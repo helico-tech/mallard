@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/helico-tech/otel-ducklake"
+rust-version = "1.90"
+
+[workspace.dependencies]
+odl-api = { path = "crates/odl-api" }
+duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono"] }
+arrow = { version = "60", default-features = false }
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "trace", "logs", "metrics", "with-serde"] }
+tonic = { version = "0.14", features = ["gzip", "zstd"] }
+prost = "0.14"
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "decompression-gzip", "compression-gzip"] }
+tower = "0.5"
+utoipa = { version = "6", features = ["chrono", "axum_extras"] }
+utoipa-axum = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip"] }
+humantime = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rand = "0.9"
+flate2 = "1"
+base64 = "0.22"
+
+# DuckDB must be built without DEBUG: debug builds are incompatible with the
+# prebuilt (release) extensions such as ducklake, and are very slow.
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"
