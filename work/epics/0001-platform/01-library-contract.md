@@ -18,5 +18,6 @@ Ask both sessions for a lib target; agree on shared connection (ADR 0001); wait 
 
 ## Progress log
 - 2026-10-31: Requested lib API from both. otel agreed: `Server::with_connection`, `otlp_http_router`, `api_router`, `grpc_routes`, `run_background`, `Config::load_with_prefix`, crate `odl-client`; catalog alias `lake`, schema `otel`, `maintenance.catalog_wide`. trace_id UUID, span_id UBIGINT. Asked sentry to mirror; awaiting reply.
+- 2026-10-31: sentry agreed: lib `Server::new|with_connection`, `router()` (relative paths incl. /v1 mgmt API → must nest under /sentry), `shutdown()`, config `lake_alias`/`schema`, `public_url` may carry a path, `sdl-client`. ETA lib 1–2h. Open: trace_id UUID vs VARCHAR, catalog-wide maintenance flag, background job shutdown.
 
 ## Follow-ups
