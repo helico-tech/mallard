@@ -1,0 +1,17 @@
+[package]
+name = "odl-client"
+description = "Async HTTP client for the otel-ducklake query API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+odl-api.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

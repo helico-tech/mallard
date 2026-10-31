@@ -39,6 +39,7 @@ zstd = "0.13"
 tokio-util = "0.7"
 
 [dev-dependencies]
+odl-client = { path = "../odl-client" }
 serde = { workspace = true }
 tempfile = "3"
 reqwest.workspace = true
