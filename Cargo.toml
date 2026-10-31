@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/helico-tech/sentry-ducklake"
+rust-version = "1.90"
+
+[workspace.dependencies]
+sdl-types = { path = "crates/sdl-types" }
+sdl-protocol = { path = "crates/sdl-protocol" }
+sdl-client = { path = "crates/sdl-client" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "query"] }
+utoipa = { version = "6", features = ["chrono", "uuid"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+flate2 = "1"
+bytes = "1"
+futures = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# DuckDB's C++ is always built optimized and without debug assertions:
+# downloaded extensions (ducklake, httpfs, ...) are release builds and trip
+# debug-only allocator checks otherwise. It also makes tests much faster.
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
+debug = false
+debug-assertions = false

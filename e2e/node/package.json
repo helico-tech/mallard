@@ -1,0 +1,11 @@
+{
+  "name": "sdl-e2e-node",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@sentry/node": "^11.10.0"
+  }
+}
