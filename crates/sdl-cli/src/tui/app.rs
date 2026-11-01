@@ -336,6 +336,10 @@ pub struct Detail {
     pub event: Option<EventDetail>,
     pub exceptions: Vec<Exception>,
     pub crumbs: Vec<Breadcrumb>,
+    /// Parsed once per shown event, not per frame.
+    pub contexts: Vec<(String, String)>,
+    pub request: Option<ev::Request>,
+    pub message: Option<String>,
     pub json: Vec<String>,
     /// Waiting for an older page to step to the next older event.
     pub want_older: bool,
@@ -395,6 +399,9 @@ impl Detail {
     fn set_event(&mut self, e: EventDetail, json: Vec<String>) {
         self.exceptions = ev::exceptions(&e.payload);
         self.crumbs = ev::breadcrumbs(&e.payload);
+        self.contexts = ev::contexts(&e.payload);
+        self.request = ev::request(&e.payload);
+        self.message = ev::message(&e.payload);
         self.json = json;
         self.event = Some(e);
         self.event_error = None;

@@ -14,6 +14,11 @@ use ratatui::widgets::{
 };
 use sdl_client::types::IssueStatus;
 
+/// `n` as a terminal coordinate, saturating instead of wrapping.
+fn u16_sat(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
 pub const MIN_WIDTH: u16 = 50;
 pub const MIN_HEIGHT: u16 = 12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -362,7 +367,7 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
                 Line::from(Span::styled("t widens the time window · tab switches status · / searches", th::dim())),
             ]
         };
-        let y = inner.y + inner.height.saturating_sub(lines.len() as u16) / 2;
+        let y = inner.y + inner.height.saturating_sub(u16_sat(lines.len())) / 2;
         f.render_widget(
             Paragraph::new(lines).alignment(Alignment::Center),
             Rect { y, height: 2.min(inner.height), ..inner },
@@ -449,9 +454,8 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         Layout::vertical([Constraint::Length(4), Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     // Title card.
-    let s = d.current_summary().cloned();
-    let level =
-        s.as_ref().map(|s| s.level.clone()).or(d.event.as_ref().map(|e| e.summary.level.clone())).unwrap_or_default();
+    let s = d.current_summary();
+    let level = s.map(|s| s.level.as_str()).or(d.event.as_ref().map(|e| e.summary.level.as_str())).unwrap_or_default();
     let title_text = if d.title().is_empty() {
         d.event.as_ref().map(|e| e.summary.title.clone()).unwrap_or_default()
     } else {
@@ -460,11 +464,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(th::level_color(&level)));
+        .border_style(Style::new().fg(th::level_color(level)));
     let inner = block.inner(title);
     f.render_widget(block, title);
     let mut l1 = vec![
-        Span::styled(th::level_label(&level), th::badge(&level)),
+        Span::styled(th::level_label(level), th::badge(level)),
         Span::raw(" "),
         Span::styled(title_text, th::bold()),
     ];
@@ -474,7 +478,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         l1.push(Span::styled(format!("  {spin}"), th::dim()));
     }
     let mut l2 = vec![Span::raw(" ")];
-    if let Some(s) = &s {
+    if let Some(s) = s {
         if let Some(c) = s.culprit.as_ref().filter(|c| !c.is_empty()) {
             l2.push(Span::styled(format!("{c}  "), th::dim()));
         }
@@ -544,7 +548,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn kv_line(key: &str, value: Span<'static>) -> Line<'static> {
-    Line::from(vec![Span::styled(format!("  {key:<14}"), th::dim()), value])
+    Line::from(vec![Span::styled(format!("  {}", fmt::pad(key, 14)), th::dim()), value])
 }
 
 fn section_line(title: &str) -> Line<'static> {
@@ -559,9 +563,9 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
     let col_w = if two_cols { inner.width / 2 } else { inner.width };
 
     let mut left: Vec<Line> = vec![section_line("Details")];
-    let s = d.current_summary().cloned();
+    let s = d.current_summary();
     let txt = |v: String| Span::styled(v, th::text());
-    if let Some(s) = &s {
+    if let Some(s) = s {
         left.push(kv_line("Status", status_span(s.status)));
         left.push(kv_line("Level", Span::styled(s.level.clone(), Style::new().fg(th::level_color(&s.level)))));
         left.push(kv_line("Platform", txt(s.platform.clone())));
@@ -583,7 +587,7 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
         left.push(kv_line("First release", txt(dd.first_release.clone().unwrap_or_else(|| "–".into()))));
         left.push(kv_line("Last release", txt(dd.last_release.clone().unwrap_or_else(|| "–".into()))));
     }
-    if let Some(s) = &s {
+    if let Some(s) = s {
         left.push(Line::raw(""));
         left.push(section_line(&format!("Trend · last {window}")));
         let w = (col_w as usize).saturating_sub(4).clamp(8, 72);
@@ -610,14 +614,12 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
         if let Some(t) = &e.summary.trace_id {
             left.push(kv_line("Trace", Span::styled(format!("{t}  (t: open)"), Style::new().fg(th::ACCENT2))));
         }
-        for (k, v) in crate::event_view::contexts(&e.payload) {
-            left.push(kv_line(&k, txt(v)));
+        for (k, v) in &d.contexts {
+            left.push(kv_line(k, txt(v.clone())));
         }
-        if let Some(r) = crate::event_view::request(&e.payload) {
-            left.push(kv_line(
-                "Request",
-                txt(format!("{} {}", r.method.unwrap_or_default(), r.url.unwrap_or_default())),
-            ));
+        if let Some(r) = &d.request {
+            let (method, url) = (r.method.as_deref().unwrap_or_default(), r.url.as_deref().unwrap_or_default());
+            left.push(kv_line("Request", txt(format!("{method} {url}"))));
         }
     }
     if let Some(dd) = &d.detail {
@@ -654,7 +656,7 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
                     let bar = fmt::hbar(v.count, total, bar_w);
                     let pad = bar_w.saturating_sub(bar.chars().count());
                     right.push(Line::from(vec![
-                        Span::styled(format!("    {:<22}", fmt::truncate(&v.value, 21)), th::text()),
+                        Span::styled(format!("    {}", fmt::pad(&fmt::truncate(&v.value, 21), 22)), th::text()),
                         Span::styled(bar, Style::new().fg(th::ACCENT2)),
                         Span::styled("·".repeat(pad), th::faint()),
                         Span::styled(format!(" {:>5.1}%", v.count as f64 * 100.0 / total as f64), th::dim()),
@@ -668,7 +670,7 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
     let total_lines = if two_cols { left.len().max(right.len()) } else { left.len() + 1 + right.len() };
     d.max_scroll = total_lines.saturating_sub(inner.height as usize);
     d.scroll = d.scroll.min(d.max_scroll);
-    let scroll = (d.scroll as u16, 0);
+    let scroll = (u16_sat(d.scroll), 0);
     if two_cols {
         let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(inner);
         f.render_widget(Paragraph::new(left).scroll(scroll), l);
@@ -699,7 +701,7 @@ fn render_stack(f: &mut Frame, area: Rect, d: &mut Detail) {
         return;
     }
     if d.exceptions.is_empty() {
-        let msg = d.event.as_ref().and_then(|e| crate::event_view::message(&e.payload));
+        let msg = d.message.clone();
         let mut lines = vec![Line::from(Span::styled("This event has no stack trace.", th::dim()))];
         if let Some(m) = msg {
             lines.push(Line::raw(""));
@@ -720,13 +722,8 @@ fn render_stack(f: &mut Frame, area: Rect, d: &mut Detail) {
             lines.push(Line::from(Span::styled("Caused by", th::faint().add_modifier(Modifier::ITALIC))));
         }
         let mut spans = vec![Span::styled(e.headline(), Style::new().fg(th::RED).add_modifier(Modifier::BOLD))];
-        if let Some(m) = &e.mechanism {
-            let handled = match e.handled {
-                Some(false) => " · unhandled",
-                Some(true) => " · handled",
-                None => "",
-            };
-            spans.push(Span::styled(format!("  ({m}{handled})"), th::dim()));
+        if let Some(m) = e.mechanism_label() {
+            spans.push(Span::styled(format!("  ({m})"), th::dim()));
         }
         lines.push(Line::from(spans));
     };
@@ -753,7 +750,7 @@ fn render_stack(f: &mut Frame, area: Rect, d: &mut Detail) {
             Span::styled(fr.function_name().to_string(), fs),
             Span::styled("  ", th::faint()),
             Span::styled(
-                fmt::truncate_left(&fr.location(), width.saturating_sub(6 + fr.function_name().chars().count())),
+                fmt::truncate_left(&fr.location(), width.saturating_sub(6 + fmt::width(fr.function_name()))),
                 ls,
             ),
         ]);
@@ -762,12 +759,12 @@ fn render_stack(f: &mut Frame, area: Rect, d: &mut Detail) {
         }
         lines.push(line);
         if selected {
-            if fr.has_context() {
+            if fr.context_line.is_some() {
                 for (n, text, is_err) in fr.context() {
                     let num = n.map(|n| format!("{n:>6}")).unwrap_or_else(|| "      ".into());
                     let body = fmt::truncate(&text.replace('\t', "    "), width.saturating_sub(12));
                     if is_err {
-                        let pad = width.saturating_sub(12 + body.chars().count());
+                        let pad = width.saturating_sub(12 + fmt::width(&body));
                         lines.push(Line::from(vec![
                             Span::styled(
                                 format!("  {num} → "),
@@ -810,7 +807,7 @@ fn render_stack(f: &mut Frame, area: Rect, d: &mut Detail) {
         d.stack_scroll = (sel_end + 1).saturating_sub(h).min(sel_start);
     }
     d.stack_scroll = d.stack_scroll.min(lines.len().saturating_sub(h));
-    f.render_widget(Paragraph::new(lines).scroll((d.stack_scroll as u16, 0)), inner);
+    f.render_widget(Paragraph::new(lines).scroll((u16_sat(d.stack_scroll), 0)), inner);
 }
 
 fn render_breadcrumbs(f: &mut Frame, area: Rect, d: &mut Detail) {
@@ -1081,7 +1078,7 @@ fn render_help(f: &mut Frame, area: Rect) {
 }
 
 fn render_projects(f: &mut Frame, area: Rect, app: &App, selected: usize) {
-    let h = (app.projects.len() as u16 + 4).clamp(6, area.height.saturating_sub(2));
+    let h = u16_sat(app.projects.len()).saturating_add(4).clamp(6, area.height.saturating_sub(2));
     let r = centered(area, 60, h);
     f.render_widget(Clear, r);
     let block = Block::new()

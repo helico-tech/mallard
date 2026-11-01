@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -91,31 +92,50 @@ pub fn bytes(n: u64) -> String {
     if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[u]) }
 }
 
-/// Cut `s` to at most `max` characters, ending with "…" when cut.
+/// Terminal columns `s` takes (CJK and emoji take two).
+pub fn width(s: &str) -> usize {
+    s.width()
+}
+
+/// The longest prefix of the chars of `it` that fits in `max` columns.
+fn take_columns(it: impl Iterator<Item = char>, max: usize) -> Vec<char> {
+    let mut used = 0;
+    it.take_while(|c| {
+        used += c.width().unwrap_or(0);
+        used <= max
+    })
+    .collect()
+}
+
+/// Cut `s` to at most `max` columns, ending with "…" when cut.
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if s.width() <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out: String = s.chars().take(max - 1).collect();
+    let mut out: String = take_columns(s.chars(), max - 1).into_iter().collect();
     out.push('…');
     out
 }
 
-/// Cut `s` to at most `max` characters keeping the end: "…/src/app.js:10".
+/// Cut `s` to at most `max` columns keeping the end: "…/src/app.js:10".
 pub fn truncate_left(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
+    if s.width() <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
     let mut out = String::from("…");
-    out.extend(s.chars().skip(n - (max - 1)));
+    out.extend(take_columns(s.chars().rev(), max - 1).into_iter().rev());
     out
+}
+
+/// `s` padded with spaces to `w` columns (`{:<w}` counts chars, not columns).
+pub fn pad(s: &str, w: usize) -> String {
+    format!("{s}{}", " ".repeat(w.saturating_sub(s.width())))
 }
 
 /// Short local-free timestamp for tables: "2026-10-31 20:59:13".
@@ -137,7 +157,7 @@ pub fn parse_duration(s: &str) -> Option<u64> {
         "w" => 604_800,
         _ => return None,
     };
-    Some(n * mult)
+    n.checked_mul(mult)
 }
 
 /// Human interval: 1800 -> "30m", 86400 -> "1d".
@@ -166,6 +186,12 @@ pub fn hbar(value: u64, max: u64, width: usize) -> String {
     s
 }
 
+/// Bidi overrides and marks: they can make text display in another order
+/// than it is stored.
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Make untrusted text (event data, server messages) safe to print to a
 /// terminal: tabs become spaces, other control characters (C0, DEL, C1, so
 /// ESC, OSC, CSI, BEL, CR, ...) become U+FFFD, and bidi overrides are
@@ -179,7 +205,7 @@ pub fn clean_text(s: &str, keep_newlines: bool) -> String {
             '\r' if keep_newlines => {}
             '\r' => out.push(' '),
             '\t' => out.push_str("    "),
-            '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => {}
+            c if is_bidi_control(c) => {}
             c if c.is_control() => out.push('\u{FFFD}'),
             c => out.push(c),
         }
@@ -303,10 +329,18 @@ mod tests {
         assert_eq!(truncate("hello world", 6), "hello…");
         assert_eq!(truncate_left("/a/b/c/app.js:10", 10), "…app.js:10");
         assert_eq!(truncate_left("app.js", 10), "app.js");
+        // Wide characters count as two columns.
+        assert_eq!(truncate("日本語のテキスト", 7), "日本語…");
+        assert_eq!(width(&truncate("日本語のテキスト", 7)), 7);
+        assert_eq!(truncate_left("/パス/ファイル.js", 10), "…ァイル.js");
+        assert_eq!(pad("日本", 6), "日本  ");
+        assert_eq!(pad("toolong", 3), "toolong");
         assert_eq!(parse_duration("24h"), Some(86_400));
         assert_eq!(parse_duration("14d"), Some(14 * 86_400));
         assert_eq!(parse_duration("x"), None);
         assert_eq!(parse_duration("5y"), None);
+        assert_eq!(parse_duration("99999999999999999999d"), None);
+        assert_eq!(parse_duration("9999999999999999w"), None, "overflow is None, not a panic");
         assert_eq!(duration(1800), "30m");
         assert_eq!(duration(86_400), "1d");
         assert_eq!(duration(90), "90s");

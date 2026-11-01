@@ -4,6 +4,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Frame {
@@ -52,16 +53,12 @@ impl Frame {
     pub fn location(&self) -> String {
         let mut s = self.filename.clone().or_else(|| self.module.clone()).unwrap_or_else(|| "<unknown>".into());
         if let Some(l) = self.lineno {
-            s.push_str(&format!(":{l}"));
+            let _ = write!(s, ":{l}");
             if let Some(c) = self.colno {
-                s.push_str(&format!(":{c}"));
+                let _ = write!(s, ":{c}");
             }
         }
         s
-    }
-
-    pub fn has_context(&self) -> bool {
-        self.context_line.is_some()
     }
 
     /// Source lines around the frame: `(line number, text, is error line)`.
@@ -99,6 +96,17 @@ impl Exception {
     pub fn frames_newest_first(&self, raw: bool) -> Vec<&Frame> {
         let src = if raw { self.raw_frames.as_ref().unwrap_or(&self.frames) } else { &self.frames };
         src.iter().rev().collect()
+    }
+
+    /// "onerror · unhandled" (or just the mechanism), when it is known.
+    pub fn mechanism_label(&self) -> Option<String> {
+        let m = self.mechanism.as_ref()?;
+        let handled = match self.handled {
+            Some(false) => " · unhandled",
+            Some(true) => " · handled",
+            None => "",
+        };
+        Some(format!("{m}{handled}"))
     }
 
     /// "TypeError: boom" (or just the type).

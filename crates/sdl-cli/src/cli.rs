@@ -175,13 +175,12 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
 /// (e.g. U+009B, an 8-bit CSI) and bidi overrides as they are. Escape those
 /// too; `\uXXXX` is the same JSON value, so the output stays lossless.
 fn json_safe(json: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {
         // Raw newlines are the pretty-printer's own; inside strings serde escapes them.
-        if (c.is_control() && c != '\n')
-            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-        {
-            out.push_str(&format!("\\u{:04x}", c as u32));
+        if (c.is_control() && c != '\n') || fmt::is_bidi_control(c) {
+            let _ = write!(out, "\\u{:04x}", c as u32);
         } else {
             out.push(c);
         }
@@ -256,7 +255,8 @@ fn right(s: impl ToString) -> Cell {
 }
 
 fn kv(key: &str, value: &str) -> Result<()> {
-    out!("  {:<14} {value}", p::dim(key));
+    // Pad before coloring: escape codes would count as width.
+    out!("  {} {value}", p::dim(&fmt::pad(key, 14)));
     Ok(())
 }
 
@@ -436,9 +436,9 @@ fn print_issue(d: &IssueDetail, project: &str, h: &Hints) -> Result<()> {
             for v in &f.top {
                 let pct = v.count as f64 * 100.0 / total as f64;
                 out!(
-                    "    {:<28} {:<20} {:>5.1}%  {}",
-                    fmt::truncate(&v.value, 28),
-                    p::cyan(&format!("{:<20}", fmt::hbar(v.count, total, 20))),
+                    "    {} {} {:>5.1}%  {}",
+                    fmt::pad(&fmt::truncate(&v.value, 28), 28),
+                    p::cyan(&fmt::pad(&fmt::hbar(v.count, total, 20), 20)),
                     pct,
                     p::dim(&v.count.to_string())
                 );
@@ -449,7 +449,8 @@ fn print_issue(d: &IssueDetail, project: &str, h: &Hints) -> Result<()> {
         out!();
         out!("{}", p::bold("Activity"));
         for a in &d.activity {
-            out!("  {}  {:<10} {}", p::dim(&fmt::timestamp(a.at)), p::status(a.status.as_str()), p::dim(&a.reason));
+            let status = p::status(&fmt::pad(a.status.as_str(), 10));
+            out!("  {}  {status} {}", p::dim(&fmt::timestamp(a.at)), p::dim(&a.reason));
         }
     }
     if let Some(e) = &d.latest_event_id {
@@ -591,13 +592,8 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
     for (i, x) in exceptions.iter().enumerate() {
         section(if i == 0 { "Exception" } else { "Caused by" })?;
         let mut head = p::bold(&p::red(&x.headline()));
-        if let Some(m) = &x.mechanism {
-            let handled = match x.handled {
-                Some(false) => " · unhandled",
-                Some(true) => " · handled",
-                None => "",
-            };
-            head.push_str(&p::dim(&format!("  ({m}{handled})")));
+        if let Some(m) = x.mechanism_label() {
+            head.push_str(&p::dim(&format!("  ({m})")));
         }
         out!("  {head}");
         let frames = x.frames_newest_first(false);
@@ -632,10 +628,10 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
                 b.timestamp.map(|t| t.format("%H:%M:%S%.3f").to_string()).unwrap_or_else(|| "            ".into());
             let cat = b.category.clone().or_else(|| b.ty.clone()).unwrap_or_default();
             out!(
-                "  {}  {:<8} {:<16} {}",
+                "  {}  {} {} {}",
                 p::dim(&time),
-                p::level(&b.level),
-                p::cyan(&fmt::truncate(&cat, 16)),
+                p::level(&fmt::pad(&b.level, 8)),
+                p::cyan(&fmt::pad(&fmt::truncate(&cat, 16), 16)),
                 b.text()
             );
         }
@@ -643,9 +639,9 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
 
     if !e.tags.is_empty() {
         section("Tags")?;
-        let w = e.tags.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0).min(24);
+        let w = e.tags.iter().map(|(k, _)| fmt::width(k)).max().unwrap_or(0).min(24);
         for (k, v) in &e.tags {
-            out!("  {}  {v}", p::dim(&format!("{k:<w$}")));
+            out!("  {}  {v}", p::dim(&fmt::pad(k, w)));
         }
     }
 
