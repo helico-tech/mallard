@@ -107,6 +107,31 @@ services:
     stop_grace_period: 60s
     restart: unless-stopped
 
+  # The Web UI on http://localhost:8088 (MALLARD_WEB_PORT): sign in with the API
+  # token. Published on this machine only: anywhere else it needs TLS in front,
+  # because the session cookie is Secure. It holds no token itself, since it
+  # refuses to listen on 0.0.0.0 with one.
+  web:
+    image: ${MALLARD_IMAGE:-mallard:dev}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: ["web", "--addr", "0.0.0.0:8088"]
+    depends_on:
+      - mallard
+    ports:
+      - "127.0.0.1:${MALLARD_WEB_PORT:-8088}:8088"
+    environment:
+      MALLARD_URL: http://mallard:8080
+    # The image's own check probes the server's port.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8088 && printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 15s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    restart: unless-stopped
+
 volumes:
   rustfs-data:
   postgres-data:
