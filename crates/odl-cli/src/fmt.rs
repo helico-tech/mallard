@@ -202,7 +202,7 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
         out,
         "uptime {}   catalog {}   data {}   snapshot {}",
         uptime(s.uptime_secs),
-        clean(&s.storage.catalog_type).cyan(),
+        s.storage.catalog_type.to_string().cyan(),
         clean(&s.storage.data_path).cyan(),
         s.storage.snapshot_id
     );
@@ -210,7 +210,7 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
     let mut t = table(&["signal", "requests", "accepted", "rejected"]);
     for sig in &i.signals {
         t.add_row(vec![
-            Cell::new(clean(&sig.signal)),
+            Cell::new(sig.signal),
             num(sig.requests as f64),
             num(sig.accepted as f64),
             num(sig.rejected as f64),
@@ -295,7 +295,7 @@ pub(crate) fn operations_text(v: &[OperationSummary]) -> String {
         let mut row = vec![
             Cell::new(clean(&s.service)),
             Cell::new(clean(&s.name)),
-            Cell::new(clean(&s.kind.to_lowercase())).fg(Color::DarkGrey),
+            Cell::new(s.kind.as_str().to_lowercase()).fg(Color::DarkGrey),
         ];
         row.extend(red_cells(&s.red));
         t.add_row(row);
@@ -355,9 +355,9 @@ pub(crate) fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
         let (a, len) = crate::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
         let (a, len) = (a as usize, len as usize);
         let bar = format!("{}{}{}", " ".repeat(a), "█".repeat(len), " ".repeat(width.saturating_sub(a + len)));
-        let bar = if s.status_code == "ERROR" { bar.red().to_string() } else { bar.cyan().to_string() };
+        let bar = if s.status_code == SpanStatus::Error { bar.red().to_string() } else { bar.cyan().to_string() };
         let label = format!("{}{} {}", row.prefix, clean(&s.service_name).bold(), clean(&s.name));
-        let err = if s.status_code == "ERROR" { format!(" {}", "✗".red()) } else { String::new() };
+        let err = if s.status_code == SpanStatus::Error { format!(" {}", "✗".red()) } else { String::new() };
         out.push(format!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6)));
         if show_attrs {
             let indent = " ".repeat(row.depth * 2 + 2);
@@ -411,10 +411,11 @@ pub(crate) fn metrics_text(v: &[MetricInfo]) -> String {
     }
     let mut t = table(&["metric", "type", "unit", "series", "points", "services", "last seen"]);
     for m in v {
-        let temporality = if m.temporality.is_empty() { String::new() } else { format!(" ({})", m.temporality) };
+        let temporality =
+            if m.temporality == Temporality::Unspecified { String::new() } else { format!(" ({})", m.temporality) };
         t.add_row(vec![
             Cell::new(clean(&m.name)).fg(Color::White),
-            Cell::new(clean(&format!("{}{temporality}", m.metric_type))),
+            Cell::new(format!("{}{temporality}", m.metric_type)),
             Cell::new(clean(&m.unit)),
             num(m.series_count as f64),
             num(m.point_count as f64),
@@ -440,7 +441,7 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
         out,
         "{} {}  agg={}  step={}s  unit={}",
         clean(&r.name).bold(),
-        clean(&r.metric_type).dimmed(),
+        r.metric_type.to_string().dimmed(),
         clean(&r.agg).cyan(),
         r.step_secs,
         if r.unit.is_empty() { Cow::Borrowed("-") } else { clean(&r.unit) }

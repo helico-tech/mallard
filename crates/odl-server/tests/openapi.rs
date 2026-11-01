@@ -3,7 +3,7 @@
 
 #[test]
 fn openapi_document_is_current() {
-    let generated = odl_server::api::openapi().to_pretty_json().unwrap();
+    let generated = odl_server::openapi().to_pretty_json().unwrap();
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/otel/openapi.json");
     let committed = std::fs::read_to_string(path).expect("docs/otel/openapi.json exists");
     assert_eq!(

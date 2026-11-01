@@ -47,7 +47,7 @@ pub struct ChartState {
 pub fn aggs_for(info: &MetricInfo) -> Vec<&'static str> {
     match info.metric_type.as_str() {
         "gauge" => vec!["avg", "min", "max", "sum", "count"],
-        "sum" if info.temporality == "cumulative" || info.temporality == "delta" => {
+        "sum" if info.temporality != Temporality::Unspecified => {
             vec!["rate", "increase", "avg", "max", "sum"]
         }
         "sum" => vec!["avg", "min", "max", "sum"],
@@ -429,10 +429,10 @@ mod tests {
     fn info(t: &str, temp: &str) -> MetricInfo {
         MetricInfo {
             name: "m".into(),
-            metric_type: t.into(),
+            metric_type: t.parse().unwrap(),
             unit: String::new(),
             description: String::new(),
-            temporality: temp.into(),
+            temporality: temp.parse().unwrap(),
             series_count: 1,
             point_count: 1,
             services: vec![],

@@ -358,7 +358,7 @@ fn errors_hint_only_when_enabled() {
 fn metric_result_json(agg: &str) -> String {
     serde_json::to_string(&MetricQueryResult {
         name: "m".into(),
-        metric_type: "sum".into(),
+        metric_type: MetricType::Sum,
         unit: String::new(),
         agg: agg.into(),
         step_secs: 60,
@@ -381,10 +381,10 @@ async fn aggregation_change_supersedes_pending_query() {
     e.view = View::Metrics;
     let info = MetricInfo {
         name: "m".into(),
-        metric_type: "sum".into(),
+        metric_type: MetricType::Sum,
         unit: String::new(),
         description: String::new(),
-        temporality: "cumulative".into(),
+        temporality: Temporality::Cumulative,
         series_count: 1,
         point_count: 1,
         services: vec![],
@@ -436,7 +436,7 @@ async fn drill_down_supersedes_pending_traces() {
         p99_ms: 1.0,
         max_ms: 1.0,
     };
-    let op = OperationSummary { service: "checkout".into(), name: "GET /cart".into(), kind: "SERVER".into(), red };
+    let op = OperationSummary { service: "checkout".into(), name: "GET /cart".into(), kind: SpanKind::Server, red };
     e.overview.ops = Some(("checkout".into(), vec![op]));
     e.overview.ops_sel.select(Some(0));
     e.handle_event(&ev(KeyCode::Enter, KeyModifiers::NONE));

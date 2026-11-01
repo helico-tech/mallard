@@ -7,8 +7,9 @@ use std::{io::Read, sync::Arc};
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request as HttpRequest, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -36,7 +37,28 @@ pub fn router(ingest: Arc<Ingest>) -> Router {
         .route("/v1/logs", post(logs))
         .route("/v1/metrics", post(metrics))
         .layer(DefaultBodyLimit::max(limit))
+        .layer(middleware::from_fn_with_state(ingest.clone(), admit))
         .with_state(ingest)
+}
+
+/// Runs before the body is read: check the token, then reserve memory for
+/// the body so concurrent requests cannot exhaust it.
+async fn admit(State(ingest): State<Arc<Ingest>>, req: HttpRequest, next: Next) -> Response {
+    let headers = req.headers();
+    let fmt = format(headers).unwrap_or(Format::Json);
+    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    if !ingest.tokens.allows(auth) {
+        return error(StatusCode::UNAUTHORIZED, fmt, "invalid or missing bearer token".into());
+    }
+    let identity = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|e| e.trim().is_empty() || e.trim().eq_ignore_ascii_case("identity"));
+    let len = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok());
+    let Some(_inflight) = ingest.admit(len.filter(|_| identity)) else {
+        return error(StatusCode::TOO_MANY_REQUESTS, fmt, "too many requests in flight; retry later".into());
+    };
+    next.run(req).await
 }
 
 fn error(status: StatusCode, fmt: Format, msg: String) -> Response {
@@ -65,11 +87,11 @@ fn format(headers: &HeaderMap) -> Result<Format, String> {
 }
 
 /// Decompress (gzip/zstd/identity) with a size cap.
-fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, String> {
+fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Bytes, String> {
     let enc = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("identity");
     let mut out = Vec::new();
     let reader: Box<dyn Read> = match enc.trim().to_ascii_lowercase().as_str() {
-        "" | "identity" => return Ok(body.to_vec()),
+        "" | "identity" => return Ok(body),
         "gzip" => Box::new(flate2::read::MultiGzDecoder::new(&body[..])),
         "deflate" => Box::new(flate2::read::ZlibDecoder::new(&body[..])),
         "zstd" => Box::new(zstd::stream::read::Decoder::new(&body[..]).map_err(|e| e.to_string())?),
@@ -79,7 +101,7 @@ fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, 
     if out.len() > max {
         return Err(format!("decompressed body larger than {max} bytes"));
     }
-    Ok(out)
+    Ok(out.into())
 }
 
 fn ok_response<T: Message + serde::Serialize>(fmt: Format, msg: &T) -> Response {
@@ -101,10 +123,6 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
         Ok(f) => f,
         Err(m) => return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, Format::Json, m),
     };
-    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    if !ingest.tokens.allows(auth) {
-        return error(StatusCode::UNAUTHORIZED, fmt, "invalid or missing bearer token".into());
-    }
     let max = ingest.max_request_bytes;
     // Decompress and decode off the async runtime.
     let decoded = tokio::task::spawn_blocking(move || -> Result<Request, String> {
@@ -112,17 +130,17 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
         let decode_err = |e: &dyn std::fmt::Display| format!("invalid OTLP {} payload: {e}", signal.as_str());
         Ok(match (signal, fmt) {
             (Signal::Traces, Format::Proto) => {
-                Request::Traces(ExportTraceServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+                Request::Traces(ExportTraceServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Traces, Format::Json) => {
                 Request::Traces(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Logs, Format::Proto) => {
-                Request::Logs(ExportLogsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+                Request::Logs(ExportLogsServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Logs, Format::Json) => Request::Logs(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?),
             (Signal::Metrics, Format::Proto) => {
-                Request::Metrics(ExportMetricsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+                Request::Metrics(ExportMetricsServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Metrics, Format::Json) => {
                 Request::Metrics(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
@@ -136,7 +154,12 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             ingest.stats.record_request(signal, 0, 0);
             return error(StatusCode::BAD_REQUEST, fmt, e);
         }
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, fmt, e.to_string()),
+        Err(e) => {
+            // A panic message is not for the client.
+            tracing::error!(error = %e, "OTLP decode task failed");
+            ingest.stats.record_request(signal, 0, 0);
+            return error(StatusCode::INTERNAL_SERVER_ERROR, fmt, "internal error while decoding the request".into());
+        }
     };
     match ingest.handle(req).await {
         Ok(a) => match signal {
@@ -169,7 +192,6 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             ),
         },
         Err(IngestError::Backpressure(m)) => error(StatusCode::TOO_MANY_REQUESTS, fmt, m),
-        Err(IngestError::BadRequest(m)) => error(StatusCode::BAD_REQUEST, fmt, m),
         Err(IngestError::TooLarge(m)) => error(StatusCode::PAYLOAD_TOO_LARGE, fmt, m),
         Err(IngestError::Internal(m)) => error(StatusCode::INTERNAL_SERVER_ERROR, fmt, m),
     }
@@ -183,4 +205,46 @@ async fn logs(State(i): State<Arc<Ingest>>, h: HeaderMap, b: Bytes) -> Response 
 }
 async fn metrics(State(i): State<Arc<Ingest>>, h: HeaderMap, b: Bytes) -> Response {
     handle(i, Signal::Metrics, h, b).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    fn headers(encoding: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_str(encoding).unwrap());
+        h
+    }
+
+    fn gzip(data: &[u8]) -> Bytes {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(data).unwrap();
+        e.finish().unwrap().into()
+    }
+
+    #[test]
+    fn decodes_supported_encodings() {
+        let data = b"hello otlp".repeat(10);
+        assert_eq!(decode_body(&HeaderMap::new(), Bytes::from(data.clone()), 1000).unwrap(), data);
+        assert_eq!(decode_body(&headers("GZIP"), gzip(&data), 1000).unwrap(), data);
+        let z = zstd::encode_all(&data[..], 0).unwrap();
+        assert_eq!(decode_body(&headers("zstd"), z.into(), 1000).unwrap(), data);
+        let mut d = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        d.write_all(&data).unwrap();
+        assert_eq!(decode_body(&headers("deflate"), d.finish().unwrap().into(), 1000).unwrap(), data);
+        assert!(decode_body(&headers("br"), Bytes::from_static(b"x"), 1000).is_err());
+        assert!(decode_body(&headers("gzip"), Bytes::from_static(b"not gzip"), 1000).is_err());
+    }
+
+    /// A small compressed body that expands beyond the limit is refused.
+    #[test]
+    fn refuses_decompression_bombs() {
+        let bomb = gzip(&vec![0u8; 10_000_000]);
+        assert!(bomb.len() < 20_000);
+        let err = decode_body(&headers("gzip"), bomb, 1_000_000).unwrap_err();
+        assert!(err.contains("larger than"), "{err}");
+    }
 }

@@ -47,7 +47,7 @@ pub fn render(t: &TraceOverview) -> String {
         let s = &t.spans[i];
         let pad = "  ".repeat(depth);
         let offset = start.map(|st| (s.start_time - st).num_microseconds().unwrap_or(0) as f64 / 1000.0).unwrap_or(0.0);
-        let mark = if s.status_code == "ERROR" { "✖" } else { "•" };
+        let mark = if s.status_code == mallard_client::odl_client::api::SpanStatus::Error { "✖" } else { "•" };
         let _ = writeln!(
             out,
             "{pad}{mark} {}  {}  {:.1} ms  (+{offset:.1} ms)  {}",

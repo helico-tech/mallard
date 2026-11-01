@@ -188,7 +188,10 @@ pub fn run(conn: &Connection, schema: &str, query: &str, limit: u32) -> QResult<
         let v: J = serde_json::from_str(&text)
             .or_else(|_| serde_json::from_str(&non_finite_to_null(&text)))
             .map_err(|e| bad(format!("cannot encode row as JSON: {e}")))?;
-        rows.push(v.as_array().cloned().unwrap_or_default());
+        rows.push(match v {
+            J::Array(a) => a,
+            _ => Vec::new(),
+        });
     }
     Ok(SqlResponse { columns, rows, truncated, elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0 })
 }

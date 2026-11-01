@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use duckdb::Connection;
 use tracing::{info, warn};
 
-use crate::config::{CatalogKind, Config, is_identifier, parse_bytes};
-use schema::{TABLES, TableDef};
+use crate::config::{CatalogKind, Config, is_identifier};
+use schema::TABLES;
 
 /// Name under which the lake is attached in DuckDB.
 pub const CATALOG: &str = "lake";
@@ -54,6 +54,12 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// True when `e` is DuckLake's transaction conflict with a concurrent
+/// writer (retrying helps). DuckDB reports it only in the message text.
+pub(crate) fn is_conflict(e: &anyhow::Error) -> bool {
+    format!("{e:#}").to_ascii_lowercase().contains("conflict")
+}
+
 /// Quote a string literal for SQL.
 pub fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -91,10 +97,6 @@ impl Lake {
         Ok(c)
     }
 
-    pub fn table(&self, t: &TableDef) -> String {
-        format!("{CATALOG}.{}.{}", self.schema, t.name)
-    }
-
     /// Create schema and tables. Several replicas starting at once on a shared
     /// catalog race to create them; DuckLake then reports a transaction
     /// conflict for the loser. Every step is idempotent, so retry.
@@ -103,7 +105,7 @@ impl Lake {
         loop {
             match self.migrate_once() {
                 Ok(()) => return Ok(()),
-                Err(e) if attempt < 10 && format!("{e:#}").to_ascii_lowercase().contains("conflict") => {
+                Err(e) if attempt < 10 && is_conflict(&e) => {
                     attempt += 1;
                     warn!(attempt, error = %format!("{e:#}"), "schema migration conflicted with another writer; retrying");
                     std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
@@ -182,8 +184,8 @@ fn configure_duckdb(conn: &Connection, cfg: &Config) -> Result<()> {
     if d.threads > 0 {
         sql += &format!("SET threads = {};", d.threads);
     }
-    if !d.memory_limit.is_empty() {
-        sql += &format!("SET memory_limit = {};", sql_str(&format!("{}B", parse_bytes(&d.memory_limit)?)));
+    if let Some(limit) = d.memory_limit {
+        sql += &format!("SET memory_limit = '{}B';", limit.0);
     }
     if !d.temp_directory.is_empty() {
         sql += &format!("SET temp_directory = {};", sql_str(&d.temp_directory));
@@ -342,7 +344,7 @@ fn attach(conn: &Connection, cfg: &Config) -> Result<()> {
     let opts = [
         ("parquet_compression", sql_str("zstd")),
         ("parquet_row_group_size", st.row_group_size.to_string()),
-        ("target_file_size", sql_str(&format!("{}B", parse_bytes(&st.target_file_size)?))),
+        ("target_file_size", format!("'{}B'", st.target_file_size.0)),
         ("data_inlining_row_limit", st.data_inlining_row_limit.to_string()),
     ];
     for (k, v) in opts {

@@ -185,21 +185,33 @@ pub struct Window {
 }
 
 impl Window {
+    /// Resolve `from`/`to`/`since`. Without `from` and `since` the window is
+    /// `default` long, capped at `max`.
     pub fn resolve(w: &TimeWindow, default: Duration, max: Duration) -> QResult<Self> {
+        let too_large =
+            || bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max)));
         let to = w.to.unwrap_or_else(Utc::now);
+        // `since` is user input: check it against `max` before any date
+        // arithmetic, and never let the subtraction overflow (chrono panics).
+        let back = |d: Duration| -> QResult<DateTime<Utc>> {
+            if d > max {
+                return Err(too_large());
+            }
+            TimeDelta::from_std(d)
+                .ok()
+                .and_then(|d| to.checked_sub_signed(d))
+                .ok_or_else(|| bad("time window starts before the earliest supported time"))
+        };
         let from = match (w.from, w.since.as_deref()) {
             (Some(f), _) => f,
-            (None, Some(s)) => {
-                let d = parse_duration(s).map_err(|e| bad(format!("invalid since={s:?}: {e}")))?;
-                to - TimeDelta::from_std(d).map_err(|_| bad("since is too large"))?
-            }
-            (None, None) => to - TimeDelta::from_std(default).unwrap(),
+            (None, Some(s)) => back(parse_duration(s).map_err(|e| bad(format!("invalid since={s:?}: {e}")))?)?,
+            (None, None) => back(default.min(max))?,
         };
         if from >= to {
             return Err(bad("`from` must be before `to`"));
         }
         if (to - from).to_std().unwrap_or(Duration::MAX) > max {
-            return Err(bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max))));
+            return Err(too_large());
         }
         Ok(Self { from, to })
     }
@@ -208,11 +220,11 @@ impl Window {
         (self.to - self.from).num_microseconds().unwrap_or(i64::MAX) as f64 / 1e6
     }
 
-    pub fn from_param(&self) -> Value {
+    pub fn start_param(&self) -> Value {
         ts_value(self.from.naive_utc())
     }
 
-    pub fn to_param(&self) -> Value {
+    pub fn end_param(&self) -> Value {
         ts_value(self.to.naive_utc())
     }
 
@@ -252,8 +264,13 @@ pub fn ts_value(t: NaiveDateTime) -> Value {
     Value::Timestamp(duckdb::types::TimeUnit::Microsecond, t.and_utc().timestamp_micros())
 }
 
+/// Epoch microseconds from DuckDB. Out of range (corrupt data) is logged
+/// and shown as 1970-01-01.
 pub fn from_micros(us: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(us).unwrap_or_default()
+    DateTime::from_timestamp_micros(us).unwrap_or_else(|| {
+        tracing::warn!(us, "timestamp out of range in query result");
+        DateTime::UNIX_EPOCH
+    })
 }
 
 /// Validate a 32-char hex trace id; returns it lowercased.
@@ -289,13 +306,13 @@ impl Filter {
     }
 
     pub fn window(&mut self, col: &str, w: &Window) {
-        self.add(format!("{col} >= ? AND {col} < ?"), [w.from_param(), w.to_param()]);
+        self.add(format!("{col} >= ? AND {col} < ?"), [w.start_param(), w.end_param()]);
     }
 
     /// `key=value` filters on span/log/metric attributes or resource attributes.
     pub fn attributes(&mut self, spec: Option<&str>) -> QResult<()> {
         if let Some(spec) = spec {
-            for (k, v) in odl_api::parse_attribute_filter(spec).map_err(bad)? {
+            for (k, v) in odl_api::parse_attribute_filter(spec).map_err(|e| bad(e.to_string()))? {
                 self.add(
                     "(attributes[?] = ? OR resource_attributes[?] = ?)",
                     [Value::Text(k.clone()), Value::Text(v.clone()), Value::Text(k), Value::Text(v)],
@@ -310,9 +327,28 @@ impl Filter {
     }
 }
 
-/// Parse a JSON column produced by `to_json(...)` into a value.
+/// Read a text column holding one value of a closed set (e.g. a span kind).
+/// NULL reads as the empty string. An unknown value is an error.
+pub fn enum_col<T: std::str::FromStr<Err = odl_api::UnknownValue>>(r: &duckdb::Row, i: usize) -> duckdb::Result<T> {
+    let s: Option<String> = r.get(i)?;
+    s.unwrap_or_default()
+        .parse()
+        .map_err(|e| duckdb::Error::FromSqlConversionFailure(i, duckdb::types::Type::Text, Box::new(e)))
+}
+
+/// Parse a JSON column produced by `to_json(...)` into a value. NULL is the
+/// default value; invalid JSON (corrupt data) is logged and also the default.
 pub fn json_col<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
-    s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    json_str(s.as_deref())
+}
+
+/// [`json_col`] on a borrowed string.
+pub fn json_str<T: serde::de::DeserializeOwned + Default>(s: Option<&str>) -> T {
+    let Some(s) = s else { return T::default() };
+    serde_json::from_str(s).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "unexpected JSON in query result");
+        T::default()
+    })
 }
 
 #[cfg(test)]
@@ -331,6 +367,31 @@ mod tests {
         assert!(r.step(Some("100ms")).is_ok());
         assert!(r.step(Some("0s")).is_ok());
     }
+
+    #[test]
+    fn huge_since_is_an_error_not_a_panic() {
+        let w = TimeWindow { since: Some("300000y".into()), ..Default::default() };
+        let day = Duration::from_secs(86_400);
+        assert!(Window::resolve(&w, day, 31 * day).is_err());
+        // Even when the window limit allows it, the subtraction must not overflow.
+        assert!(Window::resolve(&w, day, Duration::MAX).is_err());
+    }
+
+    #[test]
+    fn default_window_is_capped_at_max_window() {
+        let day = Duration::from_secs(86_400);
+        let r = Window::resolve(&TimeWindow::default(), 7 * day, day).unwrap();
+        assert!((r.secs() - 86_400.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn from_must_be_before_to() {
+        let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let w = TimeWindow { from: Some(t), to: Some(t), since: None };
+        assert!(Window::resolve(&w, HOUR, HOUR).is_err());
+    }
+
+    const HOUR: Duration = Duration::from_secs(3600);
 
     #[test]
     fn buckets_cover_window() {

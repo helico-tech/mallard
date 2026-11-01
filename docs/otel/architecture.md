@@ -67,8 +67,11 @@ that talks HTTP only.
   reached. It appends all batches with DuckDB's Arrow appender in one
   transaction: one DuckLake snapshot per flush.
 - On failure the batches go back to the front of the buffer and the flush is
-  retried with exponential back-off (max 30 s). On shutdown the buffer is
-  drained (3 attempts).
+  retried with exponential back-off (max 30 s). After 3 failures in a row
+  each batch is written on its own: a batch that fails while others succeed
+  (not a conflict) can never be written, so it is dropped, logged at `error`
+  and counted in `dropped_rows`; when every batch fails nothing is dropped.
+  On shutdown the buffer is drained (3 attempts).
 - Durability: data is acknowledged when it is in memory. See
   [ADR 0003](adr/0003-ingest-durability.md) for why there is no queue or WAL,
   and how to get at-least-once delivery anyway.

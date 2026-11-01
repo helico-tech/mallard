@@ -2,13 +2,21 @@
 
 use std::sync::Arc;
 
-/// A set of accepted bearer tokens. Empty = authentication disabled.
+use sha2::{Digest, Sha256};
+use subtle::{Choice, ConstantTimeEq};
+
+/// A set of accepted bearer tokens, kept as SHA-256 digests. Empty =
+/// authentication disabled.
 #[derive(Clone, Default)]
-pub struct Tokens(Arc<Vec<Vec<u8>>>);
+pub struct Tokens(Arc<Vec<[u8; 32]>>);
+
+fn digest(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
 
 impl Tokens {
-    pub fn new(tokens: &[String]) -> Self {
-        Self(Arc::new(tokens.iter().filter(|t| !t.is_empty()).map(|t| t.as_bytes().to_vec()).collect()))
+    pub fn new(tokens: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self(Arc::new(tokens.into_iter().filter(|t| !t.as_ref().is_empty()).map(|t| digest(t.as_ref())).collect()))
     }
 
     pub fn enabled(&self) -> bool {
@@ -28,17 +36,11 @@ impl Tokens {
         if !scheme.eq_ignore_ascii_case("bearer") {
             return false;
         }
-        let token = token.trim().as_bytes();
-        // Compare against every token without early exit to avoid timing leaks.
-        self.0.iter().fold(false, |acc, t| acc | constant_time_eq(t, token))
+        // Fixed-length digests compared in constant time against every
+        // token: neither the token nor its length leaks through timing.
+        let presented = digest(token.trim());
+        self.0.iter().fold(Choice::from(0), |acc, t| acc | t.ct_eq(&presented)).into()
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]
@@ -47,12 +49,15 @@ mod tests {
 
     #[test]
     fn tokens() {
-        assert!(Tokens::new(&[]).allows(None));
-        let t = Tokens::new(&["abc".into(), "def".into()]);
+        assert!(Tokens::new(Vec::<String>::new()).allows(None));
+        assert!(Tokens::new([""]).allows(None), "empty tokens are ignored");
+        let t = Tokens::new(["abc", "def"]);
         assert!(t.allows(Some("Bearer def")));
         assert!(t.allows(Some("BEARER def")));
         assert!(!t.allows(Some("Bearer xyz")));
         assert!(!t.allows(Some("def")));
+        assert!(!t.allows(Some("Bearer de")));
+        assert!(!t.allows(Some("Bearer defg")));
         assert!(!t.allows(None));
     }
 }

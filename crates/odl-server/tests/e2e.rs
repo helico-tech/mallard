@@ -9,7 +9,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use odl_api::*;
-use odl_server::{Server, config::Config, store};
+use odl_server::{Server, config::Config};
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
@@ -18,8 +18,10 @@ use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value},
     logs::v1::{LogRecord as OtlpLog, ResourceLogs, ScopeLogs},
     metrics::v1::{
-        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
-        ScopeMetrics, Sum, metric::Data, number_data_point,
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram,
+        HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint,
+        exponential_histogram_data_point::Buckets, metric::Data, number_data_point,
+        summary_data_point::ValueAtQuantile,
     },
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span},
@@ -213,7 +215,7 @@ async fn harness(token: Option<&str>) -> Harness {
     cfg.storage.catalog = dir.path().join("catalog.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
-    cfg.ingest.flush_interval = "100ms".into();
+    cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     if let Some(t) = token {
         cfg.auth.api_tokens = vec![t.into()];
@@ -294,8 +296,8 @@ async fn traces_roundtrip() {
     assert_eq!(root.span_id, "0000000000000001");
     assert_eq!(root.parent_span_id, None);
     assert_eq!(root.service_name, "checkout");
-    assert_eq!(root.kind, "SERVER");
-    assert_eq!(root.status_code, "ERROR");
+    assert_eq!(root.kind, SpanKind::Server);
+    assert_eq!(root.status_code, SpanStatus::Error);
     assert_eq!(root.duration_ns, 120_000_000);
     assert_eq!(root.attributes["http.route"], "/checkout");
     assert_eq!(root.resource_attributes["host.name"], "h1");
@@ -404,10 +406,10 @@ async fn metrics_queries() {
         })
         .await;
     let counter = list.iter().find(|m| m.name == "http.requests").unwrap();
-    assert_eq!(counter.metric_type, "sum");
+    assert_eq!(counter.metric_type, MetricType::Sum);
     assert_eq!(counter.series_count, 2);
-    assert_eq!(counter.temporality, "cumulative");
-    assert!(list.iter().any(|m| m.metric_type == "histogram"));
+    assert_eq!(counter.temporality, Temporality::Cumulative);
+    assert!(list.iter().any(|m| m.metric_type == MetricType::Histogram));
 
     // Counter rate per route: /a grows 100/min, /b 50/min.
     let r: MetricQueryResult = h.get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&group_by=route").await;
@@ -517,29 +519,6 @@ async fn compaction_and_retention() {
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
-    let lake = store::Lake::open(&cfg).unwrap();
-    let conn = lake.connect().unwrap();
-    // Write 6 small batches directly: two days ago and now.
-    let old = now_ns() - 10 * 86_400_000_000_000;
-    for (i, t) in [old, old + 1, now_ns(), now_ns(), now_ns(), now_ns()].iter().enumerate() {
-        let mut req = traces_req(*t);
-        for rs in &mut req.resource_spans {
-            for ss in &mut rs.scope_spans {
-                for s in &mut ss.spans {
-                    s.span_id[0] = i as u8 + 1;
-                }
-            }
-        }
-        let c = odl_server::otlp::convert::convert_traces(&req);
-        let tx = conn.unchecked_transaction().unwrap();
-        let mut app = conn.appender_to_catalog_and_db("spans", "lake", "otel").unwrap();
-        for (_, b) in c.batches {
-            app.append_record_batch(b).unwrap();
-        }
-        app.flush().unwrap();
-        drop(app);
-        tx.commit().unwrap();
-    }
     let files = |c: &duckdb::Connection| -> i64 {
         c.query_row(
             "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file WHERE end_snapshot IS NULL",
@@ -548,14 +527,40 @@ async fn compaction_and_retention() {
         )
         .unwrap()
     };
-    assert_eq!(files(&conn), 6);
-    let detail = store::maintenance::compact(&conn, "otel", Some(16_000_000)).unwrap();
-    assert!(detail.contains("merged"), "{detail}");
-    assert_eq!(files(&conn), 2, "one file per day partition after merge");
-    let settings = store::maintenance::Settings::from_config(&cfg).unwrap();
-    let detail = store::maintenance::retention(&conn, "otel", &settings).unwrap();
-    assert!(detail.contains("deleted 6 expired rows"), "{detail}");
-    let n: i64 = conn.query_row("SELECT count(*) FROM spans", [], |r| r.get(0)).unwrap();
+    {
+        let conn = odl_server::open_connection(&cfg).unwrap();
+        // Creates the tables.
+        drop(Server::with_connection(cfg.clone(), conn.try_clone().unwrap()).await.unwrap());
+        // Write 6 small batches directly: ten days ago and now.
+        let old = now_ns() - 10 * 86_400_000_000_000;
+        for (i, t) in [old, old + 1, now_ns(), now_ns(), now_ns(), now_ns()].iter().enumerate() {
+            let mut req = traces_req(*t);
+            for rs in &mut req.resource_spans {
+                for ss in &mut rs.scope_spans {
+                    for s in &mut ss.spans {
+                        s.span_id[0] = i as u8 + 1;
+                    }
+                }
+            }
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut app = conn.appender_to_catalog_and_db("spans", "lake", "otel").unwrap();
+            for b in odl_server::__convert_traces(&req) {
+                app.append_record_batch(b).unwrap();
+            }
+            app.flush().unwrap();
+            drop(app);
+            tx.commit().unwrap();
+        }
+        assert_eq!(files(&conn), 6);
+    }
+    // The DuckDB-file catalog is free again: run maintenance as the CLI does.
+    let c = cfg.clone();
+    let done = tokio::task::spawn_blocking(move || odl_server::run_maintenance(&c, false)).await.unwrap().unwrap();
+    assert!(done[0].contains("merged"), "{done:?}");
+    assert!(done[1].contains("deleted 6 expired rows"), "{done:?}");
+    let conn = odl_server::open_connection(&cfg).unwrap();
+    assert_eq!(files(&conn), 1, "one file per day partition after merge; the old day is gone");
+    let n: i64 = conn.query_row("SELECT count(*) FROM lake.otel.spans", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 12);
     let deletes: i64 =
         conn.query_row("SELECT count(*) FROM __ducklake_metadata_lake.ducklake_delete_file", [], |r| r.get(0)).unwrap();
@@ -570,11 +575,12 @@ async fn tolerates_columns_added_by_newer_version() {
     let mut cfg = Config::default();
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
-    cfg.ingest.flush_interval = "100ms".into();
+    cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     {
-        let lake = store::Lake::open(&cfg).unwrap();
-        lake.connect().unwrap().execute_batch("ALTER TABLE spans ADD COLUMN future_column VARCHAR").unwrap();
+        let conn = odl_server::open_connection(&cfg).unwrap();
+        drop(Server::with_connection(cfg.clone(), conn.try_clone().unwrap()).await.unwrap());
+        conn.execute_batch("ALTER TABLE lake.otel.spans ADD COLUMN future_column VARCHAR").unwrap();
     }
     let server = Arc::new(Server::new(cfg).await.unwrap());
     let shutdown = CancellationToken::new();
@@ -625,5 +631,232 @@ async fn refuses_expansion_bombs() {
     assert!(body.len() < 32_000_000);
     let (s, _) = h.post("/v1/traces", "application/x-protobuf", body).await;
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    h.stop().await;
+}
+
+/// If the background jobs cannot start, `serve` must stop the receivers and
+/// return the error instead of accepting data that is never flushed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serve_stops_when_background_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
+    cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
+    cfg.server.otlp_grpc_addr = "127.0.0.1:0".into();
+    cfg.server.otlp_http_addr = "127.0.0.1:0".into();
+    cfg.server.api_addr = "127.0.0.1:0".into();
+    let conn = odl_server::open_connection(&cfg).unwrap();
+    let server = Server::with_connection(cfg, conn.try_clone().unwrap()).await.unwrap();
+    // New connections can no longer select the lake schema, so the flusher fails to start.
+    conn.execute_batch("DETACH lake").unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(20), server.serve(CancellationToken::new()))
+        .await
+        .expect("serve must return when the background jobs fail");
+    assert!(r.is_err());
+}
+
+fn lake_config(dir: &std::path::Path) -> Config {
+    let mut cfg = Config::default();
+    cfg.storage.catalog = dir.join("c.ducklake").to_string_lossy().into();
+    cfg.storage.data_path = format!("{}/", dir.join("lake").to_string_lossy());
+    cfg.storage.data_inlining_row_limit = 0;
+    cfg.ingest.flush_interval = Duration::from_millis(100);
+    cfg.maintenance.enabled = false;
+    cfg
+}
+
+/// The token is checked before the body is read: a client without a token
+/// cannot make the server buffer a body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_ingest_checks_the_token_before_reading_the_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = lake_config(dir.path());
+    cfg.auth.ingest_tokens = vec!["in".into()];
+    let server = Server::new(cfg).await.unwrap();
+    // A body that never ends: reading it would hang.
+    let body = Body::from_stream(futures::stream::pending::<Result<Vec<u8>, std::io::Error>>());
+    let req = Request::post("/v1/traces").header(header::CONTENT_TYPE, "application/x-protobuf").body(body).unwrap();
+    let resp = tokio::time::timeout(Duration::from_secs(5), server.otlp_http_router().oneshot(req))
+        .await
+        .expect("answered without reading the body")
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// OTLP/gRPC through a real tonic client: the token is checked before the
+/// message is decoded, and an accepted export is queryable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_roundtrip_and_auth_before_decoding() {
+    use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = lake_config(dir.path());
+    cfg.auth.ingest_tokens = vec!["in".into()];
+    cfg.ingest.max_request_bytes = odl_server::config::ByteSize(64 * 1024);
+    let server = Arc::new(Server::new(cfg).await.unwrap());
+    let shutdown = CancellationToken::new();
+    let (s2, sd) = (server.clone(), shutdown.clone());
+    let bg = tokio::spawn(async move { s2.run_background(async move { sd.cancelled().await }).await.unwrap() });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let grpc = tonic::transport::Server::builder().add_routes(server.grpc_routes());
+    let sd = shutdown.clone();
+    let grpc_task = tokio::spawn(async move {
+        grpc.serve_with_incoming_shutdown(tonic::transport::server::TcpIncoming::from(listener), sd.cancelled_owned())
+            .await
+    });
+    let mut client = TraceServiceClient::connect(format!("http://{addr}")).await.unwrap();
+
+    // Larger than max_request_bytes and without a token: refused for the token,
+    // so the message was never decoded.
+    let mut big = traces_req(now_ns());
+    big.resource_spans[0].resource.as_mut().unwrap().attributes.push(kv("big", &"x".repeat(100 * 1024)));
+    let err = client.export(big).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+
+    let mut req = tonic::Request::new(traces_req(now_ns() - 1_000_000_000));
+    req.metadata_mut().insert("authorization", "Bearer in".parse().unwrap());
+    client.export(req).await.expect("authorized export");
+    let api = server.api_router();
+    let mut found = false;
+    for _ in 0..50 {
+        let get = Request::get(format!("/api/v1/traces/{TRACE_HEX}?since=1h")).body(Body::empty()).unwrap();
+        if api.clone().oneshot(get).await.unwrap().status() == StatusCode::OK {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "trace sent over gRPC is queryable");
+    shutdown.cancel();
+    grpc_task.await.unwrap().unwrap();
+    bg.await.unwrap();
+}
+
+/// Every path in the OpenAPI document is served by the router.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_documented_route_is_served() {
+    let h = harness(None).await;
+    let spec = h.get_raw("/openapi.json", None).await.1;
+    let spec: serde_json::Value = serde_json::from_str(&spec).unwrap();
+    let paths = spec["paths"].as_object().unwrap();
+    assert!(paths.len() >= 12);
+    for (path, ops) in paths {
+        let uri = path.replace("{trace_id}", TRACE_HEX);
+        for method in ops.as_object().unwrap().keys() {
+            let req = Request::builder()
+                .method(method.to_uppercase().as_str())
+                .uri(&uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = h.api.clone().oneshot(req).await.unwrap();
+            let status = resp.status();
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            // A handler's 404 (e.g. unknown trace) has an error body; a missing route has none.
+            assert!(
+                status != StatusCode::NOT_FOUND || serde_json::from_slice::<ApiError>(&body).is_ok(),
+                "{method} {path} is documented but not served"
+            );
+            assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+        }
+    }
+    h.stop().await;
+}
+
+/// Delta sums, exponential histograms and summaries: ingest and query.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delta_sums_exp_histograms_and_summaries() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    let start = t0 - 600_000_000_000;
+    let (mut delta, mut exp, mut summary) = (vec![], vec![], vec![]);
+    for i in 0..10u64 {
+        let t = t0 - (9 - i) * 60_000_000_000;
+        // 30 jobs per minute, reported as deltas.
+        delta.push(NumberDataPoint {
+            start_time_unix_nano: t - 60_000_000_000,
+            time_unix_nano: t,
+            value: Some(number_data_point::Value::AsInt(30)),
+            ..Default::default()
+        });
+        // Cumulative, scale 0 (base 2): bucket 3 = (8, 16]; 10 values of 12 per minute.
+        exp.push(ExponentialHistogramDataPoint {
+            start_time_unix_nano: start,
+            time_unix_nano: t,
+            count: 10 * (i + 1),
+            sum: Some(120.0 * (i + 1) as f64),
+            scale: 0,
+            positive: Some(Buckets { offset: 3, bucket_counts: vec![10 * (i + 1)] }),
+            ..Default::default()
+        });
+        // Cumulative count/sum; quantiles as reported by the client.
+        summary.push(SummaryDataPoint {
+            start_time_unix_nano: start,
+            time_unix_nano: t,
+            count: 10 * (i + 1),
+            sum: 50.0 * (i + 1) as f64,
+            quantile_values: vec![
+                ValueAtQuantile { quantile: 0.5, value: 4.0 },
+                ValueAtQuantile { quantile: 0.99, value: 9.0 },
+            ],
+            ..Default::default()
+        });
+    }
+    let metric = |name: &str, data: Data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: resource("worker"),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    metric(
+                        "jobs.done",
+                        Data::Sum(Sum {
+                            data_points: delta,
+                            aggregation_temporality: AggregationTemporality::Delta as i32,
+                            is_monotonic: true,
+                        }),
+                    ),
+                    metric(
+                        "rpc.latency",
+                        Data::ExponentialHistogram(ExponentialHistogram {
+                            data_points: exp,
+                            aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                        }),
+                    ),
+                    metric("gc.pause", Data::Summary(Summary { data_points: summary })),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", req.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    let list: Vec<MetricInfo> = h
+        .eventually(|| async {
+            let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+            (v.len() == 3).then_some(v)
+        })
+        .await;
+    let types: Vec<_> = list.iter().map(|m| (m.name.as_str(), m.metric_type, m.temporality)).collect();
+    assert!(types.contains(&("jobs.done", MetricType::Sum, Temporality::Delta)), "{types:?}");
+    assert!(types.contains(&("rpc.latency", MetricType::ExponentialHistogram, Temporality::Cumulative)));
+    assert!(types.contains(&("gc.pause", MetricType::Summary, Temporality::Unspecified)));
+
+    let all_near = |r: &MetricQueryResult, want: f64| {
+        assert!(!r.series.is_empty() && !r.series[0].points.is_empty(), "{r:?}");
+        for p in &r.series[0].points {
+            assert!((p.value - want).abs() < 1e-6, "{} {}: {} != {want}", r.name, r.agg, p.value);
+        }
+    };
+    let q = |name: &str, agg: &str| format!("/api/v1/metrics/query?name={name}&since=15m&step=1m&agg={agg}");
+    all_near(&h.get(&q("jobs.done", "rate")).await, 0.5);
+    all_near(&h.get(&q("jobs.done", "increase")).await, 30.0);
+    all_near(&h.get(&q("rpc.latency", "p50")).await, 12.0);
+    all_near(&h.get(&q("rpc.latency", "avg")).await, 12.0);
+    all_near(&h.get(&q("rpc.latency", "count")).await, 10.0);
+    all_near(&h.get(&q("gc.pause", "p99")).await, 9.0);
+    all_near(&h.get(&q("gc.pause", "avg")).await, 5.0);
     h.stop().await;
 }

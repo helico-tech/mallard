@@ -9,7 +9,9 @@ use odl_api::{
 };
 use serde::Deserialize;
 
-use super::{Filter, QResult, QueryError, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
+use super::{
+    Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, parse_trace_id, span_hex, trace_hex,
+};
 
 /// Entry spans: where requests enter a service.
 const ENTRY: &str = "(kind IN ('SERVER', 'CONSUMER') OR parent_span_id IS NULL)";
@@ -78,7 +80,7 @@ pub fn operations(
     let mut stmt = conn.prepare(&sql)?;
     let secs = w.secs();
     let rows = stmt.query_map(params_from_iter(f.params), |r| {
-        Ok(OperationSummary { service: r.get(0)?, name: r.get(1)?, kind: r.get(2)?, red: red(r, 3, secs)? })
+        Ok(OperationSummary { service: r.get(0)?, name: r.get(1)?, kind: enum_col(r, 2)?, red: red(r, 3, secs)? })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -182,8 +184,8 @@ pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<Tra
         tid = trace_hex("s.trace_id"),
     );
     let mut params = f.params;
-    params.push(w.from_param());
-    params.push(w.to_param());
+    params.push(w.start_param());
+    params.push(w.end_param());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(params), |r| {
         Ok(TraceSummary {
@@ -256,11 +258,11 @@ pub fn span_from_row(r: &duckdb::Row) -> duckdb::Result<Span> {
         span_id: r.get(1)?,
         parent_span_id: r.get(2)?,
         name: r.get(3)?,
-        kind: r.get(4)?,
+        kind: enum_col(r, 4)?,
         service_name: r.get(5)?,
         start_time: from_micros(r.get(6)?),
         duration_ns: r.get(7)?,
-        status_code: r.get(8)?,
+        status_code: enum_col(r, 8)?,
         status_message: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
         trace_state: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
         scope_name: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
@@ -293,7 +295,7 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let spans: Vec<Span> = stmt
-        .query_map(params_from_iter([Value::Text(tid.clone()), w.from_param(), w.to_param()]), span_from_row)?
+        .query_map(params_from_iter([Value::Text(tid.clone()), w.start_param(), w.end_param()]), span_from_row)?
         .collect::<Result<_, _>>()?;
     if spans.is_empty() {
         return Err(QueryError::NotFound(format!("trace {tid} not found in the time window")));

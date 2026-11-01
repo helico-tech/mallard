@@ -6,6 +6,8 @@ pub mod http;
 
 use std::sync::Arc;
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
 use opentelemetry_proto::tonic::collector::{
     logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest, trace::v1::ExportTraceServiceRequest,
 };
@@ -84,7 +86,14 @@ pub struct Ingest {
     pub stats: Arc<Stats>,
     pub tokens: Tokens,
     pub max_request_bytes: usize,
+    /// Bounds the memory of requests being received and decoded, in KiB.
+    inflight: Arc<Semaphore>,
+    inflight_kib: u32,
 }
+
+/// A request's share of the in-flight budget; released when dropped.
+#[derive(Clone)]
+pub struct InFlight(#[allow(dead_code)] Arc<OwnedSemaphorePermit>);
 
 /// Outcome of an accepted request.
 pub struct Accepted {
@@ -97,9 +106,6 @@ pub enum IngestError {
     /// Temporary overload; clients should retry.
     #[error("{0}")]
     Backpressure(String),
-    /// The payload is invalid; retrying won't help.
-    #[error("{0}")]
-    BadRequest(String),
     /// The request is too large to ever be accepted.
     #[error("{0}")]
     TooLarge(String),
@@ -125,6 +131,37 @@ impl Request {
 }
 
 impl Ingest {
+    /// `max_inflight_bytes` bounds the bodies of requests being received
+    /// and decoded at the same time (on top of the write buffer).
+    pub fn new(
+        buffer: Arc<WriteBuffer>,
+        stats: Arc<Stats>,
+        tokens: Tokens,
+        max_request_bytes: usize,
+        max_inflight_bytes: u64,
+    ) -> Self {
+        let kib = (max_inflight_bytes / 1024).clamp(1, u32::MAX as u64) as u32;
+        Self {
+            buffer,
+            stats,
+            tokens,
+            max_request_bytes,
+            inflight: Arc::new(Semaphore::new(kib as usize)),
+            inflight_kib: kib,
+        }
+    }
+
+    /// Reserve memory for a request about to be read, or `None` when too
+    /// much is in flight already (the client should retry). `body_len` is
+    /// the exact size of an uncompressed body, if known; otherwise the
+    /// maximum request size is reserved.
+    pub fn admit(&self, body_len: Option<u64>) -> Option<InFlight> {
+        let max = self.max_request_bytes as u64;
+        let bytes = body_len.map_or(max, |n| n.min(max));
+        let kib = bytes.div_ceil(1024).clamp(1, self.inflight_kib as u64) as u32;
+        self.inflight.clone().try_acquire_many_owned(kib).ok().map(|p| InFlight(Arc::new(p)))
+    }
+
     /// Convert and buffer a request. Runs on a blocking thread because
     /// conversion is CPU work proportional to the payload.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Result<Accepted, IngestError> {
@@ -164,5 +201,23 @@ impl Ingest {
         }
         self.stats.record_request(signal, accepted, rejected);
         Ok(Accepted { rejected, message: c.reject_reason.unwrap_or_default() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflight_budget_bounds_concurrent_requests() {
+        let stats = Arc::new(Stats::default());
+        let buffer = Arc::new(WriteBuffer::new(1 << 20, 1000, stats.clone()));
+        let ingest = Ingest::new(buffer, stats, Tokens::default(), 32 * 1024, 64 * 1024);
+        let a = ingest.admit(None).expect("first request fits");
+        let _b = ingest.admit(Some(40 * 1024)).expect("sizes are capped at max_request_bytes");
+        assert!(ingest.admit(Some(1)).is_none(), "budget used up");
+        drop(a);
+        let _small = ingest.admit(Some(100)).expect("released when dropped");
+        let _small2 = ingest.admit(Some(100)).expect("small requests take little");
     }
 }

@@ -77,7 +77,7 @@ scope = "s3://otel"               # optional: only use for this prefix
 |---|---|---|
 | `flush_interval` | `5s` | Max time data waits in memory. Also the max loss on a hard crash. |
 | `flush_rows` | `200000` | Flush early at this many buffered rows. |
-| `max_buffer_bytes` | `512MB` | Above this, receivers answer HTTP 429 / gRPC `UNAVAILABLE` (retryable). |
+| `max_buffer_bytes` | `512MB` | Above this, receivers answer HTTP 429 / gRPC `UNAVAILABLE` (retryable). Request bodies being received and decoded have a budget of the same size (a gRPC request or a compressed HTTP body reserves `max_request_bytes`); when it is used up, new requests get the same retryable answer. |
 | `max_request_bytes` | `32MB` | Max OTLP request size after decompression. A request whose in-memory form would exceed `max_buffer_bytes` (resource attributes repeat on every row) is refused with 413 / `INVALID_ARGUMENT`. |
 
 ## `[retention]`
@@ -112,7 +112,7 @@ without rewriting files.
 | `max_concurrent` | `4` | Concurrent queries (DuckDB connections). Each query uses all `duckdb.threads`. |
 | `timeout` | `30s` | Queries are interrupted after this. Also the max wait for a free connection. |
 | `max_window` | `31d` | Largest allowed time window per request. |
-| `enable_sql` | `false` | Enable `POST /api/v1/sql`. Requires `auth.api_tokens`. See [ADR 0005](adr/0005-sql-endpoint.md). |
+| `enable_sql` | `false` | Enable `POST /api/v1/sql`. Requires `auth.api_tokens`. Treat these tokens as admin access: queries are read-only and limited to the lake tables, but their memory and CPU use is bounded only by `timeout` and `duckdb.memory_limit`, not fully. See [ADR 0005](adr/0005-sql-endpoint.md). |
 
 ## `[auth]`
 

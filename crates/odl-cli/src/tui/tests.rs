@@ -34,20 +34,21 @@ fn stats() -> Stats {
         version: "0.1.0".into(),
         uptime_secs: 3725,
         ingest: IngestStats {
-            signals: ["traces", "logs", "metrics"]
-                .iter()
-                .map(|s| SignalIngestStats { signal: s.to_string(), requests: 10, accepted: 1234, rejected: 0 })
+            signals: [Signal::Traces, Signal::Logs, Signal::Metrics]
+                .into_iter()
+                .map(|signal| SignalIngestStats { signal, requests: 10, accepted: 1234, rejected: 0 })
                 .collect(),
             buffered_rows: 120,
             buffered_bytes: 1_000_000,
             max_buffer_bytes: 512_000_000,
             flushes: 42,
             flush_errors: 0,
+            dropped_rows: 0,
             last_flush: Some(FlushInfo { at: Utc::now(), rows: 500, duration_ms: 21.0 }),
             last_flush_error: None,
         },
         storage: StorageStats {
-            catalog_type: "duckdb".into(),
+            catalog_type: CatalogType::DuckDb,
             data_path: "data/lake/".into(),
             snapshot_id: 77,
             tables: vec![TableStats {
@@ -152,10 +153,10 @@ fn fixture() -> Embedded {
     );
     e.metrics.set_list(vec![MetricInfo {
         name: "app.request.duration".into(),
-        metric_type: "histogram".into(),
+        metric_type: MetricType::Histogram,
         unit: "s".into(),
         description: String::new(),
-        temporality: "cumulative".into(),
+        temporality: Temporality::Cumulative,
         series_count: 18,
         point_count: 360,
         services: vec!["checkout".into()],
@@ -175,7 +176,7 @@ fn trace_fixture() -> Trace {
     spans[0].name = "POST /checkout".into();
     spans[2].service_name = "payment".into();
     spans[2].name = "Charge".into();
-    spans[2].status_code = "ERROR".into();
+    spans[2].status_code = SpanStatus::Error;
     let t2 = spans[2].start_time;
     spans[2].events.push(SpanEvent {
         time: t2,
@@ -244,7 +245,7 @@ fn overview_renders() {
     e.overview.set_operations(vec![OperationSummary {
         service: "frontend".into(),
         name: "GET /".into(),
-        kind: "SERVER".into(),
+        kind: SpanKind::Server,
         red: red(10, 1),
     }]);
     let s = render(&mut e, 160, 48);
@@ -412,7 +413,7 @@ fn metrics_render_and_chart() {
     let now = Utc::now();
     e.metrics.set_result(MetricQueryResult {
         name: "app.request.duration".into(),
-        metric_type: "histogram".into(),
+        metric_type: MetricType::Histogram,
         unit: "s".into(),
         agg: "p95".into(),
         step_secs: 60,

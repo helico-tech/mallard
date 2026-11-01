@@ -17,13 +17,15 @@
 //! The library installs no global state (no tracing subscriber, no metrics
 //! recorder); that is left to the binary or the embedding application.
 
-pub mod api;
-pub mod auth;
+mod api;
+mod auth;
 pub mod config;
-pub mod otlp;
-pub mod query;
-pub mod stats;
-pub mod store;
+mod otlp;
+mod query;
+mod stats;
+mod store;
+
+pub use store::{CATALOG, install_extensions, open_connection};
 
 use std::{future::Future, sync::Arc, time::Instant};
 
@@ -43,15 +45,39 @@ use crate::{
     stats::Stats,
     store::{
         Lake,
-        maintenance::{Maintenance, Settings},
+        maintenance::Maintenance,
         writer::{Flusher, WriteBuffer},
     },
 };
 
+/// The OpenAPI document of the query API, without building a server.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    api::openapi()
+}
+
+/// Open the lake described by `cfg` and run maintenance once: flush inlined
+/// rows and merge small files (all files below the target size with
+/// `full`), then retention. Blocking; returns one line per step. With a
+/// DuckDB-file or SQLite catalog, stop the server first.
+pub fn run_maintenance(cfg: &Config, full: bool) -> Result<Vec<String>> {
+    cfg.validate()?;
+    let lake = Lake::open(cfg)?;
+    let conn = lake.connect()?;
+    store::maintenance::run_once(&conn, &lake.schema, &cfg.maintenance, &cfg.retention, full)
+}
+
+/// Test hook (not a stable API): OTLP traces as Arrow batches for the `spans` table.
+#[doc(hidden)]
+pub fn __convert_traces(
+    req: &opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
+) -> Vec<arrow::record_batch::RecordBatch> {
+    otlp::convert::convert_traces(req).batches.into_iter().map(|(_, b)| b).collect()
+}
+
 /// A configured collector: storage attached, ready to serve.
 pub struct Server {
-    cfg: Arc<Config>,
-    lake: Arc<Lake>,
+    cfg: Config,
+    lake: Lake,
     stats: Arc<Stats>,
     buffer: Arc<WriteBuffer>,
     ingest: Arc<Ingest>,
@@ -79,27 +105,29 @@ impl Server {
 
     fn build(cfg: Config, lake: Lake) -> Result<Self> {
         let stats = Arc::new(Stats::default());
-        let buffer = Arc::new(WriteBuffer::new(cfg.max_buffer_bytes(), cfg.ingest.flush_rows, stats.clone()));
-        let ingest = Arc::new(Ingest {
-            buffer: buffer.clone(),
-            stats: stats.clone(),
-            tokens: Tokens::new(&cfg.auth.ingest_tokens),
-            max_request_bytes: cfg.max_request_bytes(),
-        });
+        let max_buffer_bytes = cfg.ingest.max_buffer_bytes.0;
+        let buffer = Arc::new(WriteBuffer::new(max_buffer_bytes, cfg.ingest.flush_rows, stats.clone()));
+        let ingest = Arc::new(Ingest::new(
+            buffer.clone(),
+            stats.clone(),
+            Tokens::new(&cfg.auth.ingest_tokens),
+            usize::try_from(cfg.ingest.max_request_bytes.0).unwrap_or(usize::MAX),
+            max_buffer_bytes,
+        ));
         let conns = (0..cfg.query.max_concurrent).map(|_| lake.connect()).collect::<Result<Vec<_>>>()?;
-        let reader = Arc::new(Reader::new(conns, cfg.query_timeout(), cfg.max_window()));
+        let reader = Arc::new(Reader::new(conns, cfg.query.timeout, cfg.query.max_window));
         let api_state = Arc::new(ApiState {
             reader,
             stats: stats.clone(),
             tokens: Tokens::new(&cfg.auth.api_tokens),
             schema: lake.schema.clone(),
-            catalog_type: lake.catalog_kind.as_str().to_string(),
+            catalog_type: lake.catalog_kind,
             data_path: lake.data_path.clone(),
-            max_buffer_bytes: cfg.max_buffer_bytes(),
+            max_buffer_bytes,
             enable_sql: cfg.query.enable_sql,
             started: Instant::now(),
         });
-        Ok(Self { cfg: Arc::new(cfg), lake: Arc::new(lake), stats, buffer, ingest, api_state })
+        Ok(Self { cfg, lake, stats, buffer, ingest, api_state })
     }
 
     pub fn config(&self) -> &Config {
@@ -119,7 +147,7 @@ impl Server {
     /// Query API: `/api/v1/...`, `/openapi.json`, `/docs`. Paths are relative,
     /// so the router can be nested under a prefix.
     pub fn api_router(&self) -> Router {
-        api::router(self.api_state.clone()).0
+        api::router(self.api_state.clone())
     }
 
     pub fn openapi(&self) -> utoipa::openapi::OpenApi {
@@ -130,9 +158,10 @@ impl Server {
     /// completes, then flush remaining buffered data. Stop the receivers
     /// before the shutdown future resolves so nothing arrives afterwards.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        let flusher = Flusher::start(&self.lake, self.buffer.clone(), self.cfg.flush_interval(), self.stats.clone())?;
-        let maintenance = if self.cfg.maintenance.enabled {
-            Some(Maintenance::start(&self.lake, Settings::from_config(&self.cfg)?, self.stats.clone())?)
+        let cfg = &self.cfg;
+        let flusher = Flusher::start(&self.lake, self.buffer.clone(), cfg.ingest.flush_interval, self.stats.clone())?;
+        let maintenance = if cfg.maintenance.enabled {
+            Some(Maintenance::start(&self.lake, cfg.maintenance.clone(), cfg.retention.clone(), self.stats.clone())?)
         } else {
             None
         };
@@ -203,7 +232,16 @@ impl Server {
             })
         };
         let rd = receivers_down.clone();
-        let background = self.run_background(async move { rd.cancelled().await });
+        let sd = shutdown.clone();
+        let background = async move {
+            let r = self.run_background(async move { rd.cancelled().await }).await;
+            // If the flusher or maintenance cannot start, stop the receivers:
+            // they would accept data that is never written.
+            if r.is_err() {
+                sd.cancel();
+            }
+            r
+        };
         let receivers = async {
             let (a, b, c) = tokio::join!(t1, t2, t3);
             receivers_down.cancel();

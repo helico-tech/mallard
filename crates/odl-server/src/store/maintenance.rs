@@ -16,6 +16,7 @@
 //! file cleanup are catalog-wide and only run when `catalog_wide = true`.
 
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -32,7 +33,7 @@ use tracing::{info, warn};
 
 use super::{CATALOG, Lake, schema::TABLES, sql_str};
 use crate::{
-    config::{Config, parse_bytes, parse_duration},
+    config::{MaintenanceConfig, RetentionConfig},
     stats::Stats,
 };
 
@@ -41,55 +42,21 @@ pub struct Maintenance {
     handle: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-pub struct Settings {
-    pub compact_interval: Duration,
-    pub small_file_size: u64,
-    pub full_compact_interval: Duration,
-    pub retention_interval: Duration,
-    pub snapshot_retention: Duration,
-    pub file_cleanup_delay: Duration,
-    pub catalog_wide: bool,
-    pub retention: [(&'static str, Duration); 3],
-}
-
-impl Settings {
-    pub fn from_config(cfg: &Config) -> Result<Self> {
-        let m = &cfg.maintenance;
-        Ok(Self {
-            compact_interval: parse_duration(&m.compact_interval)?,
-            small_file_size: parse_bytes(&m.small_file_size)?,
-            full_compact_interval: parse_duration(&m.full_compact_interval)?,
-            retention_interval: parse_duration(&m.retention_interval)?,
-            snapshot_retention: parse_duration(&m.snapshot_retention)?,
-            file_cleanup_delay: parse_duration(&m.file_cleanup_delay)?,
-            catalog_wide: m.catalog_wide,
-            retention: [
-                ("traces", parse_duration(&cfg.retention.traces)?),
-                ("logs", parse_duration(&cfg.retention.logs)?),
-                ("metrics", parse_duration(&cfg.retention.metrics)?),
-            ],
-        })
-    }
-}
-
 impl Maintenance {
-    pub fn start(lake: &Lake, settings: Settings, stats: Arc<Stats>) -> Result<Self> {
+    pub fn start(lake: &Lake, m: MaintenanceConfig, r: RetentionConfig, stats: Arc<Stats>) -> Result<Self> {
         let conn = lake.connect()?;
         let schema = lake.schema.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::Builder::new()
             .name("odl-maintenance".into())
-            .spawn(move || run(conn, schema, settings, stats, stop2))?;
+            .spawn(move || run(conn, schema, m, r, stats, stop2))?;
         Ok(Self { stop, handle: Some(handle) })
     }
 
-    pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+    /// Stop after the current task and wait for the thread.
+    pub fn stop(self) {
+        drop(self);
     }
 }
 
@@ -97,12 +64,20 @@ impl Drop for Maintenance {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
+            h.thread().unpark();
             let _ = h.join();
         }
     }
 }
 
-fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: Arc<AtomicBool>) {
+fn run(
+    conn: Connection,
+    schema: String,
+    s: MaintenanceConfig,
+    r: RetentionConfig,
+    stats: Arc<Stats>,
+    stop: Arc<AtomicBool>,
+) {
     let start = Instant::now();
     // Stagger the first runs a little so start-up stays fast.
     // Random offset so replicas sharing a catalog don't compact in lock-step
@@ -114,17 +89,18 @@ fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: A
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now >= next_retention {
-            task(&stats, "retention", || retention(&conn, &schema, &s));
+            task(&stats, "retention", || retention(&conn, &schema, &s, &r));
             next_retention = Instant::now() + s.retention_interval;
         } else if now >= next_full {
             task(&stats, "full_compaction", || compact(&conn, &schema, None));
             next_full = Instant::now() + s.full_compact_interval;
             next_compact = Instant::now() + s.compact_interval;
         } else if now >= next_compact {
-            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size)));
+            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size.0)));
             next_compact = Instant::now() + s.compact_interval;
         } else {
-            std::thread::sleep(Duration::from_millis(500));
+            // Woken early by `stop`.
+            std::thread::park_timeout(next_retention.min(next_full).min(next_compact) - now);
         }
     }
     info!("maintenance stopped");
@@ -142,9 +118,12 @@ fn jitter(max: Duration) -> Duration {
     Duration::from_millis(xxhash_rust::xxh3::xxh3_64(&seed.to_le_bytes()) % ms)
 }
 
+/// Run one task and record the outcome. A panic counts as a failure, so the
+/// maintenance thread keeps running.
 fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
     let t0 = Instant::now();
-    let res = f();
+    let res = catch_unwind(AssertUnwindSafe(f))
+        .unwrap_or_else(|p| Err(anyhow::anyhow!("panicked: {}", super::writer::panic_message(&*p))));
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     let (ok, detail) = match res {
         Ok(d) => {
@@ -159,6 +138,23 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
         }
     };
     stats.maintenance(MaintenanceInfo { task: name.to_string(), at: Utc::now(), duration_ms: ms, ok, detail });
+}
+
+/// Maintenance once, as `otel-ducklake maintenance` runs it: compaction of
+/// small files (of all files with `full`), then retention.
+pub fn run_once(
+    conn: &Connection,
+    schema: &str,
+    m: &MaintenanceConfig,
+    r: &RetentionConfig,
+    full: bool,
+) -> Result<Vec<String>> {
+    let mut done = vec![format!("compaction: {}", compact(conn, schema, Some(m.small_file_size.0))?)];
+    if full {
+        done.push(format!("full compaction: {}", compact(conn, schema, None)?));
+    }
+    done.push(format!("retention: {}", retention(conn, schema, m, r)?));
+    Ok(done)
 }
 
 /// Flush inlined data and merge adjacent files. `max_file_size = None` merges
@@ -197,23 +193,35 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
     Ok(format!("{flushed} inlined rows; merged {merged} files into {created}"))
 }
 
-/// Cut-off for a retention: aligned to the UTC day when retention >= 1 day.
-pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> DateTime<Utc> {
-    let raw = now - TimeDelta::from_std(retention).unwrap_or(TimeDelta::MAX);
-    if retention >= Duration::from_secs(86_400) { raw.duration_trunc(TimeDelta::days(1)).unwrap_or(raw) } else { raw }
+/// `now - d`, or `None` when that is before the earliest representable time.
+fn before(now: DateTime<Utc>, d: Duration) -> Option<DateTime<Utc>> {
+    TimeDelta::from_std(d).ok().and_then(|d| now.checked_sub_signed(d))
 }
 
-pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String> {
+/// Cut-off for a retention: aligned to the UTC day when retention >= 1 day.
+/// `None` when the retention reaches back further than any timestamp: keep
+/// everything.
+pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> Option<DateTime<Utc>> {
+    let raw = before(now, retention)?;
+    Some(if retention >= Duration::from_secs(86_400) {
+        raw.duration_trunc(TimeDelta::days(1)).unwrap_or(raw)
+    } else {
+        raw
+    })
+}
+
+pub fn retention(conn: &Connection, schema: &str, s: &MaintenanceConfig, r: &RetentionConfig) -> Result<String> {
     let now = Utc::now();
     let mut deleted = 0usize;
     for t in TABLES {
-        let Some((_, keep)) = s.retention.iter().find(|(sig, _)| *sig == t.signal.as_str()) else {
-            continue;
-        };
+        let keep = r.of(t.signal);
         if keep.is_zero() {
             continue;
         }
-        let cutoff = retention_cutoff(now, *keep).naive_utc();
+        let Some(cutoff) = retention_cutoff(now, keep) else {
+            continue;
+        };
+        let cutoff = cutoff.naive_utc();
         let n =
             conn.execute(&format!("DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?", t.name, t.time_column), [cutoff])?;
         deleted += n;
@@ -221,10 +229,10 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
     let mut detail = format!("deleted {deleted} expired rows");
     if s.catalog_wide {
         // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
-        // time zone can't shift the cut-off.
-        let epoch = |d: Duration| -> f64 {
-            (now - TimeDelta::from_std(d).unwrap_or(TimeDelta::zero())).timestamp_micros() as f64 / 1e6
-        };
+        // time zone can't shift the cut-off. A delay reaching back before the
+        // earliest representable time keeps everything (cut-off 1970).
+        let epoch =
+            |d: Duration| -> f64 { before(now, d).unwrap_or(DateTime::UNIX_EPOCH).timestamp_micros() as f64 / 1e6 };
         let snap_cut = epoch(s.snapshot_retention);
         let expired: i64 = conn.query_row(
             &format!(
@@ -274,8 +282,25 @@ mod tests {
     fn cutoff_aligns_to_days() {
         let now = Utc.with_ymd_and_hms(2026, 10, 31, 13, 45, 0).unwrap();
         let c = retention_cutoff(now, Duration::from_secs(7 * 86400));
-        assert_eq!(c, Utc.with_ymd_and_hms(2026, 10, 24, 0, 0, 0).unwrap());
+        assert_eq!(c, Some(Utc.with_ymd_and_hms(2026, 10, 24, 0, 0, 0).unwrap()));
         let c = retention_cutoff(now, Duration::from_secs(3600));
-        assert_eq!(c, Utc.with_ymd_and_hms(2026, 10, 31, 12, 45, 0).unwrap());
+        assert_eq!(c, Some(Utc.with_ymd_and_hms(2026, 10, 31, 12, 45, 0).unwrap()));
+    }
+
+    #[test]
+    fn a_panicking_task_is_recorded_as_failed() {
+        let stats = Stats::default();
+        task(&stats, "compaction", || panic!("boom"));
+        let m = stats.last_maintenance().unwrap();
+        assert!(!m.ok);
+        assert!(m.detail.contains("boom"), "{}", m.detail);
+    }
+
+    #[test]
+    fn huge_retention_keeps_everything_instead_of_panicking() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 31, 13, 45, 0).unwrap();
+        let huge = humantime::parse_duration("300000y").unwrap();
+        assert_eq!(retention_cutoff(now, huge), None);
+        assert_eq!(retention_cutoff(now, Duration::MAX), None);
     }
 }

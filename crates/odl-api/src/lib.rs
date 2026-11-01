@@ -2,7 +2,8 @@
 //!
 //! The server derives its OpenAPI document from these types, and the `odl`
 //! CLI/TUI deserializes responses into them. Changing a type here changes the
-//! public API: regenerate `docs/openapi.json` (`otel-ducklake openapi`).
+//! public API: regenerate `docs/otel/openapi.json`
+//! (`cargo run -p odl-server -- openapi > docs/otel/openapi.json`).
 //!
 //! Conventions:
 //! - Times are RFC 3339 strings in UTC.
@@ -19,12 +20,127 @@ use utoipa::{IntoParams, ToSchema};
 /// Attribute map. Values are stringified OTLP `AnyValue`s (see docs/data-model.md).
 pub type Attributes = BTreeMap<String, String>;
 
+/// A string that is not one of the values of a closed set.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {kind} {value:?}")]
+pub struct UnknownValue {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+/// A closed set of values sent as strings: serde names, `as_str`,
+/// `Display` and `FromStr` from one list.
+macro_rules! string_enum {
+    ($(#[$m:meta])* $name:ident: $kind:literal { $($(#[$vm:meta])* $v:ident = $s:literal),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+        pub enum $name {
+            $($(#[$vm])* #[serde(rename = $s)] $v),+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $($name::$v => $s),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = UnknownValue;
+
+            fn from_str(s: &str) -> Result<Self, UnknownValue> {
+                match s {
+                    $($s => Ok($name::$v),)+
+                    _ => Err(UnknownValue { kind: $kind, value: s.to_string() }),
+                }
+            }
+        }
+    };
+}
+
+string_enum! {
+    /// OTLP span kind.
+    SpanKind: "span kind" {
+        Unspecified = "UNSPECIFIED",
+        Internal = "INTERNAL",
+        Server = "SERVER",
+        Client = "CLIENT",
+        Producer = "PRODUCER",
+        Consumer = "CONSUMER",
+    }
+}
+
+string_enum! {
+    /// OTLP span status code.
+    SpanStatus: "span status" {
+        Unset = "UNSET",
+        Ok = "OK",
+        Error = "ERROR",
+    }
+}
+
+string_enum! {
+    /// Kind of metric data point.
+    MetricType: "metric type" {
+        Gauge = "gauge",
+        Sum = "sum",
+        Histogram = "histogram",
+        ExponentialHistogram = "exponential_histogram",
+        Summary = "summary",
+    }
+}
+
+string_enum! {
+    /// Aggregation temporality of sums and histograms; empty for gauges and summaries.
+    Temporality: "temporality" {
+        Unspecified = "",
+        Delta = "delta",
+        Cumulative = "cumulative",
+    }
+}
+
+string_enum! {
+    /// Telemetry signal.
+    Signal: "signal" {
+        Traces = "traces",
+        Logs = "logs",
+        Metrics = "metrics",
+    }
+}
+
+string_enum! {
+    /// DuckLake catalog backend.
+    CatalogType: "catalog type" {
+        DuckDb = "duckdb",
+        Sqlite = "sqlite",
+        Postgres = "postgres",
+        MySql = "mysql",
+    }
+}
+
+string_enum! {
+    /// Sort order of log records.
+    LogOrder: "order" {
+        /// Oldest first.
+        Asc = "asc",
+        /// Newest first (default).
+        Desc = "desc",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors & health
 // ---------------------------------------------------------------------------
 
 /// Error body returned with every non-2xx response.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
     /// Machine readable error code, e.g. `bad_request`, `not_found`, `timeout`.
     pub error: String,
@@ -32,7 +148,7 @@ pub struct ApiError {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Health {
     /// `ok` when the server is up.
     pub status: String,
@@ -47,7 +163,7 @@ pub struct Health {
 ///
 /// Give either `since` (relative, e.g. `15m`, `6h`, `2d`) or `from`/`to`.
 /// Default window: the last hour.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct TimeWindow {
     /// Start of the window (inclusive, RFC 3339).
@@ -62,7 +178,7 @@ pub struct TimeWindow {
 // Stats
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Stats {
     pub version: String,
     pub uptime_secs: u64,
@@ -70,7 +186,7 @@ pub struct Stats {
     pub storage: StorageStats,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct IngestStats {
     /// Per signal counters since process start.
     pub signals: Vec<SignalIngestStats>,
@@ -82,14 +198,17 @@ pub struct IngestStats {
     pub max_buffer_bytes: u64,
     pub flushes: u64,
     pub flush_errors: u64,
+    /// Rows dropped because they could not be written while other data
+    /// could (details in the server log).
+    #[serde(default)]
+    pub dropped_rows: u64,
     pub last_flush: Option<FlushInfo>,
     pub last_flush_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SignalIngestStats {
-    /// `traces`, `logs` or `metrics`.
-    pub signal: String,
+    pub signal: Signal,
     pub requests: u64,
     /// Spans, log records or metric data points accepted.
     pub accepted: u64,
@@ -97,24 +216,23 @@ pub struct SignalIngestStats {
     pub rejected: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct FlushInfo {
     pub at: DateTime<Utc>,
     pub rows: u64,
     pub duration_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct StorageStats {
-    /// `duckdb`, `sqlite` or `postgres`.
-    pub catalog_type: String,
+    pub catalog_type: CatalogType,
     pub data_path: String,
     pub snapshot_id: i64,
     pub tables: Vec<TableStats>,
     pub last_maintenance: Option<MaintenanceInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct TableStats {
     pub name: String,
     /// Rows in live Parquet files (excludes rows still inlined in the catalog).
@@ -125,7 +243,7 @@ pub struct TableStats {
     pub inlined_rows: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MaintenanceInfo {
     pub task: String,
     pub at: DateTime<Utc>,
@@ -138,7 +256,7 @@ pub struct MaintenanceInfo {
 // Services & operations (RED metrics derived from spans)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ServiceQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -151,7 +269,7 @@ pub struct ServiceQuery {
     pub entry_only: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct OperationQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -167,7 +285,7 @@ pub struct OperationQuery {
 }
 
 /// Rate, errors and duration for a service or operation.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RedStats {
     pub span_count: u64,
     pub error_count: u64,
@@ -181,23 +299,23 @@ pub struct RedStats {
     pub max_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ServiceSummary {
     pub name: String,
     #[serde(flatten)]
     pub red: RedStats,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct OperationSummary {
     pub service: String,
     pub name: String,
-    pub kind: String,
+    pub kind: SpanKind,
     #[serde(flatten)]
     pub red: RedStats,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct SpanSeriesQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -214,13 +332,13 @@ pub struct SpanSeriesQuery {
     pub entry_only: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SpanSeries {
     pub step_secs: u64,
     pub points: Vec<SpanSeriesPoint>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SpanSeriesPoint {
     pub time: DateTime<Utc>,
     pub count: u64,
@@ -234,7 +352,7 @@ pub struct SpanSeriesPoint {
 // Traces
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct TraceQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -259,7 +377,7 @@ pub struct TraceQuery {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct TraceSummary {
     pub trace_id: String,
     pub start_time: DateTime<Utc>,
@@ -272,7 +390,7 @@ pub struct TraceSummary {
     pub services: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct TraceGetQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -283,26 +401,24 @@ pub struct TraceGetQuery {
     pub since: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Trace {
     pub trace_id: String,
     /// Spans ordered by start time.
     pub spans: Vec<Span>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Span {
     pub trace_id: String,
     pub span_id: String,
     pub parent_span_id: Option<String>,
     pub name: String,
-    /// UNSPECIFIED, INTERNAL, SERVER, CLIENT, PRODUCER or CONSUMER.
-    pub kind: String,
+    pub kind: SpanKind,
     pub service_name: String,
     pub start_time: DateTime<Utc>,
     pub duration_ns: i64,
-    /// UNSET, OK or ERROR.
-    pub status_code: String,
+    pub status_code: SpanStatus,
     pub status_message: String,
     pub trace_state: String,
     pub scope_name: String,
@@ -313,14 +429,14 @@ pub struct Span {
     pub links: Vec<SpanLink>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SpanEvent {
     pub time: DateTime<Utc>,
     pub name: String,
     pub attributes: Attributes,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SpanLink {
     pub trace_id: String,
     pub span_id: String,
@@ -332,7 +448,7 @@ pub struct SpanLink {
 // Logs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct LogQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -353,10 +469,10 @@ pub struct LogQuery {
     /// Max records (default 100, max 5000).
     pub limit: Option<u32>,
     /// `desc` (newest first, default) or `asc`.
-    pub order: Option<String>,
+    pub order: Option<LogOrder>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct LogRecord {
     pub time: DateTime<Utc>,
     pub observed_time: DateTime<Utc>,
@@ -372,7 +488,7 @@ pub struct LogRecord {
     pub resource_attributes: Attributes,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct LogSeriesQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -386,14 +502,14 @@ pub struct LogSeriesQuery {
     pub step: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct LogSeries {
     pub step_secs: u64,
     pub points: Vec<LogSeriesPoint>,
 }
 
 /// Log counts per bucket, split by severity band.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct LogSeriesPoint {
     pub time: DateTime<Utc>,
     pub total: u64,
@@ -411,7 +527,7 @@ pub struct LogSeriesPoint {
 // Metrics
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct MetricListQuery {
     /// Start of the window (inclusive, RFC 3339).
@@ -425,22 +541,20 @@ pub struct MetricListQuery {
     pub q: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MetricInfo {
     pub name: String,
-    /// gauge, sum, histogram, exponential_histogram or summary.
-    pub metric_type: String,
+    pub metric_type: MetricType,
     pub unit: String,
     pub description: String,
-    /// `cumulative`, `delta` or empty for gauges.
-    pub temporality: String,
+    pub temporality: Temporality,
     pub series_count: u64,
     pub point_count: u64,
     pub services: Vec<String>,
     pub last_seen: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct MetricQuery {
     /// Metric name.
@@ -464,23 +578,23 @@ pub struct MetricQuery {
     pub step: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MetricQueryResult {
     pub name: String,
-    pub metric_type: String,
+    pub metric_type: MetricType,
     pub unit: String,
     pub agg: String,
     pub step_secs: u64,
     pub series: Vec<MetricSeries>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MetricSeries {
     pub labels: Attributes,
     pub points: Vec<MetricPoint>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MetricPoint {
     pub time: DateTime<Utc>,
     pub value: f64,
@@ -490,7 +604,7 @@ pub struct MetricPoint {
 // SQL
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlRequest {
     /// One read-only `SELECT`/`WITH` statement. Tables live in schema `lake.otel`
     /// (the default search path, so `FROM spans` works).
@@ -499,7 +613,7 @@ pub struct SqlRequest {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlResponse {
     pub columns: Vec<SqlColumn>,
     /// Row values as JSON. Non-JSON types (timestamps, UUIDs, maps) are rendered as strings.
@@ -510,7 +624,7 @@ pub struct SqlResponse {
     pub elapsed_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlColumn {
     pub name: String,
     #[serde(rename = "type")]
@@ -544,16 +658,25 @@ has_window!(
     MetricQuery
 );
 
+/// An invalid part of an attribute filter.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AttributeFilterError {
+    #[error("attribute filter `{0}` must look like key=value")]
+    NotKeyValue(String),
+    #[error("attribute filter `{0}` has an empty key")]
+    EmptyKey(String),
+}
+
 /// Parse `k=v,k2=v2` attribute filters. Values may not contain commas.
-pub fn parse_attribute_filter(s: &str) -> Result<Vec<(String, String)>, String> {
+pub fn parse_attribute_filter(s: &str) -> Result<Vec<(String, String)>, AttributeFilterError> {
     s.split(',')
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|p| {
-            let (k, v) = p.split_once('=').ok_or_else(|| format!("attribute filter `{p}` must look like key=value"))?;
+            let (k, v) = p.split_once('=').ok_or_else(|| AttributeFilterError::NotKeyValue(p.to_string()))?;
             let k = k.trim();
             if k.is_empty() {
-                return Err(format!("attribute filter `{p}` has an empty key"));
+                return Err(AttributeFilterError::EmptyKey(p.to_string()));
             }
             Ok((k.to_string(), v.trim().to_string()))
         })
@@ -568,8 +691,23 @@ mod tests {
     fn attribute_filter_parses() {
         let f = parse_attribute_filter("http.route=/a, k = v ,").unwrap();
         assert_eq!(f, vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]);
-        assert!(parse_attribute_filter("novalue").is_err());
-        assert!(parse_attribute_filter("=x").is_err());
+        assert_eq!(parse_attribute_filter("novalue"), Err(AttributeFilterError::NotKeyValue("novalue".into())));
+        assert_eq!(parse_attribute_filter("=x"), Err(AttributeFilterError::EmptyKey("=x".into())));
+    }
+
+    #[test]
+    fn closed_sets_keep_their_wire_strings() {
+        assert_eq!(serde_json::to_string(&SpanKind::Server).unwrap(), r#""SERVER""#);
+        assert_eq!(serde_json::to_string(&Temporality::Unspecified).unwrap(), r#""""#);
+        assert_eq!(
+            serde_json::from_str::<MetricType>(r#""exponential_histogram""#).unwrap(),
+            MetricType::ExponentialHistogram
+        );
+        assert_eq!("cumulative".parse(), Ok(Temporality::Cumulative));
+        assert_eq!(SpanStatus::Error.to_string(), "ERROR");
+        assert!("sideways".parse::<LogOrder>().is_err());
+        let q: LogQuery = serde_json::from_str(r#"{"order":"asc"}"#).unwrap();
+        assert_eq!(q.order, Some(LogOrder::Asc));
     }
 
     #[test]

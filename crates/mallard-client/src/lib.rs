@@ -149,7 +149,7 @@ impl Client {
             let q = LogQuery {
                 trace_id: Some(id.to_string()),
                 since: Some(since.clone()),
-                order: Some("asc".into()),
+                order: Some(odl_client::api::LogOrder::Asc),
                 limit: Some(TRACE_LOG_LIMIT + 1),
                 ..Default::default()
             };

@@ -2897,6 +2897,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "utoipa",
 ]
 
@@ -2961,6 +2962,7 @@ dependencies = [
  "clap",
  "duckdb",
  "flate2",
+ "futures",
  "humantime",
  "odl-api",
  "odl-client",
@@ -2969,6 +2971,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

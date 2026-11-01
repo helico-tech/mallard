@@ -128,7 +128,7 @@
             "description": "`desc` (newest first, default) or `asc`.",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/LogOrder"
             }
           }
         ],
@@ -1045,6 +1045,16 @@
           "type": "string"
         }
       },
+      "CatalogType": {
+        "type": "string",
+        "description": "DuckLake catalog backend.",
+        "enum": [
+          "DuckDb",
+          "Sqlite",
+          "Postgres",
+          "MySql"
+        ]
+      },
       "FlushInfo": {
         "type": "object",
         "required": [
@@ -1105,6 +1115,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Rows waiting in memory for the next flush.",
+            "minimum": 0
+          },
+          "dropped_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows dropped because they could not be written while other data\ncould (details in the server log).",
             "minimum": 0
           },
           "flush_errors": {
@@ -1329,8 +1345,7 @@
             "format": "date-time"
           },
           "metric_type": {
-            "type": "string",
-            "description": "gauge, sum, histogram, exponential_histogram or summary."
+            "$ref": "#/components/schemas/MetricType"
           },
           "name": {
             "type": "string"
@@ -1352,8 +1367,7 @@
             }
           },
           "temporality": {
-            "type": "string",
-            "description": "`cumulative`, `delta` or empty for gauges."
+            "$ref": "#/components/schemas/Temporality"
           },
           "unit": {
             "type": "string"
@@ -1392,7 +1406,7 @@
             "type": "string"
           },
           "metric_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/MetricType"
           },
           "name": {
             "type": "string"
@@ -1431,6 +1445,17 @@
           }
         }
       },
+      "MetricType": {
+        "type": "string",
+        "description": "Kind of metric data point.",
+        "enum": [
+          "Gauge",
+          "Sum",
+          "Histogram",
+          "ExponentialHistogram",
+          "Summary"
+        ]
+      },
       "OperationSummary": {
         "allOf": [
           {
@@ -1445,7 +1470,7 @@
             ],
             "properties": {
               "kind": {
-                "type": "string"
+                "$ref": "#/components/schemas/SpanKind"
               },
               "name": {
                 "type": "string"
@@ -1527,6 +1552,15 @@
           }
         ]
       },
+      "Signal": {
+        "type": "string",
+        "description": "Telemetry signal.",
+        "enum": [
+          "Traces",
+          "Logs",
+          "Metrics"
+        ]
+      },
       "SignalIngestStats": {
         "type": "object",
         "required": [
@@ -1554,8 +1588,7 @@
             "minimum": 0
           },
           "signal": {
-            "type": "string",
-            "description": "`traces`, `logs` or `metrics`."
+            "$ref": "#/components/schemas/Signal"
           }
         }
       },
@@ -1594,8 +1627,7 @@
             }
           },
           "kind": {
-            "type": "string",
-            "description": "UNSPECIFIED, INTERNAL, SERVER, CLIENT, PRODUCER or CONSUMER."
+            "$ref": "#/components/schemas/SpanKind"
           },
           "links": {
             "type": "array",
@@ -1632,8 +1664,7 @@
             "format": "date-time"
           },
           "status_code": {
-            "type": "string",
-            "description": "UNSET, OK or ERROR."
+            "$ref": "#/components/schemas/SpanStatus"
           },
           "status_message": {
             "type": "string"
@@ -1665,6 +1696,18 @@
             "format": "date-time"
           }
         }
+      },
+      "SpanKind": {
+        "type": "string",
+        "description": "OTLP span kind.",
+        "enum": [
+          "Unspecified",
+          "Internal",
+          "Server",
+          "Client",
+          "Producer",
+          "Consumer"
+        ]
       },
       "SpanLink": {
         "type": "object",
@@ -1747,6 +1790,15 @@
             "format": "date-time"
           }
         }
+      },
+      "SpanStatus": {
+        "type": "string",
+        "description": "OTLP span status code.",
+        "enum": [
+          "Unset",
+          "Ok",
+          "Error"
+        ]
       },
       "SqlColumn": {
         "type": "object",
@@ -1854,8 +1906,7 @@
         ],
         "properties": {
           "catalog_type": {
-            "type": "string",
-            "description": "`duckdb`, `sqlite` or `postgres`."
+            "$ref": "#/components/schemas/CatalogType"
           },
           "data_path": {
             "type": "string"
@@ -1914,6 +1965,15 @@
             "description": "Rows in live Parquet files (excludes rows still inlined in the catalog)."
           }
         }
+      },
+      "Temporality": {
+        "type": "string",
+        "description": "Aggregation temporality of sums and histograms; empty for gauges and summaries.",
+        "enum": [
+          "Unspecified",
+          "Delta",
+          "Cumulative"
+        ]
       },
       "Trace": {
         "type": "object",
