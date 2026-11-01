@@ -249,18 +249,26 @@ impl App {
             Screen::Trace(t) if t.trace_id == trace_id => Some(t),
             _ => None,
         });
+        let mut open = None;
         if let Some(t) = trace {
             match r {
                 Ok(list) => {
                     t.events = list.events;
                     t.loaded = true;
                     t.error = None;
-                    t.state.select(if t.events.is_empty() { None } else { Some(0) });
+                    let wanted = t.open_event.take();
+                    let i = wanted.and_then(|id| t.events.iter().position(|e| e.event_id == id));
+                    open = i.map(|i| t.events[i].clone());
+                    t.state.select(if t.events.is_empty() { None } else { Some(i.unwrap_or(0)) });
                 }
                 Err(e) => t.error = Some(e.message),
             }
         }
-        vec![]
+        // Only when the trace list is still in front.
+        match open {
+            Some(e) if self.view() == View::Trace => self.open_event(&e),
+            _ => vec![],
+        }
     }
 
     fn on_set_status(&mut self, id: &str, status: IssueStatus, r: Res<IssueDetail>) -> Vec<Req> {

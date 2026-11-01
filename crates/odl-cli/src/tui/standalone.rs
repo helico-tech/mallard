@@ -33,7 +33,7 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut Embedded)
             ev = events.next() => match ev {
                 Some(Ok(ev)) => match app.handle_event(&ev) {
                     Outcome::Quit => return Ok(()),
-                    Outcome::Jump(_) => app.flash_error("no error tracker connected"),
+                    Outcome::Jump(_) | Outcome::JumpEvent { .. } => app.flash_error("no error tracker connected"),
                     _ => {}
                 },
                 Some(Err(e)) => return Err(e.into()),

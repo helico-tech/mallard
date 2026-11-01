@@ -95,6 +95,16 @@ impl App {
         self.track(vec![Req::Trace { trace_id: trace_id.to_string() }])
     }
 
+    /// [`App::show_trace`], then open the event `event_id` when the list
+    /// arrives (Esc returns to the list).
+    pub(crate) fn show_trace_event(&mut self, trace_id: &str, event_id: &str) -> Vec<Req> {
+        let reqs = self.show_trace(trace_id);
+        if let Screen::Trace(t) = &mut self.screen {
+            t.open_event = Some(event_id.to_string());
+        }
+        reqs
+    }
+
     fn on_key_trace(&mut self, k: KeyEvent) -> Step {
         let Screen::Trace(t) = &mut self.screen else {
             return ignored();
@@ -115,7 +125,7 @@ impl App {
     }
 
     /// Open the issue detail of `e` (switching project if needed) showing `e`.
-    fn open_event(&mut self, e: &EventSummary) -> Vec<Req> {
+    pub(super) fn open_event(&mut self, e: &EventSummary) -> Vec<Req> {
         let mut reqs = vec![];
         let slug = self
             .projects

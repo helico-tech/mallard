@@ -117,6 +117,14 @@ impl Embedded {
         self.dispatch(reqs);
     }
 
+    /// [`Embedded::open_trace`], then open the event `event_id` of that
+    /// trace (its issue, on the stack trace) once the list has loaded.
+    pub fn open_trace_event(&mut self, trace_id: &str, event_id: &str) {
+        self.ensure_started();
+        let reqs = self.app.show_trace_event(trace_id, event_id);
+        self.dispatch(reqs);
+    }
+
     fn ensure_started(&mut self) {
         if !self.started {
             self.started = true;
@@ -234,6 +242,7 @@ pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
                     Some(Ok(ev)) => match ui.handle_event(&ev) {
                         Outcome::Quit => break,
                         Outcome::Jump(t) => ui.open_trace(&t),
+                        Outcome::JumpEvent { trace_id, event_id } => ui.open_trace_event(&trace_id, &event_id),
                         Outcome::Consumed | Outcome::Ignored => {}
                     },
                     Some(Err(e)) => return Err(e.into()),

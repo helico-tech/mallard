@@ -261,6 +261,8 @@ pub(super) struct TraceView {
     pub loaded: bool,
     pub state: TableState,
     pub error: Option<String>,
+    /// Open this event once the list has loaded ([`App::show_trace_event`]).
+    pub open_event: Option<String>,
 }
 
 /// One frame of the stack trace view, flattened over the exception chain.
