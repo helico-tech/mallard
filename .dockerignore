@@ -15,3 +15,5 @@ docs/
 **/*.md
 !crates/**/*.md
 .DS_Store
+# Built into the mallard binary (`mallard help agents`).
+!docs/agents.md
