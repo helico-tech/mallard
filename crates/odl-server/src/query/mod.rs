@@ -264,8 +264,13 @@ pub fn ts_value(t: NaiveDateTime) -> Value {
     Value::Timestamp(duckdb::types::TimeUnit::Microsecond, t.and_utc().timestamp_micros())
 }
 
+/// Epoch microseconds from DuckDB. Out of range (corrupt data) is logged
+/// and shown as 1970-01-01.
 pub fn from_micros(us: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(us).unwrap_or_default()
+    DateTime::from_timestamp_micros(us).unwrap_or_else(|| {
+        tracing::warn!(us, "timestamp out of range in query result");
+        DateTime::UNIX_EPOCH
+    })
 }
 
 /// Validate a 32-char hex trace id; returns it lowercased.
@@ -331,9 +336,19 @@ pub fn enum_col<T: std::str::FromStr<Err = odl_api::UnknownValue>>(r: &duckdb::R
         .map_err(|e| duckdb::Error::FromSqlConversionFailure(i, duckdb::types::Type::Text, Box::new(e)))
 }
 
-/// Parse a JSON column produced by `to_json(...)` into a value.
+/// Parse a JSON column produced by `to_json(...)` into a value. NULL is the
+/// default value; invalid JSON (corrupt data) is logged and also the default.
 pub fn json_col<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
-    s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    json_str(s.as_deref())
+}
+
+/// [`json_col`] on a borrowed string.
+pub fn json_str<T: serde::de::DeserializeOwned + Default>(s: Option<&str>) -> T {
+    let Some(s) = s else { return T::default() };
+    serde_json::from_str(s).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "unexpected JSON in query result");
+        T::default()
+    })
 }
 
 #[cfg(test)]

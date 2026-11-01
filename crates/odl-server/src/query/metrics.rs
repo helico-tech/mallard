@@ -20,7 +20,7 @@ use std::{
 use duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{MetricInfo, MetricPoint, MetricQueryResult, MetricSeries, MetricType, Temporality};
 
-use super::{Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col};
+use super::{Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, json_str};
 
 const MAX_SERIES: usize = 500;
 const MAX_POINTS: usize = 200_000;
@@ -469,7 +469,6 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                         v.insert(Merged::default())
                     }
                 };
-                m.series += 1;
                 if summary {
                     m.hist.count += inc.count;
                     m.hist.sum += inc.sum;
@@ -537,7 +536,6 @@ struct Row {
 #[derive(Default)]
 struct Merged {
     hist: Hist,
-    series: usize,
     quantile_sum: f64,
     quantile_n: usize,
 }
@@ -569,17 +567,19 @@ impl Hist {
         let mut h = Hist { count: r.count, sum: r.sum, buckets: BTreeMap::new() };
         match table {
             "metric_histograms" => {
-                let counts: Vec<u64> = json_col(r.a.clone());
-                let bounds: Vec<f64> = json_col(r.b.clone());
+                let counts: Vec<u64> = json_str(r.a.as_deref());
+                let bounds: Vec<f64> = json_str(r.b.as_deref());
                 for (i, c) in counts.iter().enumerate() {
                     let ub = bounds.get(i).copied().unwrap_or(f64::INFINITY);
                     *h.buckets.entry(Bound(ub)).or_default() += *c as f64;
                 }
             }
             "metric_exp_histograms" => {
-                let pos: Vec<u64> = json_col(r.a.clone());
-                let neg: Vec<u64> = json_col(r.b.clone());
-                let scale = r.scale.unwrap_or(0);
+                let pos: Vec<u64> = json_str(r.a.as_deref());
+                let neg: Vec<u64> = json_str(r.b.as_deref());
+                // OTLP defines scales -10..=20; anything else is bad data and
+                // would overflow below.
+                let scale = r.scale.unwrap_or(0).clamp(-10, 20);
                 let base = 2f64.powf(2f64.powi(-scale));
                 // Zero and negative buckets are folded into one bucket with upper bound 0.
                 let at_or_below_zero = r.zero as f64 + neg.iter().sum::<u64>() as f64;
@@ -752,6 +752,26 @@ mod tests {
             caps.add(&"k".to_string()).unwrap();
         }
         assert!(caps.add(&"k".to_string()).is_err(), "point cap");
+    }
+
+    #[test]
+    fn out_of_range_exp_histogram_scale_does_not_panic() {
+        for scale in [i32::MIN, i32::MAX] {
+            let r = Row {
+                key: String::new(),
+                series: 1,
+                bucket: 0,
+                count: 1.0,
+                sum: 1.0,
+                a: Some("[1]".into()),
+                b: None,
+                scale: Some(scale),
+                zero: 0,
+                offset: 0,
+            };
+            let h = Hist::from_row("metric_exp_histograms", &r);
+            assert!(h.quantile(0.5).unwrap().is_finite());
+        }
     }
 
     #[test]
