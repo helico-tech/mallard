@@ -12,7 +12,7 @@ cargo build --workspace               # first build compiles DuckDB (~2 min)
 cargo test --workspace                # unit + integration (real DuckLake in temp dirs)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-cargo run -p mallard -- serve -c config/mallard.example.toml
+MALLARD_API_TOKEN=dev cargo run -p mallard-server -- -c config/mallard.example.toml
 cargo run -p mallard -- --help        # status, trace, errors, telemetry, tui
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
@@ -21,7 +21,7 @@ JS end-to-end tests with real Sentry SDKs: `e2e/sentry/README.md`.
 After API changes: `cargo run -p odl-server -- openapi > docs/otel/openapi.json`
 and `cargo run -p sdl-server -- openapi > docs/sentry/openapi.json` (tests check them).
 Helm: `helm lint --strict deploy/helm/mallard -f deploy/helm/mallard/ci/<file>.yaml`;
-the rendered `mallard.toml` must pass `mallard check -c <file>`.
+the rendered `mallard.toml` must pass `mallard-server check -c <file>`.
 
 ## Map
 

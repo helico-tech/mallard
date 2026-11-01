@@ -8,7 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[[bin]]
+name = "mallard-server"
+path = "src/main.rs"
+
 [dependencies]
+clap.workspace = true
 sdl-server.workspace = true
 odl-server.workspace = true
 mallard-common = { workspace = true, features = ["server"] }

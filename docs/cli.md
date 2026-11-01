@@ -1,14 +1,13 @@
 # mallard CLI and TUI
 
-One binary, two sides that look and behave alike (ADR 0006). The shared
+The `mallard` CLI/TUI (ADR 0007: separate from `mallard-server`), two
+sides that look and behave alike (ADR 0006). The shared
 pieces live in `crates/mallard-term`.
 
 ## Commands
 
 | command | what |
 |---|---|
-| `mallard serve -c mallard.toml` | run the server |
-| `mallard check -c mallard.toml` | validate a config file |
 | `mallard status` | health of both sides |
 | `mallard trace <trace-id> [-s 7d]` | spans, Sentry errors and logs of one trace |
 | `mallard errors …` | Sentry side: `info`, `projects`, `issues`, `events`, `stats`, `sourcemaps`, `maintenance`, `send-test`, `tui` |

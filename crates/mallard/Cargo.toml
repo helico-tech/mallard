@@ -1,6 +1,6 @@
 [package]
 name = "mallard"
-description = "mallard: errors, traces, logs and metrics on one DuckLake. Server, CLI and TUI in one binary."
+description = "mallard: CLI and terminal UI for errors, traces, logs and metrics stored in mallard-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,14 +13,10 @@ name = "mallard"
 path = "src/main.rs"
 
 [dependencies]
-mallard-server.workspace = true
 mallard-client.workspace = true
 odl-cli.workspace = true
 sdl-cli.workspace = true
-mallard-duck.workspace = true
-mallard-common = { workspace = true, features = ["server"] }
 tokio.workspace = true
-tokio-util.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

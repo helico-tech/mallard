@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 created: 2026-11-01
 ---
 # 07 — Separate server and CLI/TUI
@@ -15,5 +15,6 @@ Server and CLI/TUI are separate crates and binaries: `mallard-server` (DuckDB, i
 ## Plan
 
 ## Progress log
+- 2026-11-01: `mallard-server` binary (serve/check/install-extensions) in crates/mallard-server; `mallard` = CLI/TUI only, no duckdb in its dependency tree (debug 41 MB vs 206 MB). Dockerfile builds both, runs mallard-server, ships mallard. ADR 0007. Docker smoke test: readyz ok, `docker exec … mallard status` ok.
 
 ## Follow-ups

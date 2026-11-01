@@ -1,7 +1,7 @@
 # 0004 — One repository, one binary: mallard
 
 ## Status
-accepted (supersedes 0003)
+accepted (supersedes 0003); the one-binary part is superseded by 0007
 
 ## Context
 The platform was three repos: sentry-ducklake, otel-ducklake and

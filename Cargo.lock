@@ -2237,9 +2237,6 @@ dependencies = [
  "crossterm",
  "futures",
  "mallard-client",
- "mallard-common",
- "mallard-duck",
- "mallard-server",
  "mallard-term",
  "odl-cli",
  "ratatui",
@@ -2247,7 +2244,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2304,6 +2300,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "clap",
  "futures",
  "mallard-client",
  "mallard-common",

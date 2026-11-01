@@ -1,11 +1,7 @@
-//! `mallard`: one binary for the server (`mallard serve`) and everything that
-//! talks to it (status, trace, errors, telemetry, tui).
+//! `mallard`: the CLI and TUI. Talks to a `mallard-server` over HTTP.
 
-mod server_cmd;
 mod trace;
 mod tui;
-
-use std::path::PathBuf;
 
 use std::process::ExitCode;
 
@@ -42,27 +38,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the server.
-    Serve {
-        /// TOML config file. Every key is optional; MALLARD_<SECTION>__<KEY> env vars override it.
-        #[arg(short, long, env = "MALLARD_CONFIG")]
-        config: Option<PathBuf>,
-    },
-    /// Validate a server config file and exit.
-    Check {
-        #[arg(short, long, env = "MALLARD_CONFIG")]
-        config: Option<PathBuf>,
-        /// Also open the catalog and storage (extensions, secrets, attach).
-        #[arg(long)]
-        connect: bool,
-    },
-    /// Download every DuckDB extension any config may need, so the server
-    /// runs without internet access (used when building the Docker image).
-    #[command(hide = true)]
-    InstallExtensions {
-        #[arg(long)]
-        dir: PathBuf,
-    },
     /// Health, ingest and storage of the server.
     Status,
     /// Everything about one trace: spans, Sentry errors and logs.
@@ -115,16 +90,9 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    match cli.cmd {
-        Cmd::Serve { config } => return server_cmd::serve(config.as_deref()).await,
-        Cmd::Check { config, connect } => return server_cmd::check(config.as_deref(), connect).await,
-        Cmd::InstallExtensions { dir } => return server_cmd::install_extensions(&dir),
-        _ => {}
-    }
     let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
     let out = Out::stdout(cli.color);
     match cli.cmd {
-        Cmd::Serve { .. } | Cmd::Check { .. } | Cmd::InstallExtensions { .. } => unreachable!(),
         Cmd::Status => status(&client, cli.json, out).await,
         Cmd::Tui { project } => tui::run(&client, project).await,
         Cmd::Errors { project, cmd } => {

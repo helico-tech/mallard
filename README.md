@@ -2,7 +2,8 @@
 
 Errors, traces, logs and metrics in one place, stored in a
 [DuckLake](https://ducklake.select) (DuckDB catalog + Parquet files on disk
-or object storage). One binary: server, CLI and terminal UI.
+or object storage). Two binaries: `mallard-server`, and `mallard`, a small
+CLI and terminal UI that talks to it over HTTP (no DuckDB inside).
 
 - **Errors**: point any Sentry SDK at mallard by changing only the DSN.
   Issues, grouping, releases, sourcemaps (`sentry-cli` uploads work).
@@ -64,7 +65,7 @@ The compose stack runs mallard with a Postgres catalog and an S3 bucket
 
 ```sh
 cargo install --path crates/mallard
-MALLARD_API_TOKEN=dev-token mallard serve -c config/mallard.example.toml
+MALLARD_API_TOKEN=dev-token mallard-server -c config/mallard.example.toml
 ```
 
 Data goes to `./data` by default.
@@ -93,7 +94,7 @@ folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
 ## CLI
 
 ```sh
-mallard serve -c mallard.toml             # run the server
+mallard-server -c mallard.toml            # run the server (separate binary)
 mallard status                            # health of both sides
 mallard trace <trace-id>                  # spans + errors + logs of one trace
 mallard errors issues list                # Sentry side: projects, issues, events, sourcemaps
@@ -117,7 +118,7 @@ key can be overridden with `MALLARD_<SECTION>__<KEY>`, e.g.
 `MALLARD_OTEL__RETENTION__TRACES=0` or `MALLARD_SERVER__API_TOKENS=a,b`
 (text settings keep the value as is; lists may be comma separated).
 `${NAME}` inside a text value is replaced by environment variable `NAME`.
-`mallard check -c mallard.toml --connect` validates a file and opens the
+`mallard-server check -c mallard.toml --connect` validates a file and opens the
 catalog.
 
 ## More

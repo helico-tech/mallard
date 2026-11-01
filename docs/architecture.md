@@ -23,8 +23,8 @@
 
 | crate | role |
 |---|---|
-| `mallard` | The one binary. `serve` runs the server; `status`, `trace`, `errors …` (= `sdl-cli` commands), `telemetry …` (= `odl-cli` commands) and `tui` talk to a server over HTTP. |
-| `mallard-server` | Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. The `mallard` binary installs logging and the Prometheus recorder (`mallard-common`). |
+| `mallard` | The CLI/TUI binary (ADR 0007): `status`, `trace`, `errors …` (= `sdl-cli`), `telemetry …` (= `odl-cli`), `tui`. HTTP only; no DuckDB, no server code. |
+| `mallard-server` | Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. Its `mallard-server` binary installs logging and the Prometheus recorder (`mallard-common`). |
 | `mallard-common` | Shared by both sides (ADR 0005): duration/size parsing, query windows, the `ApiError` body; with feature `server` the config loader, bearer tokens, HTTP helpers (`ApiErr`, `Q`, `J`, `require_bearer`, CORS, docs page, readiness), logging, signals, Prometheus. |
 | `mallard-duck` | The only crate that depends on `duckdb`: `[storage]`/`[duckdb]` types, `open_connection`, extensions, secrets, SQL quoting, identifier check, redaction, object-store options for sourcemaps. |
 | `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables, formats, colour, error lines, TUI theme, keys and `Outcome` (ADR 0006). Depends on neither client. |
