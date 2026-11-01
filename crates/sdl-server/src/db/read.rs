@@ -530,14 +530,9 @@ pub fn project_stats(
     ns: &Ns,
     project_id: u32,
     w: &Window,
-    interval: Option<std::time::Duration>,
+    interval_us: Option<i64>,
 ) -> Result<ProjectStats> {
-    let interval_us = interval
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(w.span_us() / TREND_BUCKETS)
-        .max(60_000_000)
-        .max(w.span_us() / 1000); // at most 1000 buckets
-    let n = ((w.span_us() + interval_us - 1) / interval_us).max(1);
+    let (interval_us, n) = stats_buckets(w.span_us(), interval_us);
     let mut buckets: Vec<StatsBucket> = (0..n)
         .map(|i| StatsBucket {
             start: us_to_dt(w.start_us() + i * interval_us),
@@ -589,6 +584,14 @@ pub fn project_stats(
         affected_users: users as u64,
         buckets,
     })
+}
+
+/// Bucket size and count for a window of `span_us` (> 0): buckets of at
+/// least one minute, at most 1000 of them. No overflow for any interval.
+fn stats_buckets(span_us: i64, interval_us: Option<i64>) -> (i64, i64) {
+    let interval_us = interval_us.unwrap_or(span_us / TREND_BUCKETS).max(60_000_000).max(span_us / 1000);
+    let n = span_us / interval_us + i64::from(span_us % interval_us != 0);
+    (interval_us, n.max(1))
 }
 
 pub fn list_bundles(conn: &Connection, ns: &Ns, project_id: u32) -> Result<Vec<ArtifactBundle>> {
@@ -719,4 +722,28 @@ pub fn find_by_url(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY_US: i64 = 86_400_000_000;
+
+    #[test]
+    fn stats_buckets_default_min_and_max() {
+        assert_eq!(stats_buckets(DAY_US, None), (3_600_000_000, 24));
+        // At least one minute per bucket.
+        assert_eq!(stats_buckets(3_600_000_000, Some(1)), (60_000_000, 60));
+        // At most 1000 buckets.
+        assert_eq!(stats_buckets(DAY_US, Some(1_000_000)), (86_400_000, 1000));
+        // A partial last bucket counts.
+        assert_eq!(stats_buckets(DAY_US, Some(DAY_US / 2 + 1)).1, 2);
+    }
+
+    #[test]
+    fn stats_buckets_huge_interval_does_not_overflow() {
+        assert_eq!(stats_buckets(DAY_US, Some(i64::MAX)), (i64::MAX, 1));
+        assert_eq!(stats_buckets(i64::MAX, Some(i64::MAX)), (i64::MAX, 1));
+    }
 }

@@ -335,12 +335,15 @@ async fn project_stats(
 ) -> ApiResult<ProjectStats> {
     let pid = project(&state, &p)?.id;
     let w = Window::parse(q.since.as_deref(), "24h", Utc::now()).map_err(bad)?;
-    let interval = q
+    let interval_us = q
         .interval
         .as_deref()
-        .map(|i| humantime::parse_duration(i).map_err(|e| bad(format!("invalid interval: {e}"))))
+        .map(|i| {
+            let d = humantime::parse_duration(i).map_err(|e| bad(format!("invalid interval: {e}")))?;
+            i64::try_from(d.as_micros()).map_err(|_| bad("interval is too large"))
+        })
         .transpose()?;
-    Ok(Json(state.db.read(move |c, ns| read::project_stats(c, ns, pid, &w, interval)).await?))
+    Ok(Json(state.db.read(move |c, ns| read::project_stats(c, ns, pid, &w, interval_us)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/sourcemaps", params(("project" = String, Path)),
