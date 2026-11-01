@@ -21,6 +21,7 @@ use duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{MetricInfo, MetricPoint, MetricQueryResult, MetricSeries, MetricType, Temporality};
 
 use super::{Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, json_str};
+use crate::store::schema::TableId;
 
 const MAX_SERIES: usize = 500;
 const MAX_POINTS: usize = 200_000;
@@ -29,12 +30,41 @@ const MAX_POINTS: usize = 200_000;
 // Listing
 // ---------------------------------------------------------------------------
 
-const SOURCES: [(&str, &str); 4] = [
-    ("metric_points", "metric_type"),
-    ("metric_histograms", "'histogram'"),
-    ("metric_exp_histograms", "'exponential_histogram'"),
-    ("metric_summaries", "'summary'"),
-];
+/// The four metric tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetricTable {
+    Points,
+    Histograms,
+    ExpHistograms,
+    Summaries,
+}
+
+impl MetricTable {
+    const ALL: [MetricTable; 4] =
+        [MetricTable::Points, MetricTable::Histograms, MetricTable::ExpHistograms, MetricTable::Summaries];
+
+    fn name(self) -> &'static str {
+        match self {
+            MetricTable::Points => TableId::MetricPoints,
+            MetricTable::Histograms => TableId::MetricHistograms,
+            MetricTable::ExpHistograms => TableId::MetricExpHistograms,
+            MetricTable::Summaries => TableId::MetricSummaries,
+        }
+        .def()
+        .name
+    }
+
+    /// SQL expression for the metric type of a row.
+    fn type_expr(self) -> String {
+        let fixed = |t: MetricType| format!("'{t}'");
+        match self {
+            MetricTable::Points => "metric_type".into(),
+            MetricTable::Histograms => fixed(MetricType::Histogram),
+            MetricTable::ExpHistograms => fixed(MetricType::ExponentialHistogram),
+            MetricTable::Summaries => fixed(MetricType::Summary),
+        }
+    }
+}
 
 fn base_filter(w: &Window, service: Option<&str>) -> Filter {
     let mut f = Filter::default();
@@ -50,12 +80,14 @@ pub fn list(conn: &Connection, w: &Window, service: Option<&str>, q: Option<&str
     if let Some(q) = q.filter(|q| !q.is_empty()) {
         f.add("contains(lower(metric_name), lower(?))", [Value::Text(q.into())]);
     }
-    let parts: Vec<String> = SOURCES
+    let parts: Vec<String> = MetricTable::ALL
         .iter()
-        .map(|(t, ty)| {
+        .map(|t| {
             format!(
-                "SELECT metric_name, {ty} AS t, metric_unit, metric_description, temporality, series_id, \
-                 service_name, time FROM {t} WHERE {}",
+                "SELECT metric_name, {} AS t, metric_unit, metric_description, temporality, series_id, \
+                 service_name, time FROM {} WHERE {}",
+                t.type_expr(),
+                t.name(),
                 f.sql()
             )
         })
@@ -67,7 +99,7 @@ pub fn list(conn: &Connection, w: &Window, service: Option<&str>, q: Option<&str
          FROM ({}) GROUP BY 1 ORDER BY 1 LIMIT 5000",
         parts.join(" UNION ALL ")
     );
-    let params: Vec<Value> = (0..SOURCES.len()).flat_map(|_| f.params.clone()).collect();
+    let params: Vec<Value> = MetricTable::ALL.iter().flat_map(|_| f.params.clone()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(params), |r| {
         Ok(MetricInfo {
@@ -145,7 +177,7 @@ impl Agg {
 }
 
 struct Kind {
-    table: &'static str,
+    table: MetricTable,
     metric_type: MetricType,
     monotonic: bool,
     temporality: Temporality,
@@ -155,11 +187,13 @@ struct Kind {
 fn detect(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Kind> {
     let mut f = base_filter(w, req.service);
     f.add("metric_name = ?", [Value::Text(req.name.into())]);
-    for (table, ty) in SOURCES {
-        let mono = if table == "metric_points" { "bool_or(is_monotonic)" } else { "false" };
+    for table in MetricTable::ALL {
+        let mono = if table == MetricTable::Points { "bool_or(is_monotonic)" } else { "false" };
         let sql = format!(
-            "SELECT any_value({ty}), {mono}, any_value(temporality), any_value(metric_unit), count(*) \
-             FROM {table} WHERE {}",
+            "SELECT any_value({}), {mono}, any_value(temporality), any_value(metric_unit), count(*) \
+             FROM {} WHERE {}",
+            table.type_expr(),
+            table.name(),
             f.sql()
         );
         let kind = conn.query_row(&sql, params_from_iter(f.params.clone()), |r| {
@@ -280,8 +314,8 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
     let agg = match req.agg {
         Some(a) => Agg::parse(a)?,
         None => match kind.table {
-            "metric_points" if is_counter => Agg::Rate,
-            "metric_points" => Agg::Avg,
+            MetricTable::Points if is_counter => Agg::Rate,
+            MetricTable::Points => Agg::Avg,
             _ => Agg::Quantile(0.95),
         },
     };
@@ -295,218 +329,25 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
     let step = req.step as i64;
     // One extra bucket before the window gives cumulative series a baseline.
     let ext = Window { from: w.from - chrono::TimeDelta::seconds(step), to: w.to };
-    let first_bucket = w.from.timestamp().div_euclid(step) * step;
-    let mut f = base_filter(&ext, req.service);
-    f.add("metric_name = ?", [Value::Text(req.name.into())]);
-    f.attributes(req.attributes)?;
-    let (lexpr, lparams) = labels_expr(&group_by);
-    let bucket = format!("(epoch_us(time) // {}) * {step}", step * 1_000_000);
-
+    let mut filter = base_filter(&ext, req.service);
+    filter.add("metric_name = ?", [Value::Text(req.name.into())]);
+    filter.attributes(req.attributes)?;
+    let (labels, label_params) = labels_expr(&group_by);
+    let plan = Plan {
+        w,
+        filter,
+        labels,
+        label_params,
+        bucket: format!("(epoch_us(time) // {}) * {step}", step * 1_000_000),
+        first_bucket: w.from.timestamp().div_euclid(step) * step,
+        step,
+    };
     let mut col = Collector::new(group_by);
     match kind.table {
-        "metric_points" => {
-            let cumulative = kind.temporality == Temporality::Cumulative;
-            match agg {
-                Agg::Quantile(_) => {
-                    return Err(bad("percentiles need a histogram or summary metric"));
-                }
-                Agg::Rate | Agg::Increase if !is_counter => {
-                    return Err(bad(
-                        "rate/increase need a monotonic sum (counter); use avg/min/max for gauges and up-down counters",
-                    ));
-                }
-                _ => {}
-            }
-            let per_bucket_value = match agg {
-                Agg::Rate | Agg::Increase if cumulative => {
-                    // Counter: last value per series and bucket, then reset-aware deltas.
-                    format!(
-                        "WITH per AS (SELECT {lexpr} AS k, series_id, {bucket} AS b, arg_max(value, time) AS v \
-                            FROM metric_points WHERE {where_} GROUP BY ALL), \
-                         d AS (SELECT k, b, v, v - lag(v) OVER (PARTITION BY series_id ORDER BY b) AS dv FROM per) \
-                         SELECT k, b, sum(CASE WHEN dv < 0 THEN v ELSE dv END) FROM d \
-                         WHERE dv IS NOT NULL AND b >= {first_bucket} GROUP BY ALL",
-                        where_ = f.sql()
-                    )
-                }
-                Agg::Rate | Agg::Increase | Agg::Count | Agg::Avg | Agg::Min | Agg::Max => {
-                    let a = match agg {
-                        Agg::Rate | Agg::Increase => "sum(value)",
-                        Agg::Count => "count(*)::DOUBLE",
-                        Agg::Avg => "avg(value)",
-                        Agg::Min => "min(value)",
-                        _ => "max(value)",
-                    };
-                    format!(
-                        "SELECT {lexpr} AS k, {bucket} AS b, {a} FROM metric_points WHERE {where_} \
-                         AND time >= ? GROUP BY ALL",
-                        where_ = f.sql()
-                    )
-                }
-                Agg::Sum => format!(
-                    "SELECT k, b, sum(v) FROM (SELECT {lexpr} AS k, series_id, {bucket} AS b, \
-                        {inner} AS v FROM metric_points WHERE {where_} AND time >= ? GROUP BY ALL) GROUP BY ALL",
-                    inner =
-                        if cumulative || kind.metric_type == MetricType::Gauge { "avg(value)" } else { "sum(value)" },
-                    where_ = f.sql()
-                ),
-                Agg::Quantile(_) => unreachable!(),
-            };
-            let mut params = lparams.clone();
-            params.extend(f.params.clone());
-            if !matches!(agg, Agg::Rate | Agg::Increase) || !cumulative {
-                params.push(w.start_param());
-            }
-            let mut stmt = conn.prepare(&per_bucket_value)?;
-            let rows = stmt.query_map(params_from_iter(params), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?))
-            })?;
-            for row in rows {
-                let (k, b, v) = row?;
-                let v = v.unwrap_or(f64::NAN);
-                let v = if agg == Agg::Rate { v / step as f64 } else { v };
-                col.put(k, b, v)?;
-            }
-        }
-        table => {
-            let summary = table == "metric_summaries";
-            if !matches!(agg, Agg::Quantile(_) | Agg::Avg | Agg::Count | Agg::Rate | Agg::Increase) {
-                return Err(bad("histograms and summaries support pNN, avg, count, rate, increase"));
-            }
-            let cumulative = summary || kind.temporality == Temporality::Cumulative;
-            // Columns: count, sum, a, b, scale, zero_count, offset (see `Row`).
-            let cols: [&str; 7] = match table {
-                "metric_histograms" => [
-                    "count::DOUBLE",
-                    "sum",
-                    "to_json(bucket_counts)",
-                    "to_json(explicit_bounds)",
-                    "NULL::INTEGER",
-                    "0::UBIGINT",
-                    "0::INTEGER",
-                ],
-                "metric_exp_histograms" => [
-                    "count::DOUBLE",
-                    "sum",
-                    "to_json(positive_bucket_counts)",
-                    "to_json(negative_bucket_counts)",
-                    "scale",
-                    "zero_count",
-                    "positive_offset",
-                ],
-                _ => [
-                    "count::DOUBLE",
-                    "sum",
-                    "to_json(quantiles)",
-                    "NULL::VARCHAR",
-                    "NULL::INTEGER",
-                    "0::UBIGINT",
-                    "0::INTEGER",
-                ],
-            };
-            // Cumulative: the last point per series & bucket. Delta: every point.
-            let sql = if cumulative {
-                let last: Vec<String> = cols.iter().map(|c| format!("arg_max({c}, time)")).collect();
-                format!(
-                    "SELECT {lexpr} AS k, series_id, {bucket} AS b, {} FROM {table} WHERE {where_} \
-                     GROUP BY ALL ORDER BY series_id, b",
-                    last.join(", "),
-                    where_ = f.sql()
-                )
-            } else {
-                format!(
-                    "SELECT {lexpr} AS k, series_id, {bucket} AS b, {} FROM {table} WHERE {where_} \
-                     AND time >= ? ORDER BY series_id, b",
-                    cols.join(", "),
-                    where_ = f.sql()
-                )
-            };
-            let mut params = lparams.clone();
-            params.extend(f.params.clone());
-            if !cumulative {
-                params.push(w.start_param());
-            }
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params_from_iter(params), |r| {
-                Ok(Row {
-                    key: r.get(0)?,
-                    series: r.get::<_, u64>(1)?,
-                    bucket: r.get(2)?,
-                    count: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                    sum: r.get::<_, Option<f64>>(4)?.unwrap_or(f64::NAN),
-                    a: r.get(5)?,
-                    b: r.get(6)?,
-                    scale: r.get(7)?,
-                    zero: r.get::<_, Option<u64>>(8)?.unwrap_or(0),
-                    offset: r.get::<_, Option<i32>>(9)?.unwrap_or(0),
-                })
-            })?;
-            let mut merged: HashMap<(Key, i64), Merged> = HashMap::new();
-            // One merged entry becomes one output point: cap them as they appear.
-            let mut caps = Caps::default();
-            let mut prev: Option<(u64, Hist)> = None;
-            for row in rows {
-                let row = row?;
-                let h = Hist::from_row(table, &row);
-                let inc = if cumulative {
-                    let delta = match &prev {
-                        Some((s, p)) if *s == row.series => Some(h.minus(p)),
-                        _ => None,
-                    };
-                    prev = Some((row.series, h));
-                    delta
-                } else {
-                    Some(h)
-                };
-                let Some(inc) = inc else { continue };
-                if row.bucket < first_bucket {
-                    continue;
-                }
-                let m = match merged.entry((row.key, row.bucket)) {
-                    Entry::Occupied(o) => o.into_mut(),
-                    Entry::Vacant(v) => {
-                        caps.add(&v.key().0)?;
-                        v.insert(Merged::default())
-                    }
-                };
-                if summary {
-                    m.hist.count += inc.count;
-                    m.hist.sum += inc.sum;
-                    // Quantiles are not additive; average the reported value across series.
-                    if let Agg::Quantile(q) = agg
-                        && let Some(v) = summary_quantile(row.a.as_deref(), q)
-                    {
-                        m.quantile_sum += v;
-                        m.quantile_n += 1;
-                    }
-                } else {
-                    m.hist.add(&inc);
-                }
-            }
-            for ((k, b), m) in merged {
-                let v = match agg {
-                    Agg::Quantile(_) if summary => {
-                        if m.quantile_n == 0 {
-                            f64::NAN
-                        } else {
-                            m.quantile_sum / m.quantile_n as f64
-                        }
-                    }
-                    Agg::Quantile(q) => m.hist.quantile(q).unwrap_or(f64::NAN),
-                    Agg::Avg => {
-                        if m.hist.count > 0.0 {
-                            m.hist.sum / m.hist.count
-                        } else {
-                            f64::NAN
-                        }
-                    }
-                    Agg::Count | Agg::Increase => m.hist.count,
-                    Agg::Rate => m.hist.count / step as f64,
-                    _ => unreachable!(),
-                };
-                col.put(k, b, v)?;
-            }
-        }
+        MetricTable::Points => query_points(conn, &plan, &kind, is_counter, agg, &mut col)?,
+        MetricTable::Histograms => query_histograms(conn, &plan, &kind, HistKind::Explicit, agg, &mut col)?,
+        MetricTable::ExpHistograms => query_histograms(conn, &plan, &kind, HistKind::Exponential, agg, &mut col)?,
+        MetricTable::Summaries => query_histograms(conn, &plan, &kind, HistKind::Summary, agg, &mut col)?,
     }
     Ok(MetricQueryResult {
         name: req.name.to_string(),
@@ -516,6 +357,279 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
         step_secs: req.step,
         series: col.finish()?,
     })
+}
+
+/// SQL pieces shared by the point and histogram queries.
+struct Plan<'a> {
+    w: &'a Window,
+    /// Metric, service and attribute filters over the window plus one bucket.
+    filter: Filter,
+    /// Label expression ([`labels_expr`]) and its parameters.
+    labels: String,
+    label_params: Vec<Value>,
+    /// Bucket start (epoch seconds) of a row.
+    bucket: String,
+    first_bucket: i64,
+    step: i64,
+}
+
+impl Plan<'_> {
+    /// Parameters: labels, filter, and the window start when `from_window`.
+    fn params(&self, from_window: bool) -> Vec<Value> {
+        let mut p = self.label_params.clone();
+        p.extend(self.filter.params.iter().cloned());
+        if from_window {
+            p.push(self.w.start_param());
+        }
+        p
+    }
+}
+
+/// Gauges and sums.
+fn query_points(
+    conn: &Connection,
+    plan: &Plan,
+    kind: &Kind,
+    is_counter: bool,
+    agg: Agg,
+    col: &mut Collector,
+) -> QResult<()> {
+    let Plan { labels, bucket, first_bucket, .. } = plan;
+    let where_ = plan.filter.sql();
+    let cumulative = kind.temporality == Temporality::Cumulative;
+    let (sql, from_window) = match agg {
+        Agg::Quantile(_) => return Err(bad("percentiles need a histogram or summary metric")),
+        Agg::Rate | Agg::Increase if !is_counter => {
+            return Err(bad(
+                "rate/increase need a monotonic sum (counter); use avg/min/max for gauges and up-down counters",
+            ));
+        }
+        // Counter: last value per series and bucket, then reset-aware deltas.
+        Agg::Rate | Agg::Increase if cumulative => (
+            format!(
+                "WITH per AS (SELECT {labels} AS k, series_id, {bucket} AS b, arg_max(value, time) AS v \
+                    FROM metric_points WHERE {where_} GROUP BY ALL), \
+                 d AS (SELECT k, b, v, v - lag(v) OVER (PARTITION BY series_id ORDER BY b) AS dv FROM per) \
+                 SELECT k, b, sum(CASE WHEN dv < 0 THEN v ELSE dv END) FROM d \
+                 WHERE dv IS NOT NULL AND b >= {first_bucket} GROUP BY ALL"
+            ),
+            false,
+        ),
+        Agg::Sum => (
+            format!(
+                "SELECT k, b, sum(v) FROM (SELECT {labels} AS k, series_id, {bucket} AS b, \
+                    {inner} AS v FROM metric_points WHERE {where_} AND time >= ? GROUP BY ALL) GROUP BY ALL",
+                inner = if cumulative || kind.metric_type == MetricType::Gauge { "avg(value)" } else { "sum(value)" },
+            ),
+            true,
+        ),
+        Agg::Rate | Agg::Increase | Agg::Count | Agg::Avg | Agg::Min | Agg::Max => {
+            let a = match agg {
+                Agg::Rate | Agg::Increase => "sum(value)",
+                Agg::Count => "count(*)::DOUBLE",
+                Agg::Avg => "avg(value)",
+                Agg::Min => "min(value)",
+                _ => "max(value)",
+            };
+            (
+                format!(
+                    "SELECT {labels} AS k, {bucket} AS b, {a} FROM metric_points WHERE {where_} \
+                     AND time >= ? GROUP BY ALL"
+                ),
+                true,
+            )
+        }
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(plan.params(from_window)), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<f64>>(2)?))
+    })?;
+    for row in rows {
+        let (k, b, v) = row?;
+        let v = v.unwrap_or(f64::NAN);
+        let v = if agg == Agg::Rate { v / plan.step as f64 } else { v };
+        col.put(k, b, v)?;
+    }
+    Ok(())
+}
+
+/// Data point kinds stored as buckets or quantiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistKind {
+    Explicit,
+    Exponential,
+    Summary,
+}
+
+impl HistKind {
+    fn table(self) -> MetricTable {
+        match self {
+            HistKind::Explicit => MetricTable::Histograms,
+            HistKind::Exponential => MetricTable::ExpHistograms,
+            HistKind::Summary => MetricTable::Summaries,
+        }
+    }
+
+    /// Columns: count, sum, a, b, scale, zero_count, offset (see `Row`).
+    fn columns(self) -> [&'static str; 7] {
+        match self {
+            HistKind::Explicit => [
+                "count::DOUBLE",
+                "sum",
+                "to_json(bucket_counts)",
+                "to_json(explicit_bounds)",
+                "NULL::INTEGER",
+                "0::UBIGINT",
+                "0::INTEGER",
+            ],
+            HistKind::Exponential => [
+                "count::DOUBLE",
+                "sum",
+                "to_json(positive_bucket_counts)",
+                "to_json(negative_bucket_counts)",
+                "scale",
+                "zero_count",
+                "positive_offset",
+            ],
+            HistKind::Summary => [
+                "count::DOUBLE",
+                "sum",
+                "to_json(quantiles)",
+                "NULL::VARCHAR",
+                "NULL::INTEGER",
+                "0::UBIGINT",
+                "0::INTEGER",
+            ],
+        }
+    }
+}
+
+/// Aggregations histograms and summaries support.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HistAgg {
+    Quantile(f64),
+    Avg,
+    Count,
+    Rate,
+}
+
+/// Histograms, exponential histograms and summaries.
+fn query_histograms(
+    conn: &Connection,
+    plan: &Plan,
+    kind: &Kind,
+    hk: HistKind,
+    agg: Agg,
+    col: &mut Collector,
+) -> QResult<()> {
+    let hagg = match agg {
+        Agg::Quantile(q) => HistAgg::Quantile(q),
+        Agg::Avg => HistAgg::Avg,
+        Agg::Count | Agg::Increase => HistAgg::Count,
+        Agg::Rate => HistAgg::Rate,
+        Agg::Min | Agg::Max | Agg::Sum => {
+            return Err(bad("histograms and summaries support pNN, avg, count, rate, increase"));
+        }
+    };
+    let Plan { labels, bucket, first_bucket, .. } = plan;
+    let (where_, table, cols) = (plan.filter.sql(), hk.table().name(), hk.columns());
+    let summary = hk == HistKind::Summary;
+    let cumulative = summary || kind.temporality == Temporality::Cumulative;
+    // Cumulative: the last point per series & bucket. Delta: every point.
+    let sql = if cumulative {
+        let last: Vec<String> = cols.iter().map(|c| format!("arg_max({c}, time)")).collect();
+        format!(
+            "SELECT {labels} AS k, series_id, {bucket} AS b, {} FROM {table} WHERE {where_} \
+             GROUP BY ALL ORDER BY series_id, b",
+            last.join(", "),
+        )
+    } else {
+        format!(
+            "SELECT {labels} AS k, series_id, {bucket} AS b, {} FROM {table} WHERE {where_} \
+             AND time >= ? ORDER BY series_id, b",
+            cols.join(", "),
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(plan.params(!cumulative)), |r| {
+        Ok(Row {
+            key: r.get(0)?,
+            series: r.get::<_, u64>(1)?,
+            bucket: r.get(2)?,
+            count: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+            sum: r.get::<_, Option<f64>>(4)?.unwrap_or(f64::NAN),
+            a: r.get(5)?,
+            b: r.get(6)?,
+            scale: r.get(7)?,
+            zero: r.get::<_, Option<u64>>(8)?.unwrap_or(0),
+            offset: r.get::<_, Option<i32>>(9)?.unwrap_or(0),
+        })
+    })?;
+    let mut merged: HashMap<(Key, i64), Merged> = HashMap::new();
+    // One merged entry becomes one output point: cap them as they appear.
+    let mut caps = Caps::default();
+    let mut prev: Option<(u64, Hist)> = None;
+    for row in rows {
+        let row = row?;
+        let h = Hist::from_row(hk, &row);
+        let inc = if cumulative {
+            let delta = match &prev {
+                Some((s, p)) if *s == row.series => Some(h.minus(p)),
+                _ => None,
+            };
+            prev = Some((row.series, h));
+            delta
+        } else {
+            Some(h)
+        };
+        let Some(inc) = inc else { continue };
+        if row.bucket < *first_bucket {
+            continue;
+        }
+        let m = match merged.entry((row.key, row.bucket)) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => {
+                caps.add(&v.key().0)?;
+                v.insert(Merged::default())
+            }
+        };
+        if summary {
+            m.hist.count += inc.count;
+            m.hist.sum += inc.sum;
+            // Quantiles are not additive; average the reported value across series.
+            if let HistAgg::Quantile(q) = hagg
+                && let Some(v) = summary_quantile(row.a.as_deref(), q)
+            {
+                m.quantile_sum += v;
+                m.quantile_n += 1;
+            }
+        } else {
+            m.hist.add(&inc);
+        }
+    }
+    for ((k, b), m) in merged {
+        let v = match hagg {
+            HistAgg::Quantile(_) if summary => {
+                if m.quantile_n == 0 {
+                    f64::NAN
+                } else {
+                    m.quantile_sum / m.quantile_n as f64
+                }
+            }
+            HistAgg::Quantile(q) => m.hist.quantile(q).unwrap_or(f64::NAN),
+            HistAgg::Avg => {
+                if m.hist.count > 0.0 {
+                    m.hist.sum / m.hist.count
+                } else {
+                    f64::NAN
+                }
+            }
+            HistAgg::Count => m.hist.count,
+            HistAgg::Rate => m.hist.count / plan.step as f64,
+        };
+        col.put(k, b, v)?;
+    }
+    Ok(())
 }
 
 struct Row {
@@ -563,10 +677,10 @@ struct Hist {
 }
 
 impl Hist {
-    fn from_row(table: &str, r: &Row) -> Self {
+    fn from_row(kind: HistKind, r: &Row) -> Self {
         let mut h = Hist { count: r.count, sum: r.sum, buckets: BTreeMap::new() };
-        match table {
-            "metric_histograms" => {
+        match kind {
+            HistKind::Explicit => {
                 let counts: Vec<u64> = json_str(r.a.as_deref());
                 let bounds: Vec<f64> = json_str(r.b.as_deref());
                 for (i, c) in counts.iter().enumerate() {
@@ -574,7 +688,7 @@ impl Hist {
                     *h.buckets.entry(Bound(ub)).or_default() += *c as f64;
                 }
             }
-            "metric_exp_histograms" => {
+            HistKind::Exponential => {
                 let pos: Vec<u64> = json_str(r.a.as_deref());
                 let neg: Vec<u64> = json_str(r.b.as_deref());
                 // OTLP defines scales -10..=20; anything else is bad data and
@@ -598,7 +712,7 @@ impl Hist {
                     *h.buckets.entry(Bound(base.powf(idx + 1.0))).or_default() += *c as f64;
                 }
             }
-            _ => {}
+            HistKind::Summary => {}
         }
         h
     }
@@ -724,7 +838,7 @@ mod tests {
             zero: 0,
             offset: idx,
         };
-        let h = Hist::from_row("metric_exp_histograms", &r);
+        let h = Hist::from_row(HistKind::Exponential, &r);
         for q in [0.5, 0.99] {
             let v = h.quantile(q).unwrap();
             assert!((v - 100.0).abs() < 0.01, "p{q} = {v}");
@@ -769,7 +883,7 @@ mod tests {
                 zero: 0,
                 offset: 0,
             };
-            let h = Hist::from_row("metric_exp_histograms", &r);
+            let h = Hist::from_row(HistKind::Exponential, &r);
             assert!(h.quantile(0.5).unwrap().is_finite());
         }
     }
