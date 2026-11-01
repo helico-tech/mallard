@@ -600,6 +600,17 @@ mod tests {
     }
 
     #[test]
+    fn map_urls_per_frame_origin() {
+        assert_eq!(
+            map_url_for(Some("~/assets/a.js.map"), "https://h.test/assets/a.js"),
+            "https://h.test/assets/a.js.map"
+        );
+        assert_eq!(map_url_for(Some("~/assets/a.js.map"), "/srv/a.js"), "/assets/a.js.map");
+        assert_eq!(map_url_for(Some("https://cdn.test/a.map"), "https://h.test/a.js"), "https://cdn.test/a.map");
+        assert_eq!(map_url_for(None, "https://h.test/a.js"), "https://h.test/a.js.map");
+    }
+
+    #[test]
     fn sha1_helpers() {
         assert!(is_sha1_hex(&sha1_hex(b"abc")));
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");

@@ -737,6 +737,19 @@ pub fn find_by_debug_id(
     Ok(row)
 }
 
+/// The url of a minified file's map: its `sourcemap` header resolved
+/// against the file's url, or `<url>.map`.
+fn map_url_of(url: &str, sourcemap_ref: Option<&str>) -> String {
+    match sourcemap_ref {
+        Some(r) if r.contains("://") || r.starts_with("~/") => r.to_string(),
+        Some(r) => match url.rsplit_once('/') {
+            Some((dir, _)) => format!("{dir}/{r}"),
+            None => r.to_string(),
+        },
+        None => format!("{url}.map"),
+    }
+}
+
 /// Release-based fallback: find the minified file by url, then its map.
 pub fn find_by_url(
     conn: &Connection,
@@ -769,15 +782,7 @@ pub fn find_by_url(
             )
             .optional()?;
         let Some((bundle_id, object_key, minified_path, sourcemap_ref)) = row else { continue };
-        // Resolve the `sourcemap` header relative to the minified url.
-        let map_url = match &sourcemap_ref {
-            Some(r) if r.contains("://") || r.starts_with("~/") => r.clone(),
-            Some(r) => match url.rsplit_once('/') {
-                Some((dir, _)) => format!("{dir}/{r}"),
-                None => r.clone(),
-            },
-            None => format!("{url}.map"),
-        };
+        let map_url = map_url_of(url, sourcemap_ref.as_deref());
         let map = conn
             .query_row(
                 &ns.sql(
@@ -814,6 +819,15 @@ mod tests {
         assert_eq!(Cursor::parse("-5"), Some(Cursor { us: -5, id: None }));
         assert_eq!(Cursor::parse("abc"), None);
         assert_eq!(Cursor::parse("123:not-a-uuid"), None);
+    }
+
+    #[test]
+    fn map_urls_of_release_artifacts() {
+        assert_eq!(map_url_of("~/static/app.js", Some("app.js.map")), "~/static/app.js.map");
+        assert_eq!(map_url_of("~/static/app.js", Some("~/maps/app.map")), "~/maps/app.map");
+        assert_eq!(map_url_of("~/static/app.js", Some("https://cdn.test/a.map")), "https://cdn.test/a.map");
+        assert_eq!(map_url_of("app.js", Some("app.js.map")), "app.js.map");
+        assert_eq!(map_url_of("~/static/app.js", None), "~/static/app.js.map");
     }
 
     #[test]

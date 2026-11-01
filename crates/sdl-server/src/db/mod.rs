@@ -456,6 +456,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn event_pages_break_ties_on_received_at() {
+        use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        // Five events with the same received_at.
+        let received_at = Utc::now();
+        let ctx = NormalizeContext::new(received_at);
+        let mut replies = Vec::new();
+        for _ in 0..5 {
+            let ev = normalize_event(serde_json::json!({"message": "tie"}), &ctx);
+            let (tx, rx) = oneshot::channel();
+            let event = ProcessedEvent::from_normalized(&ev, received_at);
+            let w = EventWrite { project_id: 1, event, payload_json: ev.to_string(), reply: tx };
+            db.try_send(WriteCmd::Event(Box::new(w))).unwrap();
+            replies.push(rx);
+        }
+        for rx in replies {
+            rx.await.unwrap().unwrap();
+        }
+        let mut seen = HashSet::new();
+        let mut before = None;
+        for _ in 0..5 {
+            let q = sdl_types::EventQuery { limit: Some(2), ..Default::default() };
+            let page = db.read(move |c, ns| read::list_events(c, ns, 1, None, &q, before)).await.unwrap();
+            for e in &page.events {
+                assert!(seen.insert(e.event_id.clone()), "event {} on two pages", e.event_id);
+            }
+            match page.next_cursor {
+                Some(c) => before = Some(read::Cursor::parse(&c).unwrap()),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 5);
+        db.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn schema_version_is_recorded_once() {
         let dir = tempfile::tempdir().unwrap();
         for _ in 0..2 {
