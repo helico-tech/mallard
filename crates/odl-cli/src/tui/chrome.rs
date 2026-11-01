@@ -73,16 +73,30 @@ impl Embedded {
 
     pub(super) fn draw_footer(&self, f: &mut Frame, area: Rect) {
         if let Some(p) = &self.prompt {
+            use unicode_width::UnicodeWidthChar;
             let label = format!(" {} ❯ ", p.label);
-            let line = Line::from(vec![
-                Span::styled(label.clone(), theme::badge(theme::ACCENT2)),
+            let label_w = widgets::width(&label) + 1;
+            // Scroll the text so the cursor stays in view.
+            let room = (area.width as usize).saturating_sub(label_w + 1);
+            let chars: Vec<char> = p.input.value.chars().collect();
+            let cursor = p.input.cursor.min(chars.len());
+            let mut start = 0;
+            let mut before: usize = chars[..cursor].iter().map(|c| c.width().unwrap_or(0)).sum();
+            while before > room && start < cursor {
+                before -= chars[start].width().unwrap_or(0);
+                start += 1;
+            }
+            let mut spans = vec![
+                Span::styled(label, theme::badge(theme::ACCENT2)),
                 Span::raw(" "),
-                Span::styled(p.input.value.clone(), theme::bold()),
-                Span::styled(format!("   {}", p.help), theme::muted()),
-            ]);
-            f.render_widget(line, area);
-            let before: String = p.input.value.chars().take(p.input.cursor).collect();
-            let x = area.x + label.chars().count() as u16 + 1 + Line::from(before).width() as u16;
+                Span::styled(chars[start..].iter().collect::<String>(), theme::bold()),
+            ];
+            if start == 0 {
+                spans.push(Span::styled(format!("   {}", p.help), theme::muted()));
+            }
+            f.render_widget(Line::from(spans), area);
+            let offset = u16::try_from(label_w + before).unwrap_or(u16::MAX);
+            let x = area.x.saturating_add(offset);
             f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
             return;
         }

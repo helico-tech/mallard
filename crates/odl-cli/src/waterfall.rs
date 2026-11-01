@@ -33,7 +33,10 @@ pub fn layout(spans: &[Span]) -> (Vec<Row>, i64) {
         children.entry(parent).or_default().push(i);
     }
     for v in children.values_mut() {
-        v.sort_by_key(|i| (spans[*i].start_time, spans[*i].span_id.clone()));
+        v.sort_by(|a, b| {
+            let (sa, sb) = (&spans[*a], &spans[*b]);
+            (sa.start_time, &sa.span_id).cmp(&(sb.start_time, &sb.span_id))
+        });
     }
     let mut rows = Vec::with_capacity(spans.len());
     let mut visited = vec![false; spans.len()];

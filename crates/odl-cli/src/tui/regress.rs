@@ -486,6 +486,20 @@ fn trace_lookup_backs_off() {
     assert!(d.short_window);
 }
 
+// Review finding 25: a huge paste does not overflow the cursor position,
+// and long input scrolls so the cursor end stays visible.
+#[test]
+fn long_prompt_input_scrolls() {
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    let huge = "x".repeat(65_530);
+    e.start_prompt(PromptTarget::LogFilter, "filter logs", "help", &huge);
+    render(&mut e, 80, 20);
+    let long = format!("{}END", "y".repeat(200));
+    e.start_prompt(PromptTarget::LogFilter, "filter logs", "help", &long);
+    let footer = render(&mut e, 80, 20).last().unwrap().concat();
+    assert!(footer.contains("END"), "{footer}");
+}
+
 // Review finding 6: in a prompt, Ctrl/Alt keys go to the host instead of
 // being typed, and Ctrl-C cancels the prompt instead of quitting.
 #[test]

@@ -626,3 +626,26 @@ fn time_windows() {
     e.set_since("6h").unwrap();
     assert_eq!(e.window_secs(), 6.0 * 3600.0);
 }
+
+// Review finding 18: a service without operations says so instead of
+// "loading" forever.
+#[test]
+fn empty_operations_are_not_loading() {
+    let mut e = fixture();
+    e.handle_event(&key(KeyCode::Enter));
+    assert!(e.overview.ops.is_some());
+    assert!(render(&mut e, 120, 40).contains("loading operations"));
+    e.overview.set_operations(vec![]);
+    let s = render(&mut e, 120, 40);
+    assert!(s.contains("no operations in this window"), "{s}");
+}
+
+#[test]
+fn nav_on_empty_and_short_lists() {
+    let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    assert_eq!(nav(0, 0, &k(KeyCode::Down), 10), Some(0));
+    assert_eq!(nav(0, 0, &k(KeyCode::Char('x')), 10), None);
+    assert_eq!(nav(2, 3, &k(KeyCode::Down), 10), Some(2));
+    assert_eq!(nav(2, 3, &k(KeyCode::PageUp), 10), Some(0));
+    assert_eq!(nav(0, 3, &k(KeyCode::Char('G')), 0), Some(2));
+}

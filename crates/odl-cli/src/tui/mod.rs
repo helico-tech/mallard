@@ -46,6 +46,10 @@ use loader::{Data, Kind, Loader};
 pub use standalone::run_standalone;
 
 /// What the host should do after an event.
+///
+/// Deliberately not `#[non_exhaustive]`: the host lives in the same
+/// workspace, and its exhaustive `match` makes the compiler point at every
+/// place that must handle a new jump target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The UI used the event.
@@ -297,7 +301,7 @@ impl Embedded {
         match self.view {
             View::Overview => self.refresh_overview(false),
             View::Traces => self.refresh_traces(false),
-            View::Logs => self.refresh_logs(false),
+            View::Logs => self.refresh_logs(),
             View::Metrics => self.refresh_metrics(false),
             View::Status => {}
         }
@@ -342,19 +346,21 @@ impl Embedded {
 
     fn apply_error(&mut self, kind: Kind, err: &odl_client::Error) {
         let e = loader::short_error(err);
+        // Flash when a kind starts failing, not on every retry.
+        if self.failing.insert(kind) && (kind != Kind::Stats || self.stats.is_none()) {
+            self.flash_error(e.clone());
+        }
         match kind {
-            Kind::Stats => self.stats_error = Some(e.clone()),
-            Kind::Services | Kind::Operations | Kind::SpanSeries | Kind::LogSeries => {
-                self.overview.error = Some(e.clone())
-            }
-            Kind::LogVolume | Kind::LogTail => self.logs.error = Some(e.clone()),
+            Kind::Stats => self.stats_error = Some(e),
+            Kind::Services | Kind::Operations | Kind::SpanSeries | Kind::LogSeries => self.overview.error = Some(e),
+            Kind::LogVolume | Kind::LogTail => self.logs.error = Some(e),
             Kind::Logs => {
                 // Retry the initial load after a short pause.
-                self.logs.error = Some(e.clone());
+                self.logs.error = Some(e);
                 self.logs.requested = false;
                 self.logs.retry_at = Some(Instant::now() + RETRY);
             }
-            Kind::Traces => self.traces.error = Some(e.clone()),
+            Kind::Traces => self.traces.error = Some(e),
             Kind::Trace => {
                 if let Some(d) = &mut self.traces.detail {
                     d.on_error(err);
@@ -362,20 +368,15 @@ impl Embedded {
             }
             Kind::TraceLogs => {
                 if let Some(d) = &mut self.traces.detail {
-                    d.error = Some(e.clone());
+                    d.error = Some(e);
                 }
             }
-            Kind::MetricList => self.metrics.error = Some(e.clone()),
+            Kind::MetricList => self.metrics.error = Some(e),
             Kind::MetricQuery => {
                 if let Some(c) = &mut self.metrics.chart {
-                    c.error = Some(e.clone());
+                    c.error = Some(e);
                 }
             }
-        }
-        // Flash when a kind starts failing, not on every retry.
-        let first = self.failing.insert(kind);
-        if first && (kind != Kind::Stats || self.stats.is_none()) {
-            self.flash_error(e);
         }
     }
 

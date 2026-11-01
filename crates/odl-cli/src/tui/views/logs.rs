@@ -168,9 +168,9 @@ impl State {
 }
 
 impl Embedded {
-    pub(crate) fn refresh_logs(&mut self, force: bool) {
+    pub(crate) fn refresh_logs(&mut self) {
         let since = self.since().to_string();
-        if (!self.logs.requested && self.logs.retry_at.is_none_or(|t| Instant::now() >= t)) || force {
+        if !self.logs.requested && self.logs.retry_at.is_none_or(|t| Instant::now() >= t) {
             let mut q = self.logs.base_query(since.clone());
             q.limit = Some(1000);
             q.order = Some("desc".into());
@@ -180,7 +180,7 @@ impl Embedded {
                 self.logs.requested = true;
             }
         }
-        if force || due(self.logs.refreshed, Duration::from_secs(5)) {
+        if due(self.logs.refreshed, Duration::from_secs(5)) {
             let q = LogSeriesQuery {
                 since: Some(since),
                 service: self.logs.filter.service.clone(),
@@ -188,7 +188,7 @@ impl Embedded {
                 ..Default::default()
             };
             let c = self.client.clone();
-            if self.loader.load(Kind::LogVolume, force, async move { c.log_series(&q).await }, Data::LogSeries) {
+            if self.loader.load(Kind::LogVolume, false, async move { c.log_series(&q).await }, Data::LogSeries) {
                 self.logs.refreshed = Some(Instant::now());
             }
         }
@@ -364,7 +364,11 @@ impl Embedded {
             Span::styled(" ■ ", Style::new().fg(theme::MUTED)),
             Span::styled(format!("debug {} ", compact(sum(|p| p.debug) as f64)), theme::dim()),
         ]);
-        let block = widgets::panel_with("Volume", legend, false);
+        // The volume query has no trace, level or attribute filter.
+        let lf = &self.logs.filter;
+        let partial = lf.level.is_some() || lf.trace.is_some() || !lf.attrs.is_empty();
+        let title = if partial { "Volume · service and text filter only" } else { "Volume" };
+        let block = widgets::panel_with(title, legend, false);
         let inner = block.inner(area);
         f.render_widget(block, area);
         if pts.is_empty() {

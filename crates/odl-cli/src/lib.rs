@@ -1,12 +1,14 @@
 //! `odl` command line and terminal UI, usable as a library.
 //!
 //! - [`Cmd`] + [`run`]: mount the commands in another CLI.
-//! - [`tui::Embedded`]: the TUI as a component without terminal setup.
+//! - [`Embedded`]: the TUI as a component without terminal setup.
 
 mod fmt;
 mod severity;
 pub mod tui;
 mod waterfall;
+
+pub use tui::{Embedded, Outcome};
 
 /// For the `odl` binary.
 #[doc(hidden)]

@@ -93,9 +93,6 @@ fn unit_fmt(unit: &str) -> fn(f64) -> String {
         "s" => |v| ms(v * 1000.0),
         "ms" => ms,
         "By" => |v| crate::fmt::bytes(v),
-        "1" => |v| {
-            if v.abs() <= 1.0 { format!("{:.1}%", v * 100.0) } else { compact(v) }
-        },
         _ => compact,
     }
 }
