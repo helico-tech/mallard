@@ -9,7 +9,7 @@
              ──▶│ :4317 gRPC  OTLP                            → odl-server gRPC services      │
  obs CLI/TUI ──▶│ :8080 HTTP  /sentry/...  sentry management API (nested)                    │
                 │             /otel/...    otel query API (nested)                           │
-                │             /api/v1/correlate/...  obs-only: joins across both             │
+                │             /v1/traces|logs|metrics   OTLP/HTTP (also on :4318)             │
                 │             /healthz /readyz /metrics                                       │
                 └───────────────┬────────────────────────────────────────────────────────────┘
                                 ▼
@@ -23,8 +23,8 @@
 
 | crate | kind | role |
 |---|---|---|
-| `obs-server` | bin `obs-ducklake` | Loads config, builds both library servers, mounts their routers on shared listeners, runs their background jobs, owns tracing, metrics and shutdown. Adds the correlation API. |
-| `obs-client` | lib | Typed async client: wraps `sdl-client`, `odl-client` and the correlation API behind one base URL + token. |
+| `obs-server` | lib + bin `obs-ducklake` | Loads config, opens the shared catalog (`odl_server::store::open_connection`), builds both library servers, mounts their routers, runs their background jobs, owns logging, metrics and shutdown. |
+| `obs-client` | lib | Typed async client: wraps `sdl-client` (`<url>/sentry`) and `odl-client` (`<url>/otel`) behind one base URL + token, and does correlation (trace → errors + spans + logs) by calling both. |
 | `obs-cli` | bin `obs` | CLI for errors, traces, logs, metrics, correlation. `obs tui` starts the TUI (ratatui). |
 
 ## Key rules
@@ -38,5 +38,9 @@
   metrics and the runtime.
 - One config file, TOML, sections `[server]`, `[storage]` (shared),
   `[sentry]`, `[otel]`. Env overrides: `OBS_<SECTION>__<KEY>`.
+- Correlation lives in `obs-client`, built on the two library APIs
+  (`/sentry/v1/events?trace_id=`, `/otel/api/v1/traces/{id}`,
+  `/otel/api/v1/logs?trace_id=`). The server adds no API of its own, so it
+  never depends on the libraries' table layout.
 - Errors and traces correlate on `trace_id` (Sentry `contexts.trace.trace_id`
   = OTel span `trace_id`).

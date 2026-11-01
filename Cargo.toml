@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/helico-tech/obs-ducklake"
+rust-version = "1.90"
+
+[workspace.dependencies]
+# Sibling libraries. Path deps until they have a git remote.
+sdl-server = { path = "../sentry-ducklake/crates/sdl-server" }
+sdl-client = { path = "../sentry-ducklake/crates/sdl-client" }
+sdl-types = { path = "../sentry-ducklake/crates/sdl-types" }
+odl-server = { path = "../otel-ducklake/crates/odl-server" }
+odl-api = { path = "../otel-ducklake/crates/odl-api" }
+obs-client = { path = "crates/obs-client" }
+# Must stay identical to both libraries (ADR 0001).
+duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono", "json", "parquet"] }
+axum = "0.8"
+tonic = "0.14"
+tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "query"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+utoipa = "6"
+
+# DuckDB's C++ is always built optimized: downloaded extensions are release
+# builds and trip debug-only allocator assertions otherwise. Profiles of path
+# dependencies are ignored, so this must be repeated here.
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
+debug = false
+debug-assertions = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"
