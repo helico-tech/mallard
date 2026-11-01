@@ -1,5 +1,7 @@
 //! Shared building blocks: panels, KPI tiles, charts, histogram, helpers.
 
+use std::ops::Range;
+
 use chrono::{DateTime, Local, Utc};
 use ratatui::{
     Frame,
@@ -88,7 +90,7 @@ pub struct Tile<'a> {
 }
 
 impl Tile<'_> {
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    pub fn render(self, f: &mut Frame, area: Rect) {
         let block =
             Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::border());
         let inner = block.inner(area);
@@ -101,14 +103,11 @@ impl Tile<'_> {
             Line::from(vec![
                 Span::styled(self.label.to_uppercase(), theme::dim().add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
-                Span::styled(self.sub.clone(), theme::muted()),
+                Span::styled(self.sub, theme::muted()),
             ]),
             rows[0],
         );
-        f.render_widget(
-            Span::styled(self.value.clone(), Style::new().fg(self.color).add_modifier(Modifier::BOLD)),
-            rows[1],
-        );
+        f.render_widget(Span::styled(self.value, Style::new().fg(self.color).add_modifier(Modifier::BOLD)), rows[1]);
         if rows[2].height > 0 && !self.spark.is_empty() {
             let n = rows[2].width as usize;
             let data = &self.spark[self.spark.len().saturating_sub(n)..];
@@ -260,13 +259,15 @@ impl Widget for StackedBars<'_> {
             for row in 0..area.height as u64 {
                 let lo = row * 8;
                 let hi = lo + 8;
-                // segment covering the top of this cell
                 let top = bounds.last().copied().unwrap_or(0);
                 if top <= lo {
                     break;
                 }
-                let fill = (top.min(hi) - lo) as usize;
-                let idx = bounds.iter().position(|b| *b > lo).unwrap_or(0);
+                // Color of the segment covering the top filled eighth of
+                // this cell (segment i covers bounds[i-1]..bounds[i]).
+                let filled_to = top.min(hi);
+                let fill = (filled_to - lo) as usize;
+                let idx = bounds.iter().position(|b| *b >= filled_to).unwrap_or(0);
                 let color = self.colors[idx];
                 let y = area.y + area.height - 1 - row as u16;
                 let x = area.x + col as u16;
@@ -294,6 +295,17 @@ pub fn fit_offset(offset: &mut usize, selected: Option<usize>, len: usize, visib
             *offset = sel + 1 - visible;
         }
     }
+}
+
+/// The part of a list of `len` rows that fits in `height`: fits `offset`
+/// (the list's scroll state) to the selection and returns the visible range
+/// and the selection within it. Build rows only for this range and render
+/// them with a fresh state: lists can be long and `draw` runs often.
+pub fn visible(offset: &mut usize, selected: Option<usize>, len: usize, height: u16) -> (Range<usize>, Option<usize>) {
+    fit_offset(offset, selected, len, height);
+    let start = (*offset).min(len);
+    let end = (start + height as usize).min(len);
+    (start..end, selected.filter(|s| (start..end).contains(s)).map(|s| s - start))
 }
 
 /// Key hint spans: `[k] label`.
@@ -335,5 +347,16 @@ mod tests {
         StackedBars { buckets: &buckets, colors: &[Color::Red, Color::Blue] }.render(buf.area, &mut buf);
         // tallest column is full height
         assert_eq!(buf[(3, 0)].symbol(), "█");
+    }
+
+    // Review finding 32: a cell takes the color of the segment at its top.
+    #[test]
+    fn stacked_bars_color_the_top_segment() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        // 6/8 red at the bottom, 2/8 blue on top: the cell's top is blue.
+        let buckets = vec![vec![6, 2]];
+        StackedBars { buckets: &buckets, colors: &[Color::Red, Color::Blue] }.render(buf.area, &mut buf);
+        assert_eq!(buf[(0, 0)].symbol(), "█");
+        assert_eq!(buf[(0, 0)].fg, Color::Blue);
     }
 }

@@ -20,10 +20,9 @@ use crate::{
         loader::{Data, Kind},
         nav,
         query::{TraceFilter, parse_trace_filter},
-        theme,
-        waterfall::{self, Row},
-        widgets,
+        theme, widgets,
     },
+    waterfall::{self, Row},
 };
 
 #[derive(Default)]
@@ -52,6 +51,8 @@ pub struct Detail {
     pub retry_at: Option<Instant>,
     /// Use a 24 h window: the server rejected 7 days (query.max_window).
     pub short_window: bool,
+    /// Failed lookups in a row, for the retry back-off.
+    pub failures: u32,
 }
 
 impl Detail {
@@ -69,19 +70,22 @@ impl Detail {
             error: None,
             retry_at: None,
             short_window: false,
+            failures: 0,
         }
     }
 
     /// A lookup failed: show it and retry later (a trace may not be flushed
     /// yet), with a shorter window if the server refused the default one.
-    pub fn on_error(&mut self, e: &str) {
-        self.error = Some(e.to_string());
+    /// Retries back off from 3 s to about a minute.
+    pub fn on_error(&mut self, e: &odl_client::Error) {
+        self.error = Some(crate::tui::loader::short_error(e));
         self.requested = false;
-        if e.contains("max_window") && !self.short_window {
+        if e.is_window_too_large() && !self.short_window {
             self.short_window = true;
             self.retry_at = Some(Instant::now());
         } else {
-            self.retry_at = Some(Instant::now() + crate::tui::RETRY);
+            self.retry_at = Some(Instant::now() + retry_delay(self.failures));
+            self.failures = self.failures.saturating_add(1);
         }
     }
 
@@ -92,7 +96,20 @@ impl Detail {
     }
 }
 
+/// Pause before retry number `failures + 1`: 3 s, 6 s, 12 s, … up to 48 s.
+fn retry_delay(failures: u32) -> Duration {
+    crate::tui::RETRY * 2u32.pow(failures.min(4))
+}
+
 impl State {
+    /// Show the list for `filter` (the caller cancels a pending list).
+    pub fn show_for(&mut self, filter: TraceFilter) {
+        self.filter = filter;
+        self.detail = None;
+        self.list.clear();
+        self.refreshed = None;
+    }
+
     pub fn set_list(&mut self, v: Vec<TraceSummary>) {
         let keep = self.sel.selected().and_then(|i| self.list.get(i)).map(|t| t.trace_id.clone());
         self.list = v;
@@ -114,6 +131,7 @@ impl State {
             d.trace = Some(t);
             d.error = None;
             d.retry_at = None;
+            d.failures = 0;
             let i = keep.and_then(|id| {
                 let t = d.trace.as_ref()?;
                 d.rows.iter().position(|r| t.spans.get(r.span).is_some_and(|s| s.span_id == id))
@@ -169,13 +187,13 @@ impl Embedded {
         }
         let f = &self.traces.filter;
         let q = TraceQuery {
-            since: Some(self.since()),
+            since: Some(self.since().to_string()),
             service: f.service.clone(),
             operation: f.operation.clone(),
             errors_only: Some(f.errors_only),
             min_duration_ms: f.min_ms,
             max_duration_ms: f.max_ms,
-            attributes: (!f.attrs.is_empty()).then(|| f.attrs.join(",")),
+            attributes: crate::attrs(&f.attrs),
             limit: Some(200),
             ..Default::default()
         };
@@ -454,8 +472,10 @@ impl Embedded {
             r.push_str(&bar.into_iter().collect::<String>());
         }
         f.render_widget(TSpan::styled(format!(" {r}"), theme::muted()), ruler);
-        let items: Vec<ListItem> = d
-            .rows
+        // Build items only for what fits: traces can have thousands of spans.
+        let sel = d.sel.selected();
+        let (shown, sel) = widgets::visible(d.sel.offset_mut(), sel, d.rows.len(), list_area.height);
+        let items: Vec<ListItem> = d.rows[shown]
             .iter()
             .map(|row| {
                 let s = &trace.spans[row.span];
@@ -483,12 +503,10 @@ impl Embedded {
                 ListItem::new(Line::from(label))
             })
             .collect();
-        let sel = d.sel.selected();
-        widgets::fit_offset(d.sel.offset_mut(), sel, d.rows.len(), list_area.height);
         f.render_stateful_widget(
             List::new(items).highlight_style(theme::selected()).highlight_symbol("▌"),
             list_area,
-            &mut d.sel,
+            &mut ListState::default().with_selected(sel),
         );
         // Span details
         let lines = span_details(d);

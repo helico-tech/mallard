@@ -7,18 +7,19 @@
 //! never blocks input. [`run_standalone`] wraps it for `odl tui`.
 //!
 //! F1 and F2 are reserved for the host and always return [`Outcome::Ignored`],
-//! and so do keys with Ctrl or Alt (except Ctrl-C, which quits), so host
-//! shortcuts keep working.
+//! and so do keys with Ctrl or Alt (except Ctrl-C, which quits, or cancels
+//! an open prompt), so host shortcuts keep working.
 //!
 //! A tokio runtime must be current when `tick` is called (loads are spawned on
 //! it), and the host's event loop must not block that runtime's only thread.
 
+mod chrome;
 mod input;
 mod loader;
 mod query;
+mod standalone;
 mod theme;
 mod views;
-pub(crate) mod waterfall;
 mod widgets;
 
 #[cfg(test)]
@@ -26,23 +27,29 @@ mod regress;
 #[cfg(test)]
 mod tests;
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use odl_client::{Client, api::Stats};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block, Clear, Paragraph, Wrap},
+    widgets::Paragraph,
 };
 
 use input::{Input, InputResult};
 use loader::{Data, Kind, Loader};
+pub use standalone::run_standalone;
 
 /// What the host should do after an event.
+///
+/// Deliberately not `#[non_exhaustive]`: the host lives in the same
+/// workspace, and its exhaustive `match` makes the compiler point at every
+/// place that must handle a new jump target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The UI used the event.
@@ -72,7 +79,9 @@ const VIEWS: [(View, &str); 5] = [
     (View::Status, "Status"),
 ];
 
-const WINDOWS: [&str; 6] = ["5m", "15m", "1h", "6h", "24h", "7d"];
+/// Time windows `t` cycles through; `set_since` may add one more.
+const WINDOWS: [(&str, u64); 6] =
+    [("5m", 300), ("15m", 900), ("1h", 3600), ("6h", 6 * 3600), ("24h", 86_400), ("7d", 7 * 86_400)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptTarget {
@@ -94,7 +103,8 @@ pub struct Embedded {
     client: Client,
     loader: Loader,
     view: View,
-    windows: Vec<String>,
+    /// Time windows as given (sent to the server) and parsed.
+    windows: Vec<(String, Duration)>,
     win: usize,
     stats: Option<Stats>,
     stats_error: Option<String>,
@@ -111,6 +121,18 @@ pub struct Embedded {
     flash: Option<(String, bool, Instant)>,
     spin: usize,
     errors_enabled: bool,
+    /// Kinds whose last load failed: only the first failure flashes.
+    failing: HashSet<Kind>,
+}
+
+impl std::fmt::Debug for Embedded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Embedded")
+            .field("client", &self.client)
+            .field("view", &self.view)
+            .field("since", &self.since())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Pause before retrying a failed load.
@@ -150,7 +172,7 @@ impl Embedded {
             client,
             loader: Loader::default(),
             view: View::Overview,
-            windows: WINDOWS.iter().map(|s| s.to_string()).collect(),
+            windows: WINDOWS.iter().map(|(s, secs)| (s.to_string(), Duration::from_secs(*secs))).collect(),
             win: 2,
             stats: None,
             stats_error: None,
@@ -167,6 +189,7 @@ impl Embedded {
             flash: None,
             spin: 0,
             errors_enabled: false,
+            failing: HashSet::new(),
         }
     }
 
@@ -177,50 +200,54 @@ impl Embedded {
         self.errors_enabled = enabled;
     }
 
-    /// Start with a given time window (e.g. `15m`, `6h`, `2d`).
-    pub fn with_since(client: Client, since: &str) -> Self {
+    /// Start with a given time window (e.g. `15m`, `6h`, `2d`, `1h30m`).
+    pub fn with_since(client: Client, since: &str) -> Result<Self> {
         let mut e = Self::new(client);
-        e.set_since(since);
-        e
+        e.set_since(since)?;
+        Ok(e)
     }
 
-    /// Change the time window (e.g. `15m`).
-    pub fn set_since(&mut self, since: &str) {
+    /// Change the time window (e.g. `15m`). An invalid window is an error
+    /// and changes nothing.
+    pub fn set_since(&mut self, since: &str) -> Result<()> {
         let since = since.trim();
-        if since.is_empty() {
-            return;
-        }
-        match self.windows.iter().position(|w| w == since) {
+        let d = crate::parse_window(since)?;
+        match self.windows.iter().position(|(w, _)| w == since) {
             Some(i) => self.win = i,
             None => {
-                self.windows.push(since.to_string());
+                // At most one window besides the presets.
+                self.windows.truncate(WINDOWS.len());
+                self.windows.push((since.to_string(), d));
                 self.win = self.windows.len() - 1;
             }
         }
         self.invalidate();
+        Ok(())
     }
 
-    pub(crate) fn since(&self) -> String {
-        self.windows[self.win].clone()
+    pub(crate) fn since(&self) -> &str {
+        &self.windows[self.win].0
     }
 
-    /// Window length in seconds (for rates); falls back to one hour.
+    /// Window length in seconds (for rates).
     pub(crate) fn window_secs(&self) -> f64 {
-        humantime_secs(&self.since()).unwrap_or(3600.0)
+        self.windows[self.win].1.as_secs_f64()
     }
 
-    /// Jump to a trace (and its logs).
-    pub fn open_trace(&mut self, trace_id: &str) {
-        let id: String = trace_id.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_lowercase();
-        if id.len() != 32 {
+    /// Jump to a trace (and its logs). Returns false, and shows why, when
+    /// `trace_id` is not 32 hex characters (dashes are ignored).
+    pub fn open_trace(&mut self, trace_id: &str) -> bool {
+        let id: String = trace_id.trim().chars().filter(|c| *c != '-').collect::<String>().to_lowercase();
+        if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             self.flash_error(format!("not a trace id: {trace_id}"));
-            return;
+            return false;
         }
         self.view = View::Traces;
         self.help = false;
         self.prompt = None;
         self.logs.detail = None;
         self.open_trace_detail(id);
+        true
     }
 
     pub(crate) fn flash(&mut self, msg: impl Into<String>) {
@@ -234,22 +261,7 @@ impl Embedded {
     /// Force all views to reload on the next tick. In-flight requests are
     /// aborted so results for the old window are never applied.
     fn invalidate(&mut self) {
-        for k in [
-            Kind::Services,
-            Kind::Operations,
-            Kind::SpanSeries,
-            Kind::LogSeries,
-            Kind::LogVolume,
-            Kind::Traces,
-            Kind::Trace,
-            Kind::TraceLogs,
-            Kind::Logs,
-            Kind::LogTail,
-            Kind::MetricList,
-            Kind::MetricQuery,
-        ] {
-            self.loader.cancel(k);
-        }
+        self.loader.cancel_all_except(Kind::Stats);
         self.overview.refreshed = None;
         self.traces.refreshed = None;
         if let Some(d) = &mut self.traces.detail {
@@ -272,7 +284,7 @@ impl Embedded {
                     self.last_ok = Some(Instant::now());
                     self.apply(l.kind, data);
                 }
-                Err(e) => self.apply_error(l.kind, e),
+                Err(e) => self.apply_error(l.kind, &e),
             }
         }
         if let Some((_, _, at)) = &self.flash
@@ -289,7 +301,7 @@ impl Embedded {
         match self.view {
             View::Overview => self.refresh_overview(false),
             View::Traces => self.refresh_traces(false),
-            View::Logs => self.refresh_logs(false),
+            View::Logs => self.refresh_logs(),
             View::Metrics => self.refresh_metrics(false),
             View::Status => {}
         }
@@ -299,6 +311,7 @@ impl Embedded {
     }
 
     fn apply(&mut self, kind: Kind, data: Data) {
+        self.failing.remove(&kind);
         match data {
             Data::Stats(s) => {
                 let accepted: u64 = s.ingest.signals.iter().map(|x| x.accepted).sum();
@@ -325,44 +338,45 @@ impl Embedded {
                 Kind::TraceLogs => self.traces.set_trace_logs(v),
                 _ => self.logs_loaded(v),
             },
-            Data::Tail((v, gap)) => self.logs_tail_loaded(v, gap),
+            Data::Tail { records, truncated } => self.logs_tail_loaded(records, truncated),
             Data::MetricList(v) => self.metrics.set_list(v),
             Data::MetricQuery(r) => self.metrics.set_result(r),
         }
     }
 
-    fn apply_error(&mut self, kind: Kind, e: String) {
+    fn apply_error(&mut self, kind: Kind, err: &odl_client::Error) {
+        let e = loader::short_error(err);
+        // Flash when a kind starts failing, not on every retry.
+        if self.failing.insert(kind) && (kind != Kind::Stats || self.stats.is_none()) {
+            self.flash_error(e.clone());
+        }
         match kind {
-            Kind::Stats => self.stats_error = Some(e.clone()),
-            Kind::Services | Kind::Operations | Kind::SpanSeries => self.overview.error = Some(e.clone()),
-            Kind::LogSeries => self.overview.error = Some(e.clone()),
-            Kind::LogVolume | Kind::LogTail => self.logs.error = Some(e.clone()),
+            Kind::Stats => self.stats_error = Some(e),
+            Kind::Services | Kind::Operations | Kind::SpanSeries | Kind::LogSeries => self.overview.error = Some(e),
+            Kind::LogVolume | Kind::LogTail => self.logs.error = Some(e),
             Kind::Logs => {
                 // Retry the initial load after a short pause.
-                self.logs.error = Some(e.clone());
+                self.logs.error = Some(e);
                 self.logs.requested = false;
                 self.logs.retry_at = Some(Instant::now() + RETRY);
             }
-            Kind::Traces => self.traces.error = Some(e.clone()),
+            Kind::Traces => self.traces.error = Some(e),
             Kind::Trace => {
                 if let Some(d) = &mut self.traces.detail {
-                    d.on_error(&e);
+                    d.on_error(err);
                 }
             }
             Kind::TraceLogs => {
                 if let Some(d) = &mut self.traces.detail {
-                    d.error = Some(e.clone());
+                    d.error = Some(e);
                 }
             }
-            Kind::MetricList => self.metrics.error = Some(e.clone()),
+            Kind::MetricList => self.metrics.error = Some(e),
             Kind::MetricQuery => {
                 if let Some(c) = &mut self.metrics.chart {
-                    c.error = Some(e.clone());
+                    c.error = Some(e);
                 }
             }
-        }
-        if kind != Kind::Stats || self.stats.is_none() {
-            self.flash_error(e);
         }
     }
 
@@ -389,15 +403,14 @@ impl Embedded {
         if matches!(k.code, KeyCode::F(1) | KeyCode::F(2)) {
             return Outcome::Ignored;
         }
+        if self.prompt.is_some() {
+            return self.prompt_key(k);
+        }
         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
         if self.help {
             self.help = false;
-            return Outcome::Consumed;
-        }
-        if self.prompt.is_some() {
-            self.prompt_key(k);
             return Outcome::Consumed;
         }
         // Ctrl/Alt combinations belong to the host.
@@ -453,21 +466,19 @@ impl Embedded {
         self.prompt = Some(Prompt { target, label, help, input: Input::new(value) });
     }
 
-    fn prompt_key(&mut self, k: &KeyEvent) {
-        let Some(p) = &mut self.prompt else { return };
+    /// A key while a prompt is open. Ctrl-C and Esc cancel it.
+    fn prompt_key(&mut self, k: &KeyEvent) -> Outcome {
+        let Some(p) = &mut self.prompt else { return Outcome::Ignored };
         match p.input.handle(k) {
+            InputResult::Ignored => return Outcome::Ignored,
             InputResult::Edited => {
                 if p.target == PromptTarget::MetricSearch {
                     self.metrics.search = p.input.value.clone();
                     self.metrics.clamp_selection();
                 }
             }
-            InputResult::Cancel => {
-                if p.target == PromptTarget::MetricSearch {
-                    // keep what was typed; Esc in the list clears it
-                }
-                self.prompt = None;
-            }
+            // A metric search keeps what was typed; Esc in the list clears it.
+            InputResult::Cancel => self.prompt = None,
             InputResult::Submit => {
                 let p = self.prompt.take().unwrap();
                 let v = p.input.value.trim().to_string();
@@ -482,6 +493,7 @@ impl Embedded {
                 }
             }
         }
+        Outcome::Consumed
     }
 
     /// Render the whole UI into `area`.
@@ -505,228 +517,6 @@ impl Embedded {
         self.draw_footer(f, footer);
         if self.help {
             self.draw_help(f, body);
-        }
-    }
-
-    fn live(&self) -> (bool, &'static str) {
-        match self.last_ok {
-            Some(t) if t.elapsed() < Duration::from_secs(20) => (true, "live"),
-            Some(_) => (false, "stale"),
-            None if self.stats_error.is_some() => (false, "offline"),
-            None => (false, "connecting"),
-        }
-    }
-
-    fn draw_header(&self, f: &mut Frame, area: Rect) {
-        const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let (ok, label) = self.live();
-        let mut right = vec![];
-        if self.loader.any_pending() {
-            right.push(Span::styled(format!("{} ", SPIN[self.spin % SPIN.len()]), theme::dim()));
-        }
-        if let Some(r) = self.ingest_rate {
-            right.push(Span::styled("↗ ", theme::muted()));
-            right.push(Span::styled(format!("{}/s", crate::fmt::compact(r)), theme::text()));
-            right.push(Span::styled(" ingest  ", theme::muted()));
-        }
-        right.push(Span::styled("◷ ", theme::muted()));
-        right.push(Span::styled(format!("last {}", self.since()), theme::accent()));
-        right.push(Span::raw("  "));
-        right.push(Span::styled("● ", Style::new().fg(if ok { theme::OK } else { theme::ERR })));
-        right.push(Span::styled(format!("{label} "), theme::dim()));
-        let right = Line::from(right);
-        let rw = right.width() as u16;
-        let left = Line::from(vec![
-            Span::styled(" ◆ otel-ducklake ", theme::accent()),
-            Span::styled("│ ", theme::muted()),
-            Span::styled(
-                widgets::trunc(self.client.base_url(), area.width.saturating_sub(rw + 22) as usize),
-                theme::dim(),
-            ),
-        ]);
-        f.render_widget(Block::default().style(Style::new().bg(theme::SURFACE)), area);
-        f.render_widget(left, area);
-        if rw < area.width {
-            f.render_widget(right, Rect { x: area.x + area.width - rw, width: rw, ..area });
-        }
-    }
-
-    fn draw_tabs(&self, f: &mut Frame, area: Rect) {
-        let mut spans = vec![Span::raw(" ")];
-        for (i, (v, name)) in VIEWS.iter().enumerate() {
-            if *v == self.view {
-                spans.push(Span::styled(format!(" {} {name} ", i + 1), theme::badge(theme::ACCENT)));
-            } else {
-                spans.push(Span::styled(format!(" {}", i + 1), theme::muted()));
-                spans.push(Span::styled(format!(" {name} "), theme::dim()));
-            }
-            spans.push(Span::raw(" "));
-        }
-        f.render_widget(Line::from(spans), area);
-    }
-
-    fn draw_footer(&self, f: &mut Frame, area: Rect) {
-        if let Some(p) = &self.prompt {
-            let label = format!(" {} ❯ ", p.label);
-            let line = Line::from(vec![
-                Span::styled(label.clone(), theme::badge(theme::ACCENT2)),
-                Span::raw(" "),
-                Span::styled(p.input.value.clone(), theme::bold()),
-                Span::styled(format!("   {}", p.help), theme::muted()),
-            ]);
-            f.render_widget(line, area);
-            let before: String = p.input.value.chars().take(p.input.cursor).collect();
-            let x = area.x + label.chars().count() as u16 + 1 + Line::from(before).width() as u16;
-            f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
-            return;
-        }
-        let mut spans = widgets::hints(&self.hints());
-        spans.extend(widgets::hints(&[("?", "help"), ("q", "quit")]));
-        let line = Line::from(spans);
-        let mut hints_area = area;
-        if let Some((msg, is_err, _)) = &self.flash {
-            let text = format!(" {} ", widgets::trunc(msg, (area.width / 2) as usize));
-            let w = Line::from(text.as_str()).width() as u16;
-            let style = if *is_err { theme::badge(theme::ERR) } else { theme::badge(theme::OK) };
-            if w < area.width {
-                f.render_widget(Span::styled(text, style), Rect { x: area.right() - w, width: w, ..area });
-                // Hints get the rest, with a one-cell gap.
-                hints_area.width = area.width.saturating_sub(w + 1);
-            }
-        }
-        f.render_widget(line, hints_area);
-    }
-
-    fn hints(&self) -> Vec<(&'static str, &'static str)> {
-        let mut h = self.view_hints();
-        if !self.errors_enabled {
-            h.retain(|(k, _)| *k != "e");
-        }
-        h
-    }
-
-    fn view_hints(&self) -> Vec<(&'static str, &'static str)> {
-        match self.view {
-            View::Overview if self.overview.ops.is_some() => {
-                vec![("↵", "traces"), ("esc", "services"), ("t", "window")]
-            }
-            View::Overview => vec![("↵", "operations"), ("t", "window"), ("r", "refresh")],
-            View::Traces if self.traces.detail.is_some() => {
-                vec![("j/k", "span"), ("pgup/dn", "scroll"), ("l", "logs"), ("e", "errors"), ("esc", "back")]
-            }
-            View::Traces => {
-                vec![("/", "filter"), ("E", "errors only"), ("↵", "open"), ("e", "errors"), ("t", "window")]
-            }
-            View::Logs if self.logs.detail.is_some() => {
-                vec![("o", "open trace"), ("j/k", "scroll"), ("esc", "close")]
-            }
-            View::Logs => vec![
-                ("/", "filter"),
-                ("s", "severity"),
-                ("space", if self.logs.follow { "pause" } else { "follow" }),
-                ("↵", "details"),
-                ("o", "trace"),
-            ],
-            View::Metrics if self.metrics.chart.is_some() => {
-                vec![("a", "aggregation"), ("b", "group by"), ("esc", "back"), ("t", "window")]
-            }
-            View::Metrics => vec![("/", "search"), ("↵", "chart"), ("t", "window")],
-            View::Status => vec![("r", "refresh")],
-        }
-    }
-
-    fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rows: &[(&str, &str)] = &[
-            ("1-5  tab", "switch view"),
-            ("t / T", "next / previous time window"),
-            ("r", "refresh now"),
-            ("↑↓ j k  pgup pgdn  g G", "move"),
-            ("↵", "open / drill down"),
-            ("esc", "back / close"),
-            ("q  ctrl-c", "quit"),
-            ("", ""),
-            ("Overview", "↵ service → operations → traces"),
-            (
-                "Traces",
-                if self.errors_enabled {
-                    "/ filter  E errors only  ↵ waterfall  l logs  e errors"
-                } else {
-                    "/ filter  E errors only  ↵ waterfall  l logs"
-                },
-            ),
-            ("", "filter: service=checkout op=\"GET /\" errors min=250ms key=value"),
-            ("Logs", "/ filter  s severity  space follow  ↵ details  o open trace"),
-            ("", "filter: service=api level=warn trace=<id> words to find"),
-            ("Metrics", "/ search  ↵ chart  a aggregation  b group by"),
-        ];
-        let w = 78.min(area.width);
-        let h = (rows.len() as u16 + 4).min(area.height);
-        let r = widgets::centered(area, w, h);
-        f.render_widget(Clear, r);
-        let lines: Vec<Line> = rows
-            .iter()
-            .map(|(k, d)| {
-                Line::from(vec![
-                    Span::styled(format!("{k:>24}  "), theme::accent()),
-                    Span::styled(d.to_string(), theme::text()),
-                ])
-            })
-            .collect();
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(widgets::panel("Keys", true).title_bottom(Line::from(" any key to close ").right_aligned())),
-            r,
-        );
-    }
-}
-
-pub(crate) fn humantime_secs(s: &str) -> Option<f64> {
-    let s = s.trim();
-    let idx = s.find(|c: char| !c.is_ascii_digit())?;
-    let n: f64 = s[..idx].parse().ok()?;
-    let mult = match &s[idx..] {
-        "s" => 1.0,
-        "m" => 60.0,
-        "h" => 3600.0,
-        "d" => 86400.0,
-        "w" => 7.0 * 86400.0,
-        _ => return None,
-    };
-    Some(n * mult)
-}
-
-/// Run the TUI in this terminal until the user quits.
-pub async fn run_standalone(client: Client, since: String) -> Result<()> {
-    let mut app = Embedded::with_since(client, &since);
-    // try_init installs a panic hook that restores the terminal.
-    let mut terminal = ratatui::try_init()?;
-    let res = event_loop(&mut terminal, &mut app).await;
-    ratatui::restore();
-    res
-}
-
-/// Async event loop: terminal events arrive through crossterm's EventStream,
-/// so the runtime keeps running background loads (also on a current-thread
-/// runtime).
-async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut Embedded) -> Result<()> {
-    use futures_util::StreamExt;
-    let mut events = event::EventStream::new();
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        terminal.draw(|f| app.draw(f, f.area()))?;
-        tokio::select! {
-            _ = ticker.tick() => app.tick(),
-            ev = events.next() => match ev {
-                Some(Ok(ev)) => match app.handle_event(&ev) {
-                    Outcome::Quit => return Ok(()),
-                    Outcome::OpenErrors(_) => app.flash_error("no error tracker connected"),
-                    _ => {}
-                },
-                Some(Err(e)) => return Err(e.into()),
-                None => return Ok(()),
-            },
         }
     }
 }

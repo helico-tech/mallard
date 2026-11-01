@@ -13,6 +13,8 @@ pub enum InputResult {
     Edited,
     Submit,
     Cancel,
+    /// A key the input does not use (e.g. a host shortcut).
+    Ignored,
 }
 
 impl Input {
@@ -26,6 +28,7 @@ impl Input {
 
     pub fn handle(&mut self, k: &KeyEvent) -> InputResult {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
         let len = self.value.chars().count();
         match k.code {
             KeyCode::Enter => return InputResult::Submit,
@@ -50,6 +53,7 @@ impl Input {
             }
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = len,
+            KeyCode::Char(_) if ctrl || alt => return InputResult::Ignored,
             KeyCode::Char(c) => {
                 let i = self.byte_idx(self.cursor);
                 self.value.insert(i, c);
@@ -68,7 +72,8 @@ impl Input {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(len),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = len,
-            _ => {}
+            KeyCode::Backspace | KeyCode::Delete => {}
+            _ => return InputResult::Ignored,
         }
         InputResult::Edited
     }
@@ -96,5 +101,18 @@ mod tests {
         i.handle(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
         assert_eq!(i.value, "ab ");
         assert!(matches!(i.handle(&key(KeyCode::Enter)), InputResult::Submit));
+    }
+
+    // Review finding 6: Ctrl/Alt letters are not typed into the input.
+    #[test]
+    fn modifier_keys_are_not_text() {
+        let mut i = Input::new("ab");
+        for m in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            assert!(matches!(i.handle(&KeyEvent::new(KeyCode::Char('s'), m)), InputResult::Ignored));
+        }
+        assert_eq!(i.value, "ab");
+        assert!(matches!(i.handle(&KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)), InputResult::Edited));
+        assert_eq!(i.value, "abS");
+        assert!(matches!(i.handle(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), InputResult::Cancel));
     }
 }

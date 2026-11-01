@@ -77,8 +77,10 @@ impl State {
     }
 
     pub fn set_result(&mut self, r: MetricQueryResult) {
+        // A result for another metric or aggregation is a stale one.
         if let Some(c) = &mut self.chart
             && c.info.name == r.name
+            && c.aggs[c.agg] == r.agg
         {
             c.result = Some(r);
             c.error = None;
@@ -91,9 +93,6 @@ fn unit_fmt(unit: &str) -> fn(f64) -> String {
         "s" => |v| ms(v * 1000.0),
         "ms" => ms,
         "By" => |v| crate::fmt::bytes(v),
-        "1" => |v| {
-            if v.abs() <= 1.0 { format!("{:.1}%", v * 100.0) } else { compact(v) }
-        },
         _ => compact,
     }
 }
@@ -115,13 +114,14 @@ pub(crate) fn chart_fmt(unit: &str, agg: &str, max_abs: f64) -> Box<dyn Fn(f64) 
 
 impl Embedded {
     pub(crate) fn refresh_metrics(&mut self, force: bool) {
+        let since = self.since().to_string();
         if let Some(c) = &mut self.metrics.chart {
             if !force && !due(c.refreshed, Duration::from_secs(10)) {
                 return;
             }
             let q = MetricQuery {
                 name: c.info.name.clone(),
-                since: Some(self.windows[self.win].clone()),
+                since: Some(since),
                 agg: Some(c.aggs[c.agg].to_string()),
                 group_by: (!c.group_by.trim().is_empty()).then(|| c.group_by.trim().to_string()),
                 ..Default::default()
@@ -135,7 +135,7 @@ impl Embedded {
         if !force && !due(self.metrics.refreshed, Duration::from_secs(30)) {
             return;
         }
-        let q = MetricListQuery { since: Some(self.since()), ..Default::default() };
+        let q = MetricListQuery { since: Some(since), ..Default::default() };
         let c = self.client.clone();
         if self.loader.load(Kind::MetricList, force, async move { c.metrics(&q).await }, Data::MetricList) {
             self.metrics.refreshed = Some(Instant::now());
@@ -160,11 +160,15 @@ impl Embedded {
                 }
                 KeyCode::Char('a') | KeyCode::Right => {
                     c.agg = (c.agg + 1) % c.aggs.len();
+                    c.result = None;
                     c.refreshed = None;
+                    self.loader.cancel(Kind::MetricQuery);
                 }
                 KeyCode::Char('A') => {
                     c.agg = (c.agg + c.aggs.len() - 1) % c.aggs.len();
+                    c.result = None;
                     c.refreshed = None;
+                    self.loader.cancel(Kind::MetricQuery);
                 }
                 KeyCode::Char('b') => {
                     let v = c.group_by.clone();
@@ -379,7 +383,7 @@ impl Embedded {
                 .take(8)
                 .map(|(i, s)| {
                     let vals: Vec<f64> = s.points.iter().map(|p| p.value).collect();
-                    let (mn, mx) = vals.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+                    let (mn, mx) = crate::fmt::min_max(&vals);
                     let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 };
                     let last = vals.last().copied().unwrap_or(0.0);
                     let color = theme::SERIES.get(i).copied().unwrap_or(theme::DIM);

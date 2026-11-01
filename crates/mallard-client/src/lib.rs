@@ -17,15 +17,29 @@ use odl_client::api::{LogQuery, LogRecord, Span, TraceGetQuery};
 use sdl_client::types::EventSummary;
 use serde::Serialize;
 
+/// The message already includes the inner error, so it is not also
+/// exposed as `source()` (that would print it twice in error chains).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     #[error("sentry: {0}")]
-    Sentry(#[from] sdl_client::Error),
+    Sentry(sdl_client::Error),
     #[error("otel: {0}")]
-    Otel(#[from] odl_client::Error),
+    Otel(odl_client::Error),
     #[error("invalid trace id {0:?}: expected 32 hex characters")]
     InvalidTraceId(String),
+}
+
+impl From<sdl_client::Error> for Error {
+    fn from(e: sdl_client::Error) -> Self {
+        Error::Sentry(e)
+    }
+}
+
+impl From<odl_client::Error> for Error {
+    fn from(e: odl_client::Error) -> Self {
+        Error::Otel(e)
+    }
 }
 
 /// Default search window of [`Client::trace_overview`] for all three sources.

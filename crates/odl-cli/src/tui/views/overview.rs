@@ -29,6 +29,8 @@ pub struct State {
     pub sel: TableState,
     /// Drill-down: (service, operations)
     pub ops: Option<(String, Vec<OperationSummary>)>,
+    /// The operations of `ops` arrived (they may be none).
+    pub ops_loaded: bool,
     pub ops_sel: TableState,
     pub span_series: Option<SpanSeries>,
     pub log_series: Option<LogSeries>,
@@ -47,6 +49,7 @@ impl State {
 
     pub fn set_operations(&mut self, v: Vec<OperationSummary>) {
         if let Some((_, ops)) = &mut self.ops {
+            self.ops_loaded = true;
             let keep = self.ops_sel.selected().and_then(|i| ops.get(i)).map(|o| o.name.clone());
             *ops = v;
             let i = keep.and_then(|n| ops.iter().position(|o| o.name == n)).unwrap_or(0);
@@ -72,7 +75,7 @@ impl Embedded {
         if !force && !due(self.overview.refreshed, Duration::from_secs(5)) {
             return;
         }
-        let since = Some(self.since());
+        let since = Some(self.since().to_string());
         let c = self.client.clone();
         let q = ServiceQuery { since: since.clone(), ..Default::default() };
         if !self.loader.load(Kind::Services, force, async move { c.services(&q).await }, Data::Services) {
@@ -121,6 +124,7 @@ impl Embedded {
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 let svc = o.sel.selected().and_then(|i| o.services.get(i)).map(|s| s.name.clone())?;
                 o.ops = Some((svc, Vec::new()));
+                o.ops_loaded = false;
                 o.ops_sel.select(Some(0));
                 self.refresh_overview(true);
                 Some(Outcome::Consumed)
@@ -130,12 +134,9 @@ impl Embedded {
     }
 
     fn show_traces_for(&mut self, service: Option<String>, operation: Option<String>) {
-        let mut f = crate::tui::query::TraceFilter { service, operation, ..Default::default() };
-        f.errors_only = false;
-        self.traces.filter = f;
-        self.traces.detail = None;
-        self.traces.list.clear();
-        self.traces.refreshed = None;
+        self.traces.show_for(crate::tui::query::TraceFilter { service, operation, ..Default::default() });
+        // A pending list for the old filter must not be applied.
+        self.loader.cancel(Kind::Traces);
         self.view = View::Traces;
     }
 
@@ -326,7 +327,12 @@ impl Embedded {
                 &mut o.ops_sel,
             );
             if empty {
-                widgets::placeholder(f, inner, "loading operations…", theme::muted());
+                let (msg, style) = match &o.error {
+                    Some(e) => (format!("⚠ {e}"), theme::error()),
+                    None if o.ops_loaded => ("no operations in this window".into(), theme::muted()),
+                    None => ("loading operations…".into(), theme::muted()),
+                };
+                widgets::placeholder(f, inner, &msg, style);
             }
             return;
         }

@@ -6,7 +6,7 @@ use odl_client::{Client, api::*};
 use ratatui::{Terminal, backend::TestBackend};
 
 use super::*;
-use crate::tui::{views::metrics::ChartState, waterfall::tests::span};
+use crate::{tui::views::metrics::ChartState, waterfall::tests::span};
 
 fn key(c: KeyCode) -> Event {
     Event::Key(KeyEvent::new(c, KeyModifiers::NONE))
@@ -367,7 +367,7 @@ fn logs_render_and_keys() {
     // a truncated poll inserts a visible gap marker before the new records
     e.logs_tail_loaded(vec![log(9, 9, "after a burst", None)], true);
     assert_eq!(e.logs.records.len(), 6);
-    assert!(crate::tui::views::logs::is_gap(&e.logs.records[4]));
+    assert!(matches!(e.logs.records[4], crate::tui::views::logs::LogRow::Gap(_)));
     assert!(render(&mut e, 160, 40).contains("older records skipped"));
     assert_eq!(e.logs.sel.selected(), Some(5));
     // pause
@@ -481,7 +481,7 @@ fn global_keys() {
     assert_eq!(e.view, View::Traces);
     assert_eq!(e.handle_event(&key(KeyCode::BackTab)), Outcome::Consumed);
     assert_eq!(e.view, View::Overview);
-    let before = e.since();
+    let before = e.since().to_string();
     e.handle_event(&ch('t'));
     assert_ne!(e.since(), before);
     e.handle_event(&ch('T'));
@@ -498,14 +498,15 @@ fn global_keys() {
 
 #[test]
 fn open_trace_and_since() {
-    let mut e = Embedded::with_since(Client::new("http://127.0.0.1:9", None).unwrap(), "2d");
+    let mut e = Embedded::with_since(Client::new("http://127.0.0.1:9", None).unwrap(), "2d").unwrap();
     assert_eq!(e.since(), "2d");
     assert_eq!(e.window_secs(), 172_800.0);
     e.open_trace("0AF7-6519-16cd43dd8448eb211c80319c");
     assert_eq!(e.view, View::Traces);
     assert_eq!(e.traces.detail.as_ref().unwrap().trace_id, TID);
-    e.open_trace("nope");
+    assert!(!e.open_trace("nope"));
     assert!(e.flash.as_ref().is_some_and(|f| f.1));
+    assert!(!e.open_trace("0af7651916cd43dd8448eb211c80319z"), "not hex");
     // tick without a runtime must not panic
     e.tick();
 }
@@ -538,7 +539,7 @@ async fn settle(e: &mut Embedded) {
 #[ignore]
 async fn live_snapshot() {
     let url = std::env::var("ODL_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-    let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m");
+    let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m").unwrap();
     for (k, name) in [('1', "overview"), ('2', "traces"), ('3', "logs"), ('4', "metrics"), ('5', "status")] {
         e.handle_event(&ch(k));
         settle(&mut e).await;
@@ -581,4 +582,70 @@ async fn live_snapshot() {
     e.handle_event(&key(KeyCode::Esc));
     e.handle_event(&ch('1'));
     println!("===== overview 80x24 =====\n{}", render(&mut e, 80, 24));
+}
+
+// Review finding 4: only visible rows are built; scrolling still shows the
+// selected record, at the end and in the middle of a long list.
+#[test]
+fn long_lists_scroll() {
+    let mut e = fixture();
+    e.handle_event(&ch('3'));
+    let many: Vec<LogRecord> = (0..5000).map(|i| log(i, 9, &format!("record-{i:04}"), None)).collect();
+    e.logs_tail_loaded(many, false);
+    e.logs.sel.select(Some(e.logs.records.len() - 1));
+    let s = render(&mut e, 120, 30);
+    assert!(s.contains("record-4999") && !s.contains("record-0000"), "{s}");
+    e.logs.sel.select(Some(2500));
+    let s = render(&mut e, 120, 30);
+    assert!(s.contains("▌") && s.lines().any(|l| l.contains("▌") && l.contains("record-2500")), "{s}");
+    // Waterfall: the selected span is drawn when scrolled.
+    let spans: Vec<odl_client::api::Span> =
+        (0..3000).map(|i| crate::waterfall::tests::span(&format!("{i:016}"), None, i, 1)).collect();
+    e.handle_event(&ch('2'));
+    e.traces.detail = Some(crate::tui::views::traces::Detail::new(TID.into(), None));
+    e.traces.detail.as_mut().unwrap().requested = true;
+    e.traces.set_trace(Trace { trace_id: TID.into(), spans });
+    e.traces.detail.as_mut().unwrap().sel.select(Some(2999));
+    let s = render(&mut e, 160, 40);
+    assert!(s.lines().any(|l| l.contains("▌") && l.contains("op-0000000000002999")), "{s}");
+}
+
+// Review finding 13: windows parse like on the server; a bad one is refused
+// and custom windows do not pile up.
+#[test]
+fn time_windows() {
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    e.set_since("1h30m").unwrap();
+    assert_eq!(e.window_secs(), 5400.0);
+    assert!(e.set_since("bogus").is_err());
+    assert_eq!(e.since(), "1h30m", "a bad window changes nothing");
+    for w in ["2h", "3h", "4h"] {
+        e.set_since(w).unwrap();
+    }
+    assert_eq!(e.windows.len(), WINDOWS.len() + 1);
+    e.set_since("6h").unwrap();
+    assert_eq!(e.window_secs(), 6.0 * 3600.0);
+}
+
+// Review finding 18: a service without operations says so instead of
+// "loading" forever.
+#[test]
+fn empty_operations_are_not_loading() {
+    let mut e = fixture();
+    e.handle_event(&key(KeyCode::Enter));
+    assert!(e.overview.ops.is_some());
+    assert!(render(&mut e, 120, 40).contains("loading operations"));
+    e.overview.set_operations(vec![]);
+    let s = render(&mut e, 120, 40);
+    assert!(s.contains("no operations in this window"), "{s}");
+}
+
+#[test]
+fn nav_on_empty_and_short_lists() {
+    let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    assert_eq!(nav(0, 0, &k(KeyCode::Down), 10), Some(0));
+    assert_eq!(nav(0, 0, &k(KeyCode::Char('x')), 10), None);
+    assert_eq!(nav(2, 3, &k(KeyCode::Down), 10), Some(2));
+    assert_eq!(nav(2, 3, &k(KeyCode::PageUp), 10), Some(0));
+    assert_eq!(nav(0, 3, &k(KeyCode::Char('G')), 0), Some(2));
 }

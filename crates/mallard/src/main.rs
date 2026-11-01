@@ -104,7 +104,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Telemetry { cmd } => {
             let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
-            odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await
+            match odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await {
+                // `mallard telemetry logs | head`: the reader is gone, not a failure.
+                Err(e) if is_broken_pipe(&e) => Ok(()),
+                r => r,
+            }
         }
         Cmd::Trace { trace_id, since } => {
             let t = client.trace_overview(&trace_id, since.as_deref()).await?;
@@ -121,13 +125,16 @@ async fn main() -> Result<()> {
 async fn status(c: &Client, json: bool) -> Result<()> {
     let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
     if json {
-        fn side<T: serde::Serialize, E: std::fmt::Display>(r: &Result<T, E>) -> serde_json::Value {
+        fn side<T: serde::Serialize>(r: Result<&T, String>) -> serde_json::Value {
             match r {
                 Ok(v) => serde_json::json!({ "ok": true, "info": v }),
-                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e }),
             }
         }
-        let v = serde_json::json!({ "sentry": side(&s), "otel": side(&o) });
+        let v = serde_json::json!({
+            "sentry": side(s.as_ref().map_err(|e| e.to_string())),
+            "otel": side(o.as_ref().map_err(|e| error_chain(e))),
+        });
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
@@ -153,7 +160,23 @@ async fn status(c: &Client, json: bool) -> Result<()> {
                 st.ingest.flush_errors
             );
         }
-        Err(e) => println!("otel     ERROR {e}"),
+        Err(e) => println!("otel     ERROR {}", error_chain(&e)),
     }
     Ok(())
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
+}
+
+/// An error and its causes on one line (`a: b: c`).
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        cause = c.source();
+    }
+    s
 }
