@@ -37,7 +37,7 @@ use opentelemetry_proto::tonic::{
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span},
 };
 use prost::Message;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::sync::Semaphore;
 
 #[derive(Parser, Clone)]
@@ -814,7 +814,7 @@ async fn main() -> Result<()> {
     });
     let mut rng = match args.seed {
         Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_os_rng(),
+        None => rand::make_rng(),
     };
     let started = Instant::now();
     let mut prev = (0, 0, 0, 0.0);

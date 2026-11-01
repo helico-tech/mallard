@@ -4,6 +4,9 @@ description = "Load generator for sentry-ducklake: realistic Sentry envelopes at
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [dependencies]
 sdl-client.workspace = true
@@ -16,4 +19,7 @@ uuid.workspace = true
 chrono.workspace = true
 flate2.workspace = true
 hdrhistogram = "7"
-rand = "0.10"
+rand.workspace = true
+
+[lints]
+workspace = true
