@@ -1,8 +1,0 @@
-/target
-**/node_modules
-/.data
-/e2e/**/dist
-/e2e/**/test-results
-/e2e/**/playwright-report
-.DS_Store
-.claude/worktrees/
