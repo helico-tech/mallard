@@ -7,8 +7,12 @@
 //! loads extensions, creates the `[[storage.secrets]]` and attaches the
 //! DuckLake catalog as [`CATALOG`]. It creates no schema or tables: each
 //! side does that on a `try_clone()` of the connection (ADR 0001).
+//!
+//! [`sql`] checks and runs read-only ad-hoc SQL for both sides' SQL
+//! endpoints (ADR 0010).
 
 mod config;
+pub mod sql;
 
 use std::path::Path;
 
