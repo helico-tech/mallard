@@ -1,5 +1,10 @@
 # sdl — CLI and TUI for sentry-ducklake
 
+> **Retired binary.** The standalone `sdl` binary is gone (story 0002/06);
+> this crate is the library behind `mallard`'s Sentry commands (see
+> [docs/cli.md](../../docs/cli.md)), with `MALLARD_URL`/`MALLARD_TOKEN`
+> instead of `SDL_URL`/`SDL_TOKEN`.
+
 `sdl` talks to a sentry-ducklake server through its `/v1` API (via
 `sdl-client`). It lists and changes issues, shows events with their stack
 traces, sends test errors to a DSN, and has a live terminal dashboard.

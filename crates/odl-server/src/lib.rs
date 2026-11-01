@@ -1,7 +1,7 @@
 //! otel-ducklake: an OpenTelemetry (OTLP) collector that stores traces, logs
 //! and metrics in DuckLake and serves them through an OpenAPI query API.
 //!
-//! Use as a binary (`otel-ducklake serve`) or embed it:
+//! `mallard-server` embeds it; on its own (tests) it opens its own lake:
 //!
 //! ```no_run
 //! # async fn demo() -> anyhow::Result<()> {
@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The library installs no global state (no tracing subscriber, no metrics
-//! recorder); that is left to the binary or the embedding application.
+//! recorder); that is left to the embedding application.
 
 mod api;
 pub mod config;

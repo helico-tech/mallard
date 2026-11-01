@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Median latency (5 runs) of typical API calls for several time windows.
-# Usage: query-latency.sh <api base url> <data end RFC3339> <trace id>
+# Usage: query-latency.sh <otel api base url, e.g. http://127.0.0.1:28080/otel> <data end RFC3339> <trace id>
+# Token: MALLARD_TOKEN (one of the server's server.api_tokens).
 set -euo pipefail
 API="$1/api/v1"; END="$2"; TID="$3"
 med() { sort -n | awk '{a[NR]=$1} END {print a[int((NR+1)/2)]}'; }
 t() { # url
   for _ in 1 2 3 4 5; do
-    curl -s -o /dev/null -w '%{time_total}\n' -H "Authorization: Bearer ${ODL_TOKEN:-}" "$1"
+    curl -s -o /dev/null -w '%{time_total}\n' -H "Authorization: Bearer ${MALLARD_TOKEN:-}" "$1"
   done | med | awk '{printf "%7.0f ms", $1*1000}'
 }
 printf "%-44s %10s %10s %10s %10s\n" "endpoint" "15m" "1h" "24h" "7d"

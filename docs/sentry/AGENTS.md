@@ -1,5 +1,8 @@
 # sentry-ducklake
 
+> **Retired binary.** Written for the standalone `sentry-ducklake` repo; its
+> binaries are gone (story 0002/06). The repo map is [AGENTS.md](../../AGENTS.md).
+
 Sentry-compatible error tracking server. Sentry SDKs send errors to it by
 changing only the DSN. Data lives in DuckLake (DuckDB 2.0 + Parquet on S3 /
 GCS / Azure / local disk). Rust workspace; HTTP API with OpenAPI; CLI + TUI.

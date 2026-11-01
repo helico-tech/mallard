@@ -249,11 +249,6 @@ impl Config {
         }
         Ok(())
     }
-
-    /// Example config with comments, printed by `otel-ducklake config`.
-    pub fn example_toml() -> &'static str {
-        include_str!("../../../config/otel-ducklake.example.toml")
-    }
 }
 
 /// Upper bound for every duration setting; keeps date arithmetic in range.
@@ -355,10 +350,5 @@ mod tests {
         let mut cfg = Config::default();
         cfg.storage.artifacts_path = "data/artifacts".into();
         assert!(cfg.validate().is_err(), "artifacts_path is mallard's");
-    }
-
-    #[test]
-    fn example_config_parses() {
-        load(Config::example_toml(), &[]).unwrap().validate().unwrap();
     }
 }

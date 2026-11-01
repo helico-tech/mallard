@@ -140,7 +140,7 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
     stats.maintenance(MaintenanceInfo { task: name.to_string(), at: Utc::now(), duration_ms: ms, ok, detail });
 }
 
-/// Maintenance once, as `otel-ducklake maintenance` runs it: compaction of
+/// Maintenance once ([`crate::run_maintenance`]): compaction of
 /// small files (of all files with `full`), then retention.
 pub fn run_once(
     conn: &Connection,

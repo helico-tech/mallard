@@ -1,5 +1,10 @@
 # Deployment
 
+> **Retired binary.** The `sentry-ducklake` binary, its `SDL_*` flags and its
+> chart are gone (story 0002/06). Deploy mallard: `deploy/` and the
+> [repo README](../../README.md). The storage and multi-replica notes below
+> still apply to the Sentry side.
+
 sentry-ducklake is one binary (`sentry-ducklake`) with two moving parts
 around it:
 

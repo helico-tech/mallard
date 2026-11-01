@@ -43,7 +43,7 @@ use tokio::sync::Semaphore;
 #[derive(Parser, Clone)]
 #[command(name = "odl-loadgen", version, about = "Send realistic OTLP traffic to an OTLP/HTTP endpoint")]
 struct Args {
-    /// OTLP/HTTP base URL.
+    /// OTLP/HTTP base URL: mallard's otlp_http_addr (or its http_addr).
     #[arg(long, env = "OTLP_ENDPOINT", default_value = "http://localhost:4318")]
     endpoint: String,
     /// Traces per second (live) or per simulated second (backfill).

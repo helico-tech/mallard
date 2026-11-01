@@ -1,13 +1,9 @@
 [package]
 name = "odl-cli"
-description = "CLI and TUI for otel-ducklake"
+description = "OpenTelemetry commands and TUI component of the mallard CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[[bin]]
-name = "odl"
-path = "src/main.rs"
 
 [dependencies]
 odl-client.workspace = true
@@ -24,7 +20,3 @@ ratatui.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 unicode-width.workspace = true
-
-[lib]
-name = "odl_cli"
-path = "src/lib.rs"
