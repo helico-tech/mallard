@@ -1,6 +1,6 @@
 # Queue
 
-1. [issue 0004 agent CLI: the P1 list](issues/0004-agent-cli-p1.md)
+1. [issue 0014 agent CLI P1 leftovers](issues/0014-agent-cli-p1-leftovers.md)
 2. [sentry issue 0003 maintenance blocks writer](sentry/issues/0003-maintenance-blocks-writer.md)
 3. [sentry issue 0002 issue cardinality limits](sentry/issues/0002-issue-cardinality-limits.md)
 4. [sentry issue 0001 multi-replica caches](sentry/issues/0001-multi-replica-caches.md)
@@ -15,3 +15,4 @@
 13. [issue 0013 count in-flight 429s](issues/0013-count-inflight-429s.md)
 14. [issue 0015 one-shot otel maintenance](issues/0015-one-shot-otel-maintenance.md)
 15. [issue 0016 per-side docs for mallard](issues/0016-per-side-docs-for-mallard.md)
+16. [issue 0018 test segfault after panic](issues/0018-test-segfault-after-panic.md)
