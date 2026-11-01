@@ -8,3 +8,4 @@
 6. [0004/03 TUI and CLI](epics/0004-apps-and-search/03-tui-and-cli.md)
 7. [0004/04 web scope and search](epics/0004-apps-and-search/04-web-scope-and-search.md)
 8. [0004/05 web app home](epics/0004-apps-and-search/05-web-app-home.md)
+9. [issue 0139 metric point without a value](issues/0139-otlp-metric-point-without-value.md)
