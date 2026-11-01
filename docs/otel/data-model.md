@@ -1,6 +1,6 @@
 # Data model
 
-How otel-ducklake stores OpenTelemetry data in DuckLake, and why. The table
+How mallard stores OpenTelemetry data in DuckLake, and why. The table
 definitions live in [`crates/mallard-otel-server/src/store/schema.rs`](../crates/mallard-otel-server/src/store/schema.rs);
 this document explains them.
 
@@ -343,7 +343,7 @@ INSTALL ducklake; LOAD ducklake;
 -- DuckDB-file catalog (stop the server first: a DuckDB file has one writer)
 ATTACH 'ducklake:data/catalog.ducklake' AS lake (DATA_PATH 'data/lake/', READ_ONLY);
 -- or a Postgres catalog (safe while the server runs)
-ATTACH 'ducklake:postgres:host=pg dbname=ducklake user=odl' AS lake (READ_ONLY);
+ATTACH 'ducklake:postgres:host=pg dbname=ducklake user=mallard' AS lake (READ_ONLY);
 USE lake.otel;
 SELECT service_name, count(*) FROM spans GROUP BY 1;
 ```

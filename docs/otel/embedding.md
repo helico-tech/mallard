@@ -1,7 +1,7 @@
-# Embedding otel-ducklake in your own Rust application
+# Embedding the telemetry side in your own Rust application
 
-The server, client, CLI and TUI are libraries. The `otel-ducklake` and `odl`
-binaries are thin wrappers around them. The libraries install no global state
+The server, client, CLI and TUI are libraries. The `mallard`
+binary is a thin wrapper around them. The libraries install no global state
 (no tracing subscriber, no metrics recorder).
 
 ## Server
@@ -63,7 +63,7 @@ let new_records = tail.poll().await?;
 ## CLI and TUI
 
 ```rust
-// Mount the `odl` commands under your own CLI:
+// Mount the telemetry commands under your own CLI:
 #[derive(clap::Subcommand)]
 enum Top { #[command(subcommand)] Otel(mallard_otel_cli::Command), /* ... */ }
 let result = mallard_otel_cli::run(cmd, &mallard_otel_cli::Ctx::new(client).with_json(false).with_hints(my_hints)).await;

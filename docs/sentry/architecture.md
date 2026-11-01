@@ -4,13 +4,13 @@
    Sentry SDKs (browser, node, python, rust, ...)        sentry-cli / bundler plugins
             │ POST /api/{project}/envelope/                     │ /api/0/... (token)
             v                                                   v
- ┌──────────────────────── sentry-ducklake (one process) ──────────────────────────┐
+ ┌──────────────────────────── mallard (one process) ──────────────────────────────┐
  │  ingest.rs            sourcemaps.rs                api.rs (/v1, token)          │
  │  auth, decompress,    chunk upload, assemble,      issues, events, stats,       │
  │  CORS, 429            bundle index, resolver ──┐   projects, OpenAPI, /docs     │
  │      │                                         │          │                      │
  │      v                                         │          v                      │
- │  mallard-sentry-protocol (pure): envelope -> normalize -> symbolicate -> group             │
+ │  mallard-sentry-protocol (pure): envelope -> normalize -> symbolicate -> group  │
  │      │                                         │          │                      │
  │      v  bounded queue                          │          │ reader pool          │
  │  db/writer.rs: ONE thread, group commit        │          │ (cloned conns)       │
@@ -22,7 +22,7 @@
         └──────────── object storage (S3 default, GCS, Azure, local) ────────────┐
                       sourcemap bundles under <storage>/artifacts/ (object_store) │
                                                                                  ┘
-   sdl CLI / TUI  ──(mallard-sentry-client, /v1)──>  api.rs
+   mallard CLI / TUI  ──(mallard-sentry-client, /v1)──>  api.rs
 ```
 
 ## Crates
@@ -31,16 +31,16 @@
 |---|---|---|
 | `mallard-sentry-protocol` | Sentry wire protocol, no I/O: DSN/auth parsing, envelopes, lenient event normalization, grouping, sourcemap symbolication | serde, sourcemap |
 | `mallard-sentry-api` | `/v1` request/response types; `openapi` feature derives the schema | serde, utoipa |
-| `mallard-sentry-server` | library (`Server`) + `sentry-ducklake` binary | protocol, types, duckdb, axum, object_store |
+| `mallard-sentry-server` | library (`Server`) | protocol, types, duckdb, axum, object_store |
 | `mallard-sentry-client` | typed async client for `/v1` | types, reqwest |
-| `mallard-sentry-cli` | `sdl` CLI + TUI; library (`Command`, `run`, `Embedded`) | client, ratatui |
+| `mallard-sentry-cli` | CLI commands + TUI; library (`Command`, `run`, `Embedded`) | client, ratatui |
 | `mallard-sentry-loadgen` | load generator and query benchmark | client |
 
 ## Request flow (ingest)
 
 1. **HTTP**: `RequestDecompressionLayer` handles `Content-Encoding` (gzip,
    deflate, br, zstd). Body size is capped after decompression
-   (`SDL_MAX_BODY_BYTES`). CORS mirrors the origin, so browser SDKs work from
+   (`MALLARD_SENTRY__INGEST__MAX_BODY_BYTES`). CORS mirrors the origin, so browser SDKs work from
    any site (the DSN key is public by design).
 2. **Auth**: the public key comes from `X-Sentry-Auth`, `Authorization:
    Sentry ...`, `?sentry_key=`, or the envelope header `dsn`, and must match
@@ -83,7 +83,7 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
   inlined data, compacts and expires snapshots, next to the writer. Retention
   runs on the writer thread: its `DELETE` conflicts with concurrent inserts
   ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)).
-- **Reader pool**: `SDL_READERS` connections cloned from the same DuckDB
+- **Reader pool**: `MALLARD_SENTRY__QUERY__READERS` connections cloned from the same DuckDB
   instance, used via `spawn_blocking`. Each query sees the latest committed
   snapshot.
 - **Caches** (projects, issue status, known bundles) live in memory and are
@@ -99,8 +99,7 @@ conn)` shares a connection that already has the catalog attached as `lake`
 (`mallard_duck::open_connection`) and only creates the `sentry` schema.
 `Config` is the library's own settings (mallard's `[sentry]` section);
 `Host` is what the application decides (public URL, API tokens, sourcemap
-storage, catalog-wide maintenance). `Server::new(&Standalone)` is the
-`sentry-ducklake` binary's path (flags / `SDL_*`). Mount `router()` /
+storage, catalog-wide maintenance). Mount `router()` /
 `ingest_router()` / `api_router()` anywhere (paths are relative; DSNs follow
 `public_url`, which may include a prefix). The library installs no global
 tracing subscriber or metrics recorder. `shutdown()` drains the queue and

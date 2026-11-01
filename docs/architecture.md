@@ -3,16 +3,16 @@
 ## Parts
 
 ```
-                ┌──────────────────────── mallard (one process) ───────────────────────┐
- Sentry SDKs ──▶│ :8080 HTTP  /sentry/api/{project}/envelope  → mallard-sentry-server router            │
- OTel SDKs   ──▶│ :4318 HTTP  /v1/traces|logs|metrics         → mallard-otel-server OTLP/HTTP router   │
-             ──▶│ :4317 gRPC  OTLP                            → mallard-otel-server gRPC services      │
+                    ┌──────────────────────── mallard (one process) ─────────────────────────────┐
+ Sentry SDKs     ──▶│ :8080 HTTP  /sentry/api/{project}/envelope → mallard-sentry-server router  │
+ OTel SDKs       ──▶│ :4318 HTTP  /v1/traces|logs|metrics        → mallard-otel-server OTLP/HTTP │
+                 ──▶│ :4317 gRPC  OTLP                           → mallard-otel-server gRPC      │
  mallard CLI/TUI ──▶│ :8080 HTTP  /sentry/v1/... sentry API, /api/0 (+ /sentry/api/0) sentry-cli │
-                │             /otel/...    otel query API (nested)                           │
-                │             /v1/traces|logs|metrics   OTLP/HTTP (also on :4318)             │
-                │             /healthz /readyz /metrics (or server.metrics_addr)      │
-                └───────────────┬────────────────────────────────────────────────────────────┘
-                                ▼
+                    │             /otel/...    otel query API (nested)                           │
+                    │             /v1/traces|logs|metrics   OTLP/HTTP (also on :4318)            │
+                    │             /healthz /readyz /metrics (or server.metrics_addr)             │
+                    └───────────────┬────────────────────────────────────────────────────────────┘
+                                    ▼
                 one DuckLake catalog (DuckDB file | SQLite | Postgres)
                   schema `sentry`  ← mallard-sentry-server
                   schema `otel`    ← mallard-otel-server
@@ -43,12 +43,12 @@
   alone leaves the hooks unset.
 
 ```
- Sentry SDK ─ transaction, span item ─▶ sdl ingest ─ TransactionSink, SpanSink ─▶ bridge queue
+ Sentry SDK ─ transaction, span item ─▶ sentry ingest ─ TransactionSink, SpanSink ─▶ bridge queue
      ─ (dedupe_window, minus spans seen over OTLP) ─ ingest_traces ─▶ otel buffer
  OTel SDK ─ spans ─▶ otel ingest ─ IngestHook ─▶ bridge "OTLP spans"
  OTel SDK ─ span event / log "exception" ─▶ otel ingest ─ IngestHook ─▶ bridge queue
      ─ (dedupe_window, no SDK event for trace+span) ─ ingest_event ─▶ sentry writer
- Sentry SDK ─ error event ─▶ sdl ingest ─ EventObserver ─▶ bridge "seen spans"
+ Sentry SDK ─ error event ─▶ sentry ingest ─ EventObserver ─▶ bridge "seen spans"
 ```
   Shutdown: receivers stop, the bridge stores what it holds (transactions and span items
   before otel's final flush, exceptions before Sentry's), then both flush.
@@ -57,8 +57,7 @@
   `mallard_duck::duckdb`.
 - Binaries: only `mallard` (plus the dev load generators `mallard-sentry-loadgen`,
   `mallard-otel-loadgen`); `mallard-server` and the `mallard-sentry-*`/`mallard-otel-*` crates are libraries
-  (the standalone `sentry-ducklake`, `otel-ducklake`, `mallard-server`, `sdl`,
-  `odl` binaries are gone).
+  (the old standalone binaries are gone; ADR 0024 lists their names).
 - Library crates have no global side effects. Logging and metrics are set up by
   `mallard_server::commands`, which only the server commands of the binary call,
   so CLI commands never get them. Logs go to stderr; stdout is data only (ADR 0008).

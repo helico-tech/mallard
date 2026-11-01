@@ -1,8 +1,8 @@
-# sentry-ducklake
+# mallard: the Sentry side
 
-> **Retired binary.** This page describes the standalone `sentry-ducklake`
-> server and `sdl` CLI, which are gone (story 0002/06). The code lives on
-> as the `mallard-sentry-*` libraries inside mallard: run `mallard serve` (Sentry under
+> **Retired binary.** This page was written for the old standalone server and
+> CLI, which are gone (story 0002/06). The code lives on as the
+> `mallard-sentry-*` libraries inside mallard: run `mallard serve` (Sentry under
 > `/sentry`, DSNs `<public_url>/sentry/<id>`) and the `mallard` CLI; see the
 > [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
 
@@ -26,28 +26,28 @@ Sentry.init({ dsn: "https://3f1c...@errors.example.com/1" });   // that's the on
   file or PostgreSQL.
 - **One small binary**: thousands of events per second on one core-ish
   process ([capacity.md](docs/capacity.md)); Docker image and Helm chart.
-- **Queryable**: OpenAPI-documented `/v1` API, `sdl` CLI, `sdl tui`, and plain
+- **Queryable**: OpenAPI-documented `/v1` API, `mallard` CLI, `mallard tui`, and plain
   SQL on the lake (join errors with traces by `trace_id`).
 
 ## Quick start
 
 ```sh
 # 1. Run it (local disk storage; use s3://bucket/prefix in production)
-docker run -p 8000:8000 -e SDL_API_TOKEN=secret -e SDL_STORAGE_URL=/data/storage \
-  -v sdl-data:/data sentry-ducklake:latest
-# or: SDL_API_TOKEN=secret SDL_STORAGE_URL=./.data/storage cargo run --release -p mallard-sentry-server
+docker run -p 8080:8080 -e MALLARD_SERVER__API_TOKENS=secret -e MALLARD_STORAGE__ARTIFACTS_PATH=/data/artifacts \
+  -v mallard-data:/data mallard:latest
+# or: MALLARD_API_TOKEN=secret cargo run --release -p mallard -- serve -c config/mallard.example.toml
 
 # 2. Create a project and get its DSN
-export SDL_URL=http://localhost:8000 SDL_TOKEN=secret
-cargo run -p mallard-sentry-cli -- projects create web --platform javascript
+export MALLARD_URL=http://localhost:8080 MALLARD_TOKEN=secret
+cargo run -p mallard -- projects create web --platform javascript
 
 # 3. Put the DSN in Sentry.init, or try it right away:
-cargo run -p mallard-sentry-cli -- send-test --dsn "http://<key>@localhost:8000/1"
+cargo run -p mallard -- send-test --dsn "http://<key>@localhost:8080/sentry/1"
 
 # 4. Look at it
-cargo run -p mallard-sentry-cli -- issues list -p web
-cargo run -p mallard-sentry-cli -- tui
-open http://localhost:8000/docs        # API reference (Scalar)
+cargo run -p mallard -- issues list -p web
+cargo run -p mallard -- tui
+open http://localhost:8080/sentry/docs        # API reference (Scalar)
 ```
 
 A full local stack with S3 (RustFS) and a PostgreSQL catalog:

@@ -4,7 +4,7 @@ Upload sourcemaps with the normal Sentry tools; point them at this server.
 Errors then show original files, lines, function names and source code, and
 issues stay the same across builds.
 
-You need: the server URL, its API token (`SDL_API_TOKEN`) and a project slug.
+You need: the server URL, its API token (`MALLARD_SERVER__API_TOKENS`) and a project slug.
 The org can be any value (`default` is fine).
 
 ## Vite / webpack / Rollup / esbuild plugin
@@ -19,7 +19,7 @@ export default defineConfig({
   plugins: [
     sentryVitePlugin({
       url: "https://errors.example.com",
-      authToken: process.env.SDL_TOKEN,
+      authToken: process.env.MALLARD_TOKEN,
       org: "default",
       project: "web",
       release: { name: process.env.RELEASE },        // optional
@@ -37,7 +37,7 @@ matches files in `node_modules`.
 
 ```sh
 npx sentry-cli sourcemaps inject ./dist          # adds debug ids to .js and .map
-npx sentry-cli --url https://errors.example.com --auth-token "$SDL_TOKEN" \
+npx sentry-cli --url https://errors.example.com --auth-token "$MALLARD_TOKEN" \
   sourcemaps upload --org default --project web ./dist
 ```
 
@@ -64,9 +64,9 @@ they arrive, and stored events are not reprocessed.
 
 ## Troubleshooting
 
-- `sdl sourcemaps list -p web` shows uploaded bundles and their debug ids.
+- `mallard sourcemaps list -p web` shows uploaded bundles and their debug ids.
 - No symbolication: check that the debug id in the event
-  (`sdl events show <id> --json | jq .payload.debug_meta`) is in that list,
+  (`mallard events show <id> --json | jq .payload.debug_meta`) is in that list,
   and that the bundle was uploaded to the same project.
 - `401` from the CLI: wrong `--auth-token`.
 - `501`: the server has no storage for artifacts (in mallard: `[storage]

@@ -84,7 +84,7 @@ with zstd. Measured: about 0.5 KB per event on disk for a 2.5 KB JS event with
 enough at this scale and keep the write path to one table.
 
 **`trace_id UUID` / `span_id UBIGINT`** use the same encoding as
-otel-ducklake's spans table, so `sentry.events JOIN otel.spans USING
+the telemetry side's spans table, so `sentry.events JOIN otel.spans USING
 (trace_id)` works without casts when both share a catalog.
 
 ### `issues` and `issue_activity`
@@ -145,32 +145,33 @@ writer thread: take everything queued (group commit)
 ```
 
 - **Group commit.** After the first event the writer collects for up to
-  `SDL_BATCH_WINDOW` (500 ms), so a quiet server makes at most two commits
+  `MALLARD_SENTRY__INGEST__BATCH_WINDOW` (500 ms), so a quiet server makes at most two commits
   (snapshots) per second. When 200+ events are queued it commits at once, so
   under load latency is the commit time and throughput is not capped by the
   window.
 - **Data inlining.** Batches of up to 1000 rows are stored inside the catalog
-  (no Parquet file). A flush (every `SDL_FLUSH_INTERVAL`, or after
-  `SDL_FLUSH_ROWS` inlined rows) writes them out as one sorted file per day.
+  (no Parquet file). A flush (every `MALLARD_SENTRY__MAINTENANCE__FLUSH_INTERVAL`, or after
+  `MALLARD_SENTRY__MAINTENANCE__FLUSH_ROWS` inlined rows) writes them out as one sorted file per day.
   This avoids thousands of tiny Parquet files. Bigger batches (only under
   heavy load) go straight to Parquet.
-- **Backpressure.** The queue is bounded (`SDL_QUEUE_CAPACITY`). When full,
+- **Backpressure.** The queue is bounded (`MALLARD_SENTRY__INGEST__QUEUE_CAPACITY`). When full,
   ingest answers `429` with `Retry-After`, which Sentry SDKs respect.
 
 ## Maintenance
 
 The maintenance thread flushes inlined data (see above) and, every
-`SDL_COMPACT_INTERVAL` (1 h), runs, scoped to its schema:
+`MALLARD_SENTRY__MAINTENANCE__COMPACT_INTERVAL` (1 h), runs, scoped to its schema:
 
 1. retention, on the writer thread because a `DELETE` conflicts with concurrent
    inserts ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)):
    `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
    (day-aligned, so whole daily files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
-   (target file size 64 MB for `events`; DuckDB threads lowered to
-   `SDL_MAINTENANCE_THREADS` because sorted merges need memory per thread)
-3. if `SDL_CATALOG_WIDE_MAINTENANCE`: `ducklake_expire_snapshots` and
-   `ducklake_cleanup_old_files` older than `SDL_SNAPSHOT_RETENTION` (1 h)
+   (target file size 64 MB for `events`)
+3. only if the host asks (`Host::catalog_maintenance`; in mallard the telemetry
+   side does this instead): `ducklake_expire_snapshots` and
+   `ducklake_cleanup_old_files` older than
+   `MALLARD_OTEL__MAINTENANCE__SNAPSHOT_RETENTION` (1 h)
 
 `POST /v1/maintenance` runs a flush plus all of the above immediately.
 

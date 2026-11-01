@@ -40,9 +40,9 @@ not these: there they are a usage error (exit 2) that says so.
 | `mallard maintenance [--full]` | both sides' maintenance once, then exit; stop the server first with a DuckDB-file or SQLite catalog |
 | `mallard install-extensions --dir <dir>` | download all DuckDB extensions, for running without internet (the Docker image does this) |
 
-The old paths still work, hidden: `mallard errors …` (= the `sdl` command
-set: `info`, `stats`, `maintenance`, …) and `mallard telemetry …` (= `odl`:
-`health`, `status`, `metric`, waterfall `trace`, …). Side details:
+The old paths still work, hidden: `mallard errors …` (the Sentry command
+set: `info`, `stats`, `maintenance`, …) and `mallard telemetry …` (the telemetry
+one: `health`, `status`, `metric`, waterfall `trace`, …). Side details:
 [crates/mallard-sentry-cli/README.md](../crates/mallard-sentry-cli/README.md), [otel/cli.md](otel/cli.md).
 
 ## Shared flags

@@ -13,7 +13,7 @@ A DuckLake lake has two parts, configured independently:
 |---|---|---|---|
 | DuckDB file | `data/catalog.ducklake` (any path) | **one** | default; tested |
 | SQLite file | `sqlite:data/catalog.sqlite` | **one** | tested |
-| PostgreSQL | `postgres:host=pg port=5432 dbname=ducklake user=odl` (password from `PGPASSWORD`) | many | tested with 2 replicas (compose and Kubernetes) |
+| PostgreSQL | `postgres:host=pg port=5432 dbname=ducklake user=mallard` (password from `PGPASSWORD`) | many | tested with 2 replicas (compose and Kubernetes) |
 | MySQL | `mysql:host=... database=... user=...` | many | supported by DuckLake, not tested here |
 
 - Use a DuckDB or SQLite file for a single node. With PostgreSQL, several
@@ -51,7 +51,7 @@ real cloud services were not part of the automated tests.
 ```toml
 # AWS S3 with IAM (IRSA / instance profile / env vars)
 [storage]
-catalog = "postgres:host=pg dbname=ducklake user=odl"   # password: PGPASSWORD env var
+catalog = "postgres:host=pg dbname=ducklake user=mallard"   # password: PGPASSWORD env var
 data_path = "s3://acme-telemetry/otel/"
 [[storage.secrets]]
 type = "s3"

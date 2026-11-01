@@ -1,6 +1,6 @@
 # Architecture
 
-otel-ducklake is one process that receives OpenTelemetry data, stores it in
+mallard is one process that receives OpenTelemetry data, stores it in
 DuckLake, and answers questions about it over an HTTP API. A CLI and a TUI use
 that API.
 
@@ -11,7 +11,7 @@ flowchart LR
   end
   A -- OTLP/gRPC :4317 --> R
   A -- OTLP/HTTP :4318<br/>protobuf or JSON --> R
-  subgraph srv[otel-ducklake]
+  subgraph srv[mallard]
     R[Receivers<br/>decode + convert to Arrow] --> B[(Write buffer<br/>bounded, in memory)]
     B -- every 5 s / 200k rows<br/>one transaction --> F[Flusher]
     M[Maintenance<br/>compaction, retention,<br/>snapshot expiry, cleanup]
@@ -24,8 +24,8 @@ flowchart LR
     C[(Catalog<br/>DuckDB file / SQLite / PostgreSQL)]
     O[(Parquet files<br/>local disk / S3 / GCS / Azure / R2 ...)]
   end
-  CLI[odl CLI] -- HTTP --> Q
-  TUI[odl tui] -- HTTP --> Q
+  CLI[mallard CLI] -- HTTP --> Q
+  TUI[mallard tui] -- HTTP --> Q
 ```
 
 ## Crates
@@ -33,12 +33,12 @@ flowchart LR
 | crate | kind | role |
 |---|---|---|
 | `mallard-otel-api` | lib | Request/response types shared by server and clients. They are the source of the OpenAPI schema. |
-| `mallard-otel-server` | lib + bin `otel-ducklake` | Receivers, storage, maintenance, query API. Embeddable (see [embedding.md](embedding.md)). |
+| `mallard-otel-server` | lib | Receivers, storage, maintenance, query API. Embeddable (see [embedding.md](embedding.md)). |
 | `mallard-otel-client` | lib | Async typed HTTP client for the query API, including `LogTail` (live tail). |
-| `mallard-otel-cli` | lib + bin `odl` | CLI commands and the TUI (`odl tui`); both embeddable. |
-| `mallard-otel-loadgen` | bin `mallard-otel-loadgen` | Realistic OTLP traffic for benchmarks and demos. |
+| `mallard-otel-cli` | lib | CLI commands and the TUI; both embeddable. |
+| `mallard-otel-loadgen` | bin | Realistic OTLP traffic for benchmarks and demos. |
 
-The client side (`odl`) does not link DuckDB. It is a small static binary
+The client side (`mallard --no-default-features`) does not link DuckDB. It is a small static binary
 that talks HTTP only.
 
 ## Inside the server

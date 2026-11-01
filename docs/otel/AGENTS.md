@@ -1,18 +1,18 @@
 # AGENTS.md
 
-> **Retired binary.** Written for the standalone `otel-ducklake` repo; its
+> **Retired binary.** Written for the old standalone repo; its
 > binaries are gone (story 0002/06). The repo map is [AGENTS.md](../../AGENTS.md).
 
-otel-ducklake: an OpenTelemetry (OTLP) collector in Rust that stores traces,
+The telemetry side of mallard: an OpenTelemetry (OTLP) collector in Rust that stores traces,
 logs and metrics in DuckLake (DuckDB 2.0 / DuckLake 1.1) and serves them
 through an OpenAPI query API, a CLI and a TUI.
 
 ## Map
 
 - `crates/mallard-otel-api`: API types (source of the OpenAPI schema)
-- `crates/mallard-otel-server`: receivers, storage, maintenance, query API; bin `otel-ducklake`
+- `crates/mallard-otel-server`: receivers, storage, maintenance, query API
 - `crates/mallard-otel-client`: typed HTTP client (+ `LogTail`)
-- `crates/mallard-otel-cli`: bin `odl` (CLI + `odl tui`)
+- `crates/mallard-otel-cli`: CLI commands and TUI
 - `crates/mallard-otel-loadgen`: load generator
 - `config/`: example config; `deploy/`: compose files; `charts/`: Helm chart
 - `bench/`: reproducible experiments and capacity runs
@@ -29,7 +29,7 @@ cargo build --release                 # first build compiles DuckDB (~2 min)
 cargo test --workspace                # unit + e2e (real DuckLake in temp dirs)
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all
-cargo run -p mallard-otel-server -- openapi > docs/openapi.json   # after API changes (a test checks it)
+UPDATE_OPENAPI=1 cargo test -p mallard-otel-server --test openapi   # after API changes (a test checks it)
 ```
 
 ## Rules

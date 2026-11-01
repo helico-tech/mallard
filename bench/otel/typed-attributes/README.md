@@ -83,10 +83,10 @@ section 5.
 
 ```sh
 # 1. backfill data into a lake (server on non-default ports, no inlining)
-ODL_STORAGE__CATALOG=$WORK/catalog.ducklake ODL_STORAGE__DATA_PATH=$WORK/lake/ \
-ODL_STORAGE__DATA_INLINING_ROW_LIMIT=0 ODL_MAINTENANCE__ENABLED=false \
-ODL_SERVER__OTLP_HTTP_ADDR=127.0.0.1:24318 ODL_SERVER__OTLP_GRPC_ADDR=127.0.0.1:24317 \
-ODL_SERVER__API_ADDR=127.0.0.1:28080 otel-ducklake serve &
+MALLARD_STORAGE__CATALOG=$WORK/catalog.ducklake MALLARD_STORAGE__DATA_PATH=$WORK/lake/ \
+MALLARD_STORAGE__DATA_INLINING_ROW_LIMIT=0 MALLARD_OTEL__MAINTENANCE__ENABLED=false \
+MALLARD_SERVER__OTLP_HTTP_ADDR=127.0.0.1:24318 MALLARD_SERVER__OTLP_GRPC_ADDR=127.0.0.1:24317 \
+MALLARD_SERVER__HTTP_ADDR=127.0.0.1:28080 MALLARD_SERVER__API_TOKENS=dev mallard serve &
 mallard-otel-loadgen --endpoint http://127.0.0.1:24318 --backfill 2h --rate 50 --batch 200 --concurrency 8 --seed 7
 kill -INT %1
 # 2. build the variants, then time the queries (replace ${WORK} and ${END})

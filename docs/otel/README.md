@@ -1,7 +1,7 @@
-# otel-ducklake
+# mallard: the telemetry side
 
-> **Retired binary.** This page describes the standalone `otel-ducklake`
-> server and `odl` CLI, which are gone (story 0002/06). The code lives on as
+> **Retired binary.** This page was written for the old standalone server and
+> CLI, which are gone (story 0002/06). The code lives on as
 > the `mallard-otel-*` libraries inside mallard: run `mallard serve` (query API under
 > `/otel`, OTLP on :4318/:4317) and the `mallard` CLI; see the
 > [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
@@ -17,7 +17,7 @@ second, far more than thousands to tens of thousands of visitors a day
 produce.
 
 ```
-$ odl services -s 15m
+$ mallard services -s 15m
 ╭─────────────────┬───────┬─────────┬────────┬─────────┬─────────┬─────────╮
 │ service         ┆ spans ┆ rate    ┆ errors ┆ p50     ┆ p95     ┆ p99     │
 ╞═════════════════╪═══════╪═════════╪════════╪═════════╪═════════╪═════════╡
@@ -54,8 +54,8 @@ $ odl services -s 15m
   - metric catalog and time series: counter rates with reset detection,
     histogram percentiles, group-by
   - optional guarded read-only SQL
-- `odl` CLI: tables or JSON, `logs -f`, trace waterfalls in the terminal.
-- `odl tui`: overview dashboard, trace search plus waterfall with span
+- `mallard` CLI: tables or JSON, `logs -f`, trace waterfalls in the terminal.
+- `mallard tui`: overview dashboard, trace search plus waterfall with span
   details and logs, live logs, metric charts, status.
 - Back-pressure (HTTP 429 / gRPC `UNAVAILABLE`) instead of dropping data or
   running out of memory. Automatic compaction, retention and snapshot expiry.
@@ -70,16 +70,16 @@ With Docker:
 ```sh
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 docker compose -f deploy/compose/docker-compose.yml --profile loadgen up -d   # demo traffic
-docker compose -f deploy/compose/docker-compose.yml exec otel-ducklake odl services
+docker compose -f deploy/compose/docker-compose.yml exec mallard mallard services
 ```
 
 From source (Rust 1.90+; the first build compiles DuckDB and takes ~2 min):
 
 ```sh
 cargo build --release
-./target/release/otel-ducklake serve &                 # data in ./data/
+MALLARD_SERVER__API_TOKENS=dev ./target/release/mallard serve &    # data in ./data/
 ./target/release/mallard-otel-loadgen --rate 20 --duration 0 &  # demo traffic
-./target/release/odl tui
+./target/release/mallard tui
 ```
 
 Send your own telemetry:
@@ -92,11 +92,11 @@ export OTEL_SERVICE_NAME=my-service
 Then explore:
 
 ```sh
-odl services                       # who is slow, who fails
-odl traces -S checkout -e          # failing checkout traces
-odl trace <trace-id> -A            # waterfall with attributes
-odl logs -l error -f               # follow errors
-odl metric http.server.request.duration -g p99 -b http.route
+mallard services                       # who is slow, who fails
+mallard traces list -S checkout -e          # failing checkout traces
+mallard telemetry trace <trace-id> -A            # waterfall with attributes
+mallard logs -l error -f               # follow errors
+mallard metrics show http.server.request.duration -g p99 -b http.route
 curl localhost:8080/openapi.json   # the API
 ```
 
@@ -120,9 +120,9 @@ curl localhost:8080/openapi.json   # the API
 
 ```
 crates/mallard-otel-api       API types (OpenAPI schema source)
-crates/mallard-otel-server    collector + query API (bin: otel-ducklake)
+crates/mallard-otel-server    collector + query API
 crates/mallard-otel-client    typed HTTP client
-crates/mallard-otel-cli       CLI and TUI (bin: odl)
+crates/mallard-otel-cli       CLI and TUI
 crates/mallard-otel-loadgen   load generator (bin: mallard-otel-loadgen)
 deploy/ charts/      compose files and Helm chart
 bench/               reproducible experiments

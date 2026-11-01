@@ -1,6 +1,6 @@
 # Capacity
 
-**Short answer:** one `sentry-ducklake` process ingests **~4,500-6,000 error
+**Short answer:** one `mallard` process ingests **~4,500-6,000 error
 events/s sustained** and answers every API query in **under 60 ms** with 1-3
 million events stored (after compaction), within a **2 GB DuckDB memory limit
 and 4 threads**. Events take **~265 bytes each** on disk.
@@ -53,7 +53,7 @@ curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maint
   20-80 ms. Above saturation the queue fills and clients get `429` with
   `Retry-After`, which Sentry SDKs honour; nothing is lost silently.
 - **Quiet server latency (~0.5 s)** is the batch window: the writer waits up
-  to `SDL_BATCH_WINDOW` (500 ms) after the first event so that a quiet server
+  to `MALLARD_SENTRY__INGEST__BATCH_WINDOW` (500 ms) after the first event so that a quiet server
   makes at most two DuckLake snapshots per second instead of one per event.
   SDKs send in the background, so users never wait for it. Under load,
   batches of 200+ commit immediately.
@@ -87,19 +87,20 @@ At normal traffic the data never gets that fragmented.
 |---|---|
 | Parquet per event | **~265 bytes** (1,000,624 events in 265 MB, 6 files) |
 | Raw normalized JSON per event | 5.2 KB (~20x compression: zstd + columnar) |
-| Catalog (DuckDB file) | ~14 MB; bounded by `SDL_FLUSH_ROWS` |
+| Catalog (DuckDB file) | ~14 MB; bounded by `MALLARD_SENTRY__MAINTENANCE__FLUSH_ROWS` |
 | 1M events/day x 90 days | ~24 GB |
 
 ## Memory
 
-- The DuckDB memory limit (`SDL_DUCKDB_MEMORY_LIMIT`) covers most but not all
+- The DuckDB memory limit (`MALLARD_DUCKDB__MEMORY_LIMIT`) covers most but not all
   of DuckDB's memory: with a 2 GB limit, RSS peaked at 3.4 GB during
   compaction and ran at 1.3-2.3 GB otherwise. **Set the limit to about half
   the container's memory.** Without a limit DuckDB may use up to 80% of RAM
   (we saw 13.5 GB RSS on the 64 GB machine).
 - Compaction sorts data; sorting on several threads needs more memory than
-  2 GB allows, so maintenance temporarily drops to `SDL_MAINTENANCE_THREADS`
-  (1). One compaction of 1M fresh events took 10 s.
+  2 GB allows, so in these runs maintenance dropped to 1 thread. mallard's
+  connection is shared, so it leaves the thread count alone
+  (`MALLARD_DUCKDB__THREADS` applies). One compaction of 1M fresh events took 10 s.
 
 ## Lessons that shaped the defaults
 
@@ -114,7 +115,7 @@ At normal traffic the data never gets that fragmented.
 
 ## Sizing guidance
 
-| Traffic | Events/day | Container | `SDL_DUCKDB_MEMORY_LIMIT` | Storage (90 days) |
+| Traffic | Events/day | Container | `MALLARD_DUCKDB__MEMORY_LIMIT` | Storage (90 days) |
 |---|---|---|---|---|
 | ~10k visitors/day | 1k-20k | 0.5 CPU, 1-2 GB | 512MB-1GB | < 1 GB |
 | ~100k visitors/day | 10k-200k | 1 CPU, 4 GB | 2GB | 1-5 GB |

@@ -3,7 +3,7 @@
 ## Health and monitoring
 
 - `GET /api/v1/health`: liveness/readiness (no auth).
-- `odl status` / `GET /api/v1/stats`: requests, accepted, throttled and
+- `mallard telemetry status` / `GET /api/v1/stats`: requests, accepted, throttled and
   invalid items per signal, and `throttled_requests` (requests refused before their body was read); buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
 - Prometheus (mallard's `/metrics`): `mallard_otel_ingest_requests_total`,
@@ -96,7 +96,7 @@ never modified in place, only added and (after expiry) deleted.
 - Tables are migrated on start-up: new columns are added, existing data stays.
 - The catalog format follows DuckLake (1.1). A DuckLake spec upgrade will be
   documented in the release notes; DuckLake requires explicit migration
-  (`AUTOMATIC_MIGRATION`), which otel-ducklake will not run silently.
+  (`AUTOMATIC_MIGRATION`), which mallard will not run silently.
 - Rolling upgrades with a PostgreSQL catalog: rows are appended by column
   name, so a replica of the previous version keeps writing after a newer one
   has added columns (those columns stay NULL for its rows), and an older
@@ -117,7 +117,7 @@ copy the catalog file and open the copy read-only.
 | symptom | cause / fix |
 |---|---|
 | `DATA_PATH parameter ... does not match existing data path` | `storage.data_path` differs from the path stored when the catalog was created. Fix the config, or move data and attach once with `OVERRIDE_DATA_PATH`. |
-| `extension ... is not installed and duckdb.autoinstall_extensions = false` | image built without that extension: `otel-ducklake install-extensions <name>` at build time. |
+| `extension ... is not installed and duckdb.autoinstall_extensions = false` | image built without that extension: `mallard install-extensions --dir <dir>` at build time. |
 | `Could not set lock on file` | a DuckDB-file catalog is open in another process. Only one process may use it; switch to PostgreSQL for several. |
 | HTTP 415 from `/v1/...` | send `Content-Type: application/x-protobuf` or `application/json`. |
 | 401 | missing or wrong bearer token (`auth.*_tokens`). |
