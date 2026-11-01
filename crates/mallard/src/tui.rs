@@ -141,12 +141,20 @@ impl Host {
     }
 }
 
+/// The otel TUI, with its "e: errors of this trace" jump enabled: the
+/// errors tab can answer it.
+fn telemetry_pane(client: &Client) -> odl_cli::tui::Embedded {
+    let mut pane = odl_cli::tui::Embedded::new(client.otel.clone());
+    pane.set_errors_enabled(true);
+    pane
+}
+
 pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
     // Fail fast with a clear message instead of an empty screen.
     client.sentry.info().await.map_err(|e| anyhow::anyhow!("cannot reach {}: {e}", client.base_url()))?;
     let tabs: Vec<Box<dyn Pane>> = vec![
         Box::new(Errors(sdl_cli::Embedded::new(client.sentry.clone(), project))),
-        Box::new(Telemetry(odl_cli::tui::Embedded::new(client.otel.clone()))),
+        Box::new(Telemetry(telemetry_pane(client))),
     ];
     let mut host = Host { tabs, active: ERRORS, base_url: client.base_url().to_string() };
 
@@ -251,7 +259,7 @@ mod tests {
         let mut h = Host {
             tabs: vec![
                 Box::new(Errors(sdl_cli::Embedded::new(c.sentry.clone(), None))),
-                Box::new(Telemetry(odl_cli::tui::Embedded::new(c.otel.clone()))),
+                Box::new(Telemetry(telemetry_pane(&c))),
             ],
             active: ERRORS,
             base_url: c.base_url().into(),

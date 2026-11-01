@@ -103,6 +103,14 @@ impl Config {
         );
         self.otel_config().validate().context("otel")?;
         self.sentry_config().validate().context("sentry")?;
+        if let Some(artifacts) = &self.sentry.storage_url {
+            anyhow::ensure!(
+                !is_inside(artifacts, &self.storage.data_path),
+                "sentry.storage_url ({artifacts}) must not be inside storage.data_path ({}): \
+                 lake maintenance deletes files there that the catalog does not know",
+                self.storage.data_path
+            );
+        }
         Ok(())
     }
 
@@ -132,6 +140,15 @@ impl Config {
         c.maintenance_threads = 0;
         c
     }
+}
+
+/// True when location `inner` is `outer` or below it (paths or URLs).
+fn is_inside(inner: &str, outer: &str) -> bool {
+    let norm = |s: &str| {
+        let s = s.trim().trim_start_matches("file://").trim_start_matches("./");
+        format!("{}/", s.trim_end_matches('/'))
+    };
+    norm(inner).starts_with(&norm(outer))
 }
 
 /// `MALLARD_<SECTION>__<KEY>` variables. Names without `__` (e.g. `MALLARD_CONFIG`,
@@ -220,6 +237,20 @@ mod tests {
             assert_eq!(cfg.otel.retention.traces, "3d");
             Ok(())
         });
+    }
+
+    #[test]
+    fn artifacts_must_not_live_inside_the_lake() {
+        let mut cfg = Config::default();
+        cfg.storage.data_path = "s3://bucket/lake/".into();
+        cfg.sentry.storage_url = Some("s3://bucket/lake/artifacts".into());
+        assert!(cfg.validate().is_err());
+        cfg.sentry.storage_url = Some("s3://bucket/lake".into());
+        assert!(cfg.validate().is_err());
+        cfg.sentry.storage_url = Some("s3://bucket/lake-artifacts".into());
+        cfg.validate().unwrap();
+        cfg.sentry.storage_url = Some("s3://bucket/artifacts".into());
+        cfg.validate().unwrap();
     }
 
     #[test]
