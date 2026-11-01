@@ -8,7 +8,7 @@ mod common;
 
 use common::*;
 use futures::future::join_all;
-use mallard_client::{Client, sdl_client::types::CreateProject};
+use mallard_client::{Client, mallard_sentry_client::types::CreateProject};
 
 const TRACES: usize = 40;
 

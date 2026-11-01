@@ -65,8 +65,8 @@ const COUNTS: &[f64] = &[1.0, 5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000
 pub fn install_prometheus() -> Result<PrometheusHandle> {
     PrometheusBuilder::new()
         .set_buckets(SECONDS)?
-        .set_buckets_for_metric(Matcher::Full("sdl_write_batch_events".into()), COUNTS)?
-        .set_buckets_for_metric(Matcher::Full("odl_flush_rows".into()), COUNTS)?
+        .set_buckets_for_metric(Matcher::Full("mallard_sentry_write_batch_events".into()), COUNTS)?
+        .set_buckets_for_metric(Matcher::Full("mallard_otel_flush_rows".into()), COUNTS)?
         .install_recorder()
         .context("installing the metrics recorder")
 }

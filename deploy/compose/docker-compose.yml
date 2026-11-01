@@ -1,5 +1,5 @@
 # Full local stack: mallard + S3-compatible object store (RustFS) +
-# PostgreSQL as the DuckLake catalog. Same stack as sentry-ducklake's compose.
+# PostgreSQL as the DuckLake catalog.
 #
 #   docker compose -f deploy/compose/docker-compose.yml up -d --build
 #

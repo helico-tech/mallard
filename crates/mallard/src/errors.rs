@@ -1,16 +1,16 @@
-//! The telemetry side's error lookup ([`odl_cli::ErrorLookup`]), answered
+//! The telemetry side's error lookup ([`mallard_otel_cli::ErrorLookup`]), answered
 //! by the Sentry side: one `GET /sentry/v1/events/by-trace` per trace list.
 
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use mallard_client::Client;
-use mallard_client::sdl_client::types::WindowRange;
-use odl_cli::{ErrorEvent, ErrorMap, TraceErrors};
+use mallard_client::mallard_sentry_client::types::WindowRange;
+use mallard_otel_cli::{ErrorEvent, ErrorMap, TraceErrors};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SentryErrors(pub Client);
 
-impl odl_cli::ErrorLookup for SentryErrors {
+impl mallard_otel_cli::ErrorLookup for SentryErrors {
     fn errors(
         &self,
         trace_ids: Vec<String>,

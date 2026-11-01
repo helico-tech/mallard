@@ -95,7 +95,7 @@ export async function clickCheckout(browser, appUrl, { dsn, release }) {
   await page.goto(`${appUrl}/?${qs}`);
   await page.waitForFunction(() => document.getElementById("status")?.textContent === "ready");
   await page.click("#checkout");
-  const flushed = await page.evaluate(() => window.sdlFlush());
+  const flushed = await page.evaluate(() => window.mallardFlush());
   await page.close();
   return { flushed, requests, pageErrors, consoleErrors };
 }

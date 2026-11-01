@@ -10,7 +10,7 @@ in the tens of milliseconds.
 All numbers below were measured on 2026-11-01 with otel-ducklake 0.1.0,
 DuckDB 2.0.0, DuckLake 1.1. Hardware: an Apple M-series laptop (local NVMe
 SSD; Docker Desktop VM for container tests). Data came from
-[`odl-loadgen`](../crates/odl-loadgen): a simulated web shop, 9 services,
+[`mallard-otel-loadgen`](../crates/mallard-otel-loadgen): a simulated web shop, 9 services,
 4-18 spans per trace, about 0.3 log records per span, metrics every 15 s,
 and high-cardinality attributes (`url.full` with ids, `user.id`, request
 ids). Scripts: [`bench/capacity`](../bench/capacity). Cloud VMs with network
@@ -148,14 +148,14 @@ The numbers above were measured with the standalone `otel-ducklake`
 binary, which is retired; this runs the same load against `mallard serve`:
 
 ```sh
-cargo build --release -p mallard -p odl-loadgen
+cargo build --release -p mallard -p mallard-otel-loadgen
 docker build -f deploy/docker/Dockerfile -t mallard:dev .
-LOADGEN=./target/release/odl-loadgen bench/otel/capacity/steady-state.sh 2 2g 1200MB 100 500 1500 3000 6000 10000
+LOADGEN=./target/release/mallard-otel-loadgen bench/otel/capacity/steady-state.sh 2 2g 1200MB 100 500 1500 3000 6000 10000
 
 # query latency: backfill 7 days into a lake, then query it
 MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
   ./target/release/mallard serve &
-./target/release/odl-loadgen --endpoint http://127.0.0.1:4318 --backfill 7d --rate 10 --batch 500 --concurrency 8
+./target/release/mallard-otel-loadgen --endpoint http://127.0.0.1:4318 --backfill 7d --rate 10 --batch 500 --concurrency 8
 kill %1; wait   # the DuckDB-file catalog allows one process at a time
 MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
   ./target/release/mallard maintenance --full   # merge all files, as the measured run did

@@ -126,7 +126,7 @@ mod tests {
     /// override.
     const EVIL: &str = "a\u{1b}]52;c;aGk=\u{7}b\u{1b}[2J\u{1b}]8;;http://x\u{1b}\\c\u{9b}31md\re\tf\u{202e}g";
 
-    // From sdl-cli: nothing unsafe is left, and the result is exact.
+    // From mallard-sentry-cli: nothing unsafe is left, and the result is exact.
     #[test]
     fn clean_strips_terminal_escapes() {
         let evil = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\u{9b}31md\re\tf\u{202e}g";
@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(clean("l1\nl2"), "l1 l2");
     }
 
-    // From odl-cli: plain text is borrowed, escapes stay visible, and no
+    // From mallard-otel-cli: plain text is borrowed, escapes stay visible, and no
     // unsafe character survives in either mode.
     #[test]
     fn clean_escapes_control_characters() {

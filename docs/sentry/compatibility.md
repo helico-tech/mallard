@@ -9,7 +9,7 @@ Sentry.init({ dsn: "https://<public_key>@errors.example.com/1" });
 
 ## Verified clients
 
-Tested end to end in CI (`e2e/`, `crates/sdl-server/tests/`):
+Tested end to end in CI (`e2e/`, `crates/mallard-sentry-server/tests/`):
 
 | Client | Version | What is verified |
 |---|---|---|
@@ -52,7 +52,7 @@ envelope protocol and are expected to work; they are not in the test suite.
 | `attachment`, `replay_event`, `replay_recording`, `replay_video` | accepted, dropped |
 | `client_report`, `check_in`, `log`, `otel_log`, `statsd`, `feedback`, `user_report` | accepted, dropped |
 
-Dropped items are counted in `sdl_ingest_items_dropped_total{type=...}`. You
+Dropped items are counted in `mallard_sentry_ingest_items_dropped_total{type=...}`. You
 can keep `tracesSampleRate` and replays enabled; set them to 0 to save
 bandwidth.
 
@@ -71,7 +71,7 @@ What Sentry does that we also do:
 - derived tags: level, environment, release, dist, server_name, transaction,
   logger, browser, os, runtime (+ `.name`), device, url, handled, mechanism,
   user; browser/os parsed from the User-Agent when the SDK did not send them
-- `{{auto}}` IP (uses `X-Forwarded-For` only if `SDL_TRUST_FORWARDED_FOR`)
+- `{{auto}}` IP (uses `X-Forwarded-For` only if `MALLARD_SENTRY__INGEST__TRUST_FORWARDED_FOR`)
 - JS sourcemaps: debug ids and release artifacts; original file, line, column,
   function name and source context; `raw_stacktrace` keeps the original
 - regression: a new event reopens a resolved issue
@@ -89,11 +89,11 @@ ProGuard), event reprocessing.
 | `POST /api/0/organizations/{org}/artifactbundle/assemble/` | `not_found` + missing chunks, then synchronous `ok` |
 | releases create / update / deploys | answered, not stored (stubs: `sentry-cli releases list` shows nothing; releases come from events, see `GET /v1/projects/{p}/releases`) |
 
-Any `org` slug is accepted. Use the server's token (`SDL_API_TOKEN`) as the
+Any `org` slug is accepted. Use the server's token (`MALLARD_SERVER__API_TOKENS`) as the
 auth token. See [sourcemaps.md](sourcemaps.md).
 
 ## Not supported
 
 The Sentry web API (`/api/0/projects/...`, `/api/0/issues/...`) and therefore
 Sentry's own UI and `sentry-cli issues` / `events`. Use the `/v1` API, the
-`sdl` CLI or the TUI.
+`mallard` CLI or the TUI.

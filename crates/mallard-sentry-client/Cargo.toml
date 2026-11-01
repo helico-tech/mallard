@@ -1,0 +1,23 @@
+[package]
+name = "mallard-sentry-client"
+description = "Typed async client for the mallard errors API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mallard-sentry-api.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

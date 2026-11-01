@@ -1,0 +1,19 @@
+[package]
+name = "mallard-otel-api"
+description = "Shared HTTP API types of the mallard telemetry API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mallard-common = { workspace = true, features = ["openapi"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+utoipa.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

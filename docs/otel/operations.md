@@ -3,17 +3,17 @@
 ## Health and monitoring
 
 - `GET /api/v1/health`: liveness/readiness (no auth).
-- `odl status` / `GET /api/v1/stats`: requests, accepted, throttled and
+- `mallard telemetry status` / `GET /api/v1/stats`: requests, accepted, throttled and
   invalid items per signal, and `throttled_requests` (requests refused before their body was read); buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
-- Prometheus (mallard's `/metrics`): `odl_ingest_requests_total`,
-  `odl_ingest_items_total` (label `signal`),
-  `odl_ingest_rejected_items_total` (labels `signal`, `reason` =
-  `throttled` | `invalid`), `odl_ingest_throttled_requests_total` (label
-  `signal`), `odl_buffered_rows`, `odl_buffered_bytes`, `odl_flushes_total`,
-  `odl_flush_seconds`, `odl_flush_rows`, `odl_flush_errors_total`,
-  `odl_dropped_rows_total` (label `table`), `odl_maintenance_seconds` and
-  `odl_maintenance_errors_total` (label `task`).
+- Prometheus (mallard's `/metrics`): `mallard_otel_ingest_requests_total`,
+  `mallard_otel_ingest_items_total` (label `signal`),
+  `mallard_otel_ingest_rejected_items_total` (labels `signal`, `reason` =
+  `throttled` | `invalid`), `mallard_otel_ingest_throttled_requests_total` (label
+  `signal`), `mallard_otel_buffered_rows`, `mallard_otel_buffered_bytes`, `mallard_otel_flushes_total`,
+  `mallard_otel_flush_seconds`, `mallard_otel_flush_rows`, `mallard_otel_flush_errors_total`,
+  `mallard_otel_dropped_rows_total` (label `table`), `mallard_otel_maintenance_seconds` and
+  `mallard_otel_maintenance_errors_total` (label `task`).
 - mallard's `/readyz` fails while the last flush failed or the catalog does
   not answer.
 - Logs: `RUST_LOG=info` (default). Flush failures are logged at `error`,
@@ -28,7 +28,7 @@ What to watch:
 | `throttled_requests` grows, `throttled` does not | requests refused before their body was read: too many bytes in flight (see `max_buffer_bytes` in [configuration](configuration.md)). Their items are unknown, so only the request is counted; it is also in `requests`. Exporters retry | many large or slow concurrent requests (gRPC and compressed HTTP reserve `max_request_bytes` each): raise `max_buffer_bytes`, or lower exporter concurrency / batch size |
 | `invalid` grows | items refused for good: spans without a valid trace/span id (OTLP partial success), or a request too large for `max_buffer_bytes` | fix the sender; see the partial-success message it gets back |
 | `flush_errors` grows | catalog or object store unreachable / credentials | see logs; data is retried, not dropped |
-| `dropped_rows` grows | a table refuses our rows (permanent error, e.g. a column changed by hand); other tables are still written | see the `error` log line "dropping a batch" and `odl_dropped_rows_total{table}`; restore the table's columns (the server adds missing ones at start-up), or report it as a bug |
+| `dropped_rows` grows | a table refuses our rows (permanent error, e.g. a column changed by hand); other tables are still written | see the `error` log line "dropping a batch" and `mallard_otel_dropped_rows_total{table}`; restore the table's columns (the server adds missing ones at start-up), or report it as a bug |
 | many `files` per table | compaction not keeping up or disabled | check `last_maintenance`; lower `compact_interval` |
 | `inlined_rows` keeps growing | compaction not running | `maintenance.enabled` |
 | queries return 503 | all `query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |
@@ -96,7 +96,7 @@ never modified in place, only added and (after expiry) deleted.
 - Tables are migrated on start-up: new columns are added, existing data stays.
 - The catalog format follows DuckLake (1.1). A DuckLake spec upgrade will be
   documented in the release notes; DuckLake requires explicit migration
-  (`AUTOMATIC_MIGRATION`), which otel-ducklake will not run silently.
+  (`AUTOMATIC_MIGRATION`), which mallard will not run silently.
 - Rolling upgrades with a PostgreSQL catalog: rows are appended by column
   name, so a replica of the previous version keeps writing after a newer one
   has added columns (those columns stay NULL for its rows), and an older
@@ -117,7 +117,7 @@ copy the catalog file and open the copy read-only.
 | symptom | cause / fix |
 |---|---|
 | `DATA_PATH parameter ... does not match existing data path` | `storage.data_path` differs from the path stored when the catalog was created. Fix the config, or move data and attach once with `OVERRIDE_DATA_PATH`. |
-| `extension ... is not installed and duckdb.autoinstall_extensions = false` | image built without that extension: `otel-ducklake install-extensions <name>` at build time. |
+| `extension ... is not installed and duckdb.autoinstall_extensions = false` | image built without that extension: `mallard install-extensions --dir <dir>` at build time. |
 | `Could not set lock on file` | a DuckDB-file catalog is open in another process. Only one process may use it; switch to PostgreSQL for several. |
 | HTTP 415 from `/v1/...` | send `Content-Type: application/x-protobuf` or `application/json`. |
 | 401 | missing or wrong bearer token (`auth.*_tokens`). |

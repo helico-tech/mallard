@@ -1,0 +1,28 @@
+[package]
+name = "mallard-otel-loadgen"
+description = "Realistic OTLP load generator for mallard benchmarks and demos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "mallard-otel-loadgen"
+path = "src/main.rs"
+
+[dependencies]
+opentelemetry-proto.workspace = true
+prost.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+flate2.workspace = true
+humantime.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

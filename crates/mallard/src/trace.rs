@@ -132,7 +132,8 @@ pub fn render(t: &TraceOverview) -> String {
         let s = &t.spans[i];
         let pad = "  ".repeat(depth);
         let offset = start.map(|st| (s.start_time - st).num_microseconds().unwrap_or(0) as f64 / 1000.0).unwrap_or(0.0);
-        let mark = if s.status_code == mallard_client::odl_client::api::SpanStatus::Error { "✖" } else { "•" };
+        let mark =
+            if s.status_code == mallard_client::mallard_otel_client::api::SpanStatus::Error { "✖" } else { "•" };
         let sentry = match sentry_errors(t, &s.span_id) {
             0 => String::new(),
             n => format!("  ⚠ {n}"),
@@ -216,7 +217,7 @@ pub fn render(t: &TraceOverview) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mallard_client::odl_client::api::{LogRecord, Span, SpanKind, SpanStatus};
+    use mallard_client::mallard_otel_client::api::{LogRecord, Span, SpanKind, SpanStatus};
 
     /// OSC 52, a screen clear, a C1 CSI, a newline and a bidi override.
     const EVIL: &str = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\u{9b}31m\nd\u{202e}e";
@@ -286,8 +287,8 @@ mod tests {
         assert!(raw["spans"][0].get("resource_attributes").is_some() && raw.get("resources").is_none());
     }
 
-    fn error_in(span_id: &str) -> mallard_client::sdl_client::types::EventSummary {
-        mallard_client::sdl_client::types::EventSummary {
+    fn error_in(span_id: &str) -> mallard_client::mallard_sentry_client::types::EventSummary {
+        mallard_client::mallard_sentry_client::types::EventSummary {
             event_id: "e1".into(),
             project_id: 1,
             issue_id: "85fede14250ec6be".into(),

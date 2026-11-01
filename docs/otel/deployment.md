@@ -1,7 +1,8 @@
 # Deployment
 
-> **Retired binary.** The `otel-ducklake` binary, its `ODL_*` settings and
-> its chart are gone (story 0002/06). Deploy mallard: `deploy/` and the
+> **Retired binary.** This page was written for the old standalone binary; its
+> settings and chart are gone (story 0002/06). Names are updated, the rest waits
+> for [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md). Deploy mallard: `deploy/` and the
 > [repo README](../../README.md).
 
 Three reference setups, all tested:
@@ -14,7 +15,7 @@ Three reference setups, all tested:
 
 Not containerized: download a release binary (Linux builds target glibc
 2.35+, i.e. Ubuntu 22.04 / Debian 12 or newer) or `cargo build --release`,
-and run `otel-ducklake serve` with a config file.
+and run `mallard serve` with a config file.
 
 > **Security:** authentication is off by default. Anyone who can reach the
 > ports can read all telemetry (8080) and write into the lake (4317/4318).
@@ -24,8 +25,8 @@ and run `otel-ducklake serve` with a config file.
 
 ## Container image
 
-`ghcr.io/helico-tech/otel-ducklake:<version>` (linux/amd64 and linux/arm64)
-contains `otel-ducklake`, `odl` and `odl-loadgen`.
+`ghcr.io/helico-tech/mallard:<version>` (linux/amd64 and linux/arm64)
+contains `mallard`.
 
 - DuckDB extensions (ducklake, httpfs, aws, azure, postgres, sqlite, icu) are
   baked in at `/opt/duckdb/extensions`, and auto-install is off: the image
@@ -33,18 +34,18 @@ contains `otel-ducklake`, `odl` and `odl-loadgen`.
   a smaller image with `--build-arg DUCKDB_EXTENSIONS="ducklake httpfs postgres"`.
 - Runs as uid 10001. State lives in `/data` (catalog, Parquet, spill files in
   `/data/tmp`); the root filesystem can be read-only.
-- Default config `/etc/otel-ducklake/config.toml`: DuckDB catalog
+- Default config `/etc/mallard/config.toml`: DuckDB catalog
   `/data/catalog.ducklake`, data `/data/lake/`. Mount your own file there (or
-  pass `-c`), and/or override single keys with `ODL_<SECTION>__<KEY>`.
+  pass `-c`), and/or override single keys with `MALLARD_<SECTION>__<KEY>`.
 - Ports: 4317 (OTLP/gRPC), 4318 (OTLP/HTTP), 8080 (query API, `/docs`).
-- Health: `GET /api/v1/health`, or `odl health` inside the container.
+- Health: `GET /api/v1/health`, or `mallard telemetry health` inside the container.
 - Size: about 156 MB compressed (most of it DuckDB extensions).
 
 ```sh
 docker run -d --name otel -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 -p 127.0.0.1:8080:8080 \
-  -v otel-data:/data -e ODL_DUCKDB__MEMORY_LIMIT=1GB \
-  ghcr.io/helico-tech/otel-ducklake:latest
-docker exec otel odl services
+  -v otel-data:/data -e MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
+  ghcr.io/helico-tech/mallard:latest
+docker exec otel mallard services
 ```
 
 ## Docker, single node
@@ -54,8 +55,8 @@ docker exec otel odl services
 ```sh
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 docker compose -f deploy/compose/docker-compose.yml --profile loadgen up -d   # demo traffic
-docker compose -f deploy/compose/docker-compose.yml exec otel-ducklake odl services
-odl tui     # from the host, if you installed odl
+docker compose -f deploy/compose/docker-compose.yml exec mallard mallard services
+mallard tui     # from the host, if you installed mallard
 ```
 
 ## Docker, PostgreSQL + S3
@@ -68,13 +69,13 @@ The config is in [`config/shared.toml`](../deploy/compose/config/shared.toml).
 ```sh
 docker compose -f deploy/compose/docker-compose.postgres-s3.yml up -d --build
 docker compose -f deploy/compose/docker-compose.postgres-s3.yml --profile loadgen up -d
-docker compose -f deploy/compose/docker-compose.postgres-s3.yml exec odl-1 odl status
+docker compose -f deploy/compose/docker-compose.postgres-s3.yml exec mallard-1 mallard telemetry status
 ```
 
-Replica `odl-1` listens on 4317/4318/8080, `odl-2` on 14317/14318/18080, and
+Replica `mallard-1` listens on 4317/4318/8080, `mallard-2` on 14317/14318/18080, and
 the S3 endpoint on 8333, all on `127.0.0.1` only; put any load balancer in
 front. Both ingest, and each sees the other's data. Only
-`odl-1` runs catalog-wide maintenance. Verified: Parquet files appear under
+`mallard-1` runs catalog-wide maintenance. Verified: Parquet files appear under
 `s3://otel/lake/otel/spans/epoch_day=…/`, no flush errors on either replica.
 
 Swap SeaweedFS for AWS S3, R2, MinIO, Ceph or Garage by changing only the
@@ -83,16 +84,16 @@ examples; change them.
 
 ## Kubernetes (Helm)
 
-Chart: [`charts/otel-ducklake`](../charts/otel-ducklake) (see its
-[README](../charts/otel-ducklake/README.md) for all values).
+Chart: [`deploy/helm/mallard`](../../deploy/helm/mallard) (see its
+[values.yaml](../../deploy/helm/mallard/values.yaml) for all values).
 
 ```sh
 # single: StatefulSet + PVC, DuckDB-file catalog
-helm install otel charts/otel-ducklake -n observability --create-namespace
+helm install otel deploy/helm/mallard -n observability --create-namespace
 # (an Ingress for the API is only allowed with auth.enabled=true)
 
 # shared: Deployment with N replicas, PostgreSQL catalog + object storage
-helm install otel charts/otel-ducklake -n observability -f my-values.yaml
+helm install otel deploy/helm/mallard -n observability -f my-values.yaml
 ```
 
 ```yaml
@@ -100,17 +101,17 @@ helm install otel charts/otel-ducklake -n observability -f my-values.yaml
 mode: shared
 replicaCount: 2
 storage:
-  catalog: "postgres:host=pg.db dbname=ducklake user=odl"   # password: PGPASSWORD env (envFrom)
+  catalog: "postgres:host=pg.db dbname=ducklake user=mallard"   # password: PGPASSWORD env (envFrom)
   dataPath: "s3://my-bucket/otel/"
   secrets:
     - type: s3
       provider: credential_chain   # IRSA / pod identity
       region: eu-west-1
 envFrom:
-  - secretRef: {name: odl-storage} # PGPASSWORD (and S3 keys without IRSA)
+  - secretRef: {name: mallard-storage} # PGPASSWORD (and S3 keys without IRSA)
 auth:
   enabled: true
-  existingSecret: odl-tokens       # key: api-token (+ ingest-token when ingestAuth)
+  existingSecret: mallard-tokens       # key: api-token (+ ingest-token when ingestAuth)
   ingestAuth: false                # true: OTLP needs a token too
 resources:
   limits: {cpu: "2", memory: 2Gi}
@@ -127,7 +128,7 @@ root filesystem.
 
 ```sh
 # any OpenTelemetry SDK
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-ducklake:4318   # or :4317 with OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://mallard:4318   # or :4317 with OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <ingest-token>"   # if auth.ingest_tokens is set
 export OTEL_SERVICE_NAME=checkout
 ```
@@ -159,7 +160,7 @@ receivers:
       http: {endpoint: 0.0.0.0:4318}
 exporters:
   otlphttp:
-    endpoint: http://mallard:4318       # standalone: http://otel-ducklake:4318
+    endpoint: http://mallard:4318       
     compression: gzip
     # headers: {Authorization: "Bearer ${env:INGEST_TOKEN}"}   # if auth.ingest_tokens is set
     sending_queue:
@@ -201,7 +202,7 @@ ingress, a load balancer, a service mesh, or the Collector above.
 - `.github/workflows/ci.yml` (pushes and PRs): fmt, clippy `-D warnings`,
   tests, `helm lint` for both modes, Docker build.
 - `.github/workflows/release.yml` (tags `v*`): multi-arch image to
-  `ghcr.io/<owner>/otel-ducklake` (`latest` only for non-prerelease tags);
+  `ghcr.io/<owner>/mallard` (`latest` only for non-prerelease tags);
   binaries for linux amd64/arm64 (glibc ≥ 2.35) and macOS arm64; the
   packaged chart, attached to the GitHub release. After the first release,
   make the GHCR package public (or use `imagePullSecrets`).

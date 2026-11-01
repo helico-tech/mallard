@@ -1,0 +1,26 @@
+[package]
+name = "mallard-sentry-loadgen"
+description = "Load generator for mallard: realistic Sentry envelopes at a target rate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+mallard-common.workspace = true
+mallard-sentry-client.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+hdrhistogram = "7"
+rand.workspace = true
+
+[lints]
+workspace = true

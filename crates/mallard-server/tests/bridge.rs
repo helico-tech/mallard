@@ -11,8 +11,8 @@ mod common;
 use common::*;
 use mallard_client::{
     Client,
-    odl_client::api::{SpanKind, SpanStatus},
-    sdl_client::types::{CreateProject, IssueQuery, Project},
+    mallard_otel_client::api::{SpanKind, SpanStatus},
+    mallard_sentry_client::types::{CreateProject, IssueQuery, Project},
 };
 use serde_json::{Value, json};
 

@@ -14,7 +14,7 @@ use crate::text::clean;
 /// create <name>").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hints {
-    /// What runs the commands, e.g. `sdl`, `odl`, `mallard errors`.
+    /// What runs the commands, e.g. `mallard`, `mallard errors`.
     pub command: &'static str,
     pub url_env: &'static str,
     pub token_env: &'static str,

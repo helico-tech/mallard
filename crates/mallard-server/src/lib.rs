@@ -1,10 +1,10 @@
-//! mallard: sentry-ducklake and otel-ducklake in one process, on one
+//! mallard: the Sentry side and the OpenTelemetry side in one process, on one
 //! DuckLake catalog (see docs/adr/0001-shared-ducklake-connection.md).
 //!
 //! Routes on `server.http_addr`:
-//! - `/sentry/...`  everything of sentry-ducklake (ingest, `/v1` API, sentry-cli)
+//! - `/sentry/...`  everything of the Sentry side (ingest, `/v1` API, sentry-cli)
 //! - `/api/0/...`   sentry-cli's API again (it only accepts a URL root)
-//! - `/otel/...`    otel-ducklake query API (`/otel/api/v1/...`, `/otel/docs`)
+//! - `/otel/...`    telemetry query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
 //! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
 //!   when that is set)
@@ -63,8 +63,8 @@ fn sentry_cli_at_root(
 
 pub struct Platform {
     cfg: Arc<Config>,
-    otel: Arc<odl_server::Server>,
-    sentry: sdl_server::Server,
+    otel: Arc<mallard_otel_server::Server>,
+    sentry: mallard_sentry_server::Server,
     /// The bridge's workers (Sentry transactions, OTel exceptions).
     bridge: bridge::Workers,
     metrics: Option<PrometheusHandle>,
@@ -78,9 +78,10 @@ impl Platform {
         let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
             .await?
             .context("opening the DuckLake catalog")?;
-        let otel =
-            Arc::new(odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?);
-        let sentry = sdl_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
+        let otel = Arc::new(
+            mallard_otel_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?,
+        );
+        let sentry = mallard_sentry_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
             .await
             .context("starting sentry")?;
         let bridge = bridge::install(&cfg.bridge, &sentry, &otel).context("starting the bridge")?;
@@ -244,7 +245,7 @@ pub async fn run_maintenance(cfg: Config, full: bool) -> Result<Vec<String>> {
     let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
         .await?
         .context("opening the DuckLake catalog")?;
-    let sentry = sdl_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
+    let sentry = mallard_sentry_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
         .await
         .context("starting sentry")?;
     let result = sentry.run_maintenance().await;
@@ -254,7 +255,7 @@ pub async fn run_maintenance(cfg: Config, full: bool) -> Result<Vec<String>> {
     result.context("sentry maintenance")?;
     let mut done = vec!["sentry: flushed inlined rows, applied retention, compacted".to_string()];
     let ocfg = cfg.otel_config();
-    let otel = tokio::task::spawn_blocking(move || odl_server::run_maintenance(&ocfg, full))
+    let otel = tokio::task::spawn_blocking(move || mallard_otel_server::run_maintenance(&ocfg, full))
         .await?
         .context("otel maintenance")?;
     done.extend(otel.into_iter().map(|line| format!("otel: {line}")));
@@ -287,7 +288,10 @@ impl Listeners {
 }
 
 /// Ready when both sides are ready; the body names what is not.
-async fn ready(sentry: sdl_server::Server, otel: Arc<odl_server::Server>) -> axum::response::Response {
+async fn ready(
+    sentry: mallard_sentry_server::Server,
+    otel: Arc<mallard_otel_server::Server>,
+) -> axum::response::Response {
     let (s, o) = tokio::join!(sentry.ready(), otel.ready());
     let why: Vec<String> = [s, o].into_iter().filter_map(Result::err).collect();
     readiness(if why.is_empty() { Ok(()) } else { Err(why.join("; ")) })

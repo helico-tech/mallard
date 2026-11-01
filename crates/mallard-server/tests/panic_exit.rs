@@ -8,7 +8,7 @@ mod common;
 use std::process::Command;
 
 use common::*;
-use mallard_client::{Client, sdl_client::types::CreateProject};
+use mallard_client::{Client, mallard_sentry_client::types::CreateProject};
 
 const CHILD: &str = "MALLARD_TEST_PANIC_CHILD";
 

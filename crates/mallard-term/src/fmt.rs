@@ -88,14 +88,14 @@ mod tests {
 
     #[test]
     fn compact_numbers() {
-        // sdl-cli's cases
+        // mallard-sentry-cli's cases
         assert_eq!(compact(999.0), "999");
         assert_eq!(compact(1000.0), "1k");
         assert_eq!(compact(1234.0), "1.2k");
         assert_eq!(compact(999_999.0), "1M");
         assert_eq!(compact(3_400_000.0), "3.4M");
         assert_eq!(compact(2_000_000_000.0), "2G");
-        // odl-cli's cases
+        // mallard-otel-cli's cases
         assert_eq!(compact(12_345.0), "12.3k");
         assert_eq!(compact(3.0), "3");
         assert_eq!(compact(2.5), "2.50");

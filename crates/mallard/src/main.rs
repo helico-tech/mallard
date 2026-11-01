@@ -2,7 +2,7 @@
 //! `server`, ADR 0023); the CLI and TUI talk to a server over HTTP.
 //!
 //! One flat command tree (ADR 0008): `issues`, `events`, `traces`, `logs`,
-//! … The commands come from the two libraries (`sdl-cli`, `odl-cli`);
+//! … The commands come from the two libraries (`mallard-sentry-cli`, `mallard-otel-cli`);
 //! `status`, `setup`, `find`, `trace` and `help agents` span both sides and
 //! live here. The old `errors …` / `telemetry …` paths stay as hidden
 //! aliases of the same commands.
@@ -88,27 +88,27 @@ enum Cmd {
     },
     /// Error issues: list, show, resolve, ignore, unresolve.
     #[command(subcommand)]
-    Issues(sdl_cli::IssuesCmd),
+    Issues(mallard_sentry_cli::IssuesCmd),
     /// Error events: list, show.
     #[command(subcommand)]
-    Events(sdl_cli::EventsCmd),
+    Events(mallard_sentry_cli::EventsCmd),
     /// Sentry projects: list, show, create.
     #[command(subcommand)]
-    Projects(sdl_cli::ProjectsCmd),
+    Projects(mallard_sentry_cli::ProjectsCmd),
     /// Releases seen in error events: first/last seen, events, issues, new issues.
     #[command(subcommand)]
-    Releases(sdl_cli::ReleasesCmd),
+    Releases(mallard_sentry_cli::ReleasesCmd),
     /// Traces: list (search), show (spans, errors and logs of one trace).
     #[command(subcommand)]
     Traces(TracesCmd),
     /// Everything about one trace: spans, errors and logs (= traces show).
     Trace(TraceShowArgs),
     /// Search, follow or show logs around a time (default window 1h).
-    Logs(odl_cli::LogArgs),
+    Logs(mallard_otel_cli::LogArgs),
     /// Services with request rate, error rate and latency (default window 1h).
-    Services(odl_cli::ServiceArgs),
+    Services(mallard_otel_cli::ServiceArgs),
     /// Operations (span names) with request rate, error rate and latency; --compare 1d for before/after.
-    Ops(odl_cli::OpsArgs),
+    Ops(mallard_otel_cli::OpsArgs),
     /// Counts per time bucket: spans (with p95), logs, Sentry errors (default window 1h).
     #[command(subcommand)]
     Series(series::SeriesCmd),
@@ -121,7 +121,7 @@ enum Cmd {
     Schema(SchemaArgs),
     /// Uploaded sourcemap bundles.
     #[command(subcommand)]
-    Sourcemaps(sdl_cli::SourcemapsCmd),
+    Sourcemaps(mallard_sentry_cli::SourcemapsCmd),
     /// Send a test error to a DSN (checks the Sentry SDK setup end to end).
     SendTest {
         /// DSN to send to (from `mallard setup`).
@@ -144,20 +144,20 @@ enum Cmd {
     #[command(hide = true, alias = "sentry")]
     Errors {
         #[command(subcommand)]
-        cmd: sdl_cli::Command,
+        cmd: mallard_sentry_cli::Command,
     },
     /// The OpenTelemetry-side commands under their old name (also `otel`).
     #[command(hide = true, alias = "otel")]
     Telemetry {
         #[command(subcommand)]
-        cmd: odl_cli::Command,
+        cmd: mallard_otel_cli::Command,
     },
 }
 
 #[derive(Subcommand)]
 enum TracesCmd {
     /// Search traces (default window 1h), with the Sentry error count of each.
-    List(odl_cli::TraceListArgs),
+    List(mallard_otel_cli::TraceListArgs),
     /// Spans, Sentry errors and logs of one trace.
     Show(TraceShowArgs),
 }
@@ -177,7 +177,7 @@ struct TraceShowArgs {
 #[derive(clap::Args)]
 struct SqlCmd {
     #[command(flatten)]
-    sql: odl_cli::SqlArgs,
+    sql: mallard_otel_cli::SqlArgs,
     /// Query the error tables (events, issues, issue_activity) instead of the
     /// telemetry tables (spans, logs, metric_*).
     #[arg(long)]
@@ -187,9 +187,9 @@ struct SqlCmd {
 #[derive(Subcommand)]
 enum MetricsCmd {
     /// Metric names, types and series counts (default window 1h).
-    List(odl_cli::MetricListArgs),
+    List(mallard_otel_cli::MetricListArgs),
     /// One metric over time: aggregate, group by attributes.
-    Show(odl_cli::MetricArgs),
+    Show(mallard_otel_cli::MetricArgs),
 }
 
 #[derive(clap::Args)]
@@ -204,7 +204,7 @@ enum SchemaCmd {
     /// Tables and columns that `sql` (`--errors`: the errors tables) can query (the default).
     Tables,
     /// Attribute keys with counts, or the top values of one key (sampled; default window 1h).
-    Attrs(odl_cli::AttrArgs),
+    Attrs(mallard_otel_cli::AttrArgs),
 }
 
 /// Hints in messages name mallard's commands and env vars.
@@ -222,16 +222,16 @@ struct Run {
 }
 
 impl Run {
-    fn sentry(&self) -> sdl_cli::Ctx {
-        sdl_cli::Ctx::new(self.client.sentry.clone())
+    fn sentry(&self) -> mallard_sentry_cli::Ctx {
+        mallard_sentry_cli::Ctx::new(self.client.sentry.clone())
             .with_project(self.project.clone())
             .with_output(self.output.clone())
             .with_hints(ERRORS_HINTS)
     }
 
     /// Trace lists get the Sentry error count per trace.
-    fn otel(&self) -> odl_cli::Ctx {
-        odl_cli::Ctx::new(self.client.otel.clone())
+    fn otel(&self) -> mallard_otel_cli::Ctx {
+        mallard_otel_cli::Ctx::new(self.client.otel.clone())
             .with_output(self.output.clone())
             .with_hints(TELEMETRY_HINTS)
             .with_error_lookup(std::sync::Arc::new(errors::SentryErrors(self.client.clone())))
@@ -301,33 +301,41 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Status => status::run(&r).await,
         Cmd::Setup(a) => setup::run(&r, a).await,
         Cmd::Find { id, window, wait } => find::run(&r, &id, &window, &wait).await,
-        Cmd::Issues(c) => sdl_cli::run(sdl_cli::Command::Issues(c), &r.sentry()).await,
-        Cmd::Events(c) => sdl_cli::run(sdl_cli::Command::Events(c), &r.sentry()).await,
-        Cmd::Projects(c) => sdl_cli::run(sdl_cli::Command::Projects(c), &r.sentry()).await,
-        Cmd::Releases(c) => sdl_cli::run(sdl_cli::Command::Releases(c), &r.sentry()).await,
-        Cmd::Sourcemaps(c) => sdl_cli::run(sdl_cli::Command::Sourcemaps(c), &r.sentry()).await,
-        Cmd::SendTest { dsn, message } => sdl_cli::run(sdl_cli::Command::SendTest { dsn, message }, &r.sentry()).await,
-        Cmd::Traces(TracesCmd::List(a)) => odl_cli::run(odl_cli::Command::Traces(a), &r.otel()).await,
-        Cmd::Traces(TracesCmd::Show(a)) | Cmd::Trace(a) => trace::run(&r, &a.trace_id, &a.window, &a.wait).await,
-        Cmd::Logs(a) => odl_cli::run(odl_cli::Command::Logs(a), &r.otel()).await,
-        Cmd::Services(a) => odl_cli::run(odl_cli::Command::Services(a), &r.otel()).await,
-        Cmd::Ops(a) => odl_cli::run(odl_cli::Command::Ops(a), &r.otel()).await,
-        Cmd::Series(c) => series::run(&r, c).await,
-        Cmd::Metrics(MetricsCmd::List(a)) => odl_cli::run(odl_cli::Command::Metrics(a), &r.otel()).await,
-        Cmd::Metrics(MetricsCmd::Show(a)) => odl_cli::run(odl_cli::Command::Metric(a), &r.otel()).await,
-        Cmd::Sql(SqlCmd { sql, errors: true }) => {
-            let a = sdl_cli::SqlArgs { query: sql.query, limit: sql.limit };
-            sdl_cli::run(sdl_cli::Command::Sql(a), &r.sentry()).await
+        Cmd::Issues(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Issues(c), &r.sentry()).await,
+        Cmd::Events(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Events(c), &r.sentry()).await,
+        Cmd::Projects(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Projects(c), &r.sentry()).await,
+        Cmd::Releases(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Releases(c), &r.sentry()).await,
+        Cmd::Sourcemaps(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Sourcemaps(c), &r.sentry()).await,
+        Cmd::SendTest { dsn, message } => {
+            mallard_sentry_cli::run(mallard_sentry_cli::Command::SendTest { dsn, message }, &r.sentry()).await
         }
-        Cmd::Sql(SqlCmd { sql, errors: false }) => odl_cli::run(odl_cli::Command::Sql(sql), &r.otel()).await,
+        Cmd::Traces(TracesCmd::List(a)) => mallard_otel_cli::run(mallard_otel_cli::Command::Traces(a), &r.otel()).await,
+        Cmd::Traces(TracesCmd::Show(a)) | Cmd::Trace(a) => trace::run(&r, &a.trace_id, &a.window, &a.wait).await,
+        Cmd::Logs(a) => mallard_otel_cli::run(mallard_otel_cli::Command::Logs(a), &r.otel()).await,
+        Cmd::Services(a) => mallard_otel_cli::run(mallard_otel_cli::Command::Services(a), &r.otel()).await,
+        Cmd::Ops(a) => mallard_otel_cli::run(mallard_otel_cli::Command::Ops(a), &r.otel()).await,
+        Cmd::Series(c) => series::run(&r, c).await,
+        Cmd::Metrics(MetricsCmd::List(a)) => {
+            mallard_otel_cli::run(mallard_otel_cli::Command::Metrics(a), &r.otel()).await
+        }
+        Cmd::Metrics(MetricsCmd::Show(a)) => {
+            mallard_otel_cli::run(mallard_otel_cli::Command::Metric(a), &r.otel()).await
+        }
+        Cmd::Sql(SqlCmd { sql, errors: true }) => {
+            let a = mallard_sentry_cli::SqlArgs { query: sql.query, limit: sql.limit };
+            mallard_sentry_cli::run(mallard_sentry_cli::Command::Sql(a), &r.sentry()).await
+        }
+        Cmd::Sql(SqlCmd { sql, errors: false }) => {
+            mallard_otel_cli::run(mallard_otel_cli::Command::Sql(sql), &r.otel()).await
+        }
         Cmd::Schema(SchemaArgs { cmd: None | Some(SchemaCmd::Tables) }) => schema::run(&r).await,
         Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) => {
-            odl_cli::run(odl_cli::Command::Attrs(a), &r.otel()).await
+            mallard_otel_cli::run(mallard_otel_cli::Command::Attrs(a), &r.otel()).await
         }
         Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
         Cmd::Help { topic } => help::run(&topic, &r.output),
-        Cmd::Errors { cmd } => sdl_cli::run(cmd, &r.sentry()).await,
-        Cmd::Telemetry { cmd } => odl_cli::run(cmd, &r.otel()).await,
+        Cmd::Errors { cmd } => mallard_sentry_cli::run(cmd, &r.sentry()).await,
+        Cmd::Telemetry { cmd } => mallard_otel_cli::run(cmd, &r.otel()).await,
     }
 }
 
@@ -336,8 +344,10 @@ async fn run(cli: Cli) -> Result<()> {
 fn classify(e: &mallard_client::Error, base_url: &str) -> Described {
     let base_url = base_url.trim_end_matches('/');
     match e {
-        mallard_client::Error::Sentry(e) => sdl_cli::classify(e, &format!("{base_url}/sentry"), &ERRORS_HINTS),
-        mallard_client::Error::Otel(e) => odl_cli::classify(e, &format!("{base_url}/otel"), &TELEMETRY_HINTS),
+        mallard_client::Error::Sentry(e) => {
+            mallard_sentry_cli::classify(e, &format!("{base_url}/sentry"), &ERRORS_HINTS)
+        }
+        mallard_client::Error::Otel(e) => mallard_otel_cli::classify(e, &format!("{base_url}/otel"), &TELEMETRY_HINTS),
         mallard_client::Error::InvalidTraceId(_) => Described::new(Kind::Usage, e.to_string()),
         e => Described::new(Kind::Internal, e.to_string()),
     }
@@ -477,7 +487,9 @@ mod tests {
 
     #[test]
     fn tags_cursor_and_sql_side() {
-        let Cmd::Issues(sdl_cli::IssuesCmd::List(a)) = parse_ok(&["issues", "list", "--tag", "url=/a=b"]).cmd else {
+        let Cmd::Issues(mallard_sentry_cli::IssuesCmd::List(a)) =
+            parse_ok(&["issues", "list", "--tag", "url=/a=b"]).cmd
+        else {
             panic!("issues list")
         };
         assert_eq!(a.tag, ["url:/a=b"], "split at the first =; sent as key:value");
@@ -503,7 +515,10 @@ mod tests {
         let Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) = parse_ok(&["schema", "attrs"]).cmd else {
             panic!("schema attrs")
         };
-        assert_eq!((a.signal, a.limit, a.key), (mallard_client::odl_client::api::AttributeSignal::Spans, 50, None));
+        assert_eq!(
+            (a.signal, a.limit, a.key),
+            (mallard_client::mallard_otel_client::api::AttributeSignal::Spans, 50, None)
+        );
         assert!(matches!(parse_ok(&["schema"]).cmd, Cmd::Schema(SchemaArgs { cmd: None })));
     }
 

@@ -9,8 +9,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-sdl-client.workspace = true
-odl-client.workspace = true
+mallard-sentry-client.workspace = true
+mallard-otel-client.workspace = true
 chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true

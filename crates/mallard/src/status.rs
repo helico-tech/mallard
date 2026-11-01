@@ -2,8 +2,8 @@
 //! Exit code 0 when both sides answer, 3 for a wrong token, 6 otherwise.
 
 use anyhow::Result;
-use mallard_client::odl_client::api::Stats;
-use mallard_client::sdl_client::types::ServerInfo;
+use mallard_client::mallard_otel_client::api::Stats;
+use mallard_client::mallard_sentry_client::types::ServerInfo;
 use mallard_term::error::{Described, Kind};
 use mallard_term::text::clean;
 use serde::Serialize;
@@ -85,8 +85,8 @@ fn capabilities(s: Option<&ServerInfo>, o: Option<&Stats>) -> Capabilities {
 pub(crate) async fn run(r: &Run) -> Result<()> {
     let c = &r.client;
     let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
-    let s = s.map_err(|e| sdl_cli::classify(&e, c.sentry.base_url(), &ERRORS_HINTS));
-    let o = o.map_err(|e| odl_cli::classify(&e, c.otel.base_url(), &TELEMETRY_HINTS));
+    let s = s.map_err(|e| mallard_sentry_cli::classify(&e, c.sentry.base_url(), &ERRORS_HINTS));
+    let o = o.map_err(|e| mallard_otel_cli::classify(&e, c.otel.base_url(), &TELEMETRY_HINTS));
     let caps = capabilities(s.as_ref().ok(), o.as_ref().ok());
     // The command fails when a side does: a wrong token wins (exit 3),
     // else "unavailable" (exit 6).

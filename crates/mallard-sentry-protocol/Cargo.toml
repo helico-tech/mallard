@@ -1,0 +1,25 @@
+[package]
+name = "mallard-sentry-protocol"
+description = "Sentry wire protocol: DSN/auth parsing, envelopes, event normalization, grouping and sourcemap symbolication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+xxhash-rust.workspace = true
+flate2.workspace = true
+bytes.workspace = true
+regex = "1"
+base64.workspace = true
+sourcemap = "9"
+url.workspace = true
+
+[lints]
+workspace = true

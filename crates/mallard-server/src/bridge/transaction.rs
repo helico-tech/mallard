@@ -3,13 +3,13 @@
 
 use std::collections::BTreeMap;
 
+use mallard_sentry_protocol::event::{parse_span_id, parse_timestamp, parse_trace_id};
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span::SpanKind, status::StatusCode},
 };
-use sdl_protocol::event::{parse_span_id, parse_timestamp, parse_trace_id};
 use serde_json::Value;
 
 /// One OTLP request with the transaction's root span and its child spans.

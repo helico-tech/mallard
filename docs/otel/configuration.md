@@ -1,14 +1,14 @@
 # Configuration
 
-`otel-ducklake` reads, in this order (later wins):
+`mallard serve` reads, in this order (later wins):
 
 1. built-in defaults,
-2. a TOML file: `--config path` or `ODL_CONFIG=path` (optional),
-3. environment variables `ODL_<SECTION>__<KEY>`, e.g.
-   `ODL_STORAGE__DATA_PATH=s3://bucket/otel/`, `ODL_QUERY__MAX_CONCURRENT=8`.
+2. a TOML file: `-c path` or `MALLARD_CONFIG=path` (optional),
+3. environment variables `MALLARD_<SECTION>__<KEY>`, e.g.
+   `MALLARD_STORAGE__DATA_PATH=s3://bucket/otel/`, `MALLARD_OTEL__QUERY__MAX_CONCURRENT=8`.
    Values are parsed as TOML when the setting is a number, boolean or list
-   (`ODL_AUTH__API_TOKENS='["a","b"]'`, or comma separated: `a,b`), and
-   taken literally for text settings (`ODL_RETENTION__TRACES=0`).
+   (`MALLARD_SERVER__API_TOKENS='["a","b"]'`, or comma separated: `a,b`), and
+   taken literally for text settings (`MALLARD_OTEL__RETENTION__TRACES=0`).
    Unknown keys are errors.
 
 Inside any text value, `${NAME}` is replaced by environment variable `NAME`
@@ -16,12 +16,12 @@ after the file is parsed, so the value may contain quotes (start-up fails if
 it is not set). Use this to keep secrets out of files:
 
 ```toml
-[auth]
-api_tokens = ["${ODL_API_TOKEN}"]
+[server]
+api_tokens = ["${MALLARD_API_TOKEN}"]
 ```
 
-The standalone `otel-ducklake` binary that read this file is retired. In
-mallard these keys live under `[otel.*]` (`ingest`, `retention`,
+The keys below were written for the old standalone binary. In mallard they
+live under `[otel.*]` (`ingest`, `retention`,
 `maintenance`, `query`); `[server]`, `[storage]`, `[duckdb]` and the tokens
 are mallard's. See [config/mallard.example.toml](../../config/mallard.example.toml)
 and check a config with `mallard check --connect`.
@@ -144,7 +144,7 @@ itself speaks plain HTTP/gRPC.
 
 | variable | used by | meaning |
 |---|---|---|
-| `ODL_URL` | `odl` | Query API base URL (default `http://localhost:8080`). |
-| `ODL_TOKEN` | `odl` | API bearer token. |
-| `OTLP_ENDPOINT` | `odl-loadgen` | OTLP/HTTP base URL (default `http://localhost:4318`). |
-| `ODL_INGEST_TOKEN` | `odl-loadgen` | Ingest bearer token. |
+| `MALLARD_URL` | `mallard` | Query API base URL (default `http://localhost:8080`). |
+| `MALLARD_TOKEN` | `mallard` | API bearer token. |
+| `OTLP_ENDPOINT` | `mallard-otel-loadgen` | OTLP/HTTP base URL (default `http://localhost:4318`). |
+| `MALLARD_INGEST_TOKEN` | `mallard-otel-loadgen` | Ingest bearer token. |

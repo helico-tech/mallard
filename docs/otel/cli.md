@@ -1,14 +1,14 @@
-# CLI and TUI (`odl`)
+# CLI and TUI (the telemetry side)
 
-> **Retired binary.** The standalone `odl` binary is gone (story 0002/06);
-> these commands are part of `mallard` (see [../cli.md](../cli.md)), with
-> `MALLARD_URL`/`MALLARD_TOKEN` instead of `ODL_URL`/`ODL_TOKEN`.
+> **Retired binary.** This page was written for the old standalone CLI, which
+> is gone (story 0002/06). These commands are part of `mallard` now; see
+> [docs/cli.md](../cli.md).
 
-`odl` talks to the query API. It does not need DuckDB.
+`mallard` talks to the query API. It does not need DuckDB.
 
 ```sh
-export ODL_URL=http://localhost:8080     # default
-export ODL_TOKEN=...                     # if auth.api_tokens is set
+export MALLARD_URL=http://localhost:8080     # default
+export MALLARD_TOKEN=...                     # one of server.api_tokens
 ```
 
 Global flags: `--url`, `--token`, `--json` (old: `-o json`), `--color
@@ -20,35 +20,35 @@ are the same as on the errors side: [../cli.md](../cli.md).
 
 | command | what |
 |---|---|
-| `odl health` | is the server up (no token needed) |
-| `odl status` | ingest counters, buffer, flushes, storage per table, last maintenance |
-| `odl services [-s 1h] [--all-spans]` | rate, error %, p50/p95/p99 per service |
-| `odl ops [-S svc]` | the same per operation |
-| `odl traces [-S svc] [-O op] [-e] [--min-ms 500] [-a k=v] [-n 30] [--cursor c]` | search traces; `--cursor`: the next page |
-| `odl trace <id> [-A]` | waterfall of one trace (`-A`: attributes and events) |
-| `odl logs [-S svc] [-l warn] [-q text] [-t trace] [-a k=v] [-n 100] [-f] [--cursor c]` | search logs; `-f` follows like `tail -f`; `--cursor`: the next page |
-| `odl metrics [-S svc] [-q name]` | metric catalog |
-| `odl metric <name> [-g p95] [-b route,service.name] [--step 1m] [--exemplars]` | a metric over time, with sparklines; `--exemplars` lists trace ids of the highest samples |
-| `odl sql "<select>"` | read-only SQL (server must enable it) |
-| `odl schema` | the tables and columns SQL can query |
-| `odl attrs [--signal spans\|logs\|metrics] [-S svc] [-k key] [--metric m] [-n 50]` | attribute keys with counts, or the top values of one key (sampled) |
-| `odl tui [-s 1h]` | interactive UI |
+| `mallard telemetry health` | is the server up (no token needed) |
+| `mallard telemetry status` | ingest counters, buffer, flushes, storage per table, last maintenance |
+| `mallard services [-s 1h] [--all-spans]` | rate, error %, p50/p95/p99 per service |
+| `mallard ops [-S svc]` | the same per operation |
+| `mallard traces list [-S svc] [-O op] [-e] [--min-ms 500] [-a k=v] [-n 30] [--cursor c]` | search traces; `--cursor`: the next page |
+| `mallard telemetry trace <id> [-A]` | waterfall of one trace (`-A`: attributes and events) |
+| `mallard logs [-S svc] [-l warn] [-q text] [-t trace] [-a k=v] [-n 100] [-f] [--cursor c]` | search logs; `-f` follows like `tail -f`; `--cursor`: the next page |
+| `mallard metrics list [-S svc] [-q name]` | metric catalog |
+| `mallard metrics show <name> [-g p95] [-b route,service.name] [--step 1m] [--exemplars]` | a metric over time, with sparklines; `--exemplars` lists trace ids of the highest samples |
+| `mallard sql "<select>"` | read-only SQL (server must enable it) |
+| `mallard telemetry schema` | the tables and columns SQL can query |
+| `mallard schema attrs [--signal spans\|logs\|metrics] [-S svc] [-k key] [--metric m] [-n 50]` | attribute keys with counts, or the top values of one key (sampled) |
+| `mallard tui` (`mallard telemetry tui [-s 1h]`: this side only) | interactive UI |
 
 Examples:
 
 ```sh
-odl services -s 15m
-odl traces -S checkout -e -n 10
-odl trace 0af7651916cd43dd8448eb211c80319c -A
-odl logs -l error -f
-odl metric http.server.request.duration -g p99 -b http.route -s 6h --step 5m
-odl sql "SELECT name, count(*) FROM spans WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
-odl traces -e --json | jq -r '.[].trace_id'
+mallard services -s 15m
+mallard traces list -S checkout -e -n 10
+mallard telemetry trace 0af7651916cd43dd8448eb211c80319c -A
+mallard logs -l error -f
+mallard metrics show http.server.request.duration -g p99 -b http.route -s 6h --step 5m
+mallard sql "SELECT name, count(*) FROM spans WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+mallard traces list -e --json | jq -r '.[].trace_id'
 ```
 
 ## TUI
 
-`odl tui` opens a full-screen UI with five views. It refreshes itself (every
+`mallard tui` opens a full-screen UI with five views. It refreshes itself (every
 5 s, the log tail every 2 s) and keeps your selection across refreshes.
 
 | view | shows |
@@ -74,5 +74,5 @@ this trace (in `mallard tui`), `?` help, Ctrl-C quit. All times are UTC.
 | `s`, space | logs: cycle severity, pause/follow |
 | `a` / `b` | metric chart: cycle aggregation, set group-by |
 
-The TUI is also a library component (`odl_cli::Embedded`) for embedding
+The TUI is also a library component (`mallard_otel_cli::Embedded`) for embedding
 in other terminal apps; see [embedding.md](embedding.md).

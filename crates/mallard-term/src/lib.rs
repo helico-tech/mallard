@@ -1,4 +1,4 @@
-//! Terminal output shared by mallard's two CLIs (`sdl-cli`, `odl-cli`), their
+//! Terminal output shared by mallard's two CLIs (`mallard-sentry-cli`, `mallard-otel-cli`), their
 //! TUIs and the `mallard` host, so `mallard errors …` and
 //! `mallard telemetry …` look and behave like one tool (ADR 0006).
 //!
