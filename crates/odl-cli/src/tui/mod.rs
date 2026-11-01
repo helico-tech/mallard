@@ -7,8 +7,8 @@
 //! never blocks input. [`run_standalone`] wraps it for `odl tui`.
 //!
 //! F1 and F2 are reserved for the host and always return [`Outcome::Ignored`],
-//! and so do keys with Ctrl or Alt (except Ctrl-C, which quits), so host
-//! shortcuts keep working.
+//! and so do keys with Ctrl or Alt (except Ctrl-C, which quits, or cancels
+//! an open prompt), so host shortcuts keep working.
 //!
 //! A tokio runtime must be current when `tick` is called (loads are spawned on
 //! it), and the host's event loop must not block that runtime's only thread.
@@ -385,15 +385,14 @@ impl Embedded {
         if matches!(k.code, KeyCode::F(1) | KeyCode::F(2)) {
             return Outcome::Ignored;
         }
+        if self.prompt.is_some() {
+            return self.prompt_key(k);
+        }
         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
         if self.help {
             self.help = false;
-            return Outcome::Consumed;
-        }
-        if self.prompt.is_some() {
-            self.prompt_key(k);
             return Outcome::Consumed;
         }
         // Ctrl/Alt combinations belong to the host.
@@ -449,21 +448,19 @@ impl Embedded {
         self.prompt = Some(Prompt { target, label, help, input: Input::new(value) });
     }
 
-    fn prompt_key(&mut self, k: &KeyEvent) {
-        let Some(p) = &mut self.prompt else { return };
+    /// A key while a prompt is open. Ctrl-C and Esc cancel it.
+    fn prompt_key(&mut self, k: &KeyEvent) -> Outcome {
+        let Some(p) = &mut self.prompt else { return Outcome::Ignored };
         match p.input.handle(k) {
+            InputResult::Ignored => return Outcome::Ignored,
             InputResult::Edited => {
                 if p.target == PromptTarget::MetricSearch {
                     self.metrics.search = p.input.value.clone();
                     self.metrics.clamp_selection();
                 }
             }
-            InputResult::Cancel => {
-                if p.target == PromptTarget::MetricSearch {
-                    // keep what was typed; Esc in the list clears it
-                }
-                self.prompt = None;
-            }
+            // A metric search keeps what was typed; Esc in the list clears it.
+            InputResult::Cancel => self.prompt = None,
             InputResult::Submit => {
                 let p = self.prompt.take().unwrap();
                 let v = p.input.value.trim().to_string();
@@ -478,6 +475,7 @@ impl Embedded {
                 }
             }
         }
+        Outcome::Consumed
     }
 
     /// Render the whole UI into `area`.

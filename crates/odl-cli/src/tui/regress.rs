@@ -485,3 +485,20 @@ fn trace_lookup_backs_off() {
     d.on_error(&too_large);
     assert!(d.short_window);
 }
+
+// Review finding 6: in a prompt, Ctrl/Alt keys go to the host instead of
+// being typed, and Ctrl-C cancels the prompt instead of quitting.
+#[test]
+fn prompt_leaves_modifier_keys_to_the_host() {
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
+    e.handle_event(&ev(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(e.prompt.is_some());
+    assert_eq!(e.handle_event(&ev(KeyCode::Char('s'), KeyModifiers::CONTROL)), Outcome::Ignored);
+    assert_eq!(e.handle_event(&ev(KeyCode::Char('x'), KeyModifiers::ALT)), Outcome::Ignored);
+    assert_eq!(e.prompt.as_ref().unwrap().input.value, "", "modifier keys were typed");
+    assert_eq!(e.handle_event(&ev(KeyCode::Char('a'), KeyModifiers::NONE)), Outcome::Consumed);
+    assert_eq!(e.handle_event(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), Outcome::Consumed);
+    assert!(e.prompt.is_none(), "Ctrl-C cancels the prompt");
+    assert_eq!(e.handle_event(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), Outcome::Quit);
+}
