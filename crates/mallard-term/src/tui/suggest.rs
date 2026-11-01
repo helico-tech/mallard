@@ -5,8 +5,10 @@
 //!
 //! Keys first, then the values of a key. What is known shows at once from the cache; the
 //! cache holds per scope (window and app), and answers for another scope are dropped.
-//! Fetched text is untrusted: it is cleaned here, once, on the way in, so what is shown
-//! and what Tab puts into the bar are both safe for a terminal.
+//! Fetched text is untrusted, and it is also a name the server only knows as it is. So the
+//! list keeps it raw: a row shows it cleaned ([`Item::label`]), and Tab puts it in the bar raw
+//! ([`Item::insert`]), because a cleaned name filters on nothing. A bar therefore holds raw
+//! text and must clean it where it draws it (ADR 0006).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -60,15 +62,19 @@ pub struct Key {
     pub values: Values,
 }
 
-/// One row: what it shows and what Tab puts in place of the token.
+/// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
+    /// What it shows: cleaned, safe for a terminal.
     pub label: String,
+    /// What Tab puts in place of the token, with the server's text as it is. Never draw it
+    /// without cleaning it.
     pub insert: String,
     pub count: Option<u64>,
 }
 
 struct Entry {
+    /// As the server has them.
     items: Vec<(String, u64)>,
     at: Instant,
 }
@@ -191,7 +197,6 @@ impl Suggest {
         }
         match answer {
             Some(items) => {
-                let items = items.into_iter().map(|(t, n)| (clean(&t).into_owned(), n)).collect();
                 self.cache.insert(want.clone(), Entry { items, at: now });
                 self.failed.remove(want);
                 self.note = false;
@@ -334,7 +339,9 @@ impl Suggest {
                 [Want { key: key.clone(), prefix: String::new() }, Want { key: key.clone(), prefix: t.prefix.clone() }];
             for w in &wants {
                 for (text, n) in self.cache.get(w).map_or(&[][..], |e| &e.items) {
-                    if starts_with(text, &t.prefix) && !out.iter().any(|(o, _)| o == text) {
+                    // The bar holds raw text, but what one can read and type is the label.
+                    let fits = starts_with(text, &t.prefix) || starts_with(&clean(text), &t.prefix);
+                    if fits && !out.iter().any(|(o, _)| o == text) {
                         out.push((text.clone(), *n));
                     }
                 }
@@ -353,8 +360,11 @@ impl Suggest {
                     // An attribute named like a built-in key could not be filtered on.
                     let builtin = self.keys.iter().any(|k| k.text.trim_end_matches('=') == text);
                     if !builtin && !text.contains(|c: char| c.is_whitespace() || c == '"' || c == '=') {
-                        let label = format!("{text}=");
-                        rows.push(Item { insert: label.clone(), label, count: Some(n) });
+                        rows.push(Item {
+                            label: format!("{}=", clean(&text)),
+                            insert: format!("{text}="),
+                            count: Some(n),
+                        });
                     }
                 }
                 rows
@@ -369,7 +379,11 @@ impl Suggest {
                 _ => cached(&t.key)
                     .into_iter()
                     .filter(|(text, _)| !text.contains('"'))
-                    .map(|(text, n)| Item { insert: value_insert(key, &text), label: text, count: Some(n) })
+                    .map(|(text, n)| Item {
+                        label: clean(&text).into_owned(),
+                        insert: value_insert(key, &text),
+                        count: Some(n),
+                    })
                     .collect(),
             },
         }
@@ -574,21 +588,58 @@ mod tests {
         assert_eq!(s.poll(now + FRESH + LATER), Some(w));
     }
 
-    /// Server text never reaches the terminal raw: not in the list, not in the bar.
+    /// Server text never reaches the terminal raw, and goes back as the server has it: a
+    /// row shows it cleaned and Tab inserts it raw. The bars draw that cleaned; each tab
+    /// tests its own, through to the request it sends.
     #[test]
-    fn untrusted_text_is_cleaned() {
+    fn a_row_shows_cleaned_and_inserts_raw() {
         let (mut s, now) = open("service=");
         let evil = "a\x1b[2J\u{202e}b";
         s.answer("1h", &want(Some("service"), ""), Some(vec![(evil.to_string(), 3)]), now);
         let item = &s.items()[0];
-        for t in [&item.label, &item.insert] {
-            assert!(!t.chars().any(|c| c.is_control() || crate::text::is_bidi_control(c)), "{t:?}");
-        }
-        let (text, _) = s.accept(now).unwrap();
-        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(!item.label.chars().any(|c| c.is_control() || crate::text::is_bidi_control(c)), "{item:?}");
+        assert_eq!(item.label, "a\\u{1b}[2J\\u{202e}b");
+        assert_eq!(item.insert, format!("service={evil} "));
+        let mut t = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        t.draw(|f| s.render(f, f.area(), Rect::new(0, 11, 40, 1))).unwrap();
+        let screen: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(!screen.chars().any(|c| c.is_control() || crate::text::is_bidi_control(c)), "{screen:?}");
+        assert!(screen.contains("a\\u{1b}[2J"), "{screen}");
+        let (text, cursor) = s.accept(now).unwrap();
+        assert_eq!(text, format!("service={evil} "), "the value that gets sent");
+        assert_eq!(cursor, text.chars().count());
+
+        // A key too: a tag or attribute with such a name is only found by its real name.
         let (mut s, now) = open("");
-        s.answer("1h", &want(None, ""), Some(vec![("k\x1b[2J".to_string(), 3)]), now);
-        assert!(labels(&s).iter().all(|l| !l.contains('\x1b')), "{:?}", labels(&s));
+        s.answer("1h", &want(None, ""), Some(vec![("k\u{202e}".to_string(), 3)]), now);
+        let item = s.items().iter().find(|i| i.count.is_some()).unwrap().clone();
+        assert_eq!((item.label.as_str(), item.insert.as_str()), ("k\\u{202e}=", "k\u{202e}="));
+        s.select(s.items().iter().position(|i| *i == item).unwrap() as isize);
+        let (text, _) = s.accept(now).unwrap();
+        assert_eq!(text, "k\u{202e}=");
+        assert_eq!(s.poll(now + LATER), Some(want(Some("k\u{202e}"), "")), "its values are asked for by that name");
+    }
+
+    /// What is typed matches the name as shown and as it is, also when it is edited back.
+    #[test]
+    fn a_prefix_matches_the_raw_name_and_the_label() {
+        let (mut s, now) = open("service=a\\u{20");
+        s.answer("1h", &want(Some("service"), ""), Some(vec![("a\u{202e}b".to_string(), 1)]), now);
+        assert_eq!(labels(&s), ["a\\u{202e}b"], "typed as it shows");
+        s.edited("service=a\u{202e}", 10, now);
+        assert_eq!(labels(&s), ["a\\u{202e}b"], "the raw text from an earlier Tab");
+        s.edited("service=b", 9, now);
+        assert!(!s.has_items());
+    }
+
+    /// A name with a line break takes its quotes from the raw text, or it would be two words.
+    #[test]
+    fn a_raw_name_with_a_line_break_stays_one_word() {
+        let (mut s, now) = open("service=");
+        s.answer("1h", &want(Some("service"), ""), Some(vec![("a\nb".to_string(), 1)]), now);
+        assert_eq!(labels(&s), ["a b"]);
+        let (text, _) = s.accept(now).unwrap();
+        assert_eq!(tokenize(&text), ["service=a\nb"]);
     }
 
     #[test]

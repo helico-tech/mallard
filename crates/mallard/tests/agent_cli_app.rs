@@ -294,3 +294,76 @@ async fn text_output_cleans_server_text() {
     assert_eq!(o["items"][0]["name"], EVIL, "JSON keeps the value: {o}");
     srv.stop().await;
 }
+
+/// Issue 0149: `mallard setup my_app` next to a project `my_app`, with the issue's own
+/// commands. It gets that project, again and again, and the telemetry its env vars name joins
+/// it: one app, no second project.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn setup_finds_a_project_through_the_slug_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let url = srv.url.as_str();
+    let http = reqwest::Client::new();
+    let r = http
+        .post(format!("{url}/sentry/v1/projects"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"name": "x", "slug": "my_app"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let id = r.json::<Value>().await.unwrap()["id"].clone();
+
+    // The first and the second time: idempotent, created false.
+    for _ in 0..2 {
+        let s = mallard(url, &["setup", "my_app", "--json"]).await.ok().json();
+        assert_eq!((&s["project"]["id"], &s["project"]["slug"], &s["created"]), (&id, &json!("my_app"), &json!(false)));
+        assert_eq!(s["env"]["OTEL_SERVICE_NAME"], "my_app", "{s}");
+    }
+    let text = mallard(url, &["setup", "my_app"]).await.ok();
+    assert!(text.stderr.contains("project exists: my_app"), "{}", text.stderr);
+    assert!(text.stdout.contains("OTEL_SERVICE_NAME=my_app"), "{}", text.stdout);
+    // Other spellings of the same app, and the other command that makes a project.
+    let s = mallard(url, &["setup", "My App", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&id, &json!(false)), "{s}");
+    let s = mallard(url, &["projects", "create", "my_app", "--if-not-exists", "--json"]).await.ok().json();
+    assert_eq!(s["id"], id, "{s}");
+    // Without --if-not-exists it is a conflict that names the project, as for an equal slug.
+    let o = mallard(url, &["projects", "create", "my_app", "--json"]).await;
+    assert_eq!(o.code, 5, "{}", o.stderr);
+    assert!(o.error()["message"].as_str().unwrap().contains("my_app"), "{}", o.stderr);
+
+    send_service(&http, &srv.otlp_url, "my_app", 1).await;
+    let apps = eventually("the service", || async {
+        let a = mallard(url, &["apps", "--json"]).await.ok().json();
+        (a["items"][0]["services"] == json!(["my_app"])).then_some(a)
+    })
+    .await;
+    assert_eq!(apps["count"], 1, "one app: {apps}");
+    assert_eq!((&apps["items"][0]["slug"], &apps["items"][0]["project"]), (&json!("my_app"), &id), "{apps}");
+    let list = mallard(url, &["projects", "list", "--json"]).await.ok().json();
+    assert_eq!(list["count"], 1, "no second project: {list}");
+
+    // A normal name is as it was: created, then reused.
+    let s = mallard(url, &["setup", "other_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("other-app"), &json!(true)), "{s}");
+    let s = mallard(url, &["setup", "other_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("other-app"), &json!(false)), "{s}");
+    // A slug that was asked for is that slug.
+    let s = mallard(url, &["setup", "x", "--slug", "x_y", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("x_y"), &json!(true)), "{s}");
+    let s = mallard(url, &["setup", "x", "--slug", "x_y", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("x_y"), &json!(false)), "{s}");
+    // A server that already has both keeps both, and the exact slug wins.
+    let r = http
+        .post(format!("{url}/sentry/v1/projects"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"name": "x", "slug": "my-app"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let s = mallard(url, &["setup", "my_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("my-app"), &json!(false)), "{s}");
+    srv.stop().await;
+}

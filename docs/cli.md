@@ -15,7 +15,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | command | what |
 |---|---|
 | `mallard status` | health of both sides and what the server allows (SQL, windows, retention); exit 6 when a side is down |
-| `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project; print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
+| `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project (one with the same slug under the slug rule counts: `my_app` for `my-app`); print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
 | `mallard apps [--since 24h]` | every app: a project and the services with the same slug, or either alone (ADR 0027). Projects are listed whatever the window; services need data in it |
 | `mallard find <id>` | a trace or event id (32 hex) or an issue or span id (16 hex): what it is and the command to see more |
 | `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`, `--tag k=v` (repeat), `--cursor`; status changes take `--reason` |
@@ -191,3 +191,6 @@ web UI. In an app, `service=` can only name one of its services: another is refu
 and nothing is read for it. `trace=` on logs follows the trace across apps, because it asks by id.
 `op=` values come from at most the last 24h. Difference with the web UI, on purpose: there a
 suggestion is taken only after you move to it; here the first one is ready for `tab`.
+
+A name with control or bidi characters shows cleaned, in the list and in the filter, and `tab` puts
+it in as the server has it, so the filter finds it.

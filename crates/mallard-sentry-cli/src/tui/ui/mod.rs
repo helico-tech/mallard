@@ -174,7 +174,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let line = if let Some(input) = &app.input {
         Line::from(vec![
             Span::styled(" / ", th::tab_active()),
-            Span::styled(format!(" {input}"), Style::new().fg(th::YELLOW)),
+            // A suggestion puts a name in as the server has it, so it shows cleaned.
+            Span::styled(format!(" {}", fmt::clean(input)), Style::new().fg(th::YELLOW)),
             Span::styled("█", Style::new().fg(th::YELLOW).add_modifier(Modifier::SLOW_BLINK)),
             Span::styled("   key=value is a tag · enter search · esc cancel · ctrl-u clear", th::dim()),
         ])

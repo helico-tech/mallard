@@ -463,6 +463,120 @@ mod tests {
         assert_eq!(ui.app.query, "url=/check", "applied without an answer");
     }
 
+    /// A server with one project, one tag value holding U+202E and no issues. Hands back
+    /// what it was asked, with the query strings as they came in.
+    async fn server_with_a_hostile_tag() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use mallard_sentry_client::types::{IssueList, TagCount, TagStats};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let hits = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let hits = hits.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let mut n = 0;
+                    while !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf[n..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(k) => n += k,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let full = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    hits.lock().unwrap().push(full.clone());
+                    let at = crate::tui::fixtures::now();
+                    let body = match full.split('?').next().unwrap() {
+                        "/v1/projects" => serde_json::to_string(&crate::tui::fixtures::projects()).unwrap(),
+                        p if p.ends_with("/tags") => serde_json::to_string(&TagStats {
+                            total_rows: 1,
+                            sampled_rows: 1,
+                            counted_from: at,
+                            items: vec![TagCount { key: "user".into(), value: Some("a\u{202e}b".into()), count: 1 }],
+                        })
+                        .unwrap(),
+                        p if p.ends_with("/issues") => serde_json::to_string(&IssueList {
+                            issues: vec![],
+                            window_start: at,
+                            window_end: at,
+                            next_cursor: None,
+                        })
+                        .unwrap(),
+                        _ => "{}".to_string(),
+                    };
+                    let status = if body == "{}" { "503 X" } else { "200 OK" };
+                    let answer = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(answer.as_bytes()).await;
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    /// Issue 0148. Accepting a suggestion puts the value in the bar as the server has it:
+    /// the frame only ever shows it cleaned, in the list, the bar, the filter row and the
+    /// empty list, and the request holds the real value, or it would filter on nothing.
+    #[tokio::test]
+    async fn an_accepted_suggestion_shows_cleaned_and_sends_the_real_value() {
+        let (url, seen) = server_with_a_hostile_tag().await;
+        let mut ui = Embedded::new(Client::new(&url, Some("t")).unwrap(), Some("web".into()));
+        let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut frame = |ui: &mut Embedded, says: &str| {
+            term.draw(|f| ui.draw(f, f.area())).unwrap();
+            let s = screen(&term);
+            assert!(!s.contains('\u{202e}'), "raw text on the terminal: {s}");
+            assert!(s.contains(says), "no {says:?} in\n{s}");
+        };
+        const SHOWN: &str = "a\\u{202e}b";
+
+        ui.tick();
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('/'))), Outcome::Consumed);
+        for c in "user=".chars() {
+            assert_eq!(ui.handle_event(&key(KeyCode::Char(c))), Outcome::Consumed);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        for _ in 0..200 {
+            ui.tick();
+            if ui.app.suggest.has_items() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ui.app.suggest.has_items(), "no suggestion: {:?}", seen.lock().unwrap());
+        frame(&mut ui, SHOWN);
+
+        assert_eq!(ui.handle_event(&key(KeyCode::Tab)), Outcome::Consumed);
+        assert_eq!(ui.app.input.as_deref(), Some("user=a\u{202e}b "), "raw in the bar");
+        frame(&mut ui, &format!("user={SHOWN}"));
+
+        assert_eq!(ui.handle_event(&key(KeyCode::Enter)), Outcome::Consumed);
+        assert_eq!(ui.app.query, "user=a\u{202e}b");
+        let sent = |seen: &std::sync::Mutex<Vec<String>>| {
+            seen.lock().unwrap().iter().any(|q| q.contains("/issues?") && q.contains("tag=user%3Aa%E2%80%AEb"))
+        };
+        for _ in 0..200 {
+            ui.tick();
+            if sent(&seen) && ui.app.issues_loaded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sent(&seen), "{:?}", seen.lock().unwrap());
+        assert!(ui.app.issues_loaded);
+        frame(&mut ui, &format!("matching \"user={SHOWN}\""));
+        frame(&mut ui, &format!("/ user={SHOWN}"));
+
+        // Opened again it holds the same raw text, drawn cleaned.
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('/'))), Outcome::Consumed);
+        assert_eq!(ui.app.input.as_deref(), Some("user=a\u{202e}b"));
+        frame(&mut ui, &format!(" user={SHOWN}"));
+    }
+
     /// In a host, the tab asks for an app, or says the app has no project.
     #[tokio::test]
     async fn an_empty_scope_says_what_to_do() {

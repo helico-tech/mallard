@@ -64,42 +64,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     api_routes().split_for_parts().1
 }
 
-/// A valid project slug for a service name (`unknown_service:node` →
-/// `unknown-service-node`). The one slug rule: a project and a service with the
-/// same slug under it are one app, and the bridge sends exceptions there. Project
-/// slugs go through it too, see [`app_projects`].
-pub(crate) fn service_slug(service: &str) -> String {
-    let mut s = mallard_sentry_api::slugify(service);
-    s.truncate(64);
-    let s = s.trim_end_matches('-').to_string();
-    if s.is_empty() {
-        "unknown-service".into()
-    } else if s.bytes().all(|b| b.is_ascii_digit()) {
-        format!("service-{s}")
-    } else {
-        s
-    }
-}
-
-/// The project that takes the services of each [`service_slug`], from `(id, slug)`.
-/// A project may have a slug the rule never gives (`my_app`), and it still joins the
-/// service `my_app`. If several projects share a slug under the rule, the one whose slug
-/// is exactly that wins, and then the oldest. The others stay apps of their own.
-pub(crate) fn app_projects<'a>(projects: impl IntoIterator<Item = (u32, &'a str)>) -> HashMap<String, (u32, &'a str)> {
-    let mut found: HashMap<String, (u32, &str)> = HashMap::new();
-    for (id, slug) in projects {
-        let key = service_slug(slug);
-        let rank = |(id, slug): (u32, &str)| (slug != key, id);
-        match found.get_mut(&key) {
-            Some(best) if rank((id, slug)) < rank(*best) => *best = (id, slug),
-            Some(_) => {}
-            None => {
-                found.insert(key, (id, slug));
-            }
-        }
-    }
-    found
-}
+pub(crate) use mallard_sentry_api::{app_projects, service_slug};
 
 /// One list from `(id, slug, name)` of the projects and the service names. An app with a
 /// project has the project's slug, because clients use it as the project's name.

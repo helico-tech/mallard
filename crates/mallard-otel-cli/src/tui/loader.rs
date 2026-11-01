@@ -155,7 +155,7 @@ impl Data {
                 }
                 map
             })),
-            // `Suggest` cleans what it keeps.
+            // `Suggest` keeps it raw, to insert it, and cleans what it shows.
             Data::Suggest(a) => Data::Suggest(a),
         })
     }

@@ -102,7 +102,10 @@ fn render_filters(f: &mut Frame, area: Rect, app: &App) {
     let mut right = vec![];
     if !app.query.is_empty() {
         right.push(Span::styled("/ ", th::key()));
-        right.push(Span::styled(format!("{} ", fmt::truncate(&app.query, 24)), Style::new().fg(th::YELLOW)));
+        right.push(Span::styled(
+            format!("{} ", fmt::truncate(&fmt::clean(&app.query), 24)),
+            Style::new().fg(th::YELLOW),
+        ));
         right.push(Span::styled("(esc clears)  ", th::faint()));
     }
     right.push(Span::styled("sort ", th::faint()));
@@ -158,7 +161,8 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
         } else {
             let what =
                 if app.status == StatusFilter::All { String::new() } else { format!("{} ", app.status.as_str()) };
-            let q = if app.query.is_empty() { String::new() } else { format!(" matching \"{}\"", app.query) };
+            let q =
+                if app.query.is_empty() { String::new() } else { format!(" matching \"{}\"", fmt::clean(&app.query)) };
             vec![
                 Line::from(Span::styled(
                     format!("✓ No {what}issues{q} in the last {window}"),

@@ -2,6 +2,8 @@
 //! OpenAPI schema from them with the `openapi` feature), the client, the
 //! CLI and the TUI, so all of them always agree on the wire format.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -86,11 +88,50 @@ pub fn slugify(name: &str) -> String {
     s.trim_end_matches('-').to_string()
 }
 
+/// A valid project slug for a service name (`unknown_service:node` →
+/// `unknown-service-node`). The one slug rule (ADR 0027, 0029): a project and a service with
+/// the same slug under it are one app, and the bridge sends exceptions there. Project slugs
+/// go through it too, see [`app_projects`].
+pub fn service_slug(service: &str) -> String {
+    let mut s = slugify(service);
+    s.truncate(64);
+    let s = s.trim_end_matches('-').to_string();
+    if s.is_empty() {
+        "unknown-service".into()
+    } else if s.bytes().all(|b| b.is_ascii_digit()) {
+        format!("service-{s}")
+    } else {
+        s
+    }
+}
+
+/// The project that takes each [`service_slug`], from `(id, slug)`. A project may have a slug
+/// the rule never gives (`my_app`), and it still joins the service `my_app`. If several
+/// projects share a slug under the rule, the one whose slug is exactly that wins, and then
+/// the oldest. The others stay apps of their own.
+pub fn app_projects<'a>(projects: impl IntoIterator<Item = (u32, &'a str)>) -> HashMap<String, (u32, &'a str)> {
+    let mut found: HashMap<String, (u32, &str)> = HashMap::new();
+    for (id, slug) in projects {
+        let key = service_slug(slug);
+        let rank = |(id, slug): (u32, &str)| (slug != key, id);
+        match found.get_mut(&key) {
+            Some(best) if rank((id, slug)) < rank(*best) => *best = (id, slug),
+            Some(_) => {}
+            None => {
+                found.insert(key, (id, slug));
+            }
+        }
+    }
+    found
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateProject {
     pub name: String,
-    /// URL-safe identifier. Derived from `name` when omitted.
+    /// URL-safe identifier. Derived from `name` when omitted; then a project that has that
+    /// slug under the slug rule (`my_app` for the name `my-app`) is a 409, because a second
+    /// project would take its services.
     pub slug: Option<String>,
     pub platform: Option<String>,
 }

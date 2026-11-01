@@ -96,7 +96,7 @@ impl TraceFilter {
     pub fn to_query(&self) -> String {
         let mut parts = Vec::new();
         let q = |v: &str| {
-            if v.contains(' ') { format!("\"{v}\"") } else { v.to_string() }
+            if v.contains(char::is_whitespace) { format!("\"{v}\"") } else { v.to_string() }
         };
         if let Some(s) = &self.service {
             parts.push(format!("service={}", q(s)));
@@ -139,6 +139,9 @@ mod tests {
         assert_eq!(f.min_ms, Some(1500.0));
         assert_eq!(f.attrs, vec!["http.route=/x"]);
         assert_eq!(parse_trace_filter(&f.to_query()).unwrap(), f);
+        // A name as the server has it can hold any white space, and must stay one word.
+        let raw = parse_trace_filter("service=\"a\nb\tc\"").unwrap();
+        assert_eq!(parse_trace_filter(&raw.to_query()).unwrap(), raw);
         assert!(parse_trace_filter("bogus").is_err());
         assert_eq!(parse_trace_filter(">200").unwrap().min_ms, Some(200.0));
     }
