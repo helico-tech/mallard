@@ -306,7 +306,10 @@ impl Config {
             ("retention.logs", &self.retention.logs),
             ("retention.metrics", &self.retention.metrics),
         ] {
-            parse_duration(v).with_context(|| format!("{name} = {v:?}"))?;
+            let d = parse_duration(v).with_context(|| format!("{name} = {v:?}"))?;
+            if d > MAX_DURATION {
+                bail!("{name} = {v:?} is longer than 100 years");
+            }
         }
         for (name, v) in [
             ("ingest.max_buffer_bytes", &self.ingest.max_buffer_bytes),
@@ -323,6 +326,7 @@ impl Config {
             ("maintenance.full_compact_interval", &self.maintenance.full_compact_interval),
             ("maintenance.retention_interval", &self.maintenance.retention_interval),
             ("query.timeout", &self.query.timeout),
+            ("query.max_window", &self.query.max_window),
         ] {
             if parse_duration(v)?.is_zero() {
                 bail!("{name} must be greater than 0");
@@ -375,6 +379,9 @@ impl Config {
         include_str!("../../../config/otel-ducklake.example.toml")
     }
 }
+
+/// Upper bound for every duration setting; keeps date arithmetic in range.
+const MAX_DURATION: Duration = Duration::from_secs(100 * 366 * 86_400);
 
 pub fn is_identifier(s: &str) -> bool {
     !s.is_empty()
@@ -550,6 +557,12 @@ mod tests {
         let mut cfg = Config::default();
         cfg.ingest.flush_interval = "0".into();
         assert!(cfg.validate().is_err());
+        let mut cfg = Config::default();
+        cfg.retention.traces = "300000y".into();
+        assert!(cfg.validate().is_err(), "durations are bounded");
+        let mut cfg = Config::default();
+        cfg.query.max_window = "0".into();
+        assert!(cfg.validate().is_err(), "a zero max_window makes every query fail");
         let mut cfg = Config::default();
         cfg.ingest.flush_rows = 0;
         assert!(cfg.validate().is_err());

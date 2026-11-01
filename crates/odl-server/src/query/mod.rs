@@ -185,21 +185,33 @@ pub struct Window {
 }
 
 impl Window {
+    /// Resolve `from`/`to`/`since`. Without `from` and `since` the window is
+    /// `default` long, capped at `max`.
     pub fn resolve(w: &TimeWindow, default: Duration, max: Duration) -> QResult<Self> {
+        let too_large =
+            || bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max)));
         let to = w.to.unwrap_or_else(Utc::now);
+        // `since` is user input: check it against `max` before any date
+        // arithmetic, and never let the subtraction overflow (chrono panics).
+        let back = |d: Duration| -> QResult<DateTime<Utc>> {
+            if d > max {
+                return Err(too_large());
+            }
+            TimeDelta::from_std(d)
+                .ok()
+                .and_then(|d| to.checked_sub_signed(d))
+                .ok_or_else(|| bad("time window starts before the earliest supported time"))
+        };
         let from = match (w.from, w.since.as_deref()) {
             (Some(f), _) => f,
-            (None, Some(s)) => {
-                let d = parse_duration(s).map_err(|e| bad(format!("invalid since={s:?}: {e}")))?;
-                to - TimeDelta::from_std(d).map_err(|_| bad("since is too large"))?
-            }
-            (None, None) => to - TimeDelta::from_std(default).unwrap(),
+            (None, Some(s)) => back(parse_duration(s).map_err(|e| bad(format!("invalid since={s:?}: {e}")))?)?,
+            (None, None) => back(default.min(max))?,
         };
         if from >= to {
             return Err(bad("`from` must be before `to`"));
         }
         if (to - from).to_std().unwrap_or(Duration::MAX) > max {
-            return Err(bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max))));
+            return Err(too_large());
         }
         Ok(Self { from, to })
     }
@@ -331,6 +343,31 @@ mod tests {
         assert!(r.step(Some("100ms")).is_ok());
         assert!(r.step(Some("0s")).is_ok());
     }
+
+    #[test]
+    fn huge_since_is_an_error_not_a_panic() {
+        let w = TimeWindow { since: Some("300000y".into()), ..Default::default() };
+        let day = Duration::from_secs(86_400);
+        assert!(Window::resolve(&w, day, 31 * day).is_err());
+        // Even when the window limit allows it, the subtraction must not overflow.
+        assert!(Window::resolve(&w, day, Duration::MAX).is_err());
+    }
+
+    #[test]
+    fn default_window_is_capped_at_max_window() {
+        let day = Duration::from_secs(86_400);
+        let r = Window::resolve(&TimeWindow::default(), 7 * day, day).unwrap();
+        assert!((r.secs() - 86_400.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn from_must_be_before_to() {
+        let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let w = TimeWindow { from: Some(t), to: Some(t), since: None };
+        assert!(Window::resolve(&w, HOUR, HOUR).is_err());
+    }
+
+    const HOUR: Duration = Duration::from_secs(3600);
 
     #[test]
     fn buckets_cover_window() {
