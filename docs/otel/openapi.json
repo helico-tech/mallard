@@ -1655,6 +1655,12 @@
             "format": "int64",
             "description": "Items refused because the write buffer was full (HTTP 429 / gRPC\nUNAVAILABLE). Exporters retry them, so they usually arrive later.",
             "minimum": 0
+          },
+          "throttled_requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests refused with back-pressure (HTTP 429 / gRPC UNAVAILABLE):\nby the in-flight memory limit before the body is read (their items\nare unknown, so not in `throttled`), or by the full write buffer.\nExporters retry them.",
+            "minimum": 0
           }
         }
       },

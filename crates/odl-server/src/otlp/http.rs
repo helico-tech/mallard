@@ -58,7 +58,14 @@ async fn admit(State(ingest): State<Arc<Ingest>>, req: HttpRequest, next: Next) 
         .and_then(|v| v.to_str().ok())
         .is_none_or(|e| e.trim().is_empty() || e.trim().eq_ignore_ascii_case("identity"));
     let len = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok());
-    let Some(_inflight) = ingest.admit(len.filter(|_| identity)) else {
+    let signal = match req.uri().path() {
+        "/v1/traces" => Signal::Traces,
+        "/v1/logs" => Signal::Logs,
+        "/v1/metrics" => Signal::Metrics,
+        // No such route: nothing is read, so nothing to reserve.
+        _ => return next.run(req).await,
+    };
+    let Some(_inflight) = ingest.admit(signal, len.filter(|_| identity)) else {
         return error(StatusCode::TOO_MANY_REQUESTS, fmt, "too many requests in flight; retry later".into());
     };
     next.run(req).await

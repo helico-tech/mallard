@@ -236,6 +236,12 @@ pub struct SignalIngestStats {
     /// UNAVAILABLE). Exporters retry them, so they usually arrive later.
     #[serde(default)]
     pub throttled: u64,
+    /// Requests refused with back-pressure (HTTP 429 / gRPC UNAVAILABLE):
+    /// by the in-flight memory limit before the body is read (their items
+    /// are unknown, so not in `throttled`), or by the full write buffer.
+    /// Exporters retry them.
+    #[serde(default)]
+    pub throttled_requests: u64,
     /// Items refused for good: invalid (e.g. a span without a valid trace
     /// or span id, reported as OTLP partial success) or in a request too
     /// large for the buffer.
