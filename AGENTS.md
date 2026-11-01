@@ -17,9 +17,9 @@ cargo run -p mallard -- --help        # status, setup, find, issues, traces, log
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
-JS end-to-end tests with real Sentry SDKs: `e2e/sentry/README.md`.
-After API changes: `cargo run -p odl-server -- openapi > docs/otel/openapi.json`
-and `cargo run -p sdl-server -- openapi > docs/sentry/openapi.json` (tests check them).
+JS end-to-end tests with real Sentry SDKs against `mallard-server`: `e2e/sentry/README.md`.
+After API changes: `UPDATE_OPENAPI=1 cargo test -p odl-server -p sdl-server --test openapi`
+rewrites `docs/otel/openapi.json` and `docs/sentry/openapi.json` (tests check them).
 Helm: `helm lint --strict deploy/helm/mallard -f deploy/helm/mallard/ci/<file>.yaml`;
 the rendered `mallard.toml` must pass `mallard-server check -c <file>`.
 CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
@@ -43,9 +43,9 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
-`sdl-server` and `odl-server` still build their standalone binaries
-(`sentry-ducklake`, `otel-ducklake`); the e2e suite and load tests use them.
-The product is `mallard`.
+Only `mallard-server` and `mallard` are built as binaries (plus the
+load generators `sdl-loadgen` and `odl-loadgen`, which target mallard); the
+`sdl-*`/`odl-*` server and CLI crates are libraries.
 
 ## Rules
 

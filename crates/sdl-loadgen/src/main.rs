@@ -1,9 +1,9 @@
-//! `sdl-loadgen`: push realistic Sentry error envelopes at a server and
+//! `sdl-loadgen`: push realistic Sentry error envelopes at mallard and
 //! measure throughput, latency and query times.
 //!
 //! ```text
-//! sdl-loadgen --url http://localhost:8000 --token dev ingest --rate 500 --duration 60s
-//! sdl-loadgen --url http://localhost:8000 --token dev query --project loadtest
+//! sdl-loadgen --url http://localhost:8080 --token dev ingest --rate 500 --duration 60s
+//! sdl-loadgen --url http://localhost:8080 --token dev query --project loadtest
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -18,19 +18,27 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 #[derive(Parser)]
-#[command(name = "sdl-loadgen", about = "Load generator for sentry-ducklake")]
+#[command(name = "sdl-loadgen", about = "Sentry load generator for mallard")]
 struct Cli {
-    /// Server base URL.
-    #[arg(long, env = "SDL_URL", default_value = "http://localhost:8000")]
+    /// mallard base URL (its http_addr); the Sentry side is under `/sentry`.
+    #[arg(long, env = "MALLARD_URL", default_value = "http://localhost:8080")]
     url: String,
-    /// API token (to create the project and run queries).
-    #[arg(long, env = "SDL_TOKEN")]
+    /// API token (one of the server's server.api_tokens; to create the
+    /// project and run queries).
+    #[arg(long, env = "MALLARD_TOKEN")]
     token: String,
     /// Project slug to use (created if missing).
     #[arg(long, default_value = "loadtest")]
     project: String,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+impl Cli {
+    /// Base URL of the Sentry side (API and ingest).
+    fn sentry_url(&self) -> String {
+        format!("{}/sentry", self.url.trim_end_matches('/'))
+    }
 }
 
 #[derive(Subcommand)]
@@ -204,9 +212,9 @@ async fn ingest(
     breadcrumbs: usize,
     gzip: bool,
 ) -> Result<()> {
-    let client = sdl_client::Client::new(&cli.url, Some(&cli.token))?;
+    let client = sdl_client::Client::new(&cli.sentry_url(), Some(&cli.token))?;
     let project = ensure_project(&client, &cli.project).await?;
-    let url = format!("{}/api/{}/envelope/", cli.url.trim_end_matches('/'), project.id);
+    let url = format!("{}/api/{}/envelope/", cli.sentry_url(), project.id);
     let auth = format!("Sentry sentry_version=7, sentry_client=sdl-loadgen/0.1, sentry_key={}", project.public_key);
     let http = reqwest::Client::builder().pool_max_idle_per_host(concurrency).build()?;
     let counters = Arc::new(Counters::default());
@@ -339,7 +347,7 @@ async fn timed<T, F: std::future::Future<Output = Result<T, sdl_client::Error>>>
 
 async fn query(cli: &Cli, reps: usize) -> Result<()> {
     use sdl_client::types::*;
-    let c = sdl_client::Client::new(&cli.url, Some(&cli.token))?;
+    let c = sdl_client::Client::new(&cli.sentry_url(), Some(&cli.token))?;
     let p = cli.project.as_str();
     let stats = c.stats(p, &WindowQuery { since: Some("30d".into()), interval: None }).await?;
     println!("project {p}: {} events in 30d, {} issues\n", stats.total_events, stats.unique_issues);

@@ -1,6 +1,6 @@
 [package]
 name = "odl-loadgen"
-description = "Realistic OTLP load generator for otel-ducklake benchmarks and demos"
+description = "Realistic OTLP load generator for mallard benchmarks and demos"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

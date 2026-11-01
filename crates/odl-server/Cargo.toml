@@ -7,10 +7,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "otel-ducklake"
-path = "src/main.rs"
-
 [dependencies]
 odl-api.workspace = true
 mallard-common = { workspace = true, features = ["server"] }

@@ -3,7 +3,7 @@
 //! The server derives its OpenAPI document from these types, and the `odl`
 //! CLI/TUI deserializes responses into them. Changing a type here changes the
 //! public API: regenerate `docs/otel/openapi.json`
-//! (`cargo run -p odl-server -- openapi > docs/otel/openapi.json`).
+//! (`UPDATE_OPENAPI=1 cargo test -p odl-server --test openapi`).
 //!
 //! Conventions:
 //! - Times are RFC 3339 strings in UTC.

@@ -1,4 +1,6 @@
-//! Runs the real `sdl` binary against a tiny fake HTTP server.
+//! Runs the real `mallard` binary's Sentry commands against a tiny fake
+//! HTTP server (the Sentry API is under `/sentry`). Moved from `sdl-cli`
+//! when the standalone `sdl` binary was removed.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -48,12 +50,13 @@ fn serve(routes: Vec<(&'static str, u16, String)>, delay: Duration) -> String {
     format!("http://{addr}")
 }
 
-fn sdl(url: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_sdl"))
+fn mallard(url: &str, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mallard"))
         .args(args)
-        .env("SDL_URL", url)
-        .env("SDL_TOKEN", "t")
-        .env("SDL_PROJECT", "web")
+        .env("MALLARD_URL", url)
+        .env("MALLARD_TOKEN", "t")
+        .env("MALLARD_PROJECT", "web")
+        .env_remove("MALLARD_FORMAT")
         .env_remove("NO_COLOR")
         .stdin(Stdio::null())
         .output()
@@ -100,31 +103,31 @@ fn issue_and_event_fields_cannot_inject_terminal_escapes() {
     );
     let url = serve(
         vec![
-            ("/v1/projects/web/issues/", 200, detail),
-            ("/v1/projects/web/issues", 200, list),
-            ("/v1/projects/web/events/e1", 200, event),
+            ("/sentry/v1/projects/web/issues/", 200, detail),
+            ("/sentry/v1/projects/web/issues", 200, list),
+            ("/sentry/v1/projects/web/events/e1", 200, event),
         ],
         Duration::ZERO,
     );
 
-    let out = sdl(&url, &["issues", "list"]);
+    let out = mallard(&url, &["issues", "list"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_no_escapes(&out.stdout);
     assert!(String::from_utf8_lossy(&out.stdout).contains("evil"));
 
-    let out = sdl(&url, &["issues", "show", "a1b2c3d4e5f6a7b8"]);
+    let out = mallard(&url, &["issues", "show", "a1b2c3d4e5f6a7b8"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_no_escapes(&out.stdout);
     // The hint works even with several projects.
-    assert!(String::from_utf8_lossy(&out.stdout).contains("sdl events show e1 --issue a1b2c3d4e5f6a7b8 -p web"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("mallard events show e1 --issue a1b2c3d4e5f6a7b8 -p web"));
 
-    let out = sdl(&url, &["events", "show", "e1"]);
+    let out = mallard(&url, &["events", "show", "e1"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_no_escapes(&out.stdout);
     assert!(String::from_utf8_lossy(&out.stdout).contains("Breadcrumbs"));
 
     // --json keeps the data as is; serde escapes it.
-    let out = sdl(&url, &["events", "show", "e1", "--json"]);
+    let out = mallard(&url, &["events", "show", "e1", "--json"]);
     assert!(out.status.success());
     assert_no_escapes(&out.stdout);
     assert!(String::from_utf8_lossy(&out.stdout).contains("\\u001b]52"));
@@ -136,19 +139,20 @@ fn closed_stdout_is_not_a_crash() {
         r#"{{"issues":[{}}}],"window_start":"2026-10-17T00:00:00Z","window_end":"2026-10-31T12:00:00Z"}}"#,
         issue_json()
     );
-    let url = serve(vec![("/v1/projects/web/issues", 200, list)], Duration::from_millis(300));
+    let url = serve(vec![("/sentry/v1/projects/web/issues", 200, list)], Duration::from_millis(300));
     for args in [&["issues", "list", "--json"][..], &["issues", "list"][..]] {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_sdl"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mallard"))
             .args(args)
-            .env("SDL_URL", &url)
-            .env("SDL_TOKEN", "t")
-            .env("SDL_PROJECT", "web")
+            .env("MALLARD_URL", &url)
+            .env("MALLARD_TOKEN", "t")
+            .env("MALLARD_PROJECT", "web")
+            .env_remove("MALLARD_FORMAT")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        drop(child.stdout.take()); // like `| true`: the reader is gone before sdl prints
+        drop(child.stdout.take()); // like `| true`: the reader is gone before mallard prints
         let out = child.wait_with_output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
@@ -156,7 +160,8 @@ fn closed_stdout_is_not_a_crash() {
 
 #[test]
 fn tui_without_a_terminal_fails_with_a_message() {
-    let out = sdl("http://127.0.0.1:9", &["tui"]);
+    // The Sentry-side TUI checks the terminal before it calls the server.
+    let out = mallard("http://127.0.0.1:9", &["errors", "tui"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("needs an interactive terminal"), "{err}");
@@ -164,8 +169,8 @@ fn tui_without_a_terminal_fails_with_a_message() {
 
 #[test]
 fn maintenance_errors_use_the_api_error_message() {
-    let url = serve(vec![("/v1/maintenance", 500, r#"{"error":"disk full"}"#.into())], Duration::ZERO);
-    let out = sdl(&url, &["maintenance"]);
+    let url = serve(vec![("/sentry/v1/maintenance", 500, r#"{"error":"disk full"}"#.into())], Duration::ZERO);
+    let out = mallard(&url, &["errors", "maintenance"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("server error (500): disk full") && !err.contains('{'), "{err}");
@@ -177,12 +182,12 @@ fn color_flag_and_short_flags() {
         r#"{{"issues":[{}}}],"window_start":"2026-10-17T00:00:00Z","window_end":"2026-10-31T12:00:00Z"}}"#,
         issue_json()
     );
-    let url = serve(vec![("/v1/projects/web/issues", 200, list)], Duration::ZERO);
+    let url = serve(vec![("/sentry/v1/projects/web/issues", 200, list)], Duration::ZERO);
     // Piped stdout: no colour by default, colour with --color always.
-    let plain = sdl(&url, &["issues", "list", "-s", "1h", "-n", "5"]);
+    let plain = mallard(&url, &["issues", "list", "-s", "1h", "-n", "5"]);
     assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
     assert!(!plain.stdout.contains(&0x1b));
-    let colored = sdl(&url, &["issues", "list", "--color", "always"]);
+    let colored = mallard(&url, &["issues", "list", "--color", "always"]);
     let text = String::from_utf8_lossy(&colored.stdout);
     assert!(text.contains("\u{1b}["), "{text}");
     // The only escape sequences are our own styling.
@@ -192,9 +197,12 @@ fn color_flag_and_short_flags() {
 
 #[test]
 fn errors_print_one_friendly_line() {
-    let out = sdl("http://127.0.0.1:9", &["info", "--color", "never"]);
+    let out = mallard("http://127.0.0.1:9", &["errors", "info", "--color", "never"]);
     assert_eq!(out.status.code(), Some(6), "unreachable is exit code 6 (ADR 0008)");
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(err.lines().count(), 1, "{err}");
-    assert!(err.starts_with("error: cannot reach server at http://127.0.0.1:9 (is it running? set SDL_URL)"), "{err}");
+    assert!(
+        err.starts_with("error: cannot reach server at http://127.0.0.1:9/sentry (is it running? set MALLARD_URL)"),
+        "{err}"
+    );
 }

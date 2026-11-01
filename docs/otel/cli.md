@@ -1,5 +1,9 @@
 # CLI and TUI (`odl`)
 
+> **Retired binary.** The standalone `odl` binary is gone (story 0002/06);
+> these commands are part of `mallard` (see [../cli.md](../cli.md)), with
+> `MALLARD_URL`/`MALLARD_TOKEN` instead of `ODL_URL`/`ODL_TOKEN`.
+
 `odl` talks to the query API. It does not need DuckDB.
 
 ```sh

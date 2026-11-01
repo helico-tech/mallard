@@ -1,5 +1,8 @@
 # AGENTS.md
 
+> **Retired binary.** Written for the standalone `otel-ducklake` repo; its
+> binaries are gone (story 0002/06). The repo map is [AGENTS.md](../../AGENTS.md).
+
 otel-ducklake: an OpenTelemetry (OTLP) collector in Rust that stores traces,
 logs and metrics in DuckLake (DuckDB 2.0 / DuckLake 1.1) and serves them
 through an OpenAPI query API, a CLI and a TUI.

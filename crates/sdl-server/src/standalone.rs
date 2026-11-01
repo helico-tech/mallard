@@ -1,5 +1,6 @@
-//! Flags of the standalone `sentry-ducklake` binary (also `SDL_*`
-//! environment variables). One storage URL holds everything:
+//! A standalone set-up from flags or `SDL_*` environment variables, used by
+//! the tests (the `sentry-ducklake` binary is gone). One storage URL holds
+//! everything:
 //!
 //! ```text
 //! <storage_url>/lake/        DuckLake Parquet data files

@@ -1,13 +1,9 @@
 [package]
 name = "sdl-cli"
-description = "sdl: command-line tool and terminal UI for sentry-ducklake"
+description = "Sentry commands and TUI component of the mallard CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[[bin]]
-name = "sdl"
-path = "src/main.rs"
 
 [dependencies]
 sdl-client.workspace = true

@@ -138,7 +138,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
     api.merge(docs_routes(&openapi, "otel-ducklake API"))
 }
 
-/// The OpenAPI document without building a server (for `otel-ducklake openapi`).
+/// The OpenAPI document without building a server (for `tests/openapi.rs`).
 pub fn openapi() -> utoipa::openapi::OpenApi {
     protected_routes().merge(public_routes()).split_for_parts().1
 }

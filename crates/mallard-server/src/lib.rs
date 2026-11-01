@@ -3,6 +3,7 @@
 //!
 //! Routes on `server.http_addr`:
 //! - `/sentry/...`  everything of sentry-ducklake (ingest, `/v1` API, sentry-cli)
+//! - `/api/0/...`   sentry-cli's API again (it only accepts a URL root)
 //! - `/otel/...`    otel-ducklake query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
 //! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
@@ -27,6 +28,37 @@ use tracing::info;
 
 pub use config::Config;
 use config::{OTEL_PREFIX, SENTRY_PREFIX};
+
+/// Path of the sentry-cli API.
+const SENTRY_CLI_PREFIX: &str = "/api/0";
+
+/// sentry-cli (Rust, 2.x and 3.x) refuses a `--url` with a path ("not on URL
+/// root"), so its API is served on the root as well as under `/sentry`.
+/// `nest_service` strips the prefix (and, unlike a route with a wildcard,
+/// adds no path parameter the Sentry handlers would see); put it back so
+/// the Sentry router matches its own `/api/0/...` routes.
+fn sentry_cli_at_root(
+    sentry: Router,
+) -> impl tower::Service<
+    axum::extract::Request,
+    Response = axum::response::Response,
+    Error = std::convert::Infallible,
+    Future = impl Send + 'static,
+> + Clone
++ Send
++ Sync
++ 'static {
+    use tower::ServiceExt;
+    sentry.into_service().map_request(|mut req: axum::extract::Request| {
+        let rest = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
+        let mut parts = req.uri().clone().into_parts();
+        parts.path_and_query = format!("{SENTRY_CLI_PREFIX}{rest}").parse().ok();
+        if let Ok(uri) = axum::http::Uri::from_parts(parts) {
+            *req.uri_mut() = uri;
+        }
+        req
+    })
+}
 
 pub struct Platform {
     cfg: Arc<Config>,
@@ -77,6 +109,7 @@ impl Platform {
         let (sentry, otel) = (self.sentry.clone(), self.otel.clone());
         let mut r = Router::new()
             .nest(SENTRY_PREFIX, self.sentry.router())
+            .nest_service(SENTRY_CLI_PREFIX, sentry_cli_at_root(self.sentry.router()))
             .nest(OTEL_PREFIX, self.otel.api_router())
             .merge(self.otel.otlp_http_router())
             .route("/healthz", get(|| async { "ok" }))

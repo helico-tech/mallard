@@ -7,13 +7,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "sentry-ducklake"
-path = "src/main.rs"
-
 [dependencies]
 sdl-types = { workspace = true, features = ["openapi"] }
 sdl-protocol.workspace = true

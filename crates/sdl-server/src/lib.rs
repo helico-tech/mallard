@@ -21,7 +21,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Or run the `sentry-ducklake` binary ([`Standalone`]). The library
+//! Or open it on its own with [`Standalone`] (used by the tests). The library
 //! installs no global tracing subscriber or metrics recorder; it only emits
 //! `tracing` events and `metrics` counters.
 
