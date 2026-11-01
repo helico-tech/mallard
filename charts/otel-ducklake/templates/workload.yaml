@@ -1,0 +1,51 @@
+{{- if eq .Values.mode "single" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "otel-ducklake.fullname" . }}
+  labels:
+    {{- include "otel-ducklake.labels" . | nindent 4 }}
+spec:
+  # A DuckDB-file catalog allows a single writer: always one replica.
+  replicas: 1
+  serviceName: {{ include "otel-ducklake.fullname" . }}-headless
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "otel-ducklake.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "otel-ducklake.podTemplate" . | nindent 4 }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
+{{- else }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "otel-ducklake.fullname" . }}
+  labels:
+    {{- include "otel-ducklake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "otel-ducklake.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    {{- include "otel-ducklake.podTemplate" . | nindent 4 }}
+{{- end }}

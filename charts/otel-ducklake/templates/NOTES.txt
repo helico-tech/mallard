@@ -1,0 +1,21 @@
+otel-ducklake is running in {{ .Values.mode }} mode{{ if eq .Values.mode "shared" }} with {{ .Values.replicaCount }} replicas{{ end }}.
+
+Send telemetry (inside the cluster):
+  OTLP/gRPC: {{ include "otel-ducklake.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.ports.otlpGrpc }}
+  OTLP/HTTP: http://{{ include "otel-ducklake.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.ports.otlpHttp }}
+
+  e.g. OTEL_EXPORTER_OTLP_ENDPOINT=http://{{ include "otel-ducklake.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.ports.otlpHttp }}
+
+Query from your machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "otel-ducklake.fullname" . }} 8080:{{ .Values.service.ports.api }}
+  odl --url http://localhost:8080 status
+  odl --url http://localhost:8080 tui
+  API reference: http://localhost:8080/docs
+{{- if .Values.auth.enabled }}
+
+The query API requires a bearer token:
+  export ODL_TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ include "otel-ducklake.secretName" . }} -o jsonpath='{.data.api-token}' | base64 -d)
+{{- end }}
+
+Or inside the pod:
+  kubectl -n {{ .Release.Namespace }} exec -it {{ if eq .Values.mode "single" }}statefulset{{ else }}deploy{{ end }}/{{ include "otel-ducklake.fullname" . }} -- odl status

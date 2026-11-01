@@ -1,0 +1,9 @@
+target/
+.git/
+.claude/
+**/*.ducklake
+**/*.ducklake.wal
+data/
+deploy/compose/data/
+charts/
+docs/

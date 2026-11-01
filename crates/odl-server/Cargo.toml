@@ -11,7 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 odl-api.workspace = true
-duckdb.workspace = true
+# json/parquet are compiled in: always needed, and container images then
+# work without downloading them (the extension files are ~100 MB).
+duckdb = { workspace = true, features = ["json", "parquet"] }
 arrow.workspace = true
 opentelemetry-proto.workspace = true
 tonic.workspace = true
