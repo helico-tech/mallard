@@ -164,7 +164,7 @@ pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
     // Fail fast with a clear message instead of an empty screen.
     client.sentry.info().await.map_err(|e| crate::described(mallard_client::Error::Sentry(e), client.base_url()))?;
     let tabs: Vec<Box<dyn Pane>> = vec![
-        Box::new(mallard_sentry_cli::Embedded::new(client.sentry.clone(), project).with_hints(crate::ERRORS_HINTS)),
+        Box::new(mallard_sentry_cli::Embedded::new(client.sentry.clone(), project)),
         Box::new(telemetry_pane(client)),
     ];
     let mut host = Host { tabs, active: ERRORS, base_url: client.base_url().to_string() };

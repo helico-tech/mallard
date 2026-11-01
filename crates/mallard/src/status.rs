@@ -8,7 +8,7 @@ use mallard_term::error::{Described, Kind};
 use mallard_term::text::clean;
 use serde::Serialize;
 
-use crate::{ERRORS_HINTS, Run, TELEMETRY_HINTS};
+use crate::Run;
 
 /// The JSON document of `mallard status`.
 #[derive(Debug, Serialize)]
@@ -85,8 +85,8 @@ fn capabilities(s: Option<&ServerInfo>, o: Option<&Stats>) -> Capabilities {
 pub(crate) async fn run(r: &Run) -> Result<()> {
     let c = &r.client;
     let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
-    let s = s.map_err(|e| mallard_sentry_cli::classify(&e, c.sentry.base_url(), &ERRORS_HINTS));
-    let o = o.map_err(|e| mallard_otel_cli::classify(&e, c.otel.base_url(), &TELEMETRY_HINTS));
+    let s = s.map_err(|e| mallard_sentry_cli::classify(&e, c.sentry.base_url(), &mallard_sentry_cli::HINTS));
+    let o = o.map_err(|e| mallard_otel_cli::classify(&e, c.otel.base_url(), &mallard_otel_cli::HINTS));
     let caps = capabilities(s.as_ref().ok(), o.as_ref().ok());
     // The command fails when a side does: a wrong token wins (exit 3),
     // else "unavailable" (exit 6).

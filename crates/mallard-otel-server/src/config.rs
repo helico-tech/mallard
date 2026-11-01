@@ -2,12 +2,12 @@
 //!
 //! mallard fills `ingest`, `retention`, `maintenance` and `query` from its
 //! `[otel.*]` sections (`MALLARD_OTEL__<SECTION>__<KEY>`), and the other
-//! sections from its own settings.
+//! sections from its own settings. It binds the listeners itself.
 
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use mallard_common::{ByteSize, LogFormat, duration};
+use mallard_common::{ByteSize, duration};
 use mallard_duck::{DuckDbConfig, StorageConfig};
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,6 @@ use crate::store::schema::Signal;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub server: ServerConfig,
     pub storage: StorageConfig,
     pub ingest: IngestConfig,
     pub retention: RetentionConfig,
@@ -24,19 +23,6 @@ pub struct Config {
     pub query: QueryConfig,
     pub auth: AuthConfig,
     pub duckdb: DuckDbConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ServerConfig {
-    /// OTLP/gRPC listen address.
-    pub otlp_grpc_addr: String,
-    /// OTLP/HTTP listen address.
-    pub otlp_http_addr: String,
-    /// Query API (OpenAPI) listen address.
-    pub api_addr: String,
-    /// Log format: `text` or `json`.
-    pub log_format: LogFormat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,17 +101,6 @@ pub struct AuthConfig {
     pub api_tokens: Vec<String>,
     /// Bearer tokens accepted by OTLP receivers. Empty = no auth.
     pub ingest_tokens: Vec<String>,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            otlp_grpc_addr: "0.0.0.0:4317".into(),
-            otlp_http_addr: "0.0.0.0:4318".into(),
-            api_addr: "0.0.0.0:8080".into(),
-            log_format: LogFormat::Text,
-        }
-    }
 }
 
 impl Default for IngestConfig {
@@ -256,7 +231,6 @@ mod tests {
     fn typed_values_parse_at_load_time() {
         let cfg = load(
             r#"
-            server.log_format = "json"
             ingest = { flush_interval = "250ms", max_buffer_bytes = "1GiB", max_request_bytes = 1024 }
             retention = { traces = "0", logs = "3d" }
             duckdb.memory_limit = "2GB"
@@ -264,7 +238,6 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(cfg.server.log_format, LogFormat::Json);
         assert_eq!(cfg.ingest.flush_interval, Duration::from_millis(250));
         assert_eq!(cfg.ingest.max_buffer_bytes, ByteSize(1 << 30));
         assert_eq!(cfg.ingest.max_request_bytes, ByteSize(1024));
@@ -275,7 +248,7 @@ mod tests {
         // Defaults survive the round trip through TOML.
         assert_eq!(load("", &[]).unwrap().retention.metrics, days(30));
         for bad in [
-            "server.log_format = \"xml\"",
+            "server.api_addr = \"127.0.0.1:0\"",
             "ingest.flush_interval = \"5 parsecs\"",
             "ingest.flush_interval = 5",
             "ingest.max_buffer_bytes = \"5XB\"",

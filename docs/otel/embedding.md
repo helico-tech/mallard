@@ -28,9 +28,8 @@ otel.run_background(async { shutdown_signal().await }).await?; // flusher + main
   them on a shared catalog, and the Sentry side leaves them alone
   (`Host::catalog_maintenance = None`).
 - `set_ingest_hook` and `ingest_traces` are the bridge's way in (ADR 0009).
-- `Server::new` and `Server::serve` (own connection and listeners) are left over from
-  the old binary; only tests use them
-  ([issue 0121](../../work/issues/0121-standalone-paths-left-in-side-crates.md)).
+- `Server::new` opens its own connection and lake. Only the tests use it. The library
+  binds no listeners: the host serves the routers.
 - Use DuckDB only through `mallard_duck::duckdb` (one version for the whole
   workspace), and build `libduckdb-sys` without debug assertions (the profile in the
   root `Cargo.toml`).

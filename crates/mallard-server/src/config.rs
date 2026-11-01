@@ -182,7 +182,6 @@ impl Config {
     pub fn otel_config(&self) -> mallard_otel_server::config::Config {
         let o = &self.otel;
         mallard_otel_server::config::Config {
-            server: Default::default(),
             storage: StorageConfig { artifacts_path: String::new(), ..self.storage.clone() },
             ingest: o.ingest.clone(),
             retention: o.retention.clone(),
@@ -332,6 +331,12 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.storage.catalog, format!("postgres:password={pw}"));
         assert_eq!(cfg.server.api_tokens, ["a", "b"]);
+    }
+
+    #[test]
+    fn log_format_is_mallards() {
+        assert_eq!(load("", TOKEN).unwrap().server.log_format, LogFormat::Text);
+        assert_eq!(load("[server]\nlog_format = \"json\"", TOKEN).unwrap().server.log_format, LogFormat::Json);
     }
 
     #[test]

@@ -167,10 +167,7 @@ async fn screenshots() {
 
     let client = Client::new(&url, token.as_deref()).unwrap();
     let tabs: Vec<Box<dyn Pane>> = vec![
-        Box::new(
-            mallard_sentry_cli::Embedded::new(client.sentry.clone(), Some("api".into()))
-                .with_hints(crate::ERRORS_HINTS),
-        ),
+        Box::new(mallard_sentry_cli::Embedded::new(client.sentry.clone(), Some("api".into()))),
         Box::new(telemetry_pane(&client)),
     ];
     let mut host = Host { tabs, active: ERRORS, base_url: url.clone() };
