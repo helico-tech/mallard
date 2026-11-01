@@ -481,7 +481,7 @@ fn global_keys() {
     assert_eq!(e.view, View::Traces);
     assert_eq!(e.handle_event(&key(KeyCode::BackTab)), Outcome::Consumed);
     assert_eq!(e.view, View::Overview);
-    let before = e.since();
+    let before = e.since().to_string();
     e.handle_event(&ch('t'));
     assert_ne!(e.since(), before);
     e.handle_event(&ch('T'));
@@ -498,14 +498,15 @@ fn global_keys() {
 
 #[test]
 fn open_trace_and_since() {
-    let mut e = Embedded::with_since(Client::new("http://127.0.0.1:9", None).unwrap(), "2d");
+    let mut e = Embedded::with_since(Client::new("http://127.0.0.1:9", None).unwrap(), "2d").unwrap();
     assert_eq!(e.since(), "2d");
     assert_eq!(e.window_secs(), 172_800.0);
     e.open_trace("0AF7-6519-16cd43dd8448eb211c80319c");
     assert_eq!(e.view, View::Traces);
     assert_eq!(e.traces.detail.as_ref().unwrap().trace_id, TID);
-    e.open_trace("nope");
+    assert!(!e.open_trace("nope"));
     assert!(e.flash.as_ref().is_some_and(|f| f.1));
+    assert!(!e.open_trace("0af7651916cd43dd8448eb211c80319z"), "not hex");
     // tick without a runtime must not panic
     e.tick();
 }
@@ -538,7 +539,7 @@ async fn settle(e: &mut Embedded) {
 #[ignore]
 async fn live_snapshot() {
     let url = std::env::var("ODL_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-    let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m");
+    let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m").unwrap();
     for (k, name) in [('1', "overview"), ('2', "traces"), ('3', "logs"), ('4', "metrics"), ('5', "status")] {
         e.handle_event(&ch(k));
         settle(&mut e).await;
@@ -607,4 +608,21 @@ fn long_lists_scroll() {
     e.traces.detail.as_mut().unwrap().sel.select(Some(2999));
     let s = render(&mut e, 160, 40);
     assert!(s.lines().any(|l| l.contains("▌") && l.contains("op-0000000000002999")), "{s}");
+}
+
+// Review finding 13: windows parse like on the server; a bad one is refused
+// and custom windows do not pile up.
+#[test]
+fn time_windows() {
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    e.set_since("1h30m").unwrap();
+    assert_eq!(e.window_secs(), 5400.0);
+    assert!(e.set_since("bogus").is_err());
+    assert_eq!(e.since(), "1h30m", "a bad window changes nothing");
+    for w in ["2h", "3h", "4h"] {
+        e.set_since(w).unwrap();
+    }
+    assert_eq!(e.windows.len(), WINDOWS.len() + 1);
+    e.set_since("6h").unwrap();
+    assert_eq!(e.window_secs(), 6.0 * 3600.0);
 }

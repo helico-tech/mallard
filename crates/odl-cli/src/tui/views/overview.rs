@@ -72,7 +72,7 @@ impl Embedded {
         if !force && !due(self.overview.refreshed, Duration::from_secs(5)) {
             return;
         }
-        let since = Some(self.since());
+        let since = Some(self.since().to_string());
         let c = self.client.clone();
         let q = ServiceQuery { since: since.clone(), ..Default::default() };
         if !self.loader.load(Kind::Services, force, async move { c.services(&q).await }, Data::Services) {

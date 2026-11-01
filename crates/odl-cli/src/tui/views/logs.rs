@@ -169,7 +169,7 @@ impl State {
 
 impl Embedded {
     pub(crate) fn refresh_logs(&mut self, force: bool) {
-        let since = self.since();
+        let since = self.since().to_string();
         if (!self.logs.requested && self.logs.retry_at.is_none_or(|t| Instant::now() >= t)) || force {
             let mut q = self.logs.base_query(since.clone());
             q.limit = Some(1000);
@@ -265,7 +265,9 @@ impl Embedded {
                 KeyCode::PageDown => self.logs.detail = Some(scroll.saturating_add(10)),
                 KeyCode::PageUp => self.logs.detail = Some(scroll.saturating_sub(10)),
                 KeyCode::Char('o' | 't') => match self.selected_log().and_then(|l| l.trace_id.clone()) {
-                    Some(id) => self.open_trace(&id),
+                    Some(id) => {
+                        self.open_trace(&id);
+                    }
                     None => self.flash_error("this record has no trace id"),
                 },
                 _ => {}
@@ -318,7 +320,9 @@ impl Embedded {
             }
             KeyCode::Char('o') => {
                 match self.selected_log().and_then(|l| l.trace_id.clone()) {
-                    Some(id) => self.open_trace(&id),
+                    Some(id) => {
+                        self.open_trace(&id);
+                    }
                     None => self.flash_error("this record has no trace id"),
                 }
                 Some(Outcome::Consumed)

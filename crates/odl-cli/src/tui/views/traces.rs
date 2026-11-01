@@ -180,7 +180,7 @@ impl Embedded {
         }
         let f = &self.traces.filter;
         let q = TraceQuery {
-            since: Some(self.since()),
+            since: Some(self.since().to_string()),
             service: f.service.clone(),
             operation: f.operation.clone(),
             errors_only: Some(f.errors_only),

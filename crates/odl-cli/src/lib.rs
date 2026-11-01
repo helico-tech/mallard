@@ -18,16 +18,17 @@ use odl_client::{Client, LogTail, api::*};
 
 use crate::fmt::{emit, json_safe, log_line, *};
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, ValueEnum)]
 pub enum Output {
+    #[default]
     Table,
     Json,
 }
 
-#[derive(clap::Args, Clone)]
+#[derive(clap::Args, Debug, Clone)]
 pub struct Win {
-    /// Relative window ending now, e.g. 15m, 6h, 2d.
-    #[arg(short, long, default_value = "1h")]
+    /// Relative window ending now, e.g. 15m, 6h, 2d, 1h30m.
+    #[arg(short, long, default_value = "1h", value_parser = check_window)]
     pub since: String,
     /// Absolute start (RFC 3339). Overrides --since.
     #[arg(long)]
@@ -38,7 +39,7 @@ pub struct Win {
 }
 
 /// All `odl` commands. Embedders can mount this as a subcommand.
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Cmd {
     /// Check that the server is up (no token needed); exit code 1 if not.
     Health,
@@ -88,7 +89,7 @@ pub enum Cmd {
     Trace {
         trace_id: String,
         /// Look-back window for the lookup.
-        #[arg(short, long, default_value = "7d")]
+        #[arg(short, long, default_value = "7d", value_parser = check_window)]
         since: String,
         /// Show span attributes.
         #[arg(short = 'A', long)]
@@ -112,8 +113,8 @@ pub enum Cmd {
         attr: Vec<String>,
         #[arg(short = 'n', long, default_value_t = 100)]
         limit: u32,
-        /// Keep printing new records.
-        #[arg(short, long)]
+        /// Keep printing new records (from --from/--since on, until Ctrl-C).
+        #[arg(short, long, conflicts_with = "to")]
         follow: bool,
     },
     /// List metrics.
@@ -154,17 +155,26 @@ pub enum Cmd {
     /// Interactive terminal UI.
     Tui {
         /// Initial time window.
-        #[arg(short, long, default_value = "1h")]
+        #[arg(short, long, default_value = "1h", value_parser = check_window)]
         since: String,
     },
 }
 
-impl Win {
-    /// `--since` in seconds, if it parses.
-    pub fn since_secs(&self) -> Option<f64> {
-        tui::humantime_secs(&self.since)
+/// Parse a time window such as `15m`, `2d` or `1h30m`, as the server does.
+pub(crate) fn parse_window(s: &str) -> Result<Duration> {
+    let d = humantime::parse_duration(s.trim()).map_err(|e| anyhow::anyhow!("invalid time window {s:?}: {e}"))?;
+    if d.is_zero() {
+        bail!("invalid time window {s:?}: must be longer than zero");
     }
+    Ok(d)
+}
 
+/// clap value parser: a valid window, kept as typed (the server parses it).
+fn check_window(s: &str) -> Result<String> {
+    parse_window(s).map(|_| s.trim().to_string())
+}
+
+impl Win {
     fn parts(&self) -> (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
         (self.from, self.to, if self.from.is_some() { None } else { Some(self.since.clone()) })
     }
@@ -199,6 +209,7 @@ fn print<T: serde::Serialize + ?Sized>(out: Output, v: &T, text: impl FnOnce(&T)
 }
 
 /// Shared context for commands.
+#[derive(Debug)]
 pub struct Ctx {
     pub client: Client,
     pub output: Output,
@@ -210,7 +221,7 @@ pub struct Ctx {
 /// [`std::io::Error`] of kind `BrokenPipe` in the chain, which a binary
 /// usually treats as success.
 pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
-    let c = ctx.client.clone();
+    let c = &ctx.client;
     let out = ctx.output;
     match cmd {
         Cmd::Health => {
@@ -250,10 +261,9 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             print(out, &v, |v| traces_text(v))
         }
         Cmd::Trace { trace_id, since, attributes } => {
-            let get = |since: String| {
-                let c = c.clone();
-                let id = trace_id.clone();
-                async move { c.trace(&id, &TraceGetQuery { since: Some(since), ..Default::default() }).await }
+            let id = &trace_id;
+            let get = |since: String| async move {
+                c.trace(id, &TraceGetQuery { since: Some(since), ..Default::default() }).await
             };
             let t = match get(since.clone()).await {
                 // The server's query.max_window is smaller than the window
@@ -288,10 +298,10 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             }
             // Start where --from/--since say; the first poll shows the newest
             // `--limit` records of that window, like `tail -n N -f`.
-            let start = from.unwrap_or_else(|| {
-                let secs = w.since_secs().unwrap_or(60.0);
-                chrono::Utc::now() - chrono::TimeDelta::milliseconds((secs * 1000.0) as i64)
-            });
+            let start = match from {
+                Some(f) => f,
+                None => chrono::Utc::now() - chrono::TimeDelta::from_std(parse_window(&w.since)?)?,
+            };
             let mut tail = LogTail::new(c.clone(), q, start);
             // One Ctrl-C future for the whole loop, so a signal that arrives
             // while a request is in flight is not lost.
@@ -344,6 +354,43 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             let r = c.sql(&query, Some(limit)).await?;
             print(out, &r, sql_text)
         }
-        Cmd::Tui { since } => tui::run_standalone(c, since).await,
+        Cmd::Tui { since } => tui::run_standalone(c.clone(), &since).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        cmd: Cmd,
+    }
+
+    fn parse(args: &[&str]) -> std::result::Result<Cmd, clap::Error> {
+        Cli::try_parse_from(std::iter::once("odl").chain(args.iter().copied())).map(|c| c.cmd)
+    }
+
+    // Review finding 14: `--to` would be ignored by `--follow`.
+    #[test]
+    fn follow_conflicts_with_to() {
+        assert!(parse(&["logs", "--follow", "--to", "2026-01-01T00:00:00Z"]).is_err());
+        assert!(parse(&["logs", "--follow", "--since", "5m"]).is_ok());
+    }
+
+    // Review finding 13: windows are checked up front, as the server parses them.
+    #[test]
+    fn windows_are_validated() {
+        assert!(parse(&["services", "--since", "bogus"]).is_err());
+        assert!(parse(&["tui", "--since", "0s"]).is_err());
+        let Cmd::Services { w, .. } = parse(&["services", "--since", "1h30m"]).unwrap() else { panic!() };
+        assert_eq!(parse_window(&w.since).unwrap(), Duration::from_secs(5400));
+        assert_eq!(w.parts().2.as_deref(), Some("1h30m"));
+        let from = "2026-01-01T00:00:00Z".parse().unwrap();
+        let w = Win { since: "1h".into(), from: Some(from), to: None };
+        assert_eq!(w.parts(), (Some(from), None, None), "--from overrides --since");
     }
 }

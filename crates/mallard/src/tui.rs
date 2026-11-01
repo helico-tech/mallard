@@ -82,7 +82,7 @@ impl Pane for Telemetry {
         self.0.tick()
     }
     fn open(&mut self, trace_id: &str) {
-        self.0.open_trace(trace_id)
+        self.0.open_trace(trace_id);
     }
 }
 

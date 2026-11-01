@@ -75,7 +75,9 @@ const VIEWS: [(View, &str); 5] = [
     (View::Status, "Status"),
 ];
 
-const WINDOWS: [&str; 6] = ["5m", "15m", "1h", "6h", "24h", "7d"];
+/// Time windows `t` cycles through; `set_since` may add one more.
+const WINDOWS: [(&str, u64); 6] =
+    [("5m", 300), ("15m", 900), ("1h", 3600), ("6h", 6 * 3600), ("24h", 86_400), ("7d", 7 * 86_400)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptTarget {
@@ -97,7 +99,8 @@ pub struct Embedded {
     client: Client,
     loader: Loader,
     view: View,
-    windows: Vec<String>,
+    /// Time windows as given (sent to the server) and parsed.
+    windows: Vec<(String, Duration)>,
     win: usize,
     stats: Option<Stats>,
     stats_error: Option<String>,
@@ -116,6 +119,16 @@ pub struct Embedded {
     errors_enabled: bool,
     /// Kinds whose last load failed: only the first failure flashes.
     failing: HashSet<Kind>,
+}
+
+impl std::fmt::Debug for Embedded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Embedded")
+            .field("client", &self.client)
+            .field("view", &self.view)
+            .field("since", &self.since())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Pause before retrying a failed load.
@@ -155,7 +168,7 @@ impl Embedded {
             client,
             loader: Loader::default(),
             view: View::Overview,
-            windows: WINDOWS.iter().map(|s| s.to_string()).collect(),
+            windows: WINDOWS.iter().map(|(s, secs)| (s.to_string(), Duration::from_secs(*secs))).collect(),
             win: 2,
             stats: None,
             stats_error: None,
@@ -183,50 +196,54 @@ impl Embedded {
         self.errors_enabled = enabled;
     }
 
-    /// Start with a given time window (e.g. `15m`, `6h`, `2d`).
-    pub fn with_since(client: Client, since: &str) -> Self {
+    /// Start with a given time window (e.g. `15m`, `6h`, `2d`, `1h30m`).
+    pub fn with_since(client: Client, since: &str) -> Result<Self> {
         let mut e = Self::new(client);
-        e.set_since(since);
-        e
+        e.set_since(since)?;
+        Ok(e)
     }
 
-    /// Change the time window (e.g. `15m`).
-    pub fn set_since(&mut self, since: &str) {
+    /// Change the time window (e.g. `15m`). An invalid window is an error
+    /// and changes nothing.
+    pub fn set_since(&mut self, since: &str) -> Result<()> {
         let since = since.trim();
-        if since.is_empty() {
-            return;
-        }
-        match self.windows.iter().position(|w| w == since) {
+        let d = crate::parse_window(since)?;
+        match self.windows.iter().position(|(w, _)| w == since) {
             Some(i) => self.win = i,
             None => {
-                self.windows.push(since.to_string());
+                // At most one window besides the presets.
+                self.windows.truncate(WINDOWS.len());
+                self.windows.push((since.to_string(), d));
                 self.win = self.windows.len() - 1;
             }
         }
         self.invalidate();
+        Ok(())
     }
 
-    pub(crate) fn since(&self) -> String {
-        self.windows[self.win].clone()
+    pub(crate) fn since(&self) -> &str {
+        &self.windows[self.win].0
     }
 
-    /// Window length in seconds (for rates); falls back to one hour.
+    /// Window length in seconds (for rates).
     pub(crate) fn window_secs(&self) -> f64 {
-        humantime_secs(&self.since()).unwrap_or(3600.0)
+        self.windows[self.win].1.as_secs_f64()
     }
 
-    /// Jump to a trace (and its logs).
-    pub fn open_trace(&mut self, trace_id: &str) {
-        let id: String = trace_id.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_lowercase();
-        if id.len() != 32 {
+    /// Jump to a trace (and its logs). Returns false, and shows why, when
+    /// `trace_id` is not 32 hex characters (dashes are ignored).
+    pub fn open_trace(&mut self, trace_id: &str) -> bool {
+        let id: String = trace_id.trim().chars().filter(|c| *c != '-').collect::<String>().to_lowercase();
+        if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             self.flash_error(format!("not a trace id: {trace_id}"));
-            return;
+            return false;
         }
         self.view = View::Traces;
         self.help = false;
         self.prompt = None;
         self.logs.detail = None;
         self.open_trace_detail(id);
+        true
     }
 
     pub(crate) fn flash(&mut self, msg: impl Into<String>) {
@@ -675,24 +692,9 @@ impl Embedded {
     }
 }
 
-pub(crate) fn humantime_secs(s: &str) -> Option<f64> {
-    let s = s.trim();
-    let idx = s.find(|c: char| !c.is_ascii_digit())?;
-    let n: f64 = s[..idx].parse().ok()?;
-    let mult = match &s[idx..] {
-        "s" => 1.0,
-        "m" => 60.0,
-        "h" => 3600.0,
-        "d" => 86400.0,
-        "w" => 7.0 * 86400.0,
-        _ => return None,
-    };
-    Some(n * mult)
-}
-
 /// Run the TUI in this terminal until the user quits.
-pub async fn run_standalone(client: Client, since: String) -> Result<()> {
-    let mut app = Embedded::with_since(client, &since);
+pub async fn run_standalone(client: Client, since: &str) -> Result<()> {
+    let mut app = Embedded::with_since(client, since)?;
     // try_init installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init()?;
     let res = event_loop(&mut terminal, &mut app).await;
