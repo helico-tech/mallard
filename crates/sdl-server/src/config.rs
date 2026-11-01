@@ -106,6 +106,7 @@ pub struct Config {
     /// thread; 1 keeps compaction within small memory limits). 0 = leave the
     /// thread count alone. DuckDB's thread count is global for the database,
     /// so queries running at the same time also use this many threads.
+    /// Ignored (0) with a shared connection (`Server::with_connection`).
     #[arg(long, env = "SDL_MAINTENANCE_THREADS", default_value_t = 1)]
     pub maintenance_threads: usize,
 

@@ -68,8 +68,11 @@ impl Server {
     /// Embedded: `conn` has the DuckLake catalog attached as
     /// `cfg.lake_alias` (with secrets set). We create `cfg.schema` in it.
     /// `cfg.storage_url` is only used for sourcemap bundles (optional).
-    pub async fn with_connection(cfg: Config, conn: duckdb::Connection) -> Result<Server> {
+    /// Global DuckDB settings (threads, memory, temp dir, extensions,
+    /// `maintenance_threads`) belong to the host and are left untouched.
+    pub async fn with_connection(mut cfg: Config, conn: duckdb::Connection) -> Result<Server> {
         cfg.validate()?;
+        cfg.maintenance_threads = 0;
         if cfg.duckdb_threads.is_some()
             || cfg.duckdb_memory_limit.is_some()
             || cfg.extension_dir.is_some()
