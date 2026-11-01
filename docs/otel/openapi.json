@@ -1324,6 +1324,15 @@
           }
         }
       },
+      "AttributeSignal": {
+        "type": "string",
+        "description": "Which data `GET /api/v1/attributes` looks at.",
+        "enum": [
+          "spans",
+          "logs",
+          "metrics"
+        ]
+      },
       "AttributeStats": {
         "type": "object",
         "description": "Attribute keys (or values of one key) with how many sampled rows have them.",
@@ -1403,10 +1412,10 @@
         "type": "string",
         "description": "DuckLake catalog backend.",
         "enum": [
-          "DuckDb",
-          "Sqlite",
-          "Postgres",
-          "MySql"
+          "duckdb",
+          "sqlite",
+          "postgres",
+          "mysql"
         ]
       },
       "FlushInfo": {
@@ -1517,6 +1526,14 @@
             "description": "Per signal counters since process start."
           }
         }
+      },
+      "LogOrder": {
+        "type": "string",
+        "description": "Sort order of log records.",
+        "enum": [
+          "asc",
+          "desc"
+        ]
       },
       "LogRecord": {
         "type": "object",
@@ -1850,11 +1867,11 @@
         "type": "string",
         "description": "Kind of metric data point.",
         "enum": [
-          "Gauge",
-          "Sum",
-          "Histogram",
-          "ExponentialHistogram",
-          "Summary"
+          "gauge",
+          "sum",
+          "histogram",
+          "exponential_histogram",
+          "summary"
         ]
       },
       "OperationSummary": {
@@ -2022,9 +2039,9 @@
         "type": "string",
         "description": "Telemetry signal.",
         "enum": [
-          "Traces",
-          "Logs",
-          "Metrics"
+          "traces",
+          "logs",
+          "metrics"
         ]
       },
       "SignalIngestStats": {
@@ -2178,12 +2195,12 @@
         "type": "string",
         "description": "OTLP span kind.",
         "enum": [
-          "Unspecified",
-          "Internal",
-          "Server",
-          "Client",
-          "Producer",
-          "Consumer"
+          "UNSPECIFIED",
+          "INTERNAL",
+          "SERVER",
+          "CLIENT",
+          "PRODUCER",
+          "CONSUMER"
         ]
       },
       "SpanLink": {
@@ -2272,9 +2289,9 @@
         "type": "string",
         "description": "OTLP span status code.",
         "enum": [
-          "Unset",
-          "Ok",
-          "Error"
+          "UNSET",
+          "OK",
+          "ERROR"
         ]
       },
       "SqlColumn": {
@@ -2458,10 +2475,10 @@
         "type": "string",
         "description": "Aggregation temporality of sums and histograms; empty for gauges and\nsummaries. `mixed`: the metric catalog's value for a metric with both\ndelta and cumulative points.",
         "enum": [
-          "Unspecified",
-          "Delta",
-          "Cumulative",
-          "Mixed"
+          "",
+          "delta",
+          "cumulative",
+          "mixed"
         ]
       },
       "Trace": {

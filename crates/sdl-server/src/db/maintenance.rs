@@ -34,9 +34,6 @@ const COMPACTED_TABLES: &[&str] = &["events", "issues", "issue_activity", "artif
 /// How often the inlined-rows counter is checked.
 const ROWS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The `meta` row that says which process runs maintenance.
-pub const LEASE: &str = "maintenance_lease";
-
 /// Settings for maintenance that is not scoped to this schema.
 #[derive(Debug, Clone, Copy)]
 pub struct Maintenance {
@@ -160,7 +157,7 @@ impl Maintainer {
     }
 
     fn renew_lease(&self) -> bool {
-        match try_lease(&self.conn, &self.ns, &self.holder, self.lease_for) {
+        match mallard_duck::try_lease(&self.conn, &self.ns.sql("$S.meta"), &self.holder, self.lease_for) {
             Ok(leader) => leader,
             Err(e) => {
                 metrics::counter!("sdl_maintenance_errors_total").increment(1);
@@ -256,44 +253,6 @@ impl Maintainer {
         } else {
             metrics::counter!("sdl_maintenance_errors_total").increment(errors.len() as u64);
             Err(anyhow!(errors.join("; ")))
-        }
-    }
-}
-
-/// Take or renew the maintenance lease for `lease_for`. False when another
-/// process holds it, or takes it at this moment: its `DELETE` of the row makes
-/// the second commit conflict.
-pub fn try_lease(conn: &Connection, ns: &Ns, holder: &str, lease_for: Duration) -> Result<bool> {
-    let now = Utc::now().timestamp_micros();
-    let until = now + lease_for.as_micros() as i64;
-    conn.execute_batch("BEGIN TRANSACTION")?;
-    let attempt = (|| -> Result<bool> {
-        let mut stmt = conn.prepare(&ns.sql("SELECT value FROM $S.meta WHERE key = ?"))?;
-        let rows = stmt.query_map([LEASE], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        let taken = rows
-            .iter()
-            .filter_map(|v| v.split_once(' '))
-            .any(|(who, till)| who != holder && till.parse::<i64>().is_ok_and(|till| till > now));
-        if taken {
-            return Ok(false);
-        }
-        conn.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [LEASE])?;
-        conn.execute(
-            &ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(?))"),
-            params![LEASE, format!("{holder} {until}"), now],
-        )?;
-        conn.execute_batch("COMMIT")?;
-        Ok(true)
-    })();
-    match attempt {
-        Ok(true) => Ok(true),
-        Ok(false) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Ok(false)
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            if mallard_duck::is_conflict(&e) { Ok(false) } else { Err(e) }
         }
     }
 }

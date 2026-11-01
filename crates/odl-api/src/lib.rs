@@ -28,14 +28,36 @@ pub struct UnknownValue {
     pub value: String,
 }
 
-/// A closed set of values sent as strings: serde names, `as_str`,
-/// `Display` and `FromStr` from one list.
+/// A closed set of values sent as strings: serde names, OpenAPI schema,
+/// `as_str`, `Display` and `FromStr` from one list, plus a test (named after the
+/// type) that the OpenAPI document lists the same values.
+///
+/// The schema is written out because `derive(ToSchema)` cannot list these: it
+/// misses a `serde(rename)` whose value comes from a macro fragment (it matches a
+/// plain literal, the fragment is wrapped in an invisible group), and it ignores
+/// an empty rename, which `Temporality` needs.
 macro_rules! string_enum {
-    ($(#[$m:meta])* $name:ident: $kind:literal { $($(#[$vm:meta])* $v:ident = $s:literal),+ $(,)? }) => {
-        $(#[$m])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+    ($(#[doc = $doc:literal])* $name:ident: $kind:literal { $($(#[$vm:meta])* $v:ident = $s:literal),+ $(,)? }) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub enum $name {
             $($(#[$vm])* #[serde(rename = $s)] $v),+
+        }
+
+        impl utoipa::PartialSchema for $name {
+            fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+                utoipa::openapi::ObjectBuilder::new()
+                    .schema_type(utoipa::openapi::schema::Type::String)
+                    .description(Some([$($doc.trim()),*].join("\n")))
+                    .enum_values(Some([$($s),+]))
+                    .into()
+            }
+        }
+
+        impl ToSchema for $name {
+            fn name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
         }
 
         impl $name {
@@ -61,6 +83,12 @@ macro_rules! string_enum {
                     _ => Err(UnknownValue { kind: $kind, value: s.to_string() }),
                 }
             }
+        }
+
+        #[test]
+        #[allow(non_snake_case)]
+        fn $name() {
+            tests::document_lists_what_serde_sends(stringify!($name), &[$($name::$v),+]);
         }
     };
 }
@@ -837,6 +865,13 @@ mod tests {
         assert_eq!(f, vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]);
         assert_eq!(parse_attribute_filter("novalue"), Err(AttributeFilterError::NotKeyValue("novalue".into())));
         assert_eq!(parse_attribute_filter("=x"), Err(AttributeFilterError::EmptyKey("=x".into())));
+    }
+
+    /// Called from each `string_enum!`, so a new type cannot be left out.
+    pub(super) fn document_lists_what_serde_sends<T: Serialize>(name: &str, values: &[T]) {
+        let doc: serde_json::Value = serde_json::from_str(include_str!("../../../docs/otel/openapi.json")).unwrap();
+        let sent: Vec<_> = values.iter().map(|v| serde_json::to_value(v).unwrap()).collect();
+        assert_eq!(doc["components"]["schemas"][name]["enum"], serde_json::Value::Array(sent), "{name}");
     }
 
     #[test]

@@ -2999,6 +2999,7 @@ dependencies = [
  "tracing",
  "utoipa",
  "utoipa-axum",
+ "uuid",
  "xxhash-rust",
  "zstd 0.13.3",
 ]

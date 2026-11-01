@@ -1330,7 +1330,7 @@ pub(crate) mod tests {
         let lease = |who: &'static str, d: Duration| {
             db.read(move |c, ns| {
                 c.execute_batch("ROLLBACK")?;
-                maintenance::try_lease(c, ns, who, d)
+                mallard_duck::try_lease(c, &ns.sql("$S.meta"), who, d)
             })
         };
         assert!(lease("a", long).await.unwrap());
@@ -1365,7 +1365,9 @@ pub(crate) mod tests {
         .await;
         let lease: String = db
             .read(|c, ns| {
-                Ok(c.query_row(&ns.sql("SELECT value FROM $S.meta WHERE key = ?"), [maintenance::LEASE], |r| r.get(0))?)
+                Ok(c.query_row(&ns.sql("SELECT value FROM $S.meta WHERE key = ?"), [mallard_duck::LEASE], |r| {
+                    r.get(0)
+                })?)
             })
             .await
             .unwrap();
@@ -1386,9 +1388,11 @@ pub(crate) mod tests {
         let claim = |c: &Connection, who: &str| -> Result<()> {
             c.execute_batch("BEGIN TRANSACTION")?;
             let _: i64 =
-                c.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = ?"), [maintenance::LEASE], |r| r.get(0))?;
-            c.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [maintenance::LEASE])?;
-            c.execute(&ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(0))"), [maintenance::LEASE, who])?;
+                c.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = ?"), [mallard_duck::LEASE], |r| {
+                    r.get(0)
+                })?;
+            c.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [mallard_duck::LEASE])?;
+            c.execute(&ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(0))"), [mallard_duck::LEASE, who])?;
             Ok(())
         };
         claim(&ca, "a 0").unwrap();

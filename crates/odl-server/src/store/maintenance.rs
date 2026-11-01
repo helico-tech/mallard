@@ -14,6 +14,12 @@
 //!
 //! Merges and deletes are scoped to this schema's tables. Snapshot expiry and
 //! file cleanup are catalog-wide: otel owns them on a shared catalog (ADR 0001).
+//!
+//! With several processes on one catalog, the holder of a lease in `meta` runs
+//! the tasks (ADR 0021, issue 0051): each task due tries the lease first. It is
+//! valid for 3 of the shortest interval, so a stopped process is replaced soon.
+//! Overlapping runs stay safe (losers of a conflict retry next run), only wasteful.
+//! The one-shot [`run_once`] ignores the lease.
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -79,24 +85,30 @@ fn run(
     stop: Arc<AtomicBool>,
 ) {
     let start = Instant::now();
+    let holder = uuid::Uuid::new_v4().simple().to_string();
+    let lease_for = lease_duration(&s);
+    let leader = || holds_lease(&conn, &schema, &holder, lease_for);
     // Stagger the first runs a little so start-up stays fast.
-    // Random offset so replicas sharing a catalog don't compact in lock-step
-    // (concurrent merges of the same files conflict and waste work).
-    let jitter = jitter(s.compact_interval / 2);
-    let mut next_compact = start + s.compact_interval.min(Duration::from_secs(60)) + jitter;
-    let mut next_full = start + s.full_compact_interval + jitter;
+    let mut next_compact = start + s.compact_interval.min(Duration::from_secs(60));
+    let mut next_full = start + s.full_compact_interval;
     let mut next_retention = start + Duration::from_secs(30).min(s.retention_interval);
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now >= next_retention {
-            task(&stats, "retention", || retention(&conn, &schema, &s, &r));
+            if leader() {
+                task(&stats, "retention", || retention(&conn, &schema, &s, &r));
+            }
             next_retention = Instant::now() + s.retention_interval;
         } else if now >= next_full {
-            task(&stats, "full_compaction", || compact(&conn, &schema, None));
+            if leader() {
+                task(&stats, "full_compaction", || compact(&conn, &schema, None));
+            }
             next_full = Instant::now() + s.full_compact_interval;
             next_compact = Instant::now() + s.compact_interval;
         } else if now >= next_compact {
-            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size.0)));
+            if leader() {
+                task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size.0)));
+            }
             next_compact = Instant::now() + s.compact_interval;
         } else {
             // Woken early by `stop`.
@@ -106,16 +118,23 @@ fn run(
     info!("maintenance stopped");
 }
 
-/// Pseudo-random duration in `[0, max)`, without a RNG dependency.
-fn jitter(max: Duration) -> Duration {
-    let ms = max.as_millis() as u64;
-    if ms == 0 {
-        return Duration::ZERO;
+/// How long a lease holds: the holder renews it at every task, so a few of the
+/// shortest interval. A longer run may outlive it; that overlap is safe.
+fn lease_duration(s: &MaintenanceConfig) -> Duration {
+    s.compact_interval.min(s.full_compact_interval).min(s.retention_interval).saturating_mul(3)
+}
+
+/// Whether this process may run a task now. On an error it waits for the next
+/// task: the lease saves work, it is not worth more than a warning.
+fn holds_lease(conn: &Connection, schema: &str, holder: &str, lease_for: Duration) -> bool {
+    match mallard_duck::try_lease(conn, &format!("{CATALOG}.{schema}.meta"), holder, lease_for) {
+        Ok(leader) => leader,
+        Err(e) => {
+            metrics::counter!("odl_maintenance_errors_total", "task" => "lease").increment(1);
+            warn!(error = %super::redact(&format!("{e:#}")), "maintenance lease failed");
+            false
+        }
     }
-    let nanos =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u64;
-    let seed = nanos ^ ((std::process::id() as u64) << 20);
-    Duration::from_millis(xxhash_rust::xxh3::xxh3_64(&seed.to_le_bytes()) % ms)
 }
 
 /// Run one task and record the outcome. A panic counts as a failure, so the
@@ -141,7 +160,9 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
 }
 
 /// Maintenance once ([`crate::run_maintenance`]): compaction of
-/// small files (of all files with `full`), then retention.
+/// small files (of all files with `full`), then retention. Ignores the lease, as
+/// on the Sentry side: next to a running holder it can lose a conflict, which
+/// is an error here and safe to run again.
 pub fn run_once(
     conn: &Connection,
     schema: &str,
@@ -273,7 +294,9 @@ pub fn retention(conn: &Connection, schema: &str, s: &MaintenanceConfig, r: &Ret
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use chrono::TimeZone;
+    use std::path::Path;
 
     #[test]
     fn cutoff_aligns_to_days() {
@@ -291,6 +314,104 @@ mod tests {
         let m = stats.last_maintenance().unwrap();
         assert!(!m.ok);
         assert!(m.detail.contains("boom"), "{}", m.detail);
+    }
+
+    #[test]
+    fn a_lease_holds_for_three_of_the_shortest_interval() {
+        let mut m = MaintenanceConfig::default();
+        assert_eq!(lease_duration(&m), Duration::from_secs(30 * 60));
+        m.retention_interval = Duration::from_secs(60);
+        assert_eq!(lease_duration(&m), Duration::from_secs(3 * 60));
+        m = MaintenanceConfig {
+            compact_interval: Duration::MAX,
+            full_compact_interval: Duration::MAX,
+            retention_interval: Duration::MAX,
+            ..m
+        };
+        assert_eq!(lease_duration(&m), Duration::MAX);
+    }
+
+    fn config_on(catalog: &str, dir: &Path) -> Config {
+        let mut cfg = Config::default();
+        cfg.storage.catalog = catalog.to_string();
+        cfg.storage.data_path = format!("{}/", dir.join("lake").display());
+        let every = Duration::from_millis(100);
+        cfg.maintenance.compact_interval = every;
+        cfg.maintenance.full_compact_interval = every;
+        cfg.maintenance.retention_interval = every;
+        cfg
+    }
+
+    fn lease_row(lake: &Lake) -> String {
+        let conn = lake.connect().unwrap();
+        conn.query_row("SELECT value FROM meta WHERE key = ?", [mallard_duck::LEASE], |r| r.get(0)).unwrap()
+    }
+
+    /// Issue 0051: while another process holds the lease this one runs no task,
+    /// but the one-shot command works; when the lease runs out this one takes over.
+    fn waits_for_the_lease_of_another_process(catalog: &str, dir: &Path) {
+        let cfg = config_on(catalog, dir);
+        let (other, this) = (Lake::open(&cfg).unwrap(), Lake::open(&cfg).unwrap());
+        let other_conn = other.connect().unwrap();
+        let lease = |d| mallard_duck::try_lease(&other_conn, "lake.otel.meta", "other", d).unwrap();
+        assert!(lease(Duration::from_secs(600)));
+
+        let stats = Arc::new(Stats::default());
+        let m = Maintenance::start(&this, cfg.maintenance.clone(), cfg.retention.clone(), stats.clone()).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(stats.last_maintenance().is_none(), "ran a task under another's lease");
+
+        let done = crate::run_maintenance(&cfg, false).unwrap();
+        assert!(done.iter().any(|d| d.starts_with("retention")), "{done:?}");
+        assert!(lease_row(&other).starts_with("other "), "the one-shot run leaves the lease alone");
+
+        assert!(lease(Duration::from_millis(1)), "the holder renews, briefly");
+        for _ in 0..300 {
+            if stats.last_maintenance().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        drop(m);
+        assert!(stats.last_maintenance().is_some(), "never took over");
+        assert!(!lease_row(&other).starts_with("other "), "this process holds it now");
+    }
+
+    #[test]
+    fn waits_for_the_lease_on_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = format!("sqlite:{}", dir.path().join("catalog.sqlite").display());
+        waits_for_the_lease_of_another_process(&catalog, dir.path());
+    }
+
+    /// Needs an empty Postgres database, e.g.
+    /// `ODL_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
+    #[test]
+    #[ignore]
+    fn waits_for_the_lease_on_postgres() {
+        let dir = tempfile::tempdir().unwrap();
+        let libpq = std::env::var("ODL_TEST_POSTGRES").expect("ODL_TEST_POSTGRES");
+        waits_for_the_lease_of_another_process(&format!("postgres:{libpq}"), dir.path());
+    }
+
+    /// The very first lease of a catalog has one winner too: the row exists
+    /// from the start, so both `DELETE`s remove it and the second commit loses.
+    #[test]
+    fn the_first_lease_has_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_on(&format!("sqlite:{}", dir.path().join("catalog.sqlite").display()), dir.path());
+        let (a, b) = (Lake::open(&cfg).unwrap(), Lake::open(&cfg).unwrap());
+        assert_eq!(lease_row(&a), "", "one row, however many processes started");
+        let claim = |c: &Connection, who: &str| {
+            c.execute_batch("BEGIN TRANSACTION").unwrap();
+            c.execute("DELETE FROM meta WHERE key = ?", [mallard_duck::LEASE]).unwrap();
+            c.execute("INSERT INTO meta VALUES (?, ?, now()::TIMESTAMP)", [mallard_duck::LEASE, who]).unwrap();
+        };
+        let (ca, cb) = (a.connect().unwrap(), b.connect().unwrap());
+        claim(&ca, "a 0");
+        claim(&cb, "b 0");
+        let results = [ca.execute_batch("COMMIT"), cb.execute_batch("COMMIT")];
+        assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1, "{results:?}");
     }
 
     #[test]
