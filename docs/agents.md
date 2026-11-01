@@ -31,6 +31,8 @@ mallard status                             # exit 0: both sides up
   a duration ago (`--from 2h --to 1h`). The JSON `window` is the resolved window.
 - With `--format json|ndjson`, an error is one JSON line on stderr:
   `{"error":{"code":"not_found","message":"…","status":404,"retryable":false,"hint":null}}`.
+- `--quiet` drops the `note:` lines on stderr (truncation, waiting, fallbacks);
+  data, warnings and errors still print. (`-q` is `--query` on several commands.)
 
 Exit codes:
 
@@ -44,7 +46,7 @@ Exit codes:
 | 5 | conflict | |
 | 6 | unavailable: server down, busy, timeout; `status` with a side down | retry later |
 | 7 | turned off on the server (SQL) | ask for `otel.query.enable_sql = true` |
-| 8 | condition not met | |
+| 8 | condition not met: `--wait` or `logs -f --until-match … --for …` saw nothing in time | wait longer, check the filters |
 
 ## Recipes
 
@@ -54,6 +56,15 @@ mallard issues list --since 1h --sort count -n 5 --fields id,title,count,last_se
 mallard issues show <issue-id> --json      # latest_event: exception, in-app frames, request, trace_id
 mallard trace <trace-id> --json            # spans + Sentry errors + logs of the request
 mallard logs --around <event timestamp> --window 2m -S <service>
+```
+
+**Wait for data after a test run** (ingest takes a few seconds). `--wait <dur>`
+works on `events list`, `traces list`, `logs`, `trace` and `find`: it polls until
+there is a result, else prints the empty result and exits 8.
+```sh
+mallard events list --trace <trace-id> --wait 30s --json
+mallard find <trace-id> --wait 30s
+mallard logs -S checkout -q "order 42" --since 5m --wait 20s
 ```
 
 **What is this id?** (pasted from a log or a bug report)
@@ -82,7 +93,9 @@ mallard issues resolve <issue-id> --reason "fixed in #123" --json
 ```sh
 mallard setup checkout --platform node >> .env
 # SENTRY_DSN, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL, OTEL_SERVICE_NAME
-mallard send-test --dsn "$SENTRY_DSN"                 # then: mallard events list --since 5m
+mallard setup checkout --sentry-cli >> .env           # adds SENTRY_URL, SENTRY_ORG, SENTRY_PROJECT,
+                                                      # SENTRY_AUTH_TOKEN (the CLI's token) for sourcemaps
+mallard send-test --dsn "$SENTRY_DSN"                 # then: mallard events list --since 5m --wait 30s
 ```
 
 **Latency and errors per service / endpoint:**
@@ -90,6 +103,20 @@ mallard send-test --dsn "$SENTRY_DSN"                 # then: mallard events lis
 mallard services --since 1h
 mallard ops -S checkout --since 1h
 mallard traces list -S checkout --errors --since 15m -n 10
+```
+
+**Did it get slower?** `ops --compare <dur>` adds the same window `<dur>` earlier:
+`span_count_before`, `p95_ms_before`, `p95_change_pct`, `error_rate_before`,
+`error_rate_change` (null when the operation had no spans then).
+```sh
+mallard ops -S checkout --since 1h --compare 1d --fields name,p95_ms,p95_change_pct,error_rate_change
+```
+
+**Over time** (one item per bucket, `time` = bucket start):
+```sh
+mallard series spans -S checkout -O "POST /pay" --since 6h --step 5m   # count, errors, p50/p95/p99_ms
+mallard series logs -S checkout --since 1h                             # total, debug, info, warn, error
+mallard series errors --since 1d --step 1h                             # Sentry events, errors, warnings, other
 ```
 In `traces list`, `error_count` counts spans with error status and `sentry_errors`
 counts Sentry error events of the trace (`null` when the Sentry side could not be
@@ -106,6 +133,9 @@ mallard traces list --since 1h --format ndjson --fields trace_id,root_name,sentr
 mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id
 mallard logs -t <trace-id>
 mallard logs -S checkout -f --format ndjson            # follow until stopped
+mallard logs -S checkout -f --for 2m --format ndjson   # follow for 2 minutes, then exit 0
+mallard logs -S checkout -f --until-match "listening on" --for 1m   # exit 0 at the first match
+                                                       # (body, case-insensitive); exit 8 if none in 1m
 ```
 
 **Metrics:**
@@ -125,8 +155,8 @@ mallard sql "SELECT service_name, count(*) FROM spans GROUP BY 1"   # exit 7 whe
 
 ## Good to know
 
-- Data arrives a few seconds after it is sent (telemetry: `ingest_lag_secs`). Retry
-  a lookup that finds nothing right after a test run.
+- Data arrives a few seconds after it is sent (telemetry: `ingest_lag_secs`). Use
+  `--wait 30s` on a lookup right after a test run.
 - Default windows: issues 14d, events all (with `--trace` 30d), traces/logs/metrics 1h,
   `trace`/`find` 7d. The server caps windows (`max_window_secs`).
 - Lists are capped by `--limit` (`-n`); keep it small and use `--fields`.

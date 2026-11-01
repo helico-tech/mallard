@@ -32,7 +32,7 @@ the rendered `mallard.toml` must pass `mallard-server check -c <file>`.
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
-| `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error kinds and exit codes, `--format`/`--fields`/list envelope (`output`), `--since/--from/--to` (`window`), TUI theme/keys/`Outcome` (ADR 0006, 0008) |
+| `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error kinds and exit codes, `--format`/`--fields`/list envelope (`output`), `--since/--from/--to` (`window`), `--wait` (`wait`), TUI theme/keys/`Outcome` (ADR 0006, 0008) |
 | `crates/sdl-*` | Sentry side: `sdl-protocol` (pure protocol), `sdl-server` (ingest, writer, `/v1` API), `sdl-types`, `sdl-client`, `sdl-cli` (commands + TUI component), `sdl-loadgen` |
 | `crates/odl-*` | OpenTelemetry side: `odl-server` (OTLP receivers, storage, maintenance, query API), `odl-api`, `odl-client`, `odl-cli` (commands + TUI component), `odl-loadgen` |
 | `config/` | example configs |
