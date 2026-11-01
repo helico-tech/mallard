@@ -1,0 +1,23 @@
+[package]
+name = "mallard-duck"
+description = "DuckDB/DuckLake set-up shared by the mallard servers; owns the duckdb version"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+mallard-common.workspace = true
+duckdb.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -2287,9 +2287,9 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
- "duckdb",
  "futures",
  "mallard-client",
+ "mallard-duck",
  "mallard-server",
  "metrics-exporter-prometheus",
  "odl-cli",
@@ -2315,16 +2315,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "mallard-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "humantime",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+]
+
+[[package]]
+name = "mallard-duck"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "duckdb",
+ "mallard-common",
+ "serde",
+ "tempfile",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "mallard-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
- "duckdb",
  "figment",
  "futures",
  "mallard-client",
+ "mallard-common",
+ "mallard-duck",
  "metrics-exporter-prometheus",
  "odl-server",
  "reqwest",
@@ -2895,6 +2932,7 @@ name = "odl-api"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mallard-common",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2960,10 +2998,12 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
- "duckdb",
  "flate2",
  "futures",
  "humantime",
+ "mallard-common",
+ "mallard-duck",
+ "metrics",
  "odl-api",
  "odl-client",
  "opentelemetry-proto",
@@ -2971,18 +3011,14 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "toml 0.9.12+spec-1.1.0",
  "tonic",
  "tower",
  "tower-http 0.7.1",
  "tracing",
- "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
  "xxhash-rust",
@@ -4110,6 +4146,7 @@ name = "sdl-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mallard-common",
  "serde",
  "serde_json",
  "utoipa",
