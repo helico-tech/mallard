@@ -32,6 +32,10 @@ pub enum Kind {
     LogTail,
     MetricList,
     MetricQuery,
+    /// Error events of the listed traces (the host's error lookup).
+    TraceErrors,
+    /// Error events of the open trace.
+    SpanErrors,
 }
 
 /// A loaded value.
@@ -51,6 +55,8 @@ pub enum Data {
     },
     MetricList(Vec<MetricInfo>),
     MetricQuery(MetricQueryResult),
+    /// From the host's error lookup, which fails in its own way.
+    Errors(Result<crate::ErrorMap, String>),
 }
 
 pub struct Loaded {
