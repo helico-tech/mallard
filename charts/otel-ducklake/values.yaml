@@ -51,7 +51,8 @@ storage:
 ingest:
   flushInterval: 5s
   flushRows: 200000
-  maxBufferBytes: 512MB
+  # Ingest buffer; counts toward pod memory (see duckdb.memoryLimit).
+  maxBufferBytes: 256MB
   maxRequestBytes: 32MB
 
 retention:
@@ -87,9 +88,10 @@ auth:
   ingestToken: ""
 
 duckdb:
-  # DuckDB buffer limit. The process needs about this + 0.5 GB (Parquet
-  # writers, allocator), so keep it at most (container limit - 600MB), ~60%.
-  memoryLimit: 1200MB
+  # DuckDB buffer limit. Peak pod memory is about
+  #   memoryLimit + ingest.maxBufferBytes + 0.5 GB (Parquet writers, allocator)
+  # measured at saturation (2 CPU, 2Gi: 1GB + 256MB + 0.5GB fits).
+  memoryLimit: 1GB
   threads: 0
 
 logFormat: json
