@@ -123,6 +123,52 @@
         }
       }
     },
+    "/v1/events/{event_id}": {
+      "get": {
+        "description": "One event by id, in any project (for looking up an id without knowing its project).",
+        "operationId": "find_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "32 hex chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/info": {
       "get": {
         "operationId": "info",
@@ -315,6 +361,56 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Only events received in this window, e.g. `1h` (with `from`/`to`;\ndefault: no window).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -323,6 +419,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -490,6 +595,30 @@
               ],
               "format": "int32",
               "minimum": 0
+            }
+          },
+          {
+            "name": "new",
+            "in": "path",
+            "description": "Only issues first seen inside the window (new issues).",
+            "required": true,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "first_release",
+            "in": "path",
+            "description": "Only issues first seen in this release.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -677,6 +806,7 @@
         }
       },
       "patch": {
+        "description": "Set the status. Idempotent: when the issue already has that status nothing is written and `changed` is false.",
         "operationId": "update_issue",
         "parameters": [
           {
@@ -712,6 +842,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IssueDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -1147,6 +1286,13 @@
                   "$ref": "#/components/schemas/IssueActivity"
                 }
               },
+              "changed": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Only in `PATCH` answers: false when the issue already had that status\n(nothing was written)."
+              },
               "first_release": {
                 "type": [
                   "string",
@@ -1407,6 +1553,22 @@
           "duckdb_version": {
             "type": "string"
           },
+          "max_window_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Longest query window (`query.max_window`), in seconds.",
+            "minimum": 0
+          },
+          "public_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base URL the DSNs are built from, e.g. `https://errors.example.com/sentry`."
+          },
           "queue_capacity": {
             "type": "integer",
             "format": "int64",
@@ -1415,6 +1577,15 @@
           "queue_depth": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "retention_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long events are kept, in seconds (0 = forever).",
             "minimum": 0
           },
           "storage": {
@@ -1509,6 +1680,13 @@
           "status"
         ],
         "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, e.g. `fixed in #123` (max 500 characters; default `user`).\nShown in the issue's activity."
+          },
           "status": {
             "$ref": "#/components/schemas/IssueStatus"
           }

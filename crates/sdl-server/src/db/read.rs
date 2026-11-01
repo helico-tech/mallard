@@ -159,14 +159,24 @@ pub fn list_issues(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(|text| format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
-    let search = match &like {
+    let mut search = match &like {
         Some(like) => {
             p.push(like);
             p.push(like);
-            r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')"
+            r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')".to_string()
         }
-        None => "",
+        None => String::new(),
     };
+    // New issues: first seen inside the window.
+    if q.new == Some(true) {
+        search.push_str(" AND i.first_seen >= make_timestamp(?) AND i.first_seen < make_timestamp(?)");
+        p.push(&start_us);
+        p.push(&end_us);
+    }
+    if let Some(rel) = &q.first_release {
+        search.push_str(" AND i.first_release = ?");
+        p.push(rel);
+    }
     p.push(&limit);
     let sql = ns.sql(&format!(
         "WITH agg AS (
@@ -353,6 +363,7 @@ pub fn issue_detail(
         latest_event_id,
         tags,
         activity,
+        changed: None,
     }))
 }
 
@@ -413,11 +424,17 @@ pub fn list_events(
     project_id: u32,
     group: Option<u64>,
     q: &EventQuery,
+    w: Option<&Window>,
     before: Option<Cursor>,
 ) -> Result<EventList> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
     let mut sql = format!("SELECT {EVENT_COLUMNS} FROM $S.events WHERE project_id = ?");
     let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32)];
+    if let Some(w) = w {
+        sql.push_str(" AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)");
+        p.push(Box::new(start_us(w)));
+        p.push(Box::new(end_us(w)));
+    }
     if let Some(g) = group {
         sql.push_str(" AND group_hash = ?");
         p.push(Box::new(g));
@@ -502,13 +519,14 @@ impl Cursor {
     }
 }
 
-/// Look up one event. Event ids are random, so without the issue (which
-/// prunes by sort order) we search growing windows: most lookups are for
-/// recent events and only read the last day's partitions.
+/// Look up one event, in one project or (`None`) in any. Event ids are
+/// random, so without the issue (which prunes by sort order) we search
+/// growing windows: most lookups are for recent events and only read the
+/// last day's partitions.
 pub fn event_detail(
     conn: &Connection,
     ns: &Ns,
-    project_id: u32,
+    project_id: Option<u32>,
     event_id: uuid::Uuid,
     group: Option<u64>,
 ) -> Result<Option<EventDetail>> {
@@ -532,16 +550,20 @@ pub fn event_detail(
 fn event_detail_in(
     conn: &Connection,
     ns: &Ns,
-    project_id: u32,
+    project_id: Option<u32>,
     event_id: uuid::Uuid,
     group: Option<u64>,
     range: Option<(i64, Option<i64>)>,
 ) -> Result<Option<EventDetail>> {
     let mut sql = format!(
         "SELECT {EVENT_COLUMNS}, culprit, CAST(tags AS JSON)::VARCHAR, payload FROM $S.events
-         WHERE project_id = ? AND event_id = ?::UUID"
+         WHERE event_id = ?::UUID"
     );
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(event_id.to_string())];
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(event_id.to_string())];
+    if let Some(pid) = project_id {
+        sql.push_str(" AND project_id = ?");
+        p.push(Box::new(pid as i32));
+    }
     if let Some(g) = group {
         sql.push_str(" AND group_hash = ?");
         p.push(Box::new(g));

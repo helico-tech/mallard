@@ -66,6 +66,7 @@ fn stats() -> Stats {
                 detail: "merged 12 files into 1".into(),
             }),
         },
+        capabilities: None,
     }
 }
 

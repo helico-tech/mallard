@@ -71,8 +71,9 @@ pub enum WriteCmd {
         project_id: u32,
         group_hash: u64,
         status: IssueStatus,
-        reason: &'static str,
-        reply: oneshot::Sender<Result<(), WriteError>>,
+        reason: String,
+        /// Whether the status changed (false: it already had it; nothing written).
+        reply: oneshot::Sender<Result<bool, WriteError>>,
     },
     AddBundle {
         bundle: Box<NewBundle>,
@@ -357,7 +358,7 @@ impl Writer {
                 let _ = reply.send(self.create_project(name, slug, platform));
             }
             WriteCmd::SetStatus { project_id, group_hash, status, reason, reply } => {
-                let _ = reply.send(self.set_status(project_id, group_hash, status, reason));
+                let _ = reply.send(self.set_status(project_id, group_hash, status, &reason));
             }
             WriteCmd::AddBundle { bundle, reply } => {
                 let _ = reply.send(self.add_bundle(&bundle));
@@ -562,10 +563,13 @@ impl Writer {
         group_hash: u64,
         status: IssueStatus,
         reason: &str,
-    ) -> Result<(), WriteError> {
+    ) -> Result<bool, WriteError> {
         let ns = &self.ns;
-        if !self.caches.issues.read().expect("lock").contains_key(&(project_id, group_hash)) {
-            return Err(WriteError::IssueNotFound);
+        match self.caches.issues.read().expect("lock").get(&(project_id, group_hash)) {
+            None => return Err(WriteError::IssueNotFound),
+            // Idempotent: the same status again writes nothing.
+            Some(s) if *s == status => return Ok(false),
+            Some(_) => {}
         }
         self.in_tx(|c| {
             c.execute(
@@ -575,7 +579,7 @@ impl Writer {
             Ok(())
         })?;
         self.caches.issues.write().expect("lock").insert((project_id, group_hash), status);
-        Ok(())
+        Ok(true)
     }
 
     fn add_bundle(&self, b: &NewBundle) -> Result<()> {

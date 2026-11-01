@@ -384,7 +384,7 @@ pub(crate) mod tests {
         let mut before = None;
         for _ in 0..5 {
             let q = sdl_types::EventQuery { limit: Some(2), ..Default::default() };
-            let page = db.read(move |c, ns| read::list_events(c, ns, 1, None, &q, before)).await.unwrap();
+            let page = db.read(move |c, ns| read::list_events(c, ns, 1, None, &q, None, before)).await.unwrap();
             for e in &page.events {
                 assert!(seen.insert(e.event_id.clone()), "event {} on two pages", e.event_id);
             }

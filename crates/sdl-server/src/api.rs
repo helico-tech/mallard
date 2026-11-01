@@ -72,6 +72,7 @@ fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(info))
         .routes(routes!(list_projects, create_project))
         .routes(routes!(events_by_trace))
+        .routes(routes!(find_event))
         .routes(routes!(get_project))
         .routes(routes!(list_issues))
         .routes(routes!(get_issue, update_issue))
@@ -170,6 +171,9 @@ async fn info(State(state): S) -> Json<ServerInfo> {
         storage: state.storage.as_ref().map(|s| s.describe()).unwrap_or_else(|| "(external)".into()),
         queue_depth: state.db.queue_depth() as u64,
         queue_capacity: state.db.queue_capacity as u64,
+        public_url: Some(state.public_url.clone()),
+        retention_secs: Some(state.cfg.retention.events.as_secs()),
+        max_window_secs: Some(state.cfg.query.max_window.as_secs()),
     })
 }
 
@@ -251,9 +255,13 @@ async fn get_issue(
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
+/// Longest accepted `reason` of an issue update, in characters.
+const MAX_REASON_CHARS: usize = 500;
+
 #[utoipa::path(patch, path = "/v1/projects/{project}/issues/{issue_id}", request_body = UpdateIssue,
     params(("project" = String, Path), ("issue_id" = String, Path)),
-    responses((status = 200, body = IssueDetail), (status = 404, body = ApiError)))]
+    description = "Set the status. Idempotent: when the issue already has that status nothing is written and `changed` is false.",
+    responses((status = 200, body = IssueDetail), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
 async fn update_issue(
     State(state): S,
     Path((p, id)): Path<(String, String)>,
@@ -261,25 +269,46 @@ async fn update_issue(
 ) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
-    state
+    let reason = match req.reason.as_deref().map(str::trim) {
+        None | Some("") => "user".to_string(),
+        Some(r) if r.chars().count() > MAX_REASON_CHARS => {
+            return Err(bad(format!("reason must be at most {MAX_REASON_CHARS} characters")));
+        }
+        Some(r) => r.to_string(),
+    };
+    let changed = state
         .db
-        .call(|reply| WriteCmd::SetStatus { project_id: pid, group_hash: g, status: req.status, reason: "user", reply })
+        .call(|reply| WriteCmd::SetStatus { project_id: pid, group_hash: g, status: req.status, reason, reply })
         .await?;
     let w = window(&state, None, &WindowRange::default(), 14 * DAY)?;
-    state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
+    let mut d =
+        state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.ok_or_else(|| not_found("issue"))?;
+    d.changed = Some(changed);
+    Ok(Json(d))
 }
 
-#[utoipa::path(get, path = "/v1/projects/{project}/events", params(("project" = String, Path), EventQuery),
-    responses((status = 200, body = EventList), (status = 404, body = ApiError)))]
-async fn list_events(State(state): S, Path(p): Path<String>, Q(q): Q<EventQuery>) -> ApiResult<EventList> {
+#[utoipa::path(get, path = "/v1/projects/{project}/events", params(("project" = String, Path), EventQuery, WindowRange),
+    responses((status = 200, body = EventList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
+async fn list_events(
+    State(state): S,
+    Path(p): Path<String>,
+    Q(q): Q<EventQuery>,
+    Q(r): Q<WindowRange>,
+) -> ApiResult<EventList> {
     let pid = project(&state, &p)?.id;
+    // No window unless one is asked for (all events, newest first).
+    let w = if q.since.is_some() || r.from.is_some() || r.to.is_some() {
+        Some(window(&state, q.since.as_deref(), &r, 14 * DAY)?)
+    } else {
+        None
+    };
     let g = q.issue.as_deref().map(issue_hash).transpose()?;
     if q.trace_id.as_deref().is_some_and(|t| sdl_protocol::event::parse_trace_id(t).is_none()) {
         return Err(bad("trace_id must be 32 hex characters"));
     }
     let before =
         q.before.as_deref().map(|c| read::Cursor::parse(c).ok_or_else(|| bad("invalid cursor"))).transpose()?;
-    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, before)).await?))
+    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, w.as_ref(), before)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/events", params(TraceQuery, WindowRange),
@@ -317,7 +346,21 @@ async fn get_event(
     let g = q.issue.as_deref().map(issue_hash).transpose()?;
     state
         .db
-        .read(move |c, ns| read::event_detail(c, ns, pid, eid, g))
+        .read(move |c, ns| read::event_detail(c, ns, Some(pid), eid, g))
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("event"))
+}
+
+#[utoipa::path(get, path = "/v1/events/{event_id}",
+    params(("event_id" = String, Path, description = "32 hex chars")),
+    description = "One event by id, in any project (for looking up an id without knowing its project).",
+    responses((status = 200, body = EventDetail), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
+async fn find_event(State(state): S, Path(id): Path<String>) -> ApiResult<EventDetail> {
+    let eid = sdl_protocol::event::parse_uuid(&id).ok_or_else(|| bad("invalid event id"))?;
+    state
+        .db
+        .read(move |c, ns| read::event_detail(c, ns, None, eid, None))
         .await?
         .map(Json)
         .ok_or_else(|| not_found("event"))

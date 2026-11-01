@@ -136,6 +136,7 @@ fn issue_query(a: &IssueListArgs) -> IssueQuery {
         environment: a.env.clone(),
         release: a.release.clone(),
         limit: a.limit,
+        ..Default::default()
     }
 }
 
