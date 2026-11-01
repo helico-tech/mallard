@@ -54,6 +54,12 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// True when `e` is DuckLake's transaction conflict with a concurrent
+/// writer (retrying helps). DuckDB reports it only in the message text.
+pub(crate) fn is_conflict(e: &anyhow::Error) -> bool {
+    format!("{e:#}").to_ascii_lowercase().contains("conflict")
+}
+
 /// Quote a string literal for SQL.
 pub fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -103,7 +109,7 @@ impl Lake {
         loop {
             match self.migrate_once() {
                 Ok(()) => return Ok(()),
-                Err(e) if attempt < 10 && format!("{e:#}").to_ascii_lowercase().contains("conflict") => {
+                Err(e) if attempt < 10 && is_conflict(&e) => {
                     attempt += 1;
                     warn!(attempt, error = %format!("{e:#}"), "schema migration conflicted with another writer; retrying");
                     std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));

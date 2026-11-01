@@ -11,11 +11,17 @@
 //! UNAVAILABLE). OTLP exporters retry these with back-off.
 //!
 //! Failure: if a flush fails (e.g. object store down) the batches are put back
-//! and retried with exponential back-off; nothing is dropped. Data that was
-//! acknowledged but not yet flushed is lost only if the process dies hard
+//! and retried with exponential back-off. After [`ISOLATE_AFTER`] failures in
+//! a row, each batch is written on its own: when some batches succeed and
+//! another one keeps failing (not a conflict), that batch can never be
+//! written ("poison") and is dropped, logged and counted in `dropped_rows`,
+//! so it cannot block all later data. When every batch fails, the cause is
+//! the storage, and nothing is dropped. Data that was acknowledged but not
+//! yet flushed is lost only if the process dies hard
 //! (see docs/adr/0003-ingest-durability.md).
 
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -30,6 +36,9 @@ use super::{CATALOG, Lake, schema::TableId};
 use crate::stats::Stats;
 
 const N: usize = TableId::ALL.len();
+
+/// Failed flushes in a row before batches are written one by one.
+const ISOLATE_AFTER: u32 = 3;
 
 #[derive(Default)]
 struct State {
@@ -73,7 +82,8 @@ impl WriteBuffer {
             return Ok(());
         }
         let (rows, bytes) = batches.iter().fold((0u64, 0u64), |(r, b), (_, batch)| {
-            (r + batch.num_rows() as u64, b + batch.get_array_memory_size() as u64)
+            let (br, bb) = batch_size(batch);
+            (r + br, b + bb)
         });
         if bytes > self.max_bytes {
             return Err(Backpressure::TooLarge { bytes, max: self.max_bytes });
@@ -115,8 +125,8 @@ impl WriteBuffer {
     }
 
     /// Wait until there is something to flush or the interval passed.
-    /// Returns (batches, rows, bytes, shutdown).
-    fn take(&self, interval: Duration) -> ([Vec<RecordBatch>; N], u64, u64, bool) {
+    /// Also returns whether shutdown has started.
+    fn take(&self, interval: Duration) -> (Taken, bool) {
         let deadline = Instant::now() + interval;
         let mut st = self.state.lock().unwrap();
         loop {
@@ -129,32 +139,49 @@ impl WriteBuffer {
             }
             st = self.cv.wait_timeout(st, deadline - now).unwrap().0;
         }
-        let tables = std::mem::take(&mut st.tables);
-        let (rows, bytes) = (st.rows, st.bytes);
+        let taken = Taken { tables: std::mem::take(&mut st.tables), rows: st.rows, bytes: st.bytes };
         st.rows = 0;
         st.bytes = 0;
-        st.inflight_bytes += bytes;
-        (tables, rows, bytes, st.shutdown)
+        st.inflight_bytes += taken.bytes;
+        (taken, st.shutdown)
     }
 
-    /// Flush finished (ok or not). On failure the batches go back to the front.
-    fn settle(&self, failed: Option<([Vec<RecordBatch>; N], u64)>, bytes: u64) {
+    /// A flush of `inflight` bytes finished. Batches not written (`back`) go
+    /// back to the front.
+    fn settle(&self, inflight: u64, back: Option<Taken>) {
         let mut st = self.state.lock().unwrap();
-        st.inflight_bytes -= bytes;
-        if let Some((mut tables, rows)) = failed {
+        st.inflight_bytes -= inflight;
+        if let Some(mut back) = back {
             for (i, newer) in st.tables.iter_mut().enumerate() {
-                tables[i].append(newer);
+                back.tables[i].append(newer);
             }
-            st.tables = tables;
-            st.rows += rows;
-            st.bytes += bytes;
+            st.tables = back.tables;
+            st.rows += back.rows;
+            st.bytes += back.bytes;
         }
         self.stats.set_buffered(st.rows, st.bytes + st.inflight_bytes);
     }
 }
 
-/// Append all batches in one transaction.
+/// Batches taken from the buffer for one flush.
+struct Taken {
+    tables: [Vec<RecordBatch>; N],
+    rows: u64,
+    bytes: u64,
+}
+
+fn batch_size(b: &RecordBatch) -> (u64, u64) {
+    (b.num_rows() as u64, b.get_array_memory_size() as u64)
+}
+
+/// Append all batches in one transaction. A panic in the DuckDB or Arrow
+/// code is returned as an error, so the flusher thread keeps running.
 fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Result<()> {
+    catch_unwind(AssertUnwindSafe(|| write_tx(conn, schema, tables)))
+        .unwrap_or_else(|p| Err(anyhow::anyhow!("flush panicked: {}", panic_message(&*p))))
+}
+
+fn write_tx(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     for id in TableId::ALL {
         let batches = &tables[id as usize];
@@ -178,6 +205,42 @@ fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Res
     Ok(())
 }
 
+pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> &str {
+    p.downcast_ref::<&str>().copied().or_else(|| p.downcast_ref::<String>().map(String::as_str)).unwrap_or("panic")
+}
+
+/// Write every batch in its own transaction. Batches that fail while others
+/// succeed are dropped (unless the error is a conflict); when nothing
+/// succeeds, everything is kept. Returns what is left and the rows written.
+fn write_isolated(conn: &Connection, schema: &str, taken: Taken, stats: &Stats) -> (Taken, u64) {
+    let mut left = Taken { tables: Default::default(), rows: 0, bytes: 0 };
+    let mut failed = Vec::new();
+    let mut written = 0u64;
+    for (i, batches) in taken.tables.into_iter().enumerate() {
+        for b in batches {
+            let mut one: [Vec<RecordBatch>; N] = Default::default();
+            one[i].push(b);
+            match write(conn, schema, &one) {
+                Ok(()) => written += one[i][0].num_rows() as u64,
+                Err(e) => failed.push((i, one[i].pop().expect("one batch"), e)),
+            }
+        }
+    }
+    for (i, b, e) in failed {
+        let (rows, bytes) = batch_size(&b);
+        let msg = super::redact(&format!("{e:#}"));
+        if written > 0 && !super::is_conflict(&e) {
+            error!(table = TableId::ALL[i].def().name, rows, error = %msg, "dropping a batch that cannot be written");
+            stats.dropped(rows);
+        } else {
+            left.tables[i].push(b);
+            left.rows += rows;
+            left.bytes += bytes;
+        }
+    }
+    (left, written)
+}
+
 pub struct Flusher {
     handle: Option<JoinHandle<()>>,
     buffer: Arc<WriteBuffer>,
@@ -195,11 +258,8 @@ impl Flusher {
     }
 
     /// Flush what is left and wait for the thread to finish.
-    pub fn stop(mut self) {
-        self.buffer.shutdown();
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+    pub fn stop(self) {
+        drop(self);
     }
 }
 
@@ -217,22 +277,23 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
     // Attempts after shutdown started (failures before that don't count).
     let mut shutdown_attempts: u32 = 0;
     loop {
-        let (tables, rows, bytes, shutdown) = buf.take(interval);
+        let (taken, shutdown) = buf.take(interval);
+        let (rows, bytes) = (taken.rows, taken.bytes);
         if rows == 0 {
-            buf.settle(None, bytes);
+            buf.settle(bytes, None);
             if shutdown {
                 break;
             }
             continue;
         }
         let t0 = Instant::now();
-        match write(&conn, &schema, &tables) {
+        match write(&conn, &schema, &taken.tables) {
             Ok(()) => {
                 failures = 0;
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
                 debug!(rows, ms, "flushed");
                 stats.flush_ok(rows, ms);
-                buf.settle(None, bytes);
+                buf.settle(bytes, None);
                 if shutdown {
                     // Data pushed after `take` is flushed by the next loop turn.
                     let more = buf.state.lock().unwrap().rows;
@@ -244,14 +305,29 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
             Err(e) => {
                 failures += 1;
                 let msg = super::redact(&format!("{e:#}"));
-                if msg.contains("Transaction conflict") || msg.contains("conflict") {
+                if super::is_conflict(&e) {
                     // e.g. retention or another replica touched the table; retried.
                     warn!(rows, failures, error = %msg, "flush conflicted with another transaction; will retry");
                 } else {
                     error!(rows, failures, error = %msg, "flush failed; will retry");
                 }
                 stats.flush_err(msg);
-                buf.settle(Some((tables, rows)), bytes);
+                let back = if failures >= ISOLATE_AFTER {
+                    let (left, written) = write_isolated(&conn, &schema, taken, &stats);
+                    if written > 0 {
+                        stats.flush_ok(written, t0.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    left
+                } else {
+                    taken
+                };
+                let progress = back.rows < rows;
+                buf.settle(bytes, (back.rows > 0).then_some(back));
+                if progress {
+                    // Some batches were written or dropped: try the rest right away.
+                    failures = 0;
+                    continue;
+                }
                 if shutdown {
                     shutdown_attempts += 1;
                     if shutdown_attempts >= 3 {
@@ -290,14 +366,52 @@ mod tests {
         buf.push(vec![(TableId::Logs, b(1000))]).unwrap();
         buf.push(vec![(TableId::Logs, b(1000))]).unwrap();
         assert!(buf.push(vec![(TableId::Logs, b(1000))]).is_err());
-        let (tables, rows, bytes, _) = buf.take(Duration::ZERO);
-        assert_eq!(rows, 2000);
+        let (taken, _) = buf.take(Duration::ZERO);
+        assert_eq!(taken.rows, 2000);
         // In-flight bytes still count.
         assert!(buf.push(vec![(TableId::Logs, b(1000))]).is_err());
-        buf.settle(Some((tables, rows)), bytes);
+        buf.settle(taken.bytes, Some(taken));
         let st = buf.state.lock().unwrap();
         assert_eq!(st.rows, 2000);
         assert_eq!(st.tables[TableId::Logs as usize].len(), 2);
+    }
+
+    /// A batch that can never be written must not block later data.
+    #[test]
+    fn poison_batch_is_dropped_and_the_rest_written() {
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest,
+            logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
+        cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
+        let lake = Lake::open(&cfg).unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        // Wrong columns for `logs`: the appender always refuses it.
+        buf.push(vec![(TableId::Logs, b(10))]).unwrap();
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs { log_records: vec![LogRecord::default(); 3], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        buf.push(crate::otlp::convert::convert_logs(&req).batches).unwrap();
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
+        let conn = lake.connect().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let n: i64 = conn.query_row("SELECT count(*) FROM logs", [], |r| r.get(0)).unwrap();
+            if n == 3 && stats.ingest(0).dropped_rows == 10 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "logs={n}, dropped={}", stats.ingest(0).dropped_rows);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        flusher.stop();
+        assert_eq!(buf.state.lock().unwrap().rows, 0, "nothing left behind");
     }
 
     #[test]

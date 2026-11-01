@@ -1107,6 +1107,12 @@
             "description": "Rows waiting in memory for the next flush.",
             "minimum": 0
           },
+          "dropped_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows dropped because they could not be written while other data\ncould (details in the server log).",
+            "minimum": 0
+          },
           "flush_errors": {
             "type": "integer",
             "format": "int64",

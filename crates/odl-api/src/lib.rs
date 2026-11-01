@@ -82,6 +82,10 @@ pub struct IngestStats {
     pub max_buffer_bytes: u64,
     pub flushes: u64,
     pub flush_errors: u64,
+    /// Rows dropped because they could not be written while other data
+    /// could (details in the server log).
+    #[serde(default)]
+    pub dropped_rows: u64,
     pub last_flush: Option<FlushInfo>,
     pub last_flush_error: Option<String>,
 }

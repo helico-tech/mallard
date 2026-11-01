@@ -16,6 +16,7 @@ What to watch:
 |---|---|---|
 | `rejected` grows, 429s at exporters | buffer full: storage slower than ingest, or a burst | check `last_flush_error`; raise `max_buffer_bytes`; check object store / catalog latency |
 | `flush_errors` grows | catalog or object store unreachable / credentials | see logs; data is retried, not dropped |
+| `dropped_rows` grows | a batch could not be written while other data could | see the `error` log line "dropping a batch"; report it as a bug |
 | many `files` per table | compaction not keeping up or disabled | check `last_maintenance`; lower `compact_interval` |
 | `inlined_rows` keeps growing | compaction not running | `maintenance.enabled` |
 | queries return 503 | all `query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |

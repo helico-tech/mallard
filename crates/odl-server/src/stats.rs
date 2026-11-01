@@ -26,6 +26,7 @@ pub struct Stats {
     buffered_bytes: AtomicU64,
     flushes: AtomicU64,
     flush_errors: AtomicU64,
+    dropped_rows: AtomicU64,
     last_flush: Mutex<Option<FlushInfo>>,
     last_flush_error: Mutex<Option<String>>,
     last_maintenance: Mutex<Option<MaintenanceInfo>>,
@@ -64,6 +65,11 @@ impl Stats {
         *self.last_flush_error.lock().unwrap() = Some(msg);
     }
 
+    /// Rows that could not be written and were dropped.
+    pub fn dropped(&self, rows: u64) {
+        self.dropped_rows.fetch_add(rows, Relaxed);
+    }
+
     pub fn maintenance(&self, info: MaintenanceInfo) {
         *self.last_maintenance.lock().unwrap() = Some(info);
     }
@@ -86,6 +92,7 @@ impl Stats {
             max_buffer_bytes,
             flushes: self.flushes.load(Relaxed),
             flush_errors: self.flush_errors.load(Relaxed),
+            dropped_rows: self.dropped_rows.load(Relaxed),
             last_flush: self.last_flush.lock().unwrap().clone(),
             last_flush_error: self.last_flush_error.lock().unwrap().clone(),
         }

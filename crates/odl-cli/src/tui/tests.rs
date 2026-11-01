@@ -43,6 +43,7 @@ fn stats() -> Stats {
             max_buffer_bytes: 512_000_000,
             flushes: 42,
             flush_errors: 0,
+            dropped_rows: 0,
             last_flush: Some(FlushInfo { at: Utc::now(), rows: 500, duration_ms: 21.0 }),
             last_flush_error: None,
         },
