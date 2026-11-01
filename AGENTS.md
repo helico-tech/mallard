@@ -70,7 +70,8 @@ load generators `sdl-loadgen` and `odl-loadgen`, which target mallard); the
 - All timestamps are UTC `TIMESTAMP` (bundled DuckDB has no ICU).
 - Tables are append-only. Sentry: write rows only on the writer thread
   (`sdl-server/src/db/writer.rs`), flush and compact on the maintenance thread
-  (`db/maintenance.rs`, ADR 0014); mutable state is an append-only log.
+  (`db/maintenance.rs`, ADR 0014); mutable state is an append-only log; several
+  processes may share a catalog, so read one `issues` row per group (ADR 0015).
   Otel: column order in `store/schema.rs` must match `otlp/convert.rs`.
 - DuckDB 2.0 lambdas use `lambda x: expr` (the `->` form is removed).
 - User input reaches SQL only as bound parameters.

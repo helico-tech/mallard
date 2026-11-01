@@ -9,7 +9,8 @@ Design rules:
 
 1. **Append-only.** Rows are never updated. Mutable state (issue status) is an
    append-only log where the newest row wins. In a lakehouse an `UPDATE`
-   rewrites data or writes delete files; an `INSERT` is cheap.
+   rewrites data or writes delete files; an `INSERT` is cheap. The exceptions
+   are retention and two coordination rows in `meta` (ADR 0015).
 2. **One writer per process.** All row writes go through one thread, in
    batches. One batch is one DuckLake transaction and one snapshot. Maintenance
    runs next to it and only rewrites files (ADR 0014). Several processes can

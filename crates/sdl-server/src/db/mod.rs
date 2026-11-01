@@ -1245,6 +1245,37 @@ pub(crate) mod tests {
         db.shutdown().await;
     }
 
+    /// The timed flush goes through the lease, on a catalog with one process
+    /// too: inlined rows reach Parquet without anyone asking.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timed_flush_takes_the_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("catalog.ducklake").display().to_string();
+        let db = open_db_on(&catalog, dir.path(), 1, |c| c.maintenance.flush_interval = Duration::from_millis(100));
+        store(&db, 1, serde_json::json!({"message": "m"}), Utc::now()).await;
+        eventually("the flush wrote a file", async || {
+            db.read(|c, ns| {
+                let n: i64 = c.query_row(
+                    &ns.sql("SELECT count(*) FROM ducklake_list_files($C, 'events', schema => $N)"),
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok(n > 0)
+            })
+            .await
+            .unwrap()
+        })
+        .await;
+        let lease: String = db
+            .read(|c, ns| {
+                Ok(c.query_row(&ns.sql("SELECT value FROM $S.meta WHERE key = ?"), [maintenance::LEASE], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert!(lease.contains(' '), "lease held: {lease:?}");
+        db.shutdown().await;
+    }
+
     /// Two processes that both see a free lease: the second commit loses,
     /// also on the very first lease of a catalog.
     #[tokio::test(flavor = "multi_thread")]
