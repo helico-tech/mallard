@@ -64,8 +64,12 @@ RUN mallard install-extensions --dir /opt/duckdb/extensions \
 # Parquet files go to /data/data/, and DuckDB spills to /data/.tmp. Mount a
 # volume on it. Only image facts are set through env here (env overrides the
 # config file); storage and logging come from the config file.
+# MALLOC_ARENA_MAX: glibc otherwise keeps one heap per busy thread, and DuckDB's
+# freed memory stays in them; two heaps measured about 0.5 GiB less
+# (docs/otel/capacity.md, both sides).
 WORKDIR /data
 ENV MALLARD_DUCKDB__EXTENSION_DIRECTORY=/opt/duckdb/extensions \
+    MALLOC_ARENA_MAX=2 \
     MALLARD_DUCKDB__AUTOINSTALL_EXTENSIONS=false \
     MALLARD_DUCKDB__TEMP_DIRECTORY=/data/.tmp \
     HOME=/data

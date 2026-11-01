@@ -168,7 +168,7 @@ The maintenance thread flushes inlined data (see above) and, every
    (`sentry.retention.events`, rounded up to days; day-aligned, so whole daily
    files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
-   (target file size 64 MB for `events`)
+   (target file size 16 MB for `events`; [capacity](../otel/capacity.md#both-sides-in-one-container))
 
 Snapshot expiry and file cleanup are catalog-wide. The telemetry side runs them
 (`otel.maintenance.snapshot_retention`, ADR 0001).

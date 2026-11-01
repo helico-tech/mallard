@@ -98,11 +98,17 @@ services:
       MALLARD_CATALOG: ${MALLARD_CATALOG:-postgres:host=postgres port=5432 dbname=ducklake user=mallard password=${POSTGRES_PASSWORD:-mallard-change-me}}
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-mallard-access-key}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-mallard-secret-key-change-me}
+      # Measured for mem_limit 2g, both sides (docs/otel/capacity.md). Change them together.
+      MALLARD_DUCKDB__MEMORY_LIMIT: 1GB
+      MALLARD_DUCKDB__THREADS: 4
+      MALLARD_OTEL__INGEST__MAX_BUFFER_BYTES: 128MB
       RUST_LOG: info
     volumes:
       - ./mallard.toml:/etc/mallard/mallard.toml:ro
       # DuckDB-file catalog in simple mode, and DuckDB's spill files.
       - mallard-data:/data
+    mem_limit: 2g
+    memswap_limit: 2g
     # Long enough for both libraries to flush on stop.
     stop_grace_period: 60s
     restart: unless-stopped

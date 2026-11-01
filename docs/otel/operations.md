@@ -67,9 +67,9 @@ until its next interval.
 
 ## Sizing
 
-See [capacity.md](capacity.md). Short version: 1-2 vCPU and 2 GiB RAM
-handle small/mid traffic with large headroom. Keep container memory ≥
-`duckdb.memory_limit` + `otel.ingest.max_buffer_bytes` + 1 GB.
+See [capacity.md](capacity.md). Short version: 2 GiB runs both sides at small/mid traffic with
+`duckdb.memory_limit = "1GB"`, a `128MB` buffer and 4 threads. Keep container memory ≥
+`duckdb.memory_limit` + `otel.ingest.max_buffer_bytes` + 0.9 GiB.
 
 ## Retention and disk usage
 
