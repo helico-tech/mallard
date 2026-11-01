@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "otel",
+      "credentials": [
+        { "accessKey": "otel-access-key", "secretKey": "otel-secret-key-change-me" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

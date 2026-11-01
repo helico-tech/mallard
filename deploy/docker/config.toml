@@ -1,0 +1,11 @@
+# Default configuration baked into the otel-ducklake image.
+# Mount your own file at /etc/otel-ducklake/config.toml to replace it, or
+# override single keys with ODL_<SECTION>__<KEY> environment variables.
+# See config/otel-ducklake.example.toml in the repository for every option.
+
+[storage]
+catalog = "/data/catalog.ducklake"
+data_path = "/data/lake/"
+
+[duckdb]
+temp_directory = "/data/tmp"

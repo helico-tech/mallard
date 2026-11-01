@@ -478,11 +478,11 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                     m.hist.count += inc.count;
                     m.hist.sum += inc.sum;
                     // Quantiles are not additive; average the reported value across series.
-                    if let Agg::Quantile(q) = agg {
-                        if let Some(v) = summary_quantile(row.a.as_deref(), q) {
-                            m.quantile_sum += v;
-                            m.quantile_n += 1;
-                        }
+                    if let Agg::Quantile(q) = agg
+                        && let Some(v) = summary_quantile(row.a.as_deref(), q)
+                    {
+                        m.quantile_sum += v;
+                        m.quantile_n += 1;
                     }
                 } else {
                     m.hist.add(&inc);

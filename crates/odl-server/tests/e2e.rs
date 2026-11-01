@@ -233,11 +233,11 @@ fn metrics_req(t0: u64, n: u64) -> ExportMetricsServiceRequest {
 struct Harness {
     otlp: Router,
     api: Router,
-    server: Arc<Server>,
+    _server: Arc<Server>,
     shutdown: CancellationToken,
     bg: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
-    data_path: String,
+    _data_path: String,
 }
 
 async fn harness(token: Option<&str>) -> Harness {
@@ -265,11 +265,11 @@ async fn harness(token: Option<&str>) -> Harness {
     Harness {
         otlp: server.otlp_http_router(),
         api: server.api_router(),
-        server,
+        _server: server,
         shutdown,
         bg,
         _dir: dir,
-        data_path,
+        _data_path: data_path,
     }
 }
 

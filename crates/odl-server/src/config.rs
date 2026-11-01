@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
@@ -157,21 +157,6 @@ pub struct DuckDbConfig {
     /// Allow downloading extensions at start-up. Disable in air-gapped images
     /// that ship extensions pre-installed.
     pub autoinstall_extensions: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-            ingest: IngestConfig::default(),
-            retention: RetentionConfig::default(),
-            maintenance: MaintenanceConfig::default(),
-            query: QueryConfig::default(),
-            auth: AuthConfig::default(),
-            duckdb: DuckDbConfig::default(),
-        }
-    }
 }
 
 impl Default for ServerConfig {
@@ -359,7 +344,8 @@ impl Config {
         ] {
             parse_bytes(v).with_context(|| format!("{name} = {v:?}"))?;
         }
-        if self.query.enable_sql && self.auth.api_tokens.is_empty() {
+        // Empty strings are ignored as tokens, so they do not count.
+        if self.query.enable_sql && self.auth.api_tokens.iter().all(|t| t.trim().is_empty()) {
             bail!("query.enable_sql requires auth.api_tokens to be set");
         }
         if !is_identifier(&self.storage.schema) {
@@ -580,6 +566,8 @@ mod tests {
         let mut cfg = Config::default();
         cfg.query.enable_sql = true;
         assert!(cfg.validate().is_err());
+        cfg.auth.api_tokens = vec!["".into()];
+        assert!(cfg.validate().is_err(), "empty token must not enable SQL");
         cfg.auth.api_tokens = vec!["t".into()];
         assert!(cfg.validate().is_ok());
     }

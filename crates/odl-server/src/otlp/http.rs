@@ -59,6 +59,7 @@ fn error(status: StatusCode, fmt: Format, msg: String) -> Response {
     resp
 }
 
+#[allow(clippy::result_large_err)]
 fn format(headers: &HeaderMap) -> Result<Format, Response> {
     let ct = headers
         .get(header::CONTENT_TYPE)
@@ -178,7 +179,7 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Traces => ok_response(
                 fmt,
                 &ExportTraceServiceResponse {
-                    partial_success: (a.rejected > 0).then(|| ExportTracePartialSuccess {
+                    partial_success: (a.rejected > 0).then_some(ExportTracePartialSuccess {
                         rejected_spans: a.rejected as i64,
                         error_message: a.message,
                     }),
@@ -187,7 +188,7 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Logs => ok_response(
                 fmt,
                 &ExportLogsServiceResponse {
-                    partial_success: (a.rejected > 0).then(|| ExportLogsPartialSuccess {
+                    partial_success: (a.rejected > 0).then_some(ExportLogsPartialSuccess {
                         rejected_log_records: a.rejected as i64,
                         error_message: a.message,
                     }),
@@ -196,7 +197,7 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Metrics => ok_response(
                 fmt,
                 &ExportMetricsServiceResponse {
-                    partial_success: (a.rejected > 0).then(|| ExportMetricsPartialSuccess {
+                    partial_success: (a.rejected > 0).then_some(ExportMetricsPartialSuccess {
                         rejected_data_points: a.rejected as i64,
                         error_message: a.message,
                     }),

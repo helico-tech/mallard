@@ -1,0 +1,22 @@
+# otel-ducklake config for the Postgres-catalog + S3-compatible storage stack
+# (docker-compose.postgres-s3.yml). ${NAME} values come from the environment.
+
+[storage]
+catalog = "postgres:host=postgres port=5432 dbname=ducklake user=odl password=${PGPASSWORD}"
+data_path = "s3://otel/lake/"
+
+[[storage.secrets]]
+name = "objectstore"
+type = "s3"
+key_id = "${S3_ACCESS_KEY_ID}"
+secret = "${S3_SECRET_ACCESS_KEY}"
+endpoint = "s3:8333"
+region = "us-east-1"
+url_style = "path"
+use_ssl = false
+
+[ingest]
+flush_interval = "5s"
+
+[duckdb]
+memory_limit = "1GB"

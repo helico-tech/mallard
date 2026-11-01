@@ -70,9 +70,30 @@ impl Lake {
         format!("{CATALOG}.{}.{}", self.schema, t.name)
     }
 
+    /// Create schema and tables. Several replicas starting at once on a shared
+    /// catalog race to create them; DuckLake then reports a transaction
+    /// conflict for the loser. Every step is idempotent, so retry.
+    fn migrate(&self) -> Result<()> {
+        let mut attempt = 0u32;
+        loop {
+            match self.migrate_once() {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if attempt < 10
+                        && format!("{e:#}").to_ascii_lowercase().contains("conflict") =>
+                {
+                    attempt += 1;
+                    warn!(attempt, error = %format!("{e:#}"), "schema migration conflicted with another writer; retrying");
+                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Create schema and tables; add columns that were appended to a table
     /// definition since the table was created.
-    fn migrate(&self) -> Result<()> {
+    fn migrate_once(&self) -> Result<()> {
         let conn = self.root.lock().unwrap();
         conn.execute_batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS {CATALOG}.{}",

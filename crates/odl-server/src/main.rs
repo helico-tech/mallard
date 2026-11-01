@@ -36,7 +36,8 @@ enum Cmd {
     /// building container images, so they can run without internet access).
     InstallExtensions {
         /// Extensions to install.
-        #[arg(default_values_t = ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "json", "parquet", "icu"].map(String::from))]
+        /// json and parquet are compiled into the binary and need no install.
+        #[arg(default_values_t = ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "icu"].map(String::from))]
         names: Vec<String>,
     },
 }
