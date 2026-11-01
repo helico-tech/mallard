@@ -177,7 +177,11 @@ fn rewrite_frame(frame: &mut Value, rm: &ResolvedSourceMap) -> bool {
     else {
         return false;
     };
-    let (line0, col0) = (line.saturating_sub(1) as u32, col.saturating_sub(1) as u32);
+    // Frame numbers are untrusted u64; out-of-range lines must not wrap.
+    let (Some(Ok(line0)), Ok(col0)) = (line.checked_sub(1).map(u32::try_from), u32::try_from(col.saturating_sub(1)))
+    else {
+        return false;
+    };
     let Some(token) = rm.map.lookup_token(line0, col0) else { return false };
     let Some(source) = token.get_source() else { return false };
     let minified_fn = frame.get("function").and_then(Value::as_str).map(str::to_string);
@@ -229,23 +233,27 @@ pub fn apply(ev: &mut Value, maps: &HashMap<String, Arc<ResolvedSourceMap>>) -> 
     }
     let mut total = 0;
     for_each_stacktrace_mut(ev, |holder, keep_raw| {
-        let raw = holder.get("stacktrace").cloned();
+        // Copy the original frames only when one of them can change.
+        let raw = (keep_raw
+            && holder.get("raw_stacktrace").is_none()
+            && frames(holder)
+                .any(|f| is_symbolicatable(f) && f["abs_path"].as_str().is_some_and(|abs| maps.contains_key(abs))))
+        .then(|| holder.get("stacktrace").cloned())
+        .flatten();
         let mut changed = 0;
         if let Some(frames) =
             holder.get_mut("stacktrace").and_then(|s| s.get_mut("frames")).and_then(Value::as_array_mut)
         {
             for f in frames.iter_mut().filter(|f| is_symbolicatable(f)) {
-                let abs = f["abs_path"].as_str().unwrap_or_default().to_string();
-                if let Some(rm) = maps.get(&abs)
-                    && rewrite_frame(f, rm)
+                let rm = f["abs_path"].as_str().and_then(|abs| maps.get(abs)).cloned();
+                if let Some(rm) = rm
+                    && rewrite_frame(f, &rm)
                 {
                     changed += 1;
                 }
             }
         }
         if changed > 0
-            && keep_raw
-            && holder.get("raw_stacktrace").is_none()
             && let (Some(raw), Some(o)) = (raw, holder.as_object_mut())
         {
             o.insert("raw_stacktrace".into(), raw);
@@ -334,6 +342,17 @@ mod tests {
         // Unresolved frame untouched; applying twice is a no-op.
         assert_eq!(exc["stacktrace"]["frames"][1]["function"], "z");
         assert_eq!(apply(&mut ev, &maps), 0);
+    }
+
+    #[test]
+    fn out_of_range_line_is_not_symbolicated() {
+        let mut ev = event();
+        // 2^32 + 1 would wrap to line 0 with a truncating cast.
+        ev["exception"]["values"][0]["stacktrace"]["frames"][0]["lineno"] = json!(4_294_967_297u64);
+        let mut maps = HashMap::new();
+        maps.insert("https://cdn.test/assets/main.js".to_string(), Arc::new(fixture()));
+        assert_eq!(apply(&mut ev, &maps), 0);
+        assert!(ev["exception"]["values"][0].get("raw_stacktrace").is_none());
     }
 
     #[test]
