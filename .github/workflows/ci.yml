@@ -38,6 +38,41 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  web:
+    name: web UI (types, unit, build, browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Drop cached DuckDB source tree
+        run: rm -rf target/duckdb-sources
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/mallard-web/ui/package-lock.json
+      - name: Install
+        working-directory: crates/mallard-web/ui
+        run: npm ci
+      - name: Types, unit tests, build
+        working-directory: crates/mallard-web/ui
+        run: |
+          npm run build
+          npm test
+      - name: API types are current
+        working-directory: crates/mallard-web/ui
+        run: |
+          npm run api-types
+          git diff --exit-code src/api
+      - name: Build the binaries with the UI inside
+        run: cargo build --locked -p mallard-server -p mallard
+      - name: Browser tests
+        working-directory: crates/mallard-web/ui
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
   helm:
     name: helm lint
     runs-on: ubuntu-latest

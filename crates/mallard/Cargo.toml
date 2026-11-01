@@ -1,6 +1,6 @@
 [package]
 name = "mallard"
-description = "mallard: CLI and terminal UI for errors, traces, logs and metrics stored in mallard-server"
+description = "mallard: CLI, terminal UI and Web UI for errors, traces, logs and metrics stored in mallard-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 mallard-client.workspace = true
+mallard-web.workspace = true
 odl-cli.workspace = true
 sdl-cli.workspace = true
 tokio.workspace = true

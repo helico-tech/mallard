@@ -1,0 +1,77 @@
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "tailwindcss";
+
+/* Kumo owns colours, sizes and spacing. shadcn components (Kbd, Resizable) read
+   its names mapped onto Kumo's tokens, so both are one system (ADR 0016). */
+@theme inline {
+  --color-background: var(--color-kumo-base);
+  --color-foreground: var(--text-color-kumo-default);
+  --color-muted: var(--color-kumo-recessed);
+  --color-muted-foreground: var(--text-color-kumo-subtle);
+  --color-border: var(--color-kumo-hairline);
+  --color-ring: var(--color-kumo-focus);
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* Kumo's light theme misses WCAG AA in three text tokens: placeholder 2.6:1, warning
+   3.8:1, subtle on recessed surfaces 4.3:1. Same hues, one step darker. Dark:
+   placeholder only. Remove when upstream fixes them. */
+:root {
+  --text-color-kumo-subtle: light-dark(oklch(50% 0 0), var(--color-neutral-400, oklch(70.8% 0 0)));
+  --text-color-kumo-placeholder: light-dark(oklch(52% 0 0), oklch(68% 0 0));
+  --text-color-kumo-warning: light-dark(oklch(51% 0.13 57.5), var(--color-orange-400, oklch(75% 0.183 55.934)));
+}
+
+/* Until the theme is applied, follow the system. */
+:root { color-scheme: light dark; }
+[data-mode="light"] { color-scheme: light; }
+[data-mode="dark"] { color-scheme: dark; }
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--color-kumo-canvas);
+  color: var(--text-color-kumo-default);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers line up. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* Monospace for ids, code, frames and log bodies: Kumo's mono size, about 0.9em. */
+.mono { font-family: var(--font-mono); font-size: var(--text-sm); font-variant-ligatures: none; }
+
+/* One focus ring for everything. */
+:where(a, button, input, select, textarea, summary, [role="tab"], [role="combobox"], [tabindex]):focus-visible {
+  outline: 2px solid var(--color-kumo-brand);
+  outline-offset: 1px;
+}
+
+/* A selected row keeps clear of the sticky header. */
+[data-row-id] { scroll-margin-top: 40px; scroll-margin-bottom: 8px; }
+
+/* Tables: Kumo's Table in one rhythm (32px, two-line rows 48px), hairlines rather
+   than zebra so a selected row stands out, the same edges as card titles, and a
+   rule under the sticky header that survives scrolling. */
+.data-table th { padding-block: 6px; padding-inline: 12px; box-shadow: inset 0 -1px 0 var(--color-kumo-fill); border-bottom: 0; }
+.data-table td { height: 32px; padding-block: 4px; padding-inline: 12px; border-bottom: 1px solid var(--color-kumo-hairline); }
+.data-table tr > :first-child { padding-left: 16px; }
+.data-table tr > :last-child { padding-right: 16px; }
+.data-table tbody tr:not([aria-selected="true"]) { background: transparent; }
+.data-table tbody tr[data-row-id] { cursor: pointer; }
+.data-table tbody tr[data-row-id]:not([aria-selected="true"]):hover { background: var(--color-kumo-tint); }
+.data-table tbody tr:last-child > td { border-bottom: 0; }
+
+/* The row cursor of the TUI: a brand bar on top of Kumo's selected row. */
+tr[aria-selected="true"] > td:first-child, .row-selected {
+  box-shadow: inset 2px 0 0 var(--color-kumo-brand);
+}
+.row-selected { background: var(--color-kumo-tint); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

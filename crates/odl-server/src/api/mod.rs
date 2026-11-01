@@ -52,6 +52,8 @@ const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
         license(name = "MIT OR Apache-2.0")
     ),
     modifiers(&BearerAuth),
+    // Query-parameter enums: `IntoParams` refers to these, nothing registers them.
+    components(schemas(odl_api::LogOrder, odl_api::AttributeSignal)),
     tags(
         (name = "system", description = "Health and statistics"),
         (name = "traces", description = "Services, operations and traces"),

@@ -16,3 +16,4 @@
 14. [issue 0015 one-shot otel maintenance](issues/0015-one-shot-otel-maintenance.md)
 15. [issue 0016 per-side docs for mallard](issues/0016-per-side-docs-for-mallard.md)
 16. [issue 0018 test segfault after panic](issues/0018-test-segfault-after-panic.md)
+17. [issue 0070 Web UI in compose and Helm](issues/0070-web-deploy-and-mallard-web-command.md)

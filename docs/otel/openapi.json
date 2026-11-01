@@ -1315,6 +1315,15 @@
           }
         }
       },
+      "AttributeSignal": {
+        "type": "string",
+        "description": "Which data `GET /api/v1/attributes` looks at.",
+        "enum": [
+          "Spans",
+          "Logs",
+          "Metrics"
+        ]
+      },
       "AttributeStats": {
         "type": "object",
         "description": "Attribute keys (or values of one key) with how many sampled rows have them.",
@@ -1508,6 +1517,14 @@
             "description": "Per signal counters since process start."
           }
         }
+      },
+      "LogOrder": {
+        "type": "string",
+        "description": "Sort order of log records.",
+        "enum": [
+          "Asc",
+          "Desc"
+        ]
       },
       "LogRecord": {
         "type": "object",

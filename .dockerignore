@@ -5,6 +5,8 @@ data/
 .git/
 .claude/
 **/node_modules/
+crates/mallard-web/ui/dist/
+crates/mallard-web/ui/test-results/
 **/*.ducklake
 **/*.ducklake.wal
 e2e/

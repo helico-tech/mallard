@@ -3,7 +3,7 @@
 One observability app: Sentry-compatible error tracking plus an
 OpenTelemetry collector (traces, logs, metrics), stored together in one
 DuckLake catalog (DuckDB 2.0 + Parquet on disk or object storage). Two
-binaries: `mallard-server` runs it, `mallard` is the CLI and TUI (ADR 0007).
+binaries: `mallard-server` runs it, `mallard` is the CLI, TUI and Web UI (ADR 0007, 0016).
 
 ## Build and test
 
@@ -17,6 +17,7 @@ cargo run -p mallard -- --help        # status, setup, find, issues, traces, log
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
+Web UI: `crates/mallard-web/README.md` (`npm run dev|test|e2e` in `crates/mallard-web/ui`).
 JS end-to-end tests with real Sentry SDKs against `mallard-server`: `e2e/sentry/README.md`.
 After API changes: `UPDATE_OPENAPI=1 cargo test -p odl-server -p sdl-server --test openapi`
 rewrites `docs/otel/openapi.json` and `docs/sentry/openapi.json` (tests check them).
@@ -28,7 +29,8 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 
 | path | what |
 |---|---|
-| `crates/mallard` | the `mallard` CLI/TUI: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases |
+| `crates/mallard` | the `mallard` CLI/TUI: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, `web`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases |
+| `crates/mallard-web` | the Web UI behind `mallard web`: React + Kumo in `ui/`, compiled in, with a same-origin proxy to the server (ADR 0016) |
 | `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, readiness, shutdown; `src/bridge/`: Sentry transactions → spans, OTel exceptions → issues (ADR 0009) |
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction |
@@ -40,7 +42,7 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
 | `bench/otel/` | reproducible experiments and capacity runs |
-| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
+| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/), [Web UI guidelines and parity](docs/web/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 Only `mallard-server` and `mallard` are built as binaries (plus the
@@ -82,6 +84,10 @@ load generators `sdl-loadgen` and `odl-loadgen`, which target mallard); the
   `Output::object`/`Output::list` for JSON (envelope, `--fields`), errors as
   `error::Described` with a `Kind` (exit code). `docs/agents.md` is built
   into the binary; keep it in step with the commands.
+
+- The Web UI follows the same rules as the TUI through its own one-place modules
+  (`lib/clean.ts`, `lib/format.ts`, `app/keys.tsx`), built from Kumo components only
+  (`.claude/skills/kumo-design`); see `crates/mallard-web/README.md`.
 
 ## Work
 

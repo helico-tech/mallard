@@ -6,7 +6,8 @@
 #
 #   docker build -f deploy/docker/Dockerfile -t mallard .
 #
-# Stage 1 compiles `mallard-server` and the `mallard` CLI/TUI (DuckDB's C++ is compiled
+# Stage 0 builds the Web UI, which goes into the `mallard` binary. Stage 1
+# compiles `mallard-server` and `mallard` (CLI, TUI, Web UI; DuckDB's C++ is compiled
 # from source, so the first build takes a few minutes; BuildKit cache mounts
 # keep the cargo registry and target dir between builds). Stage 2 is a small
 # glibc image with all DuckDB extensions pre-installed, so the server needs
@@ -14,6 +15,14 @@
 
 ARG RUST_VERSION=1.99
 ARG DEBIAN_RELEASE=trixie
+
+# ------------------------------------------------------------- web UI stage
+FROM node:24-slim AS web
+WORKDIR /src/crates/mallard-web/ui
+COPY crates/mallard-web/ui/package.json crates/mallard-web/ui/package-lock.json ./
+RUN npm ci
+COPY crates/mallard-web/ui/ ./
+RUN npm run build
 
 # ---------------------------------------------------------------- build stage
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS build
@@ -24,6 +33,7 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY . .
+COPY --from=web /src/crates/mallard-web/ui/dist crates/mallard-web/ui/dist
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -42,7 +52,8 @@ RUN apt-get update \
  && useradd --system --uid 10001 --gid mallard --home-dir /data --shell /usr/sbin/nologin mallard \
  && install -d -o mallard -g mallard -m 0750 /data
 
-# The CLI ships too, for `docker exec … mallard status` and debugging.
+# The CLI ships too, for `docker exec … mallard status` and debugging. The Web UI is
+# in it: `--entrypoint mallard … web --addr 0.0.0.0:8088`, with MALLARD_URL.
 COPY --from=build /out/mallard-server /out/mallard /usr/local/bin/
 
 # Every DuckDB extension any config may need (ducklake, httpfs, aws, azure,

@@ -26,6 +26,7 @@ mallard-duck = { path = "crates/mallard-duck" }
 mallard-server = { path = "crates/mallard-server" }
 mallard-client = { path = "crates/mallard-client" }
 mallard-term = { path = "crates/mallard-term" }
+mallard-web = { path = "crates/mallard-web" }
 # DuckDB is bundled and linked once. Only mallard-duck depends on it; every
 # other crate uses `mallard_duck::duckdb`.
 duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono", "json", "parquet"] }
