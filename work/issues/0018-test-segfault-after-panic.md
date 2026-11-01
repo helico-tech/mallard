@@ -30,3 +30,7 @@ helper: any drop without `shutdown()` could do this, also a failed start of
 `mallard-server`. Fixed in `Db::drop`: it sends `Shutdown` and joins the writer,
 like otel's `Flusher`. `tests/panic_exit.rs` runs a panicking test in a child
 process and expects exit 101.
+
+Later: the Sentry side got a second thread, `ducklake-maintenance` (ADR 0014).
+`Db::drop` stops and joins it first, then the writer
+(`db::tests::drop_stops_maintenance_and_waits`).

@@ -9,17 +9,22 @@ Design rules:
 
 1. **Append-only.** Rows are never updated. Mutable state (issue status) is an
    append-only log where the newest row wins. In a lakehouse an `UPDATE`
-   rewrites data or writes delete files; an `INSERT` is cheap.
-2. **One writer.** All writes go through one thread, in batches. One batch is
-   one DuckLake transaction and one snapshot.
+   rewrites data or writes delete files; an `INSERT` is cheap. The exceptions
+   are retention and two coordination rows in `meta` (ADR 0021).
+2. **One writer per process.** All row writes go through one thread, in
+   batches. One batch is one DuckLake transaction and one snapshot. Maintenance
+   runs next to it and only rewrites files (ADR 0014). Several processes can
+   share a catalog (ADR 0021).
 3. **Prune by time, then by issue.** Almost every query filters on
    `project_id`, a time window and often `group_hash`. The physical
    layout is built for exactly that.
 4. **Event time for issues, receive time for storage.** First/last seen,
    trends, tag facets and stats use the event's `timestamp`, as Sentry does.
-   Ingest replaces a `timestamp` more than 60 s after or 30 days before the
-   receive time with the receive time (`MAX_SECS_IN_FUTURE` /
-   `MAX_SECS_IN_PAST` in `sdl-protocol`), so it stays close to
+   When an envelope's `sent_at` differs 55 minutes or more from the receive
+   time, the client's clock is off and the event and its breadcrumbs shift by
+   that difference. Ingest then replaces a `timestamp` more than 60 s after or
+   30 days before the receive time with the receive time (`MAX_SECS_IN_FUTURE`
+   / `MAX_SECS_IN_PAST` in `sdl-protocol`), so it stays close to
    `received_at`. Partitions, retention, event lists, trace lookups and the
    issue activity log use `received_at` / write time.
 
@@ -33,7 +38,7 @@ Design rules:
 | `projects` | one per project | on create | slug, DSN public key |
 | `artifact_bundles` | one per (bundle, project) | sourcemap upload | bundle object + release |
 | `artifact_files` | one per file in a bundle | sourcemap upload | debug-id / url lookup |
-| `meta` | a few | startup | schema version |
+| `meta` | a few | startup, project creation, maintenance | schema version; `project_seq` and `maintenance_lease` are replaced (ADR 0021) |
 
 ### `events`
 
@@ -86,17 +91,35 @@ otel-ducklake's spans table, so `sentry.events JOIN otel.spans USING
 
 `issues` gets one row the first time a group hash is seen (first seen =
 the earliest event `timestamp` in that batch, first release, first title).
-It is not lowered when an older event arrives in a later batch (append-only).
-The current title, level and culprit come from the newest event in the
+Two processes can each write one for a new group, so reads take one row per
+group (`arg_min(..., first_seen)`).
+An older event in a later batch does not change the row (append-only); issue
+list and detail read `least(first_seen, min(timestamp))`, so first seen moves
+back as soon as the window holds that event. "New issues" in stats and the
+`issues` row itself do not see it. The current title, level and culprit come from the newest event in the
 queried window (`arg_max(title, timestamp)`), as in Sentry.
 
 Status is `arg_max(status, changed_at)` over `issue_activity`. Reasons:
-`user` (API) and `regression` (a new event for a resolved issue reopens it;
-ignored issues stay ignored).
+`user` (API) and `regression` (an event of a resolved issue reopens it when its
+`timestamp` is not older than the resolve; ignored issues stay ignored).
 
-The writer keeps `(project, group) -> status` in memory to decide "new issue"
-and "regression" without reading the lake on the hot path. It is loaded at
-startup and updated only after a commit succeeds.
+The writer keeps `(project, group) -> status` of recently seen issues in memory
+to decide "new issue" and "regression" without reading the lake on the hot
+path. The cache holds at most 200,000 issues and forgets an issue without
+events for the retention period; it is not loaded at startup. On a miss the
+writer asks the lake, once per batch for all missing groups, so an issue that
+left the cache keeps its one `issues` row and its status. The cache changes only
+after a commit succeeds.
+
+**Limit on new issues.** A project gets at most 1000 new issues per hour
+(`MAX_NEW_ISSUES_PER_HOUR`, per process; not configurable). Events of further
+new groups go into one issue per project, "Too many new issues"
+(`OVERFLOW_GROUP`, `6d616c6c61726421`), and are counted in
+`sdl_issue_overflow_events_total`. Each event keeps its own title and payload,
+so nothing is lost but the grouping; the next hour those groups get their own
+issue from their next event on. Known groups are never affected.
+`issues` and `issue_activity` rows stay after their events are past retention;
+an issue that comes back keeps its history.
 
 ### Sourcemap tables
 
@@ -136,9 +159,12 @@ writer thread: take everything queued (group commit)
 
 ## Maintenance
 
-Every `SDL_COMPACT_INTERVAL` (1 h) the writer runs, scoped to its schema:
+The maintenance thread flushes inlined data (see above) and, every
+`SDL_COMPACT_INTERVAL` (1 h), runs, scoped to its schema:
 
-1. retention: `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
+1. retention, on the writer thread because a `DELETE` conflicts with concurrent
+   inserts ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)):
+   `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
    (day-aligned, so whole daily files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
    (target file size 64 MB for `events`; DuckDB threads lowered to

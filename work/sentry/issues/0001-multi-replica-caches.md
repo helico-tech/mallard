@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-01
 ---
@@ -31,3 +31,31 @@ concurrent flushes of one table conflict.
   queries duplicate-tolerant (`arg_min(..., first_seen)` per group), elect one
   maintenance runner (or keep `SDL_CATALOG_WIDE_MAINTENANCE=false` on all but
   one), and rely on DuckLake conflict retries for concurrent commits.
+
+### What changed (done)
+Decisions and reasons: [ADR 0021](../../../docs/adr/0021-sentry-several-processes.md).
+- Maintenance: one process, by a lease row in `meta` (a transaction that deletes
+  and inserts it, so the second commit conflicts). No config flag: pods of one
+  Deployment share their config. Safety does not rely on the lease.
+- Project ids count up, allocated with the `project_seq` row in the same
+  transaction: no duplicate id or slug across processes.
+- Project cache: refresh on a miss (at most once a second) and every 30 s.
+  `GET /v1/projects` refreshes first.
+- Writer thread reads projects, bundles and status changes every 30 s
+  (bundle flag and regressions across processes).
+- Queries take one row per group: issue list, stats, releases (detail already
+  did).
+- Startup tries again on a conflict.
+- Helm NOTES and `docs/sentry/deployment.md` say what is true now.
+- Tests: `db::tests::two_processes_on_sqlite` (two DuckDB instances on one
+  catalog: project known at once, no id or slug twice under concurrent creates,
+  no event lost under concurrent ingest and maintenance, status and bundles reach
+  the other side), `two_processes_on_postgres` (same; ignored, needs
+  `SDL_TEST_POSTGRES`; ran against postgres:17 in Docker),
+  `one_process_holds_the_maintenance_lease`, `a_lease_race_has_one_winner`,
+  `duplicate_issue_rows_count_once`. Also by hand with two `mallard-server`
+  processes on Postgres, starting at once: a project created on A takes events on
+  B at once, 60 events at once on both end up as one issue with count 60, a resolve
+  on A is followed by a regression from an event on B after the sync, one process
+  did all flushes.
+- Follow-up: `work/issues/0051-otel-maintenance-on-every-replica.md`.

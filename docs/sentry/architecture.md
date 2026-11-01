@@ -77,14 +77,20 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
 ## Concurrency model
 
 - **One writer thread** (`ducklake-writer`, a plain OS thread) owns the write
-  connection. Writes from anywhere else are bugs. This rules out DuckLake
+  connection. Row writes from anywhere else are bugs. This rules out DuckLake
   write conflicts inside the process and makes batching natural.
+- **One maintenance thread** (`ducklake-maintenance`, own connection) flushes
+  inlined data, compacts and expires snapshots, next to the writer. Retention
+  runs on the writer thread: its `DELETE` conflicts with concurrent inserts
+  ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)).
 - **Reader pool**: `SDL_READERS` connections cloned from the same DuckDB
   instance, used via `spawn_blocking`. Each query sees the latest committed
   snapshot.
 - **Caches** (projects, issue status, known bundles) live in memory and are
-  updated by the writer after a commit. Consequence: **one process per
-  catalog**. See [issue 0001](../work/issues/0001-multi-replica-caches.md).
+  updated by the writer after a commit. Several processes can share a Postgres
+  catalog: a cache miss reads the catalog, the writer reads what others wrote
+  every 30 s, and one process runs maintenance
+  ([ADR 0021](../adr/0021-sentry-several-processes.md)).
 
 ## Embedding
 

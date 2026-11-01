@@ -92,7 +92,7 @@ impl Server {
         host.validate()?;
         let c = cfg.clone();
         let maintenance =
-            db::writer::Maintenance { catalog_wide: host.catalog_maintenance, threads: host.maintenance_threads };
+            db::maintenance::Maintenance { catalog_wide: host.catalog_maintenance, threads: host.maintenance_threads };
         let artifacts = host.artifacts.clone();
         // Both create directories and open files: keep them off async threads.
         let (db, storage) = tokio::task::spawn_blocking(move || {
@@ -176,10 +176,10 @@ impl Server {
     /// Returns the event id. A repeated `event_id` is stored once. The
     /// [`EventObserver`] is not told.
     pub async fn ingest_event(&self, project_id: u32, payload: serde_json::Value) -> Result<String, IngestError> {
-        if self.state.db.caches.project(project_id).is_none() {
+        if self.state.db.project_by_ref(&project_id.to_string()).await.is_none() {
             return Err(IngestError::UnknownProject);
         }
-        let source = ingest::Source { project_id, client_ip: None, from_sdk: false };
+        let source = ingest::Source { project_id, client_ip: None, from_sdk: false, sent_at: None };
         ingest::process_event(&self.state, &source, payload, None).await
     }
 

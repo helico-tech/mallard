@@ -251,8 +251,8 @@ impl SourceMaps {
         let mut project_ids = Vec::new();
         for p in &req.projects {
             let proj = match p {
-                Value::String(s) => db.caches.project_by_ref(s),
-                Value::Number(n) => db.caches.project_by_ref(&n.to_string()),
+                Value::String(s) => db.project_by_ref(s).await,
+                Value::Number(n) => db.project_by_ref(&n.to_string()).await,
                 _ => None,
             };
             project_ids.push(proj.ok_or_else(|| bad_request("One or more projects are invalid"))?.id);

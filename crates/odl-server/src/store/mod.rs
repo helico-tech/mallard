@@ -28,7 +28,7 @@ pub struct Lake {
 /// True when `e` is DuckLake's transaction conflict with a concurrent
 /// writer (retrying helps). DuckDB reports it only in the message text.
 pub(crate) fn is_conflict(e: &anyhow::Error) -> bool {
-    format!("{e:#}").to_ascii_lowercase().contains("conflict")
+    mallard_duck::is_conflict(e)
 }
 
 impl Lake {

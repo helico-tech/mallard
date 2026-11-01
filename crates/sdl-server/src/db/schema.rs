@@ -1,6 +1,7 @@
 //! DuckLake schema. `$S` is replaced by `<lake_alias>.<schema>`. See `docs/data-model.md` for the reasoning.
 //!
-//! All tables are append-only, except retention deletes on `events`.
+//! All tables are append-only, except retention deletes on `events` and the
+//! coordination rows in `meta` (ADR 0021).
 //! Mutable state (issue status) is an append-only activity log where the
 //! latest row wins. That keeps writes cheap in a lakehouse, where an
 //! UPDATE means writing delete files.
@@ -8,6 +9,11 @@
 /// Bump when the schema changes. Stored in `meta` at startup; there are
 /// no migrations yet.
 pub const SCHEMA_VERSION: i32 = 1;
+
+/// The group of events over the limit of new issues per hour ("too many
+/// issues"), one per project. A fixed value; a real group hash is an xxh3.
+pub const OVERFLOW_GROUP: u64 = 0x6d61_6c6c_6172_6421;
+pub const OVERFLOW_TITLE: &str = "Too many new issues";
 
 pub const CREATE: &[&str] = &[
     "CREATE SCHEMA IF NOT EXISTS $S",

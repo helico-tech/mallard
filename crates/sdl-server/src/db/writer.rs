@@ -8,18 +8,24 @@
 //! Rows go first into an in-memory staging table with the fast DuckDB
 //! appender, then `INSERT INTO <lake>.<schema>.events SELECT ... FROM staging` moves
 //! them into the lake. (DuckDB does not allow one transaction to write to
-//! two databases, so the staging append runs before the lake transaction.)
+//! two databases, so the staging append runs before the lake transaction.
+//!
+//! Flush and compaction run next to this thread ([`super::maintenance`]).
+//! A commit that conflicts with another process is tried again.
 
-use super::{Caches, Ns, ProjectRow, us_to_dt};
+use super::maintenance::{MaintCmd, flush_inlined};
+use super::schema::{OVERFLOW_GROUP, OVERFLOW_TITLE};
+use super::{Caches, IssueState, Ns, ProjectRow, Tick, us_to_dt};
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use crossbeam_channel::{Receiver, RecvTimeoutError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use mallard_duck::duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
@@ -80,7 +86,13 @@ pub enum WriteCmd {
         reply: oneshot::Sender<Result<()>>,
     },
     /// Run flush + compaction + retention now (used by tests and the CLI).
+    /// Handed to the maintenance thread after what is queued before it.
     Maintenance {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Delete events past retention. On this thread: a `DELETE` that removes
+    /// rows conflicts with every concurrent insert into the table (ADR 0014).
+    Retention {
         reply: oneshot::Sender<Result<()>>,
     },
     /// Write everything still queued, flush inlined data and stop.
@@ -96,26 +108,51 @@ pub struct Writer {
     caches: Arc<Caches>,
     batch_max: usize,
     batch_window: Duration,
-    flush_interval: Duration,
-    compact_interval: Duration,
     retention: Duration,
-    maintenance: Maintenance,
-    last_flush: Instant,
-    inlined_since_flush: usize,
-    flush_rows: usize,
-    last_compact: Instant,
+    /// The maintenance thread, for [`WriteCmd::Maintenance`].
+    maintainer: Sender<MaintCmd>,
+    /// Rows inlined since the last flush; the maintenance thread reads it.
+    inlined: Arc<AtomicUsize>,
+    new_issues: NewIssueCount,
+    sync: Tick,
+}
+
+/// New issues per project in the current hour, of this process.
+#[derive(Default)]
+struct NewIssueCount(HashMap<u32, (i64, u32)>);
+
+impl NewIssueCount {
+    fn get(&self, project: u32, hour: i64) -> u32 {
+        self.0.get(&project).filter(|(h, _)| *h == hour).map_or(0, |(_, n)| *n)
+    }
+    fn add(&mut self, project: u32, hour: i64, n: u32) {
+        let total = self.get(project, hour) + n;
+        self.0.insert(project, (hour, total));
+    }
 }
 
 /// A drained queue with at least this many events commits without waiting
 /// for the batch window.
 const EARLY_COMMIT_EVENTS: usize = 200;
 
-/// Files merged per table and maintenance run (bounds how long one run blocks
-/// the writer; the rest is merged in later runs).
-const MAX_COMPACTED_FILES: usize = 1000;
+/// New issues per project, per hour and process. Events of further new groups
+/// go into one "too many issues" issue ([`OVERFLOW_GROUP`]). Far above any
+/// real release; a limit for grouping gone wrong (ids in a message or a
+/// fingerprint).
+pub const MAX_NEW_ISSUES_PER_HOUR: u32 = 1000;
 
-/// Tables compacted by periodic maintenance.
-const COMPACTED_TABLES: &[&str] = &["events", "issues", "issue_activity", "artifact_files"];
+/// How often to pick up what other processes on this catalog wrote (projects,
+/// status changes, bundles; ADR 0021).
+const SYNC_INTERVAL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(30) };
+
+/// A sync reads rows this much older than the last one: writes of another
+/// process carry its clock. Reading a row twice is harmless.
+const SYNC_CLOCK_SLACK: Duration = Duration::from_secs(300);
+
+/// Commits tried again after a conflict with another process. Doubling from
+/// 20 ms, this waits at most about 2.5 s; then the batch fails and the SDK
+/// retries it.
+const MAX_COMMIT_RETRIES: u32 = 7;
 
 const STAGING: &str = "CREATE TABLE IF NOT EXISTS $T.staging_events (
     project_id INTEGER, received_us BIGINT, ts_us BIGINT, event_id VARCHAR, group_hash UBIGINT,
@@ -131,6 +168,24 @@ const MOVE_STAGED: &str = "INSERT INTO $S.events SELECT
     exception_type, exception_value, message, handled, user_key, trace_id::UUID, span_id, sdk_name, sdk_version,
     CAST(tags_json::JSON AS MAP(VARCHAR, VARCHAR)), size_bytes, payload
     FROM $T.staging_events";
+
+/// The `meta` row [`Writer::create_project`] rewrites.
+const PROJECT_SEQ: &str = "project_seq";
+
+/// Rows of `meta` that get replaced, not added: a `DELETE` of no rows conflicts
+/// with nothing, so each must exist before its first use.
+pub fn ensure_meta_rows(conn: &Connection, ns: &Ns) -> Result<()> {
+    for key in [PROJECT_SEQ, super::maintenance::LEASE] {
+        let n: i64 = conn.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = ?"), [key], |r| r.get(0))?;
+        if n == 0 {
+            conn.execute(
+                &ns.sql("INSERT INTO $S.meta VALUES (?, '', make_timestamp(?))"),
+                params![key, Utc::now().timestamp_micros()],
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// Store the schema version once (the latest row wins).
 pub fn record_schema_version(conn: &Connection, ns: &Ns) -> Result<()> {
@@ -153,6 +208,24 @@ pub fn record_schema_version(conn: &Connection, ns: &Ns) -> Result<()> {
 }
 
 pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
+    load_projects(conn, ns, caches)?;
+    load_bundles(conn, ns, caches, 0)?;
+    tracing::info!(
+        projects = caches.projects.read().expect("lock").len(),
+        bundles = caches.bundle_count(),
+        "loaded caches"
+    );
+    Ok(())
+}
+
+/// A row of project, group, status, epoch microseconds of the change.
+fn issue_state_row(r: &mallard_duck::duckdb::Row<'_>) -> mallard_duck::duckdb::Result<((u32, u64), IssueState)> {
+    let status = r.get::<_, String>(2)?.parse().unwrap_or_default();
+    Ok(((r.get::<_, i32>(0)? as u32, r.get(1)?), IssueState { status, changed_us: r.get(3)? }))
+}
+
+/// Read all projects (a small table).
+pub fn load_projects(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     let mut stmt = conn.prepare(
         &ns.sql("SELECT id, slug, name, platform, public_key, epoch_us(created_at) FROM $S.projects ORDER BY id"),
     )?;
@@ -166,61 +239,38 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
             created_at: us_to_dt(r.get(5)?),
         })
     })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
     let mut projects = caches.projects.write().expect("lock");
     for p in rows {
-        let p = p?;
         projects.insert(p.id, p);
     }
-    drop(projects);
+    Ok(())
+}
 
+/// Read bundles created since `since_us`.
+fn load_bundles(conn: &Connection, ns: &Ns, caches: &Caches, since_us: i64) -> Result<()> {
     let mut stmt = conn.prepare(&ns.sql(
-        "SELECT i.project_id, i.group_hash, coalesce(a.status, 'unresolved')
-         FROM $S.issues i
-         LEFT JOIN (SELECT project_id, group_hash, arg_max(status, changed_at) AS status
-                    FROM $S.issue_activity GROUP BY ALL) a USING (project_id, group_hash)",
+        "SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles WHERE created_at >= make_timestamp(?)",
     ))?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
-    let mut issues = caches.issues.write().expect("lock");
-    for row in rows {
-        let (p, g, s) = row?;
-        issues.insert((p, g), s.parse().unwrap_or_default());
-    }
-    let n_issues = issues.len();
-    drop(issues);
-    let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles"))?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?)))?;
+    let rows = stmt.query_map([since_us], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?))
+    })?;
     for row in rows {
         let (b, p, r) = row?;
         caches.add_bundle(p, &b, r.as_deref(), []);
     }
     let mut stmt = conn.prepare(&ns.sql(
-        "SELECT DISTINCT bundle_id, project_id, debug_id::VARCHAR FROM $S.artifact_files
-         WHERE debug_id IS NOT NULL AND file_type = 'source_map'",
+        "SELECT DISTINCT f.bundle_id, f.project_id, f.debug_id::VARCHAR
+         FROM $S.artifact_files f JOIN $S.artifact_bundles b USING (bundle_id, project_id)
+         WHERE f.debug_id IS NOT NULL AND f.file_type = 'source_map' AND b.created_at >= make_timestamp(?)",
     ))?;
-    let rows =
-        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, String>(2)?)))?;
+    let rows = stmt
+        .query_map([since_us], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, String>(2)?)))?;
     for row in rows {
         let (b, p, id) = row?;
         caches.add_bundle(p, &b, None, uuid::Uuid::try_parse(&id).ok());
     }
-    tracing::info!(
-        projects = caches.projects.read().expect("lock").len(),
-        issues = n_issues,
-        bundles = caches.bundle_count(),
-        "loaded caches"
-    );
     Ok(())
-}
-
-/// Settings for maintenance that is not scoped to this schema.
-#[derive(Debug, Clone, Copy)]
-pub struct Maintenance {
-    /// Expire snapshots and delete old files catalog-wide, keeping
-    /// snapshots this long (`None`: another component does it).
-    pub catalog_wide: Option<Duration>,
-    /// `SET threads` while compacting (0 = leave alone).
-    pub threads: usize,
 }
 
 impl Writer {
@@ -230,7 +280,8 @@ impl Writer {
         rx: Receiver<WriteCmd>,
         caches: Arc<Caches>,
         cfg: &Config,
-        maintenance: Maintenance,
+        maintainer: Sender<MaintCmd>,
+        inlined: Arc<AtomicUsize>,
     ) -> Result<Self> {
         conn.execute_batch(&ns.sql("ATTACH IF NOT EXISTS ':memory:' AS $T"))?;
         conn.execute_batch(&ns.sql(STAGING))?;
@@ -241,14 +292,11 @@ impl Writer {
             caches,
             batch_max: cfg.ingest.batch_max.max(1),
             batch_window: cfg.ingest.batch_window,
-            flush_interval: cfg.maintenance.flush_interval,
-            compact_interval: cfg.maintenance.compact_interval,
             retention: cfg.retention.events,
-            maintenance,
-            last_flush: Instant::now(),
-            last_compact: Instant::now(),
-            inlined_since_flush: 0,
-            flush_rows: cfg.maintenance.flush_rows.max(1),
+            maintainer,
+            inlined,
+            new_issues: NewIssueCount::default(),
+            sync: Tick::new(SYNC_INTERVAL),
         })
     }
 
@@ -256,11 +304,10 @@ impl Writer {
         tracing::info!(schema = %self.ns.schema, "writer started");
         let mut shutdown_reply = None;
         while shutdown_reply.is_none() {
-            let next_maint = self.next_maintenance_in();
-            let cmd = match self.rx.recv_timeout(next_maint) {
+            let cmd = match self.rx.recv_timeout(self.sync.due_in()) {
                 Ok(c) => c,
                 Err(RecvTimeoutError::Timeout) => {
-                    self.periodic_maintenance();
+                    self.sync_if_due();
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -302,9 +349,7 @@ impl Writer {
                 WriteCmd::Shutdown { reply } => shutdown_reply = Some(reply),
                 other => self.handle(other),
             }
-            if shutdown_reply.is_none() {
-                self.periodic_maintenance();
-            }
+            self.sync_if_due();
         }
         // Drain what is still queued (late requests get answered, not dropped).
         let mut batch = Vec::new();
@@ -321,7 +366,8 @@ impl Writer {
             self.write_events(batch);
         }
         // Flush inlined data so a clean shutdown leaves everything in Parquet.
-        if let Err(e) = self.flush_inlined() {
+        // The maintenance thread has stopped by now (`Db::shutdown`).
+        if let Err(e) = flush_inlined(&self.conn, &self.ns) {
             tracing::warn!(error = format!("{e:#}"), "final flush failed");
         }
         tracing::info!("writer stopped");
@@ -330,25 +376,35 @@ impl Writer {
         }
     }
 
-    fn next_maintenance_in(&self) -> Duration {
-        let f = self.flush_interval.saturating_sub(self.last_flush.elapsed());
-        let c = self.compact_interval.saturating_sub(self.last_compact.elapsed());
-        f.min(c).max(Duration::from_millis(10))
+    fn sync_if_due(&mut self) {
+        if !self.sync.is_due() {
+            return;
+        }
+        let since_us = (Utc::now() - chrono::Duration::from_std(SYNC_INTERVAL + SYNC_CLOCK_SLACK).unwrap_or_default())
+            .timestamp_micros();
+        if let Err(e) = self.sync_catalog(since_us) {
+            tracing::warn!(error = format!("{e:#}"), "reading what other processes wrote failed");
+        }
+        self.sync.done();
     }
 
-    fn periodic_maintenance(&mut self) {
-        if self.last_flush.elapsed() >= self.flush_interval || self.inlined_since_flush >= self.flush_rows {
-            if let Err(e) = self.flush_inlined() {
-                tracing::error!(error = format!("{e:#}"), "flushing inlined data failed");
+    /// Pick up what other processes wrote (ADR 0021). New issues are found on
+    /// a cache miss. All cache changes of status happen on this thread, so a
+    /// sync cannot overwrite a newer status with an older one.
+    fn sync_catalog(&self, since_us: i64) -> Result<()> {
+        load_projects(&self.conn, &self.ns, &self.caches)?;
+        load_bundles(&self.conn, &self.ns, &self.caches, since_us)?;
+        let mut stmt = self.conn.prepare(&self.ns.sql(
+            "SELECT project_id, group_hash, arg_max(status, changed_at), epoch_us(max(changed_at))
+             FROM $S.issue_activity WHERE changed_at >= make_timestamp(?) GROUP BY ALL",
+        ))?;
+        for row in stmt.query_map([since_us], issue_state_row)? {
+            let (key, state) = row?;
+            if self.caches.issues.contains_key(&key) {
+                self.caches.issues.insert(key, state);
             }
-            self.last_flush = Instant::now();
         }
-        if self.last_compact.elapsed() >= self.compact_interval {
-            if let Err(e) = self.compact_and_expire() {
-                tracing::error!(error = format!("{e:#}"), "compaction failed");
-            }
-            self.last_compact = Instant::now();
-        }
+        Ok(())
     }
 
     fn handle(&mut self, cmd: WriteCmd) {
@@ -368,15 +424,37 @@ impl Writer {
                 let _ = reply.send(());
             }
             WriteCmd::Maintenance { reply } => {
-                let r = self.flush_inlined().and_then(|_| self.compact_and_expire());
-                self.last_flush = Instant::now();
-                self.last_compact = Instant::now();
-                let _ = reply.send(r);
+                // Never wait here: that would pause ingest.
+                if let Err(e) = self.maintainer.try_send(MaintCmd::RunNow { reply })
+                    && let MaintCmd::RunNow { reply } = e.into_inner()
+                {
+                    let _ = reply.send(Err(anyhow!("maintenance is busy or stopped")));
+                }
+            }
+            WriteCmd::Retention { reply } => {
+                let _ = reply.send(self.retention());
             }
         }
     }
 
-    fn in_tx<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    /// Run `f` in one transaction. Again when the commit conflicts with
+    /// another process (or its retention): nothing was written then.
+    fn in_tx<T>(&self, f: impl Fn(&Connection) -> Result<T>) -> Result<T> {
+        let mut attempt = 0;
+        loop {
+            match self.try_tx(&f) {
+                Err(e) if attempt < MAX_COMMIT_RETRIES && mallard_duck::is_conflict(&e) => {
+                    metrics::counter!("sdl_write_conflicts_total").increment(1);
+                    tracing::debug!(attempt, error = format!("{e:#}"), "commit conflict, trying again");
+                    std::thread::sleep(Duration::from_millis(20 << attempt));
+                    attempt += 1;
+                }
+                r => return r,
+            }
+        }
+    }
+
+    fn try_tx<T>(&self, f: &impl Fn(&Connection) -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN TRANSACTION")?;
         match f(&self.conn) {
             Ok(v) => {
@@ -393,17 +471,17 @@ impl Writer {
         }
     }
 
-    fn write_events(&mut self, batch: Vec<EventWrite>) {
+    fn write_events(&mut self, mut batch: Vec<EventWrite>) {
         let started = Instant::now();
         let n = batch.len();
-        let result = self.try_write_events(&batch);
+        let result = self.try_write_events(&mut batch);
         let elapsed = started.elapsed();
         metrics::histogram!("sdl_write_batch_seconds").record(elapsed.as_secs_f64());
         metrics::histogram!("sdl_write_batch_events").record(n as f64);
         match &result {
             Ok(()) => {
                 if n <= super::schema::EVENTS_INLINE_ROWS {
-                    self.inlined_since_flush += n;
+                    self.inlined.fetch_add(n, Ordering::Relaxed);
                 }
                 metrics::counter!("sdl_events_stored_total").increment(n as u64);
                 tracing::debug!(events = n, ms = elapsed.as_millis() as u64, "batch committed");
@@ -419,40 +497,111 @@ impl Writer {
         }
     }
 
-    fn try_write_events(&self, batch: &[EventWrite]) -> Result<()> {
+    /// Put issues among `keys` that are not cached but exist in the lake into
+    /// the cache. The cache is bounded, and other processes create issues.
+    fn load_issues(&self, keys: impl IntoIterator<Item = (u32, u64)>) -> Result<()> {
+        let missing: HashSet<(u32, u64)> = keys.into_iter().filter(|k| !self.caches.issues.contains_key(k)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        // Numbers only, so building the IN lists is injection-safe.
+        let list = |items: HashSet<String>| items.into_iter().collect::<Vec<_>>().join(",");
+        let projects = list(missing.iter().map(|k| k.0.to_string()).collect());
+        let groups = list(missing.iter().map(|k| k.1.to_string()).collect());
+        let mut stmt = self.conn.prepare(&self.ns.sql(&format!(
+            "WITH i AS (
+                SELECT DISTINCT project_id, group_hash FROM $S.issues
+                WHERE project_id IN ({projects}) AND group_hash IN ({groups})
+             ), a AS (
+                SELECT project_id, group_hash, arg_max(status, changed_at) AS status, epoch_us(max(changed_at)) AS at
+                FROM $S.issue_activity
+                WHERE project_id IN ({projects}) AND group_hash IN ({groups}) GROUP BY ALL
+             )
+             SELECT project_id, group_hash, coalesce(a.status, 'unresolved'), coalesce(a.at, 0)
+             FROM i LEFT JOIN a USING (project_id, group_hash)"
+        )))?;
+        for row in stmt.query_map([], issue_state_row)? {
+            let (key, state) = row?;
+            if missing.contains(&key) {
+                self.caches.issues.insert(key, state);
+            }
+        }
+        Ok(())
+    }
+
+    /// Move events of new groups over the limit into the project's overflow
+    /// group. Returns how many new issues each project gets (without the
+    /// overflow issue itself). Their rows exist only after the commit, so the
+    /// count is added then.
+    fn apply_issue_limit(&self, batch: &mut [EventWrite], hour: i64) -> HashMap<u32, u32> {
+        let mut new_per_project: HashMap<u32, u32> = HashMap::new();
+        let mut new: HashSet<(u32, u64)> = HashSet::new();
+        let mut over: HashSet<(u32, u64)> = HashSet::new();
+        for w in batch.iter_mut() {
+            let key = (w.project_id, w.event.group_hash);
+            if key.1 == OVERFLOW_GROUP || new.contains(&key) || self.caches.issues.contains_key(&key) {
+                continue;
+            }
+            if !over.contains(&key) {
+                let count = new_per_project.entry(key.0).or_default();
+                if self.new_issues.get(key.0, hour) + *count < MAX_NEW_ISSUES_PER_HOUR {
+                    *count += 1;
+                    new.insert(key);
+                    continue;
+                }
+                over.insert(key);
+            }
+            w.event.group_hash = OVERFLOW_GROUP;
+            metrics::counter!("sdl_issue_overflow_events_total").increment(1);
+        }
+        if !over.is_empty() {
+            let projects: HashSet<u32> = over.iter().map(|k| k.0).collect();
+            tracing::warn!(?projects, groups = over.len(), "too many new issues this hour; events go to one issue");
+        }
+        new_per_project
+    }
+
+    fn try_write_events(&mut self, batch: &mut [EventWrite]) -> Result<()> {
+        let hour = Utc::now().timestamp() / 3600;
+        self.load_issues(batch.iter().map(|w| (w.project_id, w.event.group_hash)))?;
+        let new_per_project = self.apply_issue_limit(batch, hour);
+        self.load_issues(
+            batch.iter().filter(|w| w.event.group_hash == OVERFLOW_GROUP).map(|w| (w.project_id, OVERFLOW_GROUP)),
+        )?;
+        let batch = &*batch;
         let ns = &self.ns;
         // Decide new issues and regressions against the cache, but only
         // apply cache changes after the commit succeeded. A new issue starts
-        // at its earliest event (by event time) in the batch. Regressions are
-        // logged at commit time: the activity log is ordered by write time.
+        // at its earliest event (by event time) in the batch. A resolved issue
+        // reopens from an event at or after the resolve, not from an older one
+        // (a replay, an offline client). Regressions are logged at commit
+        // time: the activity log is ordered by write time.
         let mut new_issues: Vec<&EventWrite> = Vec::new();
         let mut activity: Vec<(u32, u64, IssueStatus, &'static str)> = Vec::new();
         // Group -> its index in `new_issues`, if it is new.
-        let mut seen_in_batch: HashMap<(u32, u64), Option<usize>> = HashMap::new();
-        {
-            let issues = self.caches.issues.read().expect("lock");
-            for w in batch {
-                let key = (w.project_id, w.event.group_hash);
-                if let Some(slot) = seen_in_batch.get(&key) {
-                    if let Some(i) = *slot
-                        && w.event.timestamp < new_issues[i].event.timestamp
-                    {
-                        new_issues[i] = w;
-                    }
-                    continue;
+        let mut new_in_batch: HashMap<(u32, u64), usize> = HashMap::new();
+        let mut reopened: HashSet<(u32, u64)> = HashSet::new();
+        for w in batch {
+            let key = (w.project_id, w.event.group_hash);
+            if let Some(i) = new_in_batch.get(&key) {
+                if w.event.timestamp < new_issues[*i].event.timestamp {
+                    new_issues[*i] = w;
                 }
-                let slot = match issues.get(&key) {
-                    None => {
-                        new_issues.push(w);
-                        Some(new_issues.len() - 1)
-                    }
-                    Some(IssueStatus::Resolved) => {
-                        activity.push((key.0, key.1, IssueStatus::Unresolved, "regression"));
-                        None
-                    }
-                    Some(_) => None,
-                };
-                seen_in_batch.insert(key, slot);
+                continue;
+            }
+            match self.caches.issues.get(&key) {
+                None => {
+                    new_in_batch.insert(key, new_issues.len());
+                    new_issues.push(w);
+                }
+                Some(i)
+                    if i.status == IssueStatus::Resolved
+                        && w.event.timestamp.timestamp_micros() >= i.changed_us
+                        && reopened.insert(key) =>
+                {
+                    activity.push((key.0, key.1, IssueStatus::Unresolved, "regression"));
+                }
+                Some(_) => {}
             }
         }
 
@@ -506,17 +655,19 @@ impl Writer {
                 )?;
                 for w in &new_issues {
                     let e = &w.event;
+                    // The overflow issue does not take after its first event.
+                    let overflow = e.group_hash == OVERFLOW_GROUP;
                     stmt.execute(params![
                         w.project_id as i32,
                         e.group_hash,
                         e.timestamp.timestamp_micros(),
                         e.event_id.to_string(),
                         e.release,
-                        e.title,
-                        e.culprit,
-                        e.level,
+                        if overflow { OVERFLOW_TITLE } else { e.title.as_str() },
+                        if overflow { None } else { e.culprit.as_deref() },
+                        if overflow { "warning" } else { e.level.as_str() },
                         e.platform,
-                        e.exception_type,
+                        if overflow { None } else { e.exception_type.as_deref() },
                     ])?;
                 }
             }
@@ -532,44 +683,52 @@ impl Writer {
         self.conn.execute_batch(&ns.sql("DELETE FROM $T.staging_events"))?;
         result?;
 
-        let mut issues = self.caches.issues.write().expect("lock");
         for w in new_issues {
-            issues.insert((w.project_id, w.event.group_hash), IssueStatus::Unresolved);
+            self.caches.issues.insert((w.project_id, w.event.group_hash), IssueState::NEW);
         }
-        for (p, g, s, _) in activity {
-            issues.insert((p, g), s);
+        for (p, g, status, _) in activity {
+            self.caches.issues.insert((p, g), IssueState { status, changed_us: now_us });
+        }
+        for (project, n) in new_per_project {
+            self.new_issues.add(project, hour, n);
         }
         Ok(())
     }
 
+    /// Ids count up. Writing the `project_seq` row in the same transaction
+    /// makes two concurrent calls conflict, also across processes (a
+    /// `DELETE` conflicts with concurrent writes, ADR 0021); the loser tries
+    /// again and sees the other's project, its id and its slug.
     fn create_project(&self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow, WriteError> {
         let ns = &self.ns;
-        let id = {
-            let projects = self.caches.projects.read().expect("lock");
-            if projects.values().any(|p| p.slug == slug) {
-                return Err(WriteError::SlugTaken(slug));
-            }
-            projects.keys().max().copied().unwrap_or(0) + 1
-        };
         let mut key = [0u8; 16];
         rand::fill(&mut key);
-        let row = ProjectRow { id, slug, name, platform, public_key: hex::encode(key), created_at: Utc::now() };
-        self.in_tx(|c| {
+        let public_key = hex::encode(key);
+        let created_at = Utc::now();
+        let id = self.in_tx(|c| {
+            let taken: i64 =
+                c.query_row(&ns.sql("SELECT count(*) FROM $S.projects WHERE slug = ?"), [&slug], |r| r.get(0))?;
+            if taken > 0 {
+                return Ok(None);
+            }
+            let id: i32 = c.query_row(&ns.sql("SELECT coalesce(max(id), 0) + 1 FROM $S.projects"), [], |r| r.get(0))?;
+            c.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [PROJECT_SEQ])?;
+            c.execute(
+                &ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(?))"),
+                params![PROJECT_SEQ, id.to_string(), created_at.timestamp_micros()],
+            )?;
             c.execute(
                 &ns.sql("INSERT INTO $S.projects VALUES (?, ?, ?, ?, ?, make_timestamp(?))"),
-                params![
-                    row.id as i32,
-                    row.slug,
-                    row.name,
-                    row.platform,
-                    row.public_key,
-                    row.created_at.timestamp_micros()
-                ],
+                params![id, slug, name, platform, public_key, created_at.timestamp_micros()],
             )?;
-            Ok(())
+            Ok(Some(id))
         })?;
-        self.caches.projects.write().expect("lock").insert(id, row.clone());
-        Ok(row)
+        // Also when the slug is taken: tells the cache about that project.
+        load_projects(&self.conn, ns, &self.caches)?;
+        match id {
+            Some(id) => Ok(ProjectRow { id: id as u32, slug, name, platform, public_key, created_at }),
+            None => Err(WriteError::SlugTaken(slug)),
+        }
     }
 
     fn set_status(
@@ -580,20 +739,24 @@ impl Writer {
         reason: &str,
     ) -> Result<bool, WriteError> {
         let ns = &self.ns;
-        match self.caches.issues.read().expect("lock").get(&(project_id, group_hash)) {
+        // The lake, not the cache: another process may have changed it.
+        self.caches.issues.invalidate(&(project_id, group_hash));
+        self.load_issues([(project_id, group_hash)])?;
+        match self.caches.issues.get(&(project_id, group_hash)) {
             None => return Err(WriteError::IssueNotFound),
             // Idempotent: the same status again writes nothing.
-            Some(s) if *s == status => return Ok(false),
+            Some(i) if i.status == status => return Ok(false),
             Some(_) => {}
         }
+        let changed_us = Utc::now().timestamp_micros();
         self.in_tx(|c| {
             c.execute(
                 &ns.sql("INSERT INTO $S.issue_activity VALUES (?, ?, make_timestamp(?), ?, ?)"),
-                params![project_id as i32, group_hash, Utc::now().timestamp_micros(), status.as_str(), reason],
+                params![project_id as i32, group_hash, changed_us, status.as_str(), reason],
             )?;
             Ok(())
         })?;
-        self.caches.issues.write().expect("lock").insert((project_id, group_hash), status);
+        self.caches.issues.insert((project_id, group_hash), IssueState { status, changed_us });
         Ok(true)
     }
 
@@ -649,81 +812,38 @@ impl Writer {
         Ok(())
     }
 
-    fn flush_inlined(&mut self) -> Result<()> {
-        let started = Instant::now();
-        let sql = self.ns.sql("CALL ducklake_flush_inlined_data($C, schema_name => $N)");
-        self.conn.execute_batch(&sql).context("ducklake_flush_inlined_data")?;
-        metrics::histogram!("sdl_flush_seconds").record(started.elapsed().as_secs_f64());
-        tracing::debug!(ms = started.elapsed().as_millis() as u64, "flushed inlined data");
+    fn retention(&self) -> Result<()> {
+        if self.retention.is_zero() {
+            return Ok(());
+        }
+        // Day-aligned cutoff: whole daily partitions are dropped without
+        // writing delete files. Partial days round up (keep more).
+        let days = self.retention.as_secs().div_ceil(86_400);
+        let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
+        let cutoff = (today - chrono::Duration::days(days as i64)).timestamp_micros();
+        let sql = self.ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)");
+        let deleted = self.in_tx(|c| Ok(c.execute(&sql, params![cutoff])?))?;
+        if deleted > 0 {
+            tracing::info!(deleted, "retention removed old events");
+        }
         Ok(())
     }
+}
 
-    fn compact_and_expire(&self) -> Result<()> {
-        let ns = &self.ns;
-        let started = Instant::now();
-        let mut errors = Vec::new();
-        if !self.retention.is_zero() {
-            // Day-aligned cutoff: whole daily partitions are dropped without
-            // writing delete files. Partial days round up (keep more).
-            let days = self.retention.as_secs().div_ceil(86_400);
-            let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
-            let cutoff = (today - chrono::Duration::days(days as i64)).timestamp_micros();
-            match self
-                .conn
-                .execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])
-            {
-                Ok(0) => {}
-                Ok(deleted) => tracing::info!(deleted, "retention removed old events"),
-                Err(e) => errors.push(format!("retention: {e}")),
-            }
-        }
-        // Sorted merges need memory per thread: compact with fewer threads,
-        // then restore the previous setting.
-        let restore_threads: Option<i64> = match self.maintenance.threads {
-            0 => None,
-            n => {
-                let current: Option<i64> =
-                    self.conn.query_row("SELECT current_setting('threads')::BIGINT", [], |r| r.get(0)).ok();
-                if current.is_some_and(|c| c > n as i64) {
-                    let _ = self.conn.execute_batch(&format!("SET threads = {n}"));
-                    current
-                } else {
-                    None
-                }
-            }
-        };
-        // Each step runs even if an earlier one failed, so snapshots keep
-        // expiring when e.g. one table cannot be compacted.
-        for table in COMPACTED_TABLES {
-            let sql = ns.sql(&format!(
-                "CALL ducklake_merge_adjacent_files($C, '{table}', schema => $N, max_compacted_files => {MAX_COMPACTED_FILES});
-                 CALL ducklake_rewrite_data_files($C, '{table}', schema => $N, max_compacted_files => {MAX_COMPACTED_FILES});"
-            ));
-            if let Err(e) = self.conn.execute_batch(&sql) {
-                errors.push(format!("compacting {table}: {e}"));
-            }
-        }
-        if let Some(t) = restore_threads {
-            let _ = self.conn.execute_batch(&format!("SET threads = {t}"));
-        }
-        if let Some(keep) = self.maintenance.catalog_wide {
-            let cutoff = (Utc::now() - chrono::Duration::from_std(keep).unwrap_or_default()).timestamp_micros();
-            for (what, sql) in [
-                ("expiring snapshots", "CALL ducklake_expire_snapshots($C, older_than => make_timestamp(?))"),
-                ("cleaning up old files", "CALL ducklake_cleanup_old_files($C, older_than => make_timestamp(?))"),
-            ] {
-                if let Err(e) = self.conn.execute(&ns.sql(sql), params![cutoff]) {
-                    errors.push(format!("{what}: {e}"));
-                }
-            }
-        }
-        metrics::histogram!("sdl_compact_seconds").record(started.elapsed().as_secs_f64());
-        if errors.is_empty() {
-            tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");
-            Ok(())
-        } else {
-            metrics::counter!("sdl_maintenance_errors_total").increment(errors.len() as u64);
-            Err(anyhow!(errors.join("; ")))
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_issue_count_is_per_project_and_hour() {
+        let mut c = NewIssueCount::default();
+        c.add(1, 100, 2);
+        c.add(1, 100, 3);
+        assert_eq!(c.get(1, 100), 5);
+        assert_eq!(c.get(2, 100), 0);
+        assert_eq!(c.get(1, 101), 0, "a new hour starts at zero");
+        c.add(1, 101, 1);
+        assert_eq!(c.get(1, 101), 1);
+        assert_eq!(c.get(1, 100), 0, "only the current hour is kept");
     }
 }

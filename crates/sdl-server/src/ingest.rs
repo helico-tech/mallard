@@ -70,6 +70,8 @@ pub(crate) struct Source {
     pub client_ip: Option<String>,
     /// Sent by a Sentry SDK (reported to the event observer).
     pub from_sdk: bool,
+    /// `sent_at` of the envelope: corrects a wrong client clock.
+    pub sent_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// The ingest answer for an event that could not be stored.
@@ -119,7 +121,7 @@ struct Incoming {
 
 impl Incoming {
     fn source(&self) -> Source {
-        Source { project_id: self.project_id, client_ip: self.client_ip.clone(), from_sdk: true }
+        Source { project_id: self.project_id, client_ip: self.client_ip.clone(), from_sdk: true, sent_at: None }
     }
 }
 
@@ -137,7 +139,7 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
     let header_key = key_from_headers(&parts.headers, query.as_deref());
     let limit = match &header_key {
         Some(key) => {
-            check_key(state, project_id, key)?;
+            check_key(state, project_id, key).await?;
             state.cfg.ingest.max_body_bytes.as_usize()
         }
         None => state.cfg.ingest.max_body_bytes.as_usize().min(UNAUTHENTICATED_BODY_LIMIT),
@@ -183,8 +185,8 @@ fn key_from_headers(headers: &HeaderMap, query: Option<&str>) -> Option<String> 
         .or_else(|| query.and_then(auth::parse_query))
 }
 
-fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Response> {
-    match state.db.caches.project(project_id) {
+async fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Response> {
+    match state.db.project_by_ref(&project_id.to_string()).await {
         Some(p) if constant_time_eq(p.public_key.as_bytes(), key.as_bytes()) => Ok(()),
         Some(_) => Err(sentry_error(StatusCode::UNAUTHORIZED, "invalid api key")),
         None => Err(sentry_error(StatusCode::NOT_FOUND, "project not found")),
@@ -193,13 +195,13 @@ fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Respons
 
 /// Check the key from the envelope's `dsn` header when there was none in
 /// the headers or query (those were checked before reading the body).
-fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) -> Result<(), Response> {
+async fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) -> Result<(), Response> {
     if inc.header_key.is_some() {
         return Ok(());
     }
     let key = envelope_dsn.and_then(|d| sdl_protocol::dsn::Dsn::parse(d).ok()).map(|d| d.public_key);
     match key {
-        Some(key) => check_key(state, inc.project_id, &key),
+        Some(key) => check_key(state, inc.project_id, &key).await,
         None => Err(sentry_error(StatusCode::UNAUTHORIZED, "missing authorization information")),
     }
 }
@@ -248,9 +250,10 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
         Ok(e) => e,
         Err(e) => return sentry_error(StatusCode::BAD_REQUEST, &format!("invalid envelope: {e}")),
     };
-    if let Err(r) = authenticate(&state, &inc, env.dsn()) {
+    if let Err(r) = authenticate(&state, &inc, env.dsn()).await {
         return r;
     }
+    let source = Source { sent_at: env.sent_at(), ..inc.source() };
     let mut stored_id: Option<String> = None;
     for item in &env.items {
         let ty = item.ty();
@@ -264,7 +267,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
                     Ok(v) => v,
                     Err(e) => return sentry_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")),
                 };
-                match process_event(&state, &inc.source(), raw, env.event_id()).await {
+                match process_event(&state, &source, raw, env.event_id()).await {
                     Ok(id) => stored_id = Some(id),
                     Err(e) => return ingest_error(e),
                 }
@@ -294,7 +297,7 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
         Ok(i) => i,
         Err(r) => return r,
     };
-    if let Err(r) = authenticate(&state, &inc, None) {
+    if let Err(r) = authenticate(&state, &inc, None).await {
         return r;
     }
     let Some(json_bytes) =
@@ -354,6 +357,7 @@ pub(crate) async fn process_event(
     let received_at = Utc::now();
     let mut ctx = NormalizeContext::new(received_at);
     ctx.client_ip = src.client_ip.clone();
+    ctx.sent_at = src.sent_at;
     ctx.event_id_hint = hint.map(str::to_string);
     // Normalizing, symbolicating and grouping are CPU work: keep them off
     // the async worker threads.

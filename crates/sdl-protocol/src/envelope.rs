@@ -49,6 +49,10 @@ impl Envelope {
     pub fn dsn(&self) -> Option<&str> {
         self.headers.get("dsn").and_then(Value::as_str)
     }
+    /// When the SDK sent it, by its own clock.
+    pub fn sent_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.headers.get("sent_at").and_then(crate::event::parse_timestamp)
+    }
 
     pub fn parse(data: Bytes) -> Result<Self, EnvelopeError> {
         let mut pos = 0usize;
