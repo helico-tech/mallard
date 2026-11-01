@@ -50,7 +50,7 @@ impl Error {
     }
 
     /// The server refused the time window because it is larger than its
-    /// `query.max_window`.
+    /// `otel.query.max_window`.
     ///
     /// The server reports this as a generic `bad_request`, so this matches
     /// its message. It is the only place that does.
@@ -440,7 +440,7 @@ mod tests {
         let e = Error::Api {
             status: 400,
             code: "bad_request".into(),
-            message: "time window larger than query.max_window (1day)".into(),
+            message: "time window larger than <side>.query.max_window (1day)".into(),
         };
         assert!(e.is_window_too_large());
         let e = Error::Api { status: 400, code: "bad_request".into(), message: "invalid since".into() };

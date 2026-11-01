@@ -12,7 +12,9 @@ use crate::duration;
 pub enum WindowError {
     #[error("invalid since={0:?}: {1}")]
     InvalidSince(String, duration::DurationError),
-    #[error("time window larger than query.max_window ({})", humantime::format_duration(*.0))]
+    /// Both sides share this text, so it names the key by its pattern: the
+    /// config keys are `otel.query.max_window` and `sentry.query.max_window`.
+    #[error("time window larger than <side>.query.max_window ({})", humantime::format_duration(*.0))]
     TooLarge(Duration),
     #[error("time window starts before the earliest supported time")]
     OutOfRange,
@@ -124,7 +126,10 @@ mod tests {
         assert!((r.secs() - 3600.0).abs() < 1.0);
         assert_eq!(r.step(None).unwrap(), 60);
         assert_eq!(since("3h", HOUR, 2 * HOUR), Err(WindowError::TooLarge(2 * HOUR)));
-        assert!(since("3h", HOUR, 2 * HOUR).unwrap_err().to_string().contains("max_window"));
+        assert_eq!(
+            since("3h", HOUR, 2 * HOUR).unwrap_err().to_string(),
+            "time window larger than <side>.query.max_window (2h)"
+        );
         assert_eq!(r.step(Some("100ms")).unwrap(), 1);
         assert_eq!(r.step(Some("0s")).unwrap(), 1);
         assert_eq!(r.step(Some("2w")).unwrap(), 3600, "at most one bucket");
