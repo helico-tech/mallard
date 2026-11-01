@@ -22,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use chrono::Utc;
 use sdl_protocol::envelope::Envelope;
+use sdl_protocol::event::parse_uuid;
 use sdl_protocol::{NormalizeContext, ProcessedEvent, auth, normalize_event, symbolicate};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
+use uuid::Uuid;
 
 pub fn router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -282,13 +284,32 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
         metrics::counter!("sdl_ingest_items_dropped_total", "type" => "non_error_event").increment(1);
         return Ok(id);
     }
+    // Claim the event id before the expensive work, so SDK retries (also
+    // concurrent ones) are stored once. Same id rule as `normalize_event`;
+    // events without an id get a random one and need no check.
+    let claimed_id =
+        raw.get("event_id").and_then(Value::as_str).and_then(parse_uuid).or_else(|| hint.and_then(parse_uuid));
+    let mut claim = match claimed_id {
+        Some(id) => match Claim::new(&state.recent_events, (inc.project_id, id)) {
+            Some(c) => Some(c),
+            None => {
+                metrics::counter!("sdl_ingest_duplicates_total").increment(1);
+                return Ok(id.simple().to_string());
+            }
+        },
+        None => None,
+    };
+
     let received_at = Utc::now();
     let mut ctx = NormalizeContext::new(received_at);
     ctx.client_ip = inc.client_ip.clone();
     ctx.event_id_hint = hint.map(str::to_string);
     // Normalizing, symbolicating and grouping are CPU work: keep them off
     // the async worker threads.
-    let blocking_err = |_| sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed");
+    let blocking_err = |e: tokio::task::JoinError| {
+        tracing::error!(error = %e, "event processing panicked");
+        sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed")
+    };
     let want_refs = state.sourcemaps.applies_to(&state.db, inc.project_id);
     let (ev, refs) = tokio::task::spawn_blocking(move || {
         let ev = normalize_event(raw, &ctx);
@@ -298,27 +319,20 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     .await
     .map_err(blocking_err)?;
     let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev, refs).await;
-    let (processed, payload_json) = tokio::task::spawn_blocking(move || {
+    let (event, payload_json) = tokio::task::spawn_blocking(move || {
         let mut ev = ev;
         if !maps.is_empty() {
             let n = symbolicate::apply(&mut ev, &maps);
             metrics::counter!("sdl_frames_symbolicated_total").increment(n as u64);
         }
-        let processed = ProcessedEvent::from_normalized(ev, received_at);
-        let payload_json = processed.payload.to_string();
-        (processed, payload_json)
+        // Only the JSON text is queued; the Value tree is dropped here.
+        (ProcessedEvent::from_normalized(&ev, received_at), ev.to_string())
     })
     .await
     .map_err(blocking_err)?;
-    let id = processed.event_id.simple().to_string();
-    let dedupe_key = (inc.project_id, processed.event_id);
-    if state.recent_events.contains_key(&dedupe_key) {
-        metrics::counter!("sdl_ingest_duplicates_total").increment(1);
-        return Ok(id);
-    }
+    let id = event.event_id.simple().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let cmd =
-        WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event: processed, payload_json, reply: tx }));
+    let cmd = WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event, payload_json, reply: tx }));
     match state.db.try_send(cmd) {
         Ok(()) => {}
         Err(EnqueueError::Full) => {
@@ -328,23 +342,75 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
             return Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"));
         }
     }
+    // Queued: the event will most likely be stored even if this request
+    // is cancelled now, so keep the claim unless the write fails.
+    let set_keep = |claim: &mut Option<Claim<'_>>, keep: bool| {
+        if let Some(c) = claim {
+            c.keep = keep;
+        }
+    };
+    set_keep(&mut claim, true);
     match rx.await {
         Ok(Ok(())) => {
-            state.recent_events.insert(dedupe_key, ());
             metrics::counter!("sdl_ingest_events_total").increment(1);
             Ok(id)
         }
         Ok(Err(e)) => {
+            set_keep(&mut claim, false);
             tracing::error!(error = format!("{e:#}"), "storing event failed");
             Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "storing the event failed"))
         }
-        Err(_) => Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")),
+        Err(_) => {
+            set_keep(&mut claim, false);
+            Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"))
+        }
+    }
+}
+
+type RecentEvents = moka::sync::Cache<(u32, Uuid), ()>;
+
+/// A claimed (project, event id) in the recent-events cache. Released on
+/// drop unless `keep` is set, so a failed or cancelled request lets the
+/// SDK's retry through.
+struct Claim<'a> {
+    cache: &'a RecentEvents,
+    key: (u32, Uuid),
+    keep: bool,
+}
+
+impl<'a> Claim<'a> {
+    /// `None` when the id is already claimed (a duplicate). Atomic:
+    /// `or_insert_with` coalesces concurrent calls (`or_insert` does not).
+    fn new(cache: &'a RecentEvents, key: (u32, Uuid)) -> Option<Self> {
+        cache.entry(key).or_insert_with(|| ()).is_fresh().then(|| Claim { cache, key, keep: false })
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.cache.invalidate(&self.key);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claims_are_exclusive_and_released_unless_kept() {
+        let cache = RecentEvents::new(100);
+        let key = (1, Uuid::new_v4());
+        let c = Claim::new(&cache, key).unwrap();
+        assert!(Claim::new(&cache, key).is_none(), "second claim of the same id is a duplicate");
+        assert!(Claim::new(&cache, key).is_none(), "a duplicate does not release the first claim");
+        drop(c);
+        let mut c = Claim::new(&cache, key).expect("released on drop");
+        c.keep = true;
+        drop(c);
+        assert!(Claim::new(&cache, key).is_none(), "kept after a stored event");
+    }
 
     #[test]
     fn item_type_labels_are_a_closed_set() {

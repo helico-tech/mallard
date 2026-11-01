@@ -306,6 +306,22 @@ async fn ingest_auth_compression_cors_and_dedupe() {
     t.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_retries_are_stored_once() {
+    let t = TestServer::start().await;
+    let project = t.create_project("dup").await;
+    let key = project["public_key"].as_str().unwrap();
+    let url = format!("{}/api/1/envelope/?sentry_key={key}", t.base);
+    let body = "{\"event_id\":\"0f6d8c0c43fc4630ad850ee518f1b9d1\"}\n{\"type\":\"event\"}\n{\"message\":\"dup\"}\n";
+    let sends = (0..8).map(|_| t.http.post(&url).body(body).send());
+    for r in futures::future::join_all(sends).await {
+        assert_eq!(r.unwrap().status(), 200);
+    }
+    let events = t.get("/v1/projects/dup/events").await;
+    assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
+    t.stop().await;
+}
+
 /// Build an artifact bundle like sentry-cli does (SYSB header + zip).
 fn bundle(debug_id: &str, minified: &str, map: &str) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
