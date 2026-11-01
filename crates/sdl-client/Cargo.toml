@@ -11,7 +11,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-url = "2"
+url.workspace = true
 percent-encoding = "2"
 
 [dev-dependencies]
