@@ -191,3 +191,6 @@ web UI. In an app, `service=` can only name one of its services: another is refu
 and nothing is read for it. `trace=` on logs follows the trace across apps, because it asks by id.
 `op=` values come from at most the last 24h. Difference with the web UI, on purpose: there a
 suggestion is taken only after you move to it; here the first one is ready for `tab`.
+
+A name with control or bidi characters shows cleaned, in the list and in the filter, and `tab` puts
+it in as the server has it, so the filter finds it.

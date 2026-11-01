@@ -651,6 +651,52 @@ fn asked(hits: &Hits, path: &str, query: &str) -> bool {
     hits.lock().unwrap().iter().any(|q| q.split('?').next() == Some(path) && q.contains(query))
 }
 
+/// Issue 0148. Accepting a suggestion puts the name in the bar as the server has it: the
+/// frame only ever shows it cleaned, in the list, in the bar and in what the view says about
+/// the filter, and the request holds the real name, or it would filter on nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_suggestion_shows_cleaned_and_sends_the_real_name() {
+    let (url, hits) = fake(Arc::new(|path, _| (200, hostile_answer(path), 0))).await;
+    let mut e = Embedded::new(Client::new(&url, None).unwrap());
+    let wait = Duration::from_secs(3);
+    let (slash, tab, enter) = (
+        ev(KeyCode::Char('/'), KeyModifiers::NONE),
+        ev(KeyCode::Tab, KeyModifiers::NONE),
+        ev(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    for (view, path) in [(View::Traces, "/api/v1/traces"), (View::Logs, "/api/v1/logs")] {
+        e.view = view;
+        let list =
+            |e: &Embedded| if e.view == View::Traces { e.trace_suggest.has_items() } else { e.log_suggest.has_items() };
+        assert_eq!(e.handle_event(&slash), Outcome::Consumed);
+        for c in "service=".chars() {
+            assert_eq!(e.handle_event(&ev(KeyCode::Char(c), KeyModifiers::NONE)), Outcome::Consumed);
+        }
+        assert!(settle(&mut e, list, wait).await, "no suggestion: {hits:?}");
+        clean_screen(&mut e, &[SHOWN]);
+
+        assert_eq!(e.handle_event(&tab), Outcome::Consumed);
+        let input = &e.prompt.as_ref().unwrap().input;
+        assert_eq!(input.value, format!("service={EVIL} "), "raw in the bar");
+        assert_eq!(input.cursor, input.value.chars().count());
+        clean_screen(&mut e, &[&format!("service={SHOWN}")]);
+
+        assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+        let filter = if view == View::Traces { e.traces.filter.service.clone() } else { e.logs.filter.service.clone() };
+        assert_eq!(filter.as_deref(), Some(EVIL));
+        let sent = settle(&mut e, |_| asked(&hits, path, "service=a%E2%80%AEb"), wait).await;
+        assert!(sent, "{path}: {hits:?}");
+        clean_screen(&mut e, &[]);
+
+        // Opened again it holds the same raw text, drawn cleaned.
+        assert_eq!(e.handle_event(&slash), Outcome::Consumed);
+        assert!(e.prompt.as_ref().unwrap().input.value.contains(EVIL));
+        clean_screen(&mut e, &[&format!("service={SHOWN}")]);
+        assert_eq!(e.handle_event(&ev(KeyCode::Esc, KeyModifiers::NONE)), Outcome::Consumed);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_text_shows_cleaned_and_goes_back_as_it_was() {
     let (url, hits) = fake(Arc::new(|path, _| (200, hostile_answer(path), 0))).await;

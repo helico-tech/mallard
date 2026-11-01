@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -20,3 +20,15 @@ On purpose today: `untrusted_text_is_cleaned` tests that the bar never gets raw 
 `Item` that shows the clean label and inserts the raw value. The telemetry bar already draws its text
 cleaned (0146); the errors tab's bar (`mallard-sentry-cli/src/tui/ui/mod.rs`) does not yet. Only names
 with control or bidi characters are affected, so it is low priority.
+
+Fixed: `Suggest` keeps fetched text raw. A row shows it cleaned (`Item::label`) and Tab inserts it raw
+(`Item::insert`), for values and for attribute and tag keys. A typed prefix matches the raw name or the
+label. What must hold now, instead of "the bar never gets raw text": what reaches the terminal is
+always cleaned, and what gets sent is the raw value. So the errors tab cleans its bar
+(`ui/mod.rs`), its filter row and its "matching ..." line (`ui/issues.rs`), which all hold raw text now.
+`suggest.rs`'s `untrusted_text_is_cleaned` became `a_row_shows_cleaned_and_inserts_raw`; each tab has a
+test through accept, draw and the request sent. A name with a tab or line break now stays one word
+when a filter is written back (`to_query`, `logs.rs`), where only a space was quoted.
+
+Checked with a real `mallard serve` and `mallard tui` in a pty, U+202E service and tag: main says "no
+matching traces", now the trace, the log and the issue show, with no raw U+202E byte on the terminal.

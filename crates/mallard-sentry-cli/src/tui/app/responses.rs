@@ -18,7 +18,7 @@ impl Resp {
             Resp::Events { issue, before, result } => Resp::Events { issue, before, result: result.and_then(cleaned) },
             Resp::SetStatus { id, status, result } => Resp::SetStatus { id, status, result: result.and_then(cleaned) },
             Resp::Trace { trace_id, result } => Resp::Trace { trace_id, result: result.and_then(cleaned) },
-            // The list cleans what it keeps.
+            // The list keeps it raw, to insert it, and cleans what it shows.
             r @ (Resp::Event { .. } | Resp::Suggest { .. } | Resp::Panicked { .. }) => r,
         }
     }

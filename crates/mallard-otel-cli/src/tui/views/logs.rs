@@ -99,8 +99,11 @@ pub fn cycle_level(query: &str) -> (String, Option<u8>) {
         Some(n) if n < 17 => Some(("error", 17)),
         Some(_) => None,
     };
-    let mut rest: Vec<String> =
-        toks.into_iter().filter(|t| !is_level(t)).map(|t| if t.contains(' ') { quote(&t) } else { t }).collect();
+    let mut rest: Vec<String> = toks
+        .into_iter()
+        .filter(|t| !is_level(t))
+        .map(|t| if t.contains(char::is_whitespace) { quote(&t) } else { t })
+        .collect();
     if let Some((name, _)) = next {
         rest.insert(0, format!("level={name}"));
     }
@@ -113,7 +116,7 @@ pub fn without_service(query: &str) -> String {
     tokenize(query)
         .into_iter()
         .filter(|t| !is_service(t))
-        .map(|t| if t.contains(' ') { quote(&t) } else { t })
+        .map(|t| if t.contains(char::is_whitespace) { quote(&t) } else { t })
         .collect::<Vec<_>>()
         .join(" ")
 }
