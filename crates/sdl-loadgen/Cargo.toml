@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+mallard-common.workspace = true
 sdl-client.workspace = true
 anyhow.workspace = true
 clap.workspace = true

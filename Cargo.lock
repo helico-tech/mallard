@@ -3988,6 +3988,7 @@ dependencies = [
  "clap",
  "flate2",
  "hdrhistogram",
+ "mallard-common",
  "rand 0.10.3",
  "reqwest",
  "sdl-client",

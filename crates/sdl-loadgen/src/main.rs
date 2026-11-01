@@ -41,7 +41,7 @@ enum Cmd {
         #[arg(long, default_value_t = 200)]
         rate: u64,
         /// How long to run, e.g. `60s`.
-        #[arg(long, value_parser = humantime_parse, default_value = "30s")]
+        #[arg(long, value_parser = mallard_common::duration::parse, default_value = "30s")]
         duration: Duration,
         /// Stop after this many events (0 = no limit).
         #[arg(long, default_value_t = 0)]
@@ -68,18 +68,6 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         reps: usize,
     },
-}
-
-fn humantime_parse(s: &str) -> Result<Duration, String> {
-    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: u64 = num.parse().map_err(|_| format!("bad duration {s}"))?;
-    Ok(match unit {
-        "ms" => Duration::from_millis(n),
-        "s" | "" => Duration::from_secs(n),
-        "m" => Duration::from_secs(n * 60),
-        "h" => Duration::from_secs(n * 3600),
-        _ => return Err(format!("bad duration unit in {s}")),
-    })
 }
 
 const FUNCS: &[&str] = &[
