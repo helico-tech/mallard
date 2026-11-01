@@ -192,11 +192,10 @@ pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<Tra
             any_value(s.service_name) FILTER (WHERE s.parent_span_id IS NULL), \
             any_value(s.name) FILTER (WHERE s.parent_span_id IS NULL), \
             count(*), count(*) FILTER (WHERE s.status_code = 'ERROR'), \
-            to_json(list(DISTINCT s.service_name ORDER BY s.service_name)), \
-            any_value(m.last) AS last \
+            to_json(list(DISTINCT s.service_name ORDER BY s.service_name)) \
          FROM spans s JOIN m USING (trace_id) \
          WHERE s.start_time >= ? AND s.start_time < ? \
-         GROUP BY s.trace_id ORDER BY last DESC",
+         GROUP BY s.trace_id ORDER BY min(s.start_time) DESC",
         where_ = f.sql(),
         limit = q.limit,
         tid = trace_hex("s.trace_id"),

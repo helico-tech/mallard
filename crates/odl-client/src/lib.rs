@@ -157,8 +157,11 @@ impl Client {
 
 /// Follows new log records ("tail -f") by polling.
 ///
-/// Records become visible after the server's flush interval and may arrive
-/// late, so each poll looks back `lookback` and drops records already seen.
+/// Each poll asks for the newest records since the last one seen (minus a
+/// look-back, because records become visible only after the server's flush
+/// interval and may arrive late) and returns those not returned before,
+/// oldest first. When more than `limit` records arrive between two polls,
+/// only the newest `limit` are returned: a tail shows what is happening now.
 pub struct LogTail {
     client: Client,
     query: LogQuery,
@@ -169,15 +172,10 @@ pub struct LogTail {
 
 impl LogTail {
     /// Start tailing from `start` (e.g. now minus a few minutes). Filters in
-    /// `query` are kept; its window and order are managed by the tail.
+    /// `query` are kept (`limit` caps each poll, default 500); its window and
+    /// order are managed by the tail.
     pub fn new(client: Client, query: LogQuery, start: DateTime<Utc>) -> Self {
-        Self {
-            client,
-            query,
-            lookback: TimeDelta::seconds(30),
-            cursor: start,
-            seen: HashSet::new(),
-        }
+        Self { client, query, lookback: TimeDelta::seconds(30), cursor: start, seen: HashSet::new() }
     }
 
     /// How far each poll looks back for late records (default 30 s).
@@ -192,8 +190,8 @@ impl LogTail {
         q.from = Some(self.cursor - self.lookback);
         q.to = None;
         q.since = None;
-        q.order = Some("asc".into());
-        q.limit = Some(q.limit.unwrap_or(1000).min(5000));
+        q.order = Some("desc".into());
+        q.limit = Some(q.limit.unwrap_or(500).clamp(1, 5000));
         let records = self.client.logs(&q).await?;
         let mut out = Vec::new();
         for r in records {
@@ -205,6 +203,7 @@ impl LogTail {
                 out.push(r);
             }
         }
+        out.reverse();
         // Forget keys older than the look-back window.
         let horizon = (self.cursor - self.lookback - TimeDelta::seconds(1)).timestamp_micros();
         self.seen.retain(|(t, _)| *t >= horizon);

@@ -372,7 +372,7 @@ impl Embedded {
                     Cell::from(Line::from(ms(tr.duration_ms)).right_aligned()).style(theme::text()),
                     Cell::from(Line::from(vec![
                         TSpan::styled("▬".repeat(filled), Style::new().fg(bar_color)),
-                        TSpan::styled("▬".repeat(10 - filled), theme::muted()),
+                        TSpan::styled("─".repeat(10 - filled), theme::muted()),
                     ])),
                     Cell::from(Line::from(compact(tr.span_count as f64)).right_aligned())
                         .style(theme::dim()),
