@@ -5,7 +5,7 @@ import { useParams } from "react-router-dom";
 import { otel } from "@/api/otel";
 import { useKeys } from "@/app/keys";
 import { useInterval, useSettings } from "@/app/settings";
-import { useParam, useWindow } from "@/app/window";
+import { useParam, useScope, useWindow } from "@/app/window";
 import { ChartLegend, lineColor, TimeChart, type Line } from "@/components/charts-kumo";
 import { useBack, DataTable, DetailHeader, EmptyState, ErrorState, Pad, Page, Section, StaleNote, TableSkeleton } from "@/components/ui-bits";
 import { clean } from "@/lib/clean";
@@ -14,7 +14,8 @@ import { aggregations, metricTypeLabel, metricValue, seriesLabel } from "@/lib/m
 
 export default function MetricPage() {
   const { name = "" } = useParams();
-  const { w } = useWindow("telemetry");
+  const { w } = useWindow();
+  const { services } = useScope();
   const [aggParam, setAgg] = useParam("agg");
   const [by, setBy] = useParam("by");
   const [draft, setDraft] = useState(by);
@@ -23,15 +24,15 @@ export default function MetricPage() {
   const { isDark } = useSettings();
   useEffect(() => setDraft(by), [by]);
 
-  const info = useQuery({ queryKey: ["otel", "metrics", w], queryFn: ({ signal }) => otel.metrics(w, signal), placeholderData: keepPreviousData });
+  const info = useQuery({ queryKey: ["otel", "metrics", w, services], queryFn: ({ signal }) => otel.metrics(w, services ?? undefined, signal), placeholderData: keepPreviousData });
   const meta = info.data?.find((m) => m.name === name);
   const aggs = meta ? aggregations(meta.metric_type, meta.temporality) : [];
   const agg = aggParam && aggs.includes(aggParam) ? aggParam : aggs[0];
 
   const q = useQuery({
-    queryKey: ["otel", "metric", name, w, agg, by],
+    queryKey: ["otel", "metric", name, w, agg, by, services],
     enabled: !!agg,
-    queryFn: ({ signal }) => otel.metric({ name, since: w, agg, group_by: by || undefined }, signal),
+    queryFn: ({ signal }) => otel.metric({ name, since: w, agg, group_by: by || undefined, service: services ?? undefined }, signal),
     refetchInterval,
   });
 

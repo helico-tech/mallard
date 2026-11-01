@@ -8,7 +8,9 @@ import { otel } from "@/api/otel";
 import type { LogRecord } from "@/api/types";
 import { REFRESH_EVENT, useKeys } from "@/app/keys";
 import { useInterval, useSettings } from "@/app/settings";
-import { useParam, useWindow } from "@/app/window";
+import { useParam, useScope, useWindow } from "@/app/window";
+import { OutsideApp } from "@/components/scope-states";
+import { logSuggestions } from "@/components/suggestions";
 import { Legend, StackedBars } from "@/components/charts";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { useNarrow, Severity, Attributes, CopyId, LIST_HEADER, EmptyState, ErrorState, Facts, Page, SearchField, Section, Service, StaleNote, TableSkeleton, toneBg } from "@/components/ui-bits";
@@ -16,6 +18,7 @@ import { severityName, severityTone, windowSeconds } from "@/lib/domain";
 import { compact, dayTime, timeMs, timestamp, timestampFull } from "@/lib/format";
 import { POLL_LIMIT, Tail } from "@/lib/logtail";
 import { cycleLevel, parseLogFilter, type LogFilter } from "@/lib/query";
+import { serviceParam } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 
 const MAX_RECORDS = 5000;
@@ -51,7 +54,7 @@ function reducer(s: State, a: Action): State {
 let nextId = 0;
 const toItem = (r: LogRecord): Item => ({ kind: "log", id: `l${nextId++}`, r, truncatedBody: r.body.length > 400 });
 
-function useLogStream(w: string, filter: LogFilter, filterKey: string, following: boolean) {
+function useLogStream(w: string, filter: LogFilter, filterKey: string, following: boolean, service: string[] | undefined, reads: boolean) {
   const [reload, bump] = useState(0);
   useEffect(() => {
     const onRefresh = () => bump((n) => n + 1);
@@ -61,18 +64,19 @@ function useLogStream(w: string, filter: LogFilter, filterKey: string, following
   const [state, dispatch] = useReducer(reducer, { items: [], loaded: false, error: null });
   const tail = useRef<Tail<LogRecord> | null>(null);
   const q = useMemo(() => ({
-    service: filter.service,
+    service,
     min_severity: filter.minSeverity,
     q: filter.q,
     trace_id: filter.trace,
     attributes: filter.attributes.join(",") || undefined,
-  }), [filter]);
+  }), [filter, service]);
 
   useEffect(() => {
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     dispatch({ type: "reset" });
     tail.current = null;
+    if (!reads) return;
     const load = async () => {
       const start = new Date();
       try {
@@ -93,7 +97,7 @@ function useLogStream(w: string, filter: LogFilter, filterKey: string, following
       abort.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [q, w, filterKey, reload]);
+  }, [q, w, filterKey, reload, reads]);
 
   const poll = useCallback(async (signal: AbortSignal) => {
     const t = tail.current;
@@ -179,7 +183,8 @@ function RecordPanel({ r, onClose }: { r: LogRecord; onClose: () => void }) {
 }
 
 export function LogsPage() {
-  const { w } = useWindow("telemetry");
+  const { w } = useWindow();
+  const { services, apps } = useScope();
   const [f, setF] = useParam("f");
   const navigate = useNavigate();
   const { paused } = useSettings();
@@ -195,7 +200,11 @@ export function LogsPage() {
   const parsed = parseLogFilter(f);
   const filter: LogFilter = useMemo(() => ("error" in parsed ? { attributes: [] } : parsed), [f]); // eslint-disable-line react-hooks/exhaustive-deps
   const following = follow && !paused;
-  const state = useLogStream(w, filter, f, following);
+  // A trace is asked for by id: all its logs, whichever app they came from.
+  const scoped = filter.trace ? serviceParam(filter.service, null) : serviceParam(filter.service, services);
+  const scopeKey = scoped?.service?.join("\n");
+  const service = useMemo(() => scoped?.service, [scopeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const state = useLogStream(w, filter, f, following, service, scoped !== null);
   const items = state.items;
 
   // The filter or window changing starts over and follows again, as in the TUI.
@@ -207,8 +216,9 @@ export function LogsPage() {
   }, [f, w]);
 
   const volume = useQuery({
-    queryKey: ["otel", "log-volume", w, filter.service, filter.q],
-    queryFn: ({ signal }) => otel.logSeries({ since: w, service: filter.service, q: filter.q }, signal),
+    queryKey: ["otel", "log-volume", w, service, filter.q],
+    enabled: scoped !== null,
+    queryFn: ({ signal }) => otel.logSeries({ since: w, service, q: filter.q }, signal),
     refetchInterval,
     placeholderData: keepPreviousData,
   });
@@ -285,6 +295,11 @@ export function LogsPage() {
     },
   });
 
+  const suggest = useMemo(
+    () => logSuggestions(w, services ?? undefined, services ?? [...new Set(apps.flatMap((a) => a.services))]),
+    [w, services, apps],
+  );
+
   const list = (
     <div className="flex h-full min-h-0 flex-col">
       <div className={cn(LIST_HEADER, "grid-cols-[8px_88px_48px_minmax(0,1fr)] @3xl:grid-cols-[8px_104px_48px_minmax(60px,140px)_minmax(0,1fr)] gap-2 pr-4")} aria-hidden>
@@ -336,6 +351,7 @@ export function LogsPage() {
           mono
           label="Filter logs"
           placeholder="service=api level=warn trace=abc order placed key=value"
+          suggest={suggest}
           validate={(v) => {
             const p = parseLogFilter(v);
             return "error" in p ? p.error : null;
@@ -386,7 +402,9 @@ export function LogsPage() {
         }
       >
         {!!state.error && items.length > 0 && <StaleNote error={state.error} />}
-        {!!state.error && items.length === 0 ? (
+        {scoped === null ? (
+          <OutsideApp service={filter.service!} onClear={() => setF("")} />
+        ) : !!state.error && items.length === 0 ? (
           <ErrorState error={state.error} title="Could not load logs" />
         ) : !state.loaded ? (
           <TableSkeleton />

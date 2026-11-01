@@ -15,6 +15,7 @@ export default defineConfig({
     proxy: {
       "/sentry": { target: backend, changeOrigin: false },
       "/otel": { target: backend, changeOrigin: false },
+      "/api": { target: backend, changeOrigin: false },
       "/web": { target: backend, changeOrigin: false },
     },
   },

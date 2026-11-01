@@ -51,6 +51,9 @@ body {
   outline-offset: 1px;
 }
 
+/* These boxes show focus on the whole box; a ring on the input inside would be cut off. */
+form[role="search"] input:focus-visible, [role="dialog"] input[role="combobox"]:focus-visible { outline: none; }
+
 /* A selected row keeps clear of the sticky header. */
 [data-row-id] { scroll-margin-top: 40px; scroll-margin-bottom: 8px; }
 

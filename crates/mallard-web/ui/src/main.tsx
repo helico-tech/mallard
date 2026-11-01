@@ -7,7 +7,6 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Link } from "react-router-dom";
 import { ApiError } from "@/api/client";
 import { SettingsProvider } from "@/app/settings";
-import { WindowProvider } from "@/app/window";
 import { App } from "./App";
 import "./index.css";
 
@@ -38,11 +37,9 @@ createRoot(document.getElementById("root")!).render(
         <LinkProvider component={RouterLink}>
           <TooltipProvider>
             <SettingsProvider>
-              <WindowProvider>
-                <Toasty>
-                  <App />
-                </Toasty>
-              </WindowProvider>
+              <Toasty>
+                <App />
+              </Toasty>
             </SettingsProvider>
           </TooltipProvider>
         </LinkProvider>

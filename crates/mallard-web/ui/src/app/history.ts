@@ -26,15 +26,16 @@ function screenOf(pathname: string): string {
   return pathname.startsWith("/telemetry/") ? pathname.split("/").slice(0, 3).join("/") : "/errors";
 }
 
-/** The window belongs to the side, not to one address: it is never restored from here. */
-function withoutWindow(search: string): string {
+/** The app and the window are global, not of one address: never restored from here. */
+function withoutScope(search: string): string {
   const p = new URLSearchParams(search);
   p.delete("w");
+  p.delete("app");
   const s = p.toString();
   return s ? `?${s}` : "";
 }
 
-const address = (e: Entry): string => e.pathname + withoutWindow(e.search);
+const address = (e: Entry): string => e.pathname + withoutScope(e.search);
 
 export function record(pathname: string, search: string): void {
   // These two only redirect.
@@ -71,6 +72,16 @@ export function screenAddress(screen: string): string {
 
 /** Where F2 returns to: the last telemetry view. */
 export const lastTelemetryView = (): string => telemetryView;
+
+/** Another app: its issues and details are not where a tab should return to. The
+ *  filters of a list stay, as they do for another window. */
+export function forgetApp(): void {
+  stacks.errors.length = 0;
+  stacks.telemetry.length = 0;
+  for (const [screen, e] of screens) {
+    if (screen === "/errors" || e.pathname.split("/").length > 3) screens.delete(screen);
+  }
+}
 
 /** For tests. */
 export function reset(): void {

@@ -95,6 +95,8 @@ export const SHARED_KEYS: [string, string][] = [
   ["1–9", "the tabs of this screen"],
   ["/", "filter or search"],
   ["t  T", "next / previous time window"],
+  ["p", "pick an app"],
+  ["⌘K  Ctrl K", "search: an app, or any id"],
   ["r", "refresh now"],
   ["x", "the same trace on the other tab"],
   ["?", "help"],
@@ -106,7 +108,6 @@ export const SCREEN_KEYS: { title: string; keys: [string, string][] }[] = [
     title: "Errors, issue list",
     keys: [
       ["s", "next sort"],
-      ["p", "pick a project"],
       ["h l  ← →", "previous / next status"],
       ["R  I  U", "resolve / ignore / unresolve"],
     ],

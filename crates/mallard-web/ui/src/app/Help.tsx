@@ -50,9 +50,11 @@ export function HelpDialog() {
             <dd className="mono [overflow-wrap:anywhere]">service= op= min=200ms max=2s errors &gt;200 key=value</dd>
             <dt>Logs</dt>
             <dd className="mono [overflow-wrap:anywhere]">service= level=warn trace= key=value, other words search the text</dd>
+            <dt>Issues</dt>
+            <dd className="mono [overflow-wrap:anywhere]">tag=value, other words search the title</dd>
           </dl>
         </div>
-        <p className="mt-4 text-xs text-kumo-subtle">Writes are capitals, so r can never change data. Tab keeps its browser meaning: it moves the focus.</p>
+        <p className="mt-4 text-xs text-kumo-subtle">Writes are capitals, so r can never change data. In a filter, ↓ opens the suggestions and Enter or Tab takes the one you moved to; otherwise Tab moves the focus.</p>
         <div className="mt-4 border-t border-kumo-hairline pt-3">
           <Switch label="Single-key shortcuts" checked={shortcuts} onCheckedChange={setShortcuts} />
         </div>

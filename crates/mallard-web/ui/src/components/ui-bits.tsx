@@ -1,14 +1,16 @@
 // Small shared pieces. Text always comes with colour, never colour alone.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Badge, Banner, Button, Empty, InlineCopyText, InputGroup, LayerCard, SkeletonLine, Table, Text, Tooltip } from "@cloudflare/kumo";
 import { ArrowsClockwiseIcon, MagnifyingGlassIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { ApiError } from "@/api/client";
 import { Kbd } from "@/components/ui/kbd";
 import { backTarget, sideOf } from "@/app/history";
 import { useKeys } from "@/app/keys";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useSuggestions, type SuggestSource } from "@/components/suggestions";
 import { levelLabel, levelTone, serviceColor, severityTone, type Tone } from "@/lib/domain";
-import { relative, timestamp } from "@/lib/format";
+import { compact, relative, timestamp } from "@/lib/format";
+import { accept, tokenAt, type Suggestion } from "@/lib/suggest";
 import { cn } from "@/lib/utils";
 
 const TONE_TEXT: Record<Tone, string> = {
@@ -222,8 +224,10 @@ export function DataTable({ children, fixed, className }: { children: ReactNode;
 }
 
 /** The one search box: `/` focuses it, Enter applies, Esc leaves it. A bad filter
- *  says why and the old one stays. `live` applies on every key. */
-export function SearchField({ value, onApply, label, placeholder, validate, live, mono, className }: {
+ *  says why and the old one stays. `live` applies on every key. With `suggest` it also
+ *  suggests: the list opens while typing or on the down arrow, nothing is picked until
+ *  you move to it, so Enter still applies and Tab still moves the focus. */
+export function SearchField({ value, onApply, label, placeholder, validate, live, mono, className, suggest }: {
   value: string;
   onApply: (v: string) => void;
   label: string;
@@ -232,39 +236,80 @@ export function SearchField({ value, onApply, label, placeholder, validate, live
   live?: boolean;
   mono?: boolean;
   className?: string;
+  suggest?: SuggestSource;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(value);
   const [error, setError] = useState<string | null>(null);
+  const [caret, setCaret] = useState(0);
+  const [listOpen, setListOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const listId = useId();
   useEffect(() => {
     setDraft(value);
     setError(null);
   }, [value]);
   useKeys({ "/": () => ref.current?.focus(), f: () => ref.current?.focus() });
+  const token = useMemo(() => tokenAt(draft, caret), [draft, caret]);
+  const { items, loading, failed, countedFrom } = useSuggestions(suggest, token, listOpen);
+  const open = listOpen && !!suggest && (items.length > 0 || loading || failed || countedFrom !== null);
+  useEffect(() => setActive(-1), [token.key, token.text, listOpen]);
+
   const apply = (v: string) => {
     const problem = validate?.(v) ?? null;
     setError(problem);
+    setListOpen(false);
     if (problem) return;
     onApply(v.trim());
     ref.current?.blur();
   };
+  const take = (item: Suggestion) => {
+    const next = accept(draft, token, item.insert);
+    setDraft(next.text);
+    setCaret(next.caret);
+    setListOpen(next.more);
+    requestAnimationFrame(() => {
+      ref.current?.focus();
+      ref.current?.setSelectionRange(next.caret, next.caret);
+    });
+  };
   return (
-    <form role="search" className={cn("min-w-52 flex-1", className)} onSubmit={(e) => { e.preventDefault(); apply(draft); }}>
+    <form role="search" className={cn("relative min-w-52 flex-1", className)} onSubmit={(e) => { e.preventDefault(); apply(draft); }}>
       <InputGroup>
         <InputGroup.Addon><MagnifyingGlassIcon aria-hidden /></InputGroup.Addon>
         <InputGroup.Input
           ref={ref}
           aria-label={label}
           aria-invalid={!!error}
+          {...(suggest ? { role: "combobox", autoComplete: "off", spellCheck: false, "aria-autocomplete": "list" as const, "aria-expanded": open, "aria-controls": listId, "aria-activedescendant": open && active >= 0 ? `${listId}-${active}` : undefined } : {})}
           className={mono ? "mono" : undefined}
           placeholder={placeholder}
           value={draft}
           onChange={(e) => {
             setDraft(e.target.value);
+            setCaret(e.target.selectionStart ?? e.target.value.length);
+            setListOpen(true);
             if (live) onApply(e.target.value);
           }}
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+          onBlur={() => setListOpen(false)}
           onKeyDown={(e) => {
-            if (e.key === "Escape") {
+            if (suggest && e.key === "ArrowDown") {
+              e.preventDefault();
+              setCaret(e.currentTarget.selectionStart ?? 0);
+              if (!listOpen) setListOpen(true);
+              else if (items.length) setActive((a) => (a + 1) % items.length);
+            } else if (suggest && e.key === "ArrowUp" && open) {
+              e.preventDefault();
+              if (items.length) setActive((a) => (a <= 0 ? items.length : a) - 1);
+            } else if ((e.key === "Enter" || e.key === "Tab") && open && items[active]) {
+              e.preventDefault();
+              take(items[active]!);
+            } else if (e.key === "Escape") {
+              if (open) {
+                setListOpen(false);
+                return;
+              }
               setDraft(value);
               setError(null);
               e.currentTarget.blur();
@@ -272,6 +317,32 @@ export function SearchField({ value, onApply, label, placeholder, validate, live
           }}
         />
       </InputGroup>
+      {open && (
+        <div className="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-lg bg-kumo-elevated shadow-lg ring ring-kumo-line">
+          <ul id={listId} role="listbox" aria-label="Suggestions" className="max-h-72 overflow-auto p-1">
+            {items.map((item, i) => (
+              <li
+                key={item.insert}
+                id={`${listId}-${i}`}
+                role="option"
+                aria-selected={i === active}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => take(item)}
+                onMouseEnter={() => setActive(i)}
+                className={cn("flex cursor-pointer items-baseline justify-between gap-3 rounded-md px-2 py-1", i === active && "bg-kumo-tint")}
+              >
+                <span className="mono min-w-0 truncate" title={item.label}>{item.label}</span>
+                <span className="tnum shrink-0 text-xs text-kumo-subtle">{item.count !== undefined ? compact(item.count) : item.hint}</span>
+              </li>
+            ))}
+          </ul>
+          {(loading || failed || countedFrom) && (
+            <p role="status" className="border-t border-kumo-hairline px-3 py-1 text-xs text-kumo-subtle">
+              {loading ? "Looking…" : failed ? "Suggestions are not available right now; the filter still works." : `Counted from ${countedFrom} UTC; older values are not listed.`}
+            </p>
+          )}
+        </div>
+      )}
       {error && <p role="alert" className="mt-1 text-xs text-kumo-danger">{error}</p>}
     </form>
   );
@@ -290,14 +361,17 @@ export function DetailHeader({ title, meta, actions }: { title: ReactNode; meta?
   );
 }
 
-export function Stat({ label, value, sub, valueClass }: { label: string; value: ReactNode; sub?: ReactNode; valueClass?: string }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1 px-4 py-3">
+/** A number; with `href`, the way to what it counts. */
+export function Stat({ label, value, sub, valueClass, href }: { label: string; value: ReactNode; sub?: ReactNode; valueClass?: string; href?: string }) {
+  const body = (
+    <>
       <Text variant="secondary">{label}</Text>
       <div className={cn("tnum truncate text-2xl font-semibold text-kumo-default", valueClass)}>{value}</div>
       {sub && <div className="tnum truncate text-kumo-subtle" title={typeof sub === "string" ? sub : undefined}>{sub}</div>}
-    </div>
+    </>
   );
+  const box = "flex min-w-0 flex-col gap-1 px-4 py-3";
+  return href ? <Link to={href} className={cn(box, "hover:bg-kumo-tint")}>{body}</Link> : <div className={box}>{body}</div>;
 }
 
 /** Key/value rows, with a real value column so long values wrap. */

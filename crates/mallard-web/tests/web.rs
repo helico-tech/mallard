@@ -130,6 +130,26 @@ async fn only_the_issue_status_write_passes() {
 }
 
 #[tokio::test]
+async fn the_apps_and_find_reads_pass_and_nothing_else_of_that_api() {
+    let (app, seen) = with_token().await;
+    for path in ["/api/v1/apps?since=1h", "/api/v1/find?id=abc"] {
+        let res = send(&app, get(path)).await;
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+    }
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().unwrap()[0].path_and_query, "/api/v1/apps?since=1h");
+    for path in ["/api/v1/other", "/api/v1/apps/x", "/api/v1/apps/../sql"] {
+        let res = send(&app, get(path)).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    let res = send(&app, get("/api/v1/apps").method("POST").header("x-mallard-web", "1")).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    let res = send(&app, get("/api/v1/apps").header("sec-fetch-site", "cross-site")).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "other sites may not read it either");
+}
+
+#[tokio::test]
 async fn paths_cannot_leave_the_api() {
     let (app, seen) = with_token().await;
     for path in [

@@ -335,7 +335,7 @@ function JsonView({ event, scrollRef }: { event?: EventDetail; scrollRef: React.
 export function IssuePage() {
   const { project = "", issueId = "" } = useParams();
   const navigate = useNavigate();
-  const { w } = useWindow("errors");
+  const { w } = useWindow();
   const [section, setSection] = useParam("section", "overview");
   const [eventParam, setEventParam] = useParam("event");
   const [, setParams] = useSearchParams();
