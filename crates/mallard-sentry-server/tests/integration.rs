@@ -408,7 +408,7 @@ async fn filters_cursors_and_releases() {
     // S15: off unless enabled.
     let (s, v) = t.api(reqwest::Method::POST, "/v1/sql", Some(json!({"query": "SELECT 1"}))).await;
     assert_eq!((s, v["error"].as_str()), (403, Some("disabled")), "{v}");
-    assert!(v["message"].as_str().unwrap().contains("enable_sql"), "{v}");
+    assert!(v["message"].as_str().unwrap().contains("sentry.query.enable_sql"), "{v}");
     t.stop().await;
 }
 

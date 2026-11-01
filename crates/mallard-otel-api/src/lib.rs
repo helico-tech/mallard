@@ -221,16 +221,16 @@ pub struct Stats {
 /// Server settings a client needs to know before it queries or sends data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Capabilities {
-    /// `POST /api/v1/sql` is enabled (`query.enable_sql`).
+    /// `POST /api/v1/sql` is enabled (`otel.query.enable_sql`).
     pub sql: bool,
-    /// Longest query window (`query.max_window`), in seconds.
+    /// Longest query window (`otel.query.max_window`), in seconds.
     pub max_window_secs: u64,
     /// How long data is kept, in seconds (0 = forever).
     pub retention_secs: RetentionSecs,
-    /// Buffered data is written at least this often (`ingest.flush_interval`),
+    /// Buffered data is written at least this often (`otel.ingest.flush_interval`),
     /// so new data can take this long to show up in queries.
     pub flush_interval_secs: f64,
-    /// OTLP ingest needs a bearer token (`auth.ingest_tokens` is set).
+    /// OTLP ingest needs a bearer token (`server.ingest_tokens` is set).
     pub ingest_auth: bool,
 }
 

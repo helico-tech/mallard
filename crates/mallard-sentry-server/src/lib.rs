@@ -37,7 +37,7 @@ pub use config::{
 };
 pub use hooks::{EventObserver, IngestError, SpanSink, Spans, Transaction, TransactionSink};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use db::Db;
 use mallard_common::auth::{AuthPolicy, Tokens};
 use sourcemaps::SourceMaps;
@@ -77,7 +77,7 @@ impl Server {
     /// belong to the host and are left untouched (except
     /// `host.maintenance_threads`, which must be 0 on a shared connection).
     pub async fn with_connection(cfg: Config, host: Host, conn: mallard_duck::duckdb::Connection) -> Result<Server> {
-        cfg.validate().context("sentry")?;
+        cfg.validate()?;
         host.validate()?;
         let c = cfg.clone();
         let maintenance =

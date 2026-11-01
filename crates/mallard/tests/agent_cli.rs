@@ -342,6 +342,10 @@ async fn tags_cursors_releases_and_error_sql() {
     assert_eq!((o.code, o.error()["code"].as_str()), (2, Some("usage")), "{}", o.stderr);
     let o = mallard(url, &["sql", "SELECT 1", "--json"]).await;
     assert_eq!((o.code, o.error()["code"].as_str()), (7, Some("disabled")), "{}", o.stderr);
+    // Telemetry's SQL is off here: the message names the key in the mallard config.
+    let message = o.error()["message"].as_str().unwrap().to_string();
+    assert!(message.contains("otel.query.enable_sql"), "{message}");
+    assert!(!message.contains("auth.api_tokens"), "{message}");
     srv.stop().await;
 
     // And with the Sentry side's SQL off: exit 7 naming the setting.

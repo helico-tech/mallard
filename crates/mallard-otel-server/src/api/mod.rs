@@ -374,7 +374,7 @@ async fn run_sql(State(st): S, J(req): J<SqlRequest>) -> R<SqlResponse> {
         return Err(ApiErr::new(
             StatusCode::FORBIDDEN,
             "disabled",
-            "ad-hoc SQL is disabled; set query.enable_sql = true (requires auth.api_tokens)",
+            "ad-hoc SQL is disabled; set otel.query.enable_sql = true in the mallard config",
         ));
     }
     let limit = clamp_limit(req.limit, 1000, 100_000)?;

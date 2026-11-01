@@ -99,9 +99,9 @@ pub struct QueryConfig {
     /// Abort queries running longer than this.
     #[serde(with = "duration")]
     pub timeout: Duration,
-    /// Enable `POST /api/v1/sql` (read-only ad-hoc SQL). Requires `auth.api_tokens`.
-    /// Treat those tokens as admin access: a query's memory and CPU use is
-    /// bounded only by `timeout` and `duckdb.memory_limit`, not fully.
+    /// `otel.query.enable_sql`: enable `POST /api/v1/sql` (read-only ad-hoc SQL).
+    /// Treat the API tokens (`server.api_tokens`) as admin access: a query's memory
+    /// and CPU use is bounded only by `timeout` and `duckdb.memory_limit`, not fully.
     pub enable_sql: bool,
     /// Max time span a single query may cover, e.g. `31d`.
     #[serde(with = "duration")]
@@ -185,48 +185,48 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let (i, m, q, r) = (&self.ingest, &self.maintenance, &self.query, &self.retention);
         for (name, d) in [
-            ("ingest.flush_interval", i.flush_interval),
-            ("maintenance.compact_interval", m.compact_interval),
-            ("maintenance.full_compact_interval", m.full_compact_interval),
-            ("maintenance.retention_interval", m.retention_interval),
-            ("maintenance.snapshot_retention", m.snapshot_retention),
-            ("maintenance.file_cleanup_delay", m.file_cleanup_delay),
-            ("query.timeout", q.timeout),
-            ("query.max_window", q.max_window),
-            ("retention.traces", r.traces),
-            ("retention.logs", r.logs),
-            ("retention.metrics", r.metrics),
+            ("otel.ingest.flush_interval", i.flush_interval),
+            ("otel.maintenance.compact_interval", m.compact_interval),
+            ("otel.maintenance.full_compact_interval", m.full_compact_interval),
+            ("otel.maintenance.retention_interval", m.retention_interval),
+            ("otel.maintenance.snapshot_retention", m.snapshot_retention),
+            ("otel.maintenance.file_cleanup_delay", m.file_cleanup_delay),
+            ("otel.query.timeout", q.timeout),
+            ("otel.query.max_window", q.max_window),
+            ("otel.retention.traces", r.traces),
+            ("otel.retention.logs", r.logs),
+            ("otel.retention.metrics", r.metrics),
         ] {
             if d > MAX_DURATION {
                 bail!("{name} is longer than 100 years");
             }
         }
         for (name, d) in [
-            ("ingest.flush_interval", i.flush_interval),
-            ("maintenance.compact_interval", m.compact_interval),
-            ("maintenance.full_compact_interval", m.full_compact_interval),
-            ("maintenance.retention_interval", m.retention_interval),
-            ("query.timeout", q.timeout),
-            ("query.max_window", q.max_window),
+            ("otel.ingest.flush_interval", i.flush_interval),
+            ("otel.maintenance.compact_interval", m.compact_interval),
+            ("otel.maintenance.full_compact_interval", m.full_compact_interval),
+            ("otel.maintenance.retention_interval", m.retention_interval),
+            ("otel.query.timeout", q.timeout),
+            ("otel.query.max_window", q.max_window),
         ] {
             if d.is_zero() {
                 bail!("{name} must be greater than 0");
             }
         }
         if i.flush_rows == 0 {
-            bail!("ingest.flush_rows must be greater than 0");
+            bail!("otel.ingest.flush_rows must be greater than 0");
         }
         // An empty token is almost always a missing secret; refuse it instead
         // of silently running without authentication.
         for (name, list) in
-            [("auth.api_tokens", &self.auth.api_tokens), ("auth.ingest_tokens", &self.auth.ingest_tokens)]
+            [("server.api_tokens", &self.auth.api_tokens), ("server.ingest_tokens", &self.auth.ingest_tokens)]
         {
             if list.iter().any(|t| t.trim().is_empty()) {
                 bail!("{name} contains an empty token (is the secret/env var set?); remove it or set a value");
             }
         }
         if q.enable_sql && self.auth.api_tokens.iter().all(|t| t.trim().is_empty()) {
-            bail!("query.enable_sql requires auth.api_tokens to be set");
+            bail!("otel.query.enable_sql requires server.api_tokens to be set");
         }
         if !self.storage.artifacts_path.is_empty() {
             bail!(
@@ -234,7 +234,7 @@ impl Config {
             );
         }
         if q.max_concurrent == 0 {
-            bail!("query.max_concurrent must be at least 1");
+            bail!("otel.query.max_concurrent must be at least 1");
         }
         Ok(())
     }
@@ -312,7 +312,9 @@ mod tests {
     fn sql_requires_tokens() {
         let mut cfg = Config::default();
         cfg.query.enable_sql = true;
-        assert!(cfg.validate().is_err());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("otel.query.enable_sql") && err.contains("server.api_tokens"), "{err}");
+        assert!(!err.contains("auth."), "{err}");
         cfg.auth.api_tokens = vec!["".into()];
         assert!(cfg.validate().is_err(), "empty token must not enable SQL");
         cfg.auth.api_tokens = vec!["t".into()];

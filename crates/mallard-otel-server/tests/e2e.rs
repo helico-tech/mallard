@@ -1011,6 +1011,25 @@ async fn refuses_expansion_bombs() {
     h.stop().await;
 }
 
+/// With SQL off, the 403 names the key as it is written in the mallard config.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sql_off_names_the_mallard_key() {
+    let h = harness(None).await;
+    let req = Request::post("/api/v1/sql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"query":"SELECT 1"}"#))
+        .unwrap();
+    let resp = h.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "disabled", "{v}");
+    let message = v["message"].as_str().unwrap();
+    assert!(message.contains("otel.query.enable_sql"), "{message}");
+    assert!(!message.contains("auth.api_tokens"), "{message}");
+    h.stop().await;
+}
+
 /// If the background jobs cannot start, `serve` must stop the receivers and
 /// return the error instead of accepting data that is never flushed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

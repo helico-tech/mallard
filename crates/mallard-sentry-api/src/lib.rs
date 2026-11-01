@@ -274,10 +274,10 @@ pub struct ServerInfo {
     /// How long events are kept, in seconds (0 = forever).
     #[serde(default)]
     pub retention_secs: Option<u64>,
-    /// Longest query window (`query.max_window`), in seconds.
+    /// Longest query window (`sentry.query.max_window`), in seconds.
     #[serde(default)]
     pub max_window_secs: Option<u64>,
-    /// `POST /v1/sql` is on (`query.enable_sql`).
+    /// `POST /v1/sql` is on (`sentry.query.enable_sql`).
     #[serde(default)]
     pub sql: Option<bool>,
 }

@@ -48,7 +48,7 @@ type ApiResult<T> = Result<Json<T>, ApiErr>;
 
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// Resolve `since`/`from`/`to` against `default` and `query.max_window`.
+/// Resolve `since`/`from`/`to` against `default` and `sentry.query.max_window`.
 fn window(state: &AppState, since: Option<&str>, r: &WindowRange, default: Duration) -> Result<Window, ApiErr> {
     Ok(Window::resolve(r.from, r.to, since, default, state.cfg.query.max_window)?)
 }
@@ -483,7 +483,7 @@ async fn get_schema(State(state): S) -> ApiResult<Schema> {
 
 #[utoipa::path(post, path = "/v1/sql", request_body = SqlRequest,
     description = "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless \
-        `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
+        `sentry.query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `sentry.query.sql_timeout`.",
     responses((status = 200, body = SqlResponse), (status = 400, body = ApiError), (status = 403, body = ApiError),
         (status = 504, body = ApiError)))]
 async fn run_sql(State(state): S, J(req): J<SqlRequest>) -> ApiResult<SqlResponse> {
