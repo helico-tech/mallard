@@ -16,7 +16,7 @@ struct Cli {
     command: Option<Command>,
     /// Flags for the default `serve` command (also accepted after `serve`).
     #[command(flatten)]
-    serve: Option<ServeArgs>,
+    serve: ServeArgs,
 }
 
 #[derive(clap::Args)]
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Some(Command::Serve(a)) => *a,
-        None => cli.serve.context("missing arguments")?,
+        None => cli.serve,
     };
     init_tracing(if args.log_json { LogFormat::Json } else { LogFormat::Text });
     let cfg = args.config;

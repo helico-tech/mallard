@@ -10,7 +10,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use mallard_common::ByteSize;
 use mallard_duck::{DuckDbConfig, ObjectStoreOptions, StorageConfig};
@@ -36,8 +36,9 @@ pub struct Standalone {
     /// Where data files and sourcemap bundles live:
     /// `s3://bucket/prefix` (also R2, MinIO, Garage, ...), `gs://bucket/prefix`,
     /// `az://container/prefix`, or a local path / `file:///path`.
+    /// Required.
     #[arg(long, env = "SDL_STORAGE_URL")]
-    pub storage_url: String,
+    pub storage_url: Option<String>,
 
     /// Custom S3 endpoint including scheme, e.g. `http://minio:9000`.
     #[arg(long, env = "SDL_S3_ENDPOINT")]
@@ -54,7 +55,7 @@ pub struct Standalone {
     /// Bearer token(s) for the management API and sourcemap uploads, comma
     /// separated. Required.
     #[arg(long, env = "SDL_API_TOKEN", hide_env_values = true)]
-    pub api_token: Secret,
+    pub api_token: Option<Secret>,
 
     /// Delete events older than this many days (0 = keep forever; default 90).
     #[arg(long, env = "SDL_RETENTION_DAYS")]
@@ -177,7 +178,9 @@ impl Standalone {
             #[command(flatten)]
             s: Standalone,
         }
-        let mut s = P::parse_from(["sentry-ducklake", "--storage-url", storage_url, "--api-token", api_token]).s;
+        let mut s = P::parse_from(["sentry-ducklake"]).s;
+        s.storage_url = Some(storage_url.into());
+        s.api_token = Some(api_token.into());
         s.catalog = catalog.into();
         s
     }
@@ -206,16 +209,11 @@ impl Standalone {
 
     /// The host settings: tokens, public URL, `<storage_url>/artifacts`.
     pub fn host(&self) -> Host {
+        let tokens = self.api_token.as_ref().map_or("", Secret::expose);
         Host {
             public_url: self.public_url.clone(),
-            api_tokens: self
-                .api_token
-                .expose()
-                .split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect(),
-            artifacts: Some(Artifacts { url: self.storage_url.clone(), options: self.object_store_options() }),
+            api_tokens: tokens.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            artifacts: self.storage_url.clone().map(|url| Artifacts { url, options: self.object_store_options() }),
             catalog_maintenance: self.catalog_wide_maintenance.then_some(self.snapshot_retention),
             maintenance_threads: self.maintenance_threads,
         }
@@ -232,7 +230,8 @@ impl Standalone {
 
     /// DuckDB and DuckLake settings for `mallard_duck::open_connection`.
     pub fn storage(&self) -> Result<(StorageConfig, DuckDbConfig)> {
-        let lake = storage::lake(&self.storage_url, &self.object_store_options())?;
+        let url = self.storage_url.as_deref().context("SDL_STORAGE_URL (--storage-url) is required")?;
+        let lake = storage::lake(url, &self.object_store_options())?;
         let st = StorageConfig {
             catalog: self.catalog.clone(),
             data_path: lake.data_path,
