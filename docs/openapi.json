@@ -1,0 +1,2020 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "otel-ducklake query API",
+    "description": "Query traces, logs and metrics stored in DuckLake by otel-ducklake.",
+    "license": {
+      "name": "Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Server is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "operationId": "search_logs",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "min_severity",
+            "in": "query",
+            "description": "Minimum severity number (1-24). 9=INFO, 13=WARN, 17=ERROR, 21=FATAL.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring match on the body.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trace_id",
+            "in": "query",
+            "description": "Only logs of this trace (32 hex chars).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "description": "Attribute filter `key=value` on log or resource attributes. Repeat with commas.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max records (default 100, max 5000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "`desc` (newest first, default) or `asc`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LogRecord"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/logs/series": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "operationId": "log_series",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "step",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogSeries"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "operationId": "list_metrics",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Substring filter on the metric name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MetricInfo"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/metrics/query": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "operationId": "query_metric",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Metric name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agg",
+            "in": "query",
+            "description": "Aggregation: `avg` (default for gauges), `min`, `max`, `sum`,\n`rate` (per-second increase, default for monotonic sums), `increase`,\n`p50`/`p90`/`p95`/`p99` (histograms and summaries; default `p95`), `count`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "description": "Comma separated attribute keys to group by. `service.name` is allowed.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "description": "Attribute filter `key=value`, comma separated.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "step",
+            "in": "query",
+            "description": "Bucket width, e.g. `1m`. Default picks ~60 buckets.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricQueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/operations": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "operationId": "operations",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "description": "Only operations of this service.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entry_only",
+            "in": "query",
+            "description": "Only entry spans (kind SERVER/CONSUMER or root spans). Default true.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "RED metrics per operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OperationSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/services": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "operationId": "services",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entry_only",
+            "in": "query",
+            "description": "Only count entry spans (kind SERVER/CONSUMER or root spans). Default true.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "RED metrics per service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ServiceSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/spans/series": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "operationId": "span_series",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "operation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "step",
+            "in": "query",
+            "description": "Bucket width, e.g. `30s`, `5m`. Default picks ~60 buckets.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entry_only",
+            "in": "query",
+            "description": "Only entry spans. Default true.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request rate, errors and latency over time",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpanSeries"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sql": {
+      "post": {
+        "tags": [
+          "sql"
+        ],
+        "operationId": "run_sql",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SqlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SqlResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "stats",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stats"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/traces": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "operationId": "search_traces",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "description": "Match traces with a span from this service.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "operation",
+            "in": "query",
+            "description": "Match traces with a span with this name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "errors_only",
+            "in": "query",
+            "description": "Only traces that contain an error span.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "min_duration_ms",
+            "in": "query",
+            "description": "Matching span must take at least this long (ms).",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "max_duration_ms",
+            "in": "query",
+            "description": "Matching span must take at most this long (ms).",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "description": "Attribute filter `key=value` on span or resource attributes. Repeat with commas: `a=1,b=2`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max traces returned (default 50, max 1000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching traces, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TraceSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/traces/{trace_id}": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "operationId": "get_trace",
+        "parameters": [
+          {
+            "name": "trace_id",
+            "in": "path",
+            "description": "32 hex chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trace"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Error body returned with every non-2xx response.",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine readable error code, e.g. `bad_request`, `not_found`, `timeout`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human readable message."
+          }
+        }
+      },
+      "BTreeMap": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "propertyNames": {
+          "type": "string"
+        }
+      },
+      "FlushInfo": {
+        "type": "object",
+        "required": [
+          "at",
+          "rows",
+          "duration_ms"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "rows": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "status",
+          "version"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`ok` when the server is up."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "IngestStats": {
+        "type": "object",
+        "required": [
+          "signals",
+          "buffered_rows",
+          "buffered_bytes",
+          "max_buffer_bytes",
+          "flushes",
+          "flush_errors"
+        ],
+        "properties": {
+          "buffered_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Approximate bytes waiting in memory for the next flush.",
+            "minimum": 0
+          },
+          "buffered_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows waiting in memory for the next flush.",
+            "minimum": 0
+          },
+          "flush_errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "flushes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_flush": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FlushInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_flush_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_buffer_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests are rejected (HTTP 429 / gRPC RESOURCE_EXHAUSTED) above this.",
+            "minimum": 0
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalIngestStats"
+            },
+            "description": "Per signal counters since process start."
+          }
+        }
+      },
+      "LogRecord": {
+        "type": "object",
+        "required": [
+          "time",
+          "observed_time",
+          "service_name",
+          "severity_number",
+          "severity_text",
+          "body",
+          "event_name",
+          "scope_name",
+          "attributes",
+          "resource_attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "body": {
+            "type": "string"
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "observed_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resource_attributes": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "scope_name": {
+            "type": "string"
+          },
+          "service_name": {
+            "type": "string"
+          },
+          "severity_number": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "severity_text": {
+            "type": "string"
+          },
+          "span_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LogSeries": {
+        "type": "object",
+        "required": [
+          "step_secs",
+          "points"
+        ],
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogSeriesPoint"
+            }
+          },
+          "step_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "LogSeriesPoint": {
+        "type": "object",
+        "description": "Log counts per bucket, split by severity band.",
+        "required": [
+          "time",
+          "total",
+          "debug",
+          "info",
+          "warn",
+          "error"
+        ],
+        "properties": {
+          "debug": {
+            "type": "integer",
+            "format": "int64",
+            "description": "severity 1-8 (TRACE/DEBUG) or unset",
+            "minimum": 0
+          },
+          "error": {
+            "type": "integer",
+            "format": "int64",
+            "description": "severity 17-24 (ERROR/FATAL)",
+            "minimum": 0
+          },
+          "info": {
+            "type": "integer",
+            "format": "int64",
+            "description": "severity 9-12",
+            "minimum": 0
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "warn": {
+            "type": "integer",
+            "format": "int64",
+            "description": "severity 13-16",
+            "minimum": 0
+          }
+        }
+      },
+      "MaintenanceInfo": {
+        "type": "object",
+        "required": [
+          "task",
+          "at",
+          "duration_ms",
+          "ok",
+          "detail"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "task": {
+            "type": "string"
+          }
+        }
+      },
+      "MetricInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "metric_type",
+          "unit",
+          "description",
+          "temporality",
+          "series_count",
+          "point_count",
+          "services",
+          "last_seen"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "metric_type": {
+            "type": "string",
+            "description": "gauge, sum, histogram, exponential_histogram or summary."
+          },
+          "name": {
+            "type": "string"
+          },
+          "point_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "series_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "temporality": {
+            "type": "string",
+            "description": "`cumulative`, `delta` or empty for gauges."
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "MetricPoint": {
+        "type": "object",
+        "required": [
+          "time",
+          "value"
+        ],
+        "properties": {
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "value": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "MetricQueryResult": {
+        "type": "object",
+        "required": [
+          "name",
+          "metric_type",
+          "unit",
+          "agg",
+          "step_secs",
+          "series"
+        ],
+        "properties": {
+          "agg": {
+            "type": "string"
+          },
+          "metric_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricSeries"
+            }
+          },
+          "step_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "MetricSeries": {
+        "type": "object",
+        "required": [
+          "labels",
+          "points"
+        ],
+        "properties": {
+          "labels": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            }
+          }
+        }
+      },
+      "OperationSummary": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RedStats"
+          },
+          {
+            "type": "object",
+            "required": [
+              "service",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "RedStats": {
+        "type": "object",
+        "description": "Rate, errors and duration for a service or operation.",
+        "required": [
+          "span_count",
+          "error_count",
+          "error_rate",
+          "rate_per_sec",
+          "p50_ms",
+          "p95_ms",
+          "p99_ms",
+          "max_ms"
+        ],
+        "properties": {
+          "error_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "error_count / span_count, 0..1."
+          },
+          "max_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "p50_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "p95_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "p99_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "rate_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Spans per second over the window."
+          },
+          "span_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ServiceSummary": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RedStats"
+          },
+          {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "SignalIngestStats": {
+        "type": "object",
+        "required": [
+          "signal",
+          "requests",
+          "accepted",
+          "rejected"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Spans, log records or metric data points accepted.",
+            "minimum": 0
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items refused because of back-pressure or invalid payloads.",
+            "minimum": 0
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "signal": {
+            "type": "string",
+            "description": "`traces`, `logs` or `metrics`."
+          }
+        }
+      },
+      "Span": {
+        "type": "object",
+        "required": [
+          "trace_id",
+          "span_id",
+          "name",
+          "kind",
+          "service_name",
+          "start_time",
+          "duration_ns",
+          "status_code",
+          "status_message",
+          "trace_state",
+          "scope_name",
+          "scope_version",
+          "attributes",
+          "resource_attributes",
+          "events",
+          "links"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "duration_ns": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpanEvent"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "description": "UNSPECIFIED, INTERNAL, SERVER, CLIENT, PRODUCER or CONSUMER."
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpanLink"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent_span_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource_attributes": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "scope_name": {
+            "type": "string"
+          },
+          "scope_version": {
+            "type": "string"
+          },
+          "service_name": {
+            "type": "string"
+          },
+          "span_id": {
+            "type": "string"
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status_code": {
+            "type": "string",
+            "description": "UNSET, OK or ERROR."
+          },
+          "status_message": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": "string"
+          },
+          "trace_state": {
+            "type": "string"
+          }
+        }
+      },
+      "SpanEvent": {
+        "type": "object",
+        "required": [
+          "time",
+          "name",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "name": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SpanLink": {
+        "type": "object",
+        "required": [
+          "trace_id",
+          "span_id",
+          "trace_state",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/BTreeMap"
+          },
+          "span_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": "string"
+          },
+          "trace_state": {
+            "type": "string"
+          }
+        }
+      },
+      "SpanSeries": {
+        "type": "object",
+        "required": [
+          "step_secs",
+          "points"
+        ],
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpanSeriesPoint"
+            }
+          },
+          "step_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SpanSeriesPoint": {
+        "type": "object",
+        "required": [
+          "time",
+          "count",
+          "errors",
+          "p50_ms",
+          "p95_ms",
+          "p99_ms"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "p50_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "p95_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "p99_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SqlColumn": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "SqlRequest": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Max rows returned (default 1000, max 100000).",
+            "minimum": 0
+          },
+          "query": {
+            "type": "string",
+            "description": "One read-only `SELECT`/`WITH` statement. Tables live in schema `lake.otel`\n(the default search path, so `FROM spans` works)."
+          }
+        }
+      },
+      "SqlResponse": {
+        "type": "object",
+        "required": [
+          "columns",
+          "rows",
+          "truncated",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SqlColumn"
+            }
+          },
+          "elapsed_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "description": "Row values as JSON. Non-JSON types (timestamps, UUIDs, maps) are rendered as strings."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when more rows existed than `limit`."
+          }
+        }
+      },
+      "Stats": {
+        "type": "object",
+        "required": [
+          "version",
+          "uptime_secs",
+          "ingest",
+          "storage"
+        ],
+        "properties": {
+          "ingest": {
+            "$ref": "#/components/schemas/IngestStats"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/StorageStats"
+          },
+          "uptime_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "StorageStats": {
+        "type": "object",
+        "required": [
+          "catalog_type",
+          "data_path",
+          "snapshot_id",
+          "tables"
+        ],
+        "properties": {
+          "catalog_type": {
+            "type": "string",
+            "description": "`duckdb`, `sqlite` or `postgres`."
+          },
+          "data_path": {
+            "type": "string"
+          },
+          "last_maintenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MaintenanceInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TableStats"
+            }
+          }
+        }
+      },
+      "TableStats": {
+        "type": "object",
+        "required": [
+          "name",
+          "rows",
+          "files",
+          "bytes",
+          "inlined_rows"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inlined_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows currently inlined in the catalog database, waiting to be flushed to Parquet."
+          },
+          "name": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows in live Parquet files (excludes rows still inlined in the catalog)."
+          }
+        }
+      },
+      "Trace": {
+        "type": "object",
+        "required": [
+          "trace_id",
+          "spans"
+        ],
+        "properties": {
+          "spans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Span"
+            },
+            "description": "Spans ordered by start time."
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TraceSummary": {
+        "type": "object",
+        "required": [
+          "trace_id",
+          "start_time",
+          "duration_ms",
+          "span_count",
+          "error_count",
+          "services"
+        ],
+        "properties": {
+          "duration_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "error_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "root_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root_service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service of the root span, if the root span was received."
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "span_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "Health and statistics"
+    },
+    {
+      "name": "traces",
+      "description": "Services, operations and traces"
+    },
+    {
+      "name": "logs",
+      "description": "Log search and volume"
+    },
+    {
+      "name": "metrics",
+      "description": "Metric catalog and time series"
+    },
+    {
+      "name": "sql",
+      "description": "Read-only ad-hoc SQL (disabled by default)"
+    }
+  ]
+}
