@@ -1278,6 +1278,23 @@
         }
       }
     },
+    "/v1/schema": {
+      "get": {
+        "description": "The tables `POST /v1/sql` can query, with their columns. Works when SQL is off.",
+        "operationId": "get_schema",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Schema"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sql": {
       "post": {
         "description": "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
@@ -1952,6 +1969,46 @@
           }
         }
       },
+      "Schema": {
+        "type": "object",
+        "description": "`GET /v1/schema`: the tables `POST /v1/sql` can query.",
+        "required": [
+          "tables"
+        ],
+        "properties": {
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SchemaTable"
+            }
+          }
+        }
+      },
+      "SchemaTable": {
+        "type": "object",
+        "required": [
+          "name",
+          "time_column",
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SqlColumn"
+            },
+            "description": "Columns in storage order."
+          },
+          "name": {
+            "type": "string",
+            "description": "Table name; also reachable as `lake.sentry.<name>`."
+          },
+          "time_column": {
+            "type": "string",
+            "description": "The table's time column; filter on it."
+          }
+        }
+      },
       "ServerInfo": {
         "type": "object",
         "required": [
@@ -2003,6 +2060,13 @@
             "format": "int64",
             "description": "How long events are kept, in seconds (0 = forever).",
             "minimum": 0
+          },
+          "sql": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`POST /v1/sql` is on (`query.enable_sql`)."
           },
           "storage": {
             "type": "string"

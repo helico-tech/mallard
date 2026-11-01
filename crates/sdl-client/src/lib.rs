@@ -312,6 +312,11 @@ impl Client {
         self.send(self.http.post(self.url("/v1/sql")).json(&req)).await
     }
 
+    /// The tables [`Client::sql`] can query (works when SQL is off).
+    pub async fn schema(&self) -> Result<Schema, Error> {
+        self.get("/v1/schema", &()).await
+    }
+
     pub async fn sourcemaps(&self, project: &str) -> Result<Vec<ArtifactBundle>, Error> {
         self.get(&format!("/v1/projects/{}/sourcemaps", segment(project)?), &()).await
     }

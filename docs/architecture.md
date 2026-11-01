@@ -82,5 +82,6 @@
 - Ad-hoc SQL is per side (ADR 0011): `/otel/api/v1/sql` over the telemetry
   tables, `/sentry/v1/sql` over `events`, `issues`, `issue_activity`. Both
   are off by default and run through one guard, `mallard_duck::sql` (one
-  SELECT, only that side's tables, no files or settings, a timeout).
-  `mallard sql` picks the side with `--errors`.
+  SELECT, only that side's tables, no files or settings, a timeout, at most
+  `limit` rows and 32 MiB per answer; ADR 0015). `mallard sql` picks the side
+  with `--errors`; `mallard schema` lists the tables of both.

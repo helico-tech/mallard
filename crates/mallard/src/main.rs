@@ -9,6 +9,7 @@
 mod errors;
 mod find;
 mod help;
+mod schema;
 mod series;
 mod setup;
 mod status;
@@ -114,7 +115,7 @@ enum Cmd {
     Metrics(MetricsCmd),
     /// Read-only SQL over the telemetry tables, or the error tables with --errors (the server must enable it).
     Sql(SqlCmd),
-    /// Tables and columns for `sql`; `schema attrs`: attribute keys and values.
+    /// Tables and columns for `sql` (both sides); `schema attrs`: attribute keys and values.
     Schema(SchemaArgs),
     /// Uploaded sourcemap bundles.
     #[command(subcommand)]
@@ -196,7 +197,7 @@ struct SchemaArgs {
 
 #[derive(Subcommand)]
 enum SchemaCmd {
-    /// Tables and columns that `sql` can query (the default).
+    /// Tables and columns that `sql` (`--errors`: the errors tables) can query (the default).
     Tables,
     /// Attribute keys with counts, or the top values of one key (sampled; default window 1h).
     Attrs(odl_cli::AttrArgs),
@@ -309,9 +310,7 @@ async fn run(cli: Cli) -> Result<()> {
             sdl_cli::run(sdl_cli::Command::Sql(a), &r.sentry()).await
         }
         Cmd::Sql(SqlCmd { sql, errors: false }) => odl_cli::run(odl_cli::Command::Sql(sql), &r.otel()).await,
-        Cmd::Schema(SchemaArgs { cmd: None | Some(SchemaCmd::Tables) }) => {
-            odl_cli::run(odl_cli::Command::Schema, &r.otel()).await
-        }
+        Cmd::Schema(SchemaArgs { cmd: None | Some(SchemaCmd::Tables) }) => schema::run(&r).await,
         Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) => {
             odl_cli::run(odl_cli::Command::Attrs(a), &r.otel()).await
         }
