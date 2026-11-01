@@ -1,6 +1,10 @@
 # Capacity
 
-**Short answer:** one `mallard` process ingests **~4,500-6,000 error
+These numbers were measured on the old standalone `sentry-ducklake` binary, which
+is gone. They were not measured again on `mallard serve`, where the same code shares
+its DuckDB with the telemetry side.
+
+**Short answer:** one process ingests **~4,500-6,000 error
 events/s sustained** and answers every API query in **under 60 ms** with 1-3
 million events stored (after compaction), within a **2 GB DuckDB memory limit
 and 4 threads**. Events take **~265 bytes each** on disk.
@@ -25,16 +29,14 @@ Parquet.
   guarantees), so throughput depends on how many clients send in parallel.
   Real traffic comes from many independent browsers and servers.
 
-Reproduce (the numbers below were measured with the standalone
-`sentry-ducklake` binary, which is retired; this runs the same load against
-`mallard serve`):
+Reproduce (this runs the same load against `mallard serve`):
 
 ```sh
 cargo build --release -p mallard -p mallard-sentry-loadgen
 MALLARD_SERVER__API_TOKENS=dev MALLARD_STORAGE__CATALOG=/tmp/mallard/catalog.ducklake \
 MALLARD_STORAGE__DATA_PATH=/tmp/mallard/lake/ MALLARD_DUCKDB__MEMORY_LIMIT=2GB MALLARD_DUCKDB__THREADS=4 \
   ./target/release/mallard serve &
-./target/release/mallard-sentry-loadgen --url http://127.0.0.1:8080 --token dev ingest --rate 0 --events 1000000 --concurrency 1024
+./target/release/mallard-sentry-loadgen --url http://127.0.0.1:8080 --token dev ingest --rate 0 --events 1000000 --duration 1h --concurrency 1024
 curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maintenance   # flush + compact now
 ./target/release/mallard-sentry-loadgen --url http://127.0.0.1:8080 --token dev query
 ```
@@ -77,7 +79,7 @@ curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maint
 
 "Not compacted" means right after a burst: thousands of small files (one per
 large batch) plus inlined rows. Compaction runs hourly (or on
-`POST /v1/maintenance`) and merges them into a few sorted 64 MB files per day;
+`POST /sentry/v1/maintenance`) and merges them into a few sorted 64 MB files per day;
 that is what makes queries 5-15x faster and keeps them flat as data grows.
 At normal traffic the data never gets that fragmented.
 
@@ -100,7 +102,8 @@ At normal traffic the data never gets that fragmented.
 - Compaction sorts data; sorting on several threads needs more memory than
   2 GB allows, so in these runs maintenance dropped to 1 thread. mallard's
   connection is shared, so it leaves the thread count alone
-  (`MALLARD_DUCKDB__THREADS` applies). One compaction of 1M fresh events took 10 s.
+  (`MALLARD_DUCKDB__THREADS` applies; [issue 0120](../../work/issues/0120-sentry-compaction-threads-in-mallard.md)).
+  One compaction of 1M fresh events took 10 s.
 
 ## Lessons that shaped the defaults
 

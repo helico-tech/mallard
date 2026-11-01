@@ -1,11 +1,11 @@
 # mallard-sentry-cli: the Sentry side of the CLI and TUI
 
-> **Retired binary.** This crate has no binary of its own any more (story
-> 0002/06); it is the library behind `mallard`'s Sentry commands (see
-> [docs/cli.md](../../docs/cli.md)).
+The library behind `mallard`'s Sentry commands and the errors tab of its TUI. It has
+no binary of its own. [docs/cli.md](../../docs/cli.md) is the reference for commands,
+flags, output and exit codes; this page adds the details of this side.
 
 `mallard` talks to the server through its `/sentry/v1` API (via
-`mallard-sentry-client`). It lists and changes issues, shows events with their stack
+`mallard-sentry-client`). This side lists and changes issues, shows events with their stack
 traces, sends test errors to a DSN, and has a live terminal dashboard.
 
 ```sh
@@ -13,55 +13,54 @@ cargo build -p mallard          # binary: target/debug/mallard
 export MALLARD_URL=http://localhost:8080 MALLARD_TOKEN=<one of the server's server.api_tokens>
 ```
 
-## Global flags
+## Notes on output
 
-| Flag | Env | Default | Meaning |
-|---|---|---|---|
-| `--url` | `MALLARD_URL` | `http://localhost:8080` | server base URL |
-| `--token` | `MALLARD_TOKEN` | – | API token (one of the server's `server.api_tokens`) |
-| `-p, --project` | `MALLARD_PROJECT` | only project | project id or slug |
-| `--json` | | off | raw JSON output (for scripts) |
-| `--color` | `NO_COLOR` | `auto` | `auto`, `always` or `never` |
+Global flags and env vars (`--url`, `--token`, `-p`, `--format`, ...): see
+[docs/cli.md](../../docs/cli.md) and ADR 0006, 0008.
 
-Flags, output style, time zone (UTC) and TUI keys are the same as on the
-telemetry side; see [docs/cli.md](../../docs/cli.md) and ADR 0006.
+When the server has exactly one project, `-p` is optional. The bridge creates a
+project per service for OTel exceptions (`bridge.default_project`), so a server with
+OTel traffic can need it.
 
-When the server has exactly one project, `-p` is optional.
 Text that comes from events (titles, messages, frames, tags, ...) or from
 the server is cleaned before it is printed: control and bidi characters are
 shown as escapes (`\u{1b}`), so an event can't send escape sequences to
-your terminal. `--json` output
-keeps the data, with control and bidi characters escaped as `\uXXXX`.
-Output to a closed pipe (`mallard issues list | head`) ends quietly with exit 0.
-Errors are one line on stderr with exit code 1, e.g.
-`error: invalid token (set MALLARD_TOKEN or --token)` or
-`error: cannot reach server at http://localhost:8080 (is it running? set MALLARD_URL)`.
+your terminal. `--json` output keeps the data, with control and bidi characters
+escaped as `\uXXXX`. Output to a closed pipe (`mallard issues list | head`) ends
+quietly with exit 0. Errors are one line on stderr, with the exit codes of
+[docs/cli.md](../../docs/cli.md), e.g.
+`error: invalid token (set MALLARD_TOKEN or --token)` (3) or
+`error: cannot reach server at http://localhost:8080/sentry (is it running? set MALLARD_URL)` (6).
 
 ## Commands
+
+Flat commands, plus `mallard errors …` (or `sentry …`), a hidden alias that keeps the
+command set of this side.
 
 ```
 mallard errors info                                   server version, storage, queue depth
 mallard projects list
-mallard projects create <name> [--slug s] [--platform node]   prints the DSN
+mallard projects create <name> [--slug s] [--platform node] [--if-not-exists]   prints the DSN
 mallard projects show <project>                               DSN first, then details
 mallard issues list [--status unresolved|resolved|ignored|all] [-q text] [-s 24h]
                 [--sort last_seen|first_seen|count|users] [--env e] [--release r] [-n limit]
-                [--tag key=value]... [--cursor c]
+                [--new] [--first-release r] [--tag key=value]... [--cursor c]
 mallard issues show <id> [-s 24h]              details, releases, tag breakdown, activity
-mallard issues resolve|ignore|unresolve <id>...
+mallard issues resolve|ignore|unresolve <id>... [--reason text]
 mallard events list [--issue id | -t trace_id] [-n limit] [-s 1h] [--tag key=value]...
-                [--release r] [--env e] [-q text] [--cursor c]
+                [--release r] [--env e] [-q text] [--cursor c] [--wait 30s]
 mallard events show <event_id> [--issue id]    exception chain, frames (newest first,
                                            in-app highlighted with source context),
                                            breadcrumbs, tags, user, request
 mallard errors stats [-s 24h] [--interval 1h]        totals and events per bucket
 mallard releases list [-s 14d] [-n limit]      releases seen in events (derived; not sentry-cli's)
-mallard errors sql "<select>" [-n limit]              read-only SQL over events, issues, issue_activity
+mallard sql --errors "<select>" [-n limit]     read-only SQL over events, issues, issue_activity
                                            (server: sentry.query.enable_sql; exit 7 when off)
 mallard sourcemaps list                        uploaded artifact bundles
-mallard errors maintenance                            flush, compact and expire now
+mallard errors maintenance                     flush and compact now, on the server
 mallard send-test --dsn <dsn> [--message m]    send a test error (Sentry envelope protocol)
-mallard tui                                    interactive dashboard
+mallard tui                                    terminal UI; F1 is this side
+mallard errors tui                             the TUI with only this side
 ```
 
 `send-test` needs no token: it posts an envelope to
@@ -90,7 +89,7 @@ mallard issues list --since 1h
 │         app/checkout.js in parseConfig                                                 │
 │  FATAL  Error: inside span                            42     3 ▁▁▁▁▁▁▁▁▁▁▅█ 1h ago     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
- ↑↓ move  ⏎ open  tab status  / search  s sort  t window  p project  r/i/u …  ? help  q quit
+ ↑↓ move  ⏎ open  tab status  / search  s sort  t window  p project  R/I/U …  ? help  q quit
 ```
 
 Enter opens the issue detail with sections Overview (facts, trend, shown
@@ -133,14 +132,14 @@ actions), except `ctrl-c` / `ctrl-q` quit and `ctrl-u` clears the search.
 
 ## As a library
 
-The crate is also a library (`mallard_sentry_cli`) so other programs can mount it:
+`crates/mallard/src/main.rs` mounts the crate (`mallard_sentry_cli`) like this:
 
 - `mallard_sentry_cli::Command` + `mallard_sentry_cli::run(cmd, &Ctx)`: the subcommands above.
   Global flags stay in the host; it builds
   `Ctx::new(client).with_project(p).with_json(j).with_color(c).with_hints(h)`.
-  `Hints` (from `mallard-term`) names the host's command and env vars in
-  messages (default `mallard_sentry_cli::HINTS`: `mallard …`, `MALLARD_URL`,
-  `MALLARD_TOKEN`, `MALLARD_PROJECT`). Errors keep the `mallard_sentry_client::Error` as their source, so a
+  `Hints` (from `mallard-term`) names the command and env vars in messages
+  (default `mallard_sentry_cli::HINTS`: `mallard …`, `MALLARD_URL`, `MALLARD_TOKEN`,
+  `MALLARD_PROJECT`). Errors keep the `mallard_sentry_client::Error` as their source, so a
   host can downcast them; end with `mallard_term::error::report`.
 - `mallard_sentry_cli::Embedded`: the TUI as a component without terminal setup:
   `new(client, project)` (optionally `.with_hints(h)`), `draw(frame, area)`

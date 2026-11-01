@@ -1,11 +1,13 @@
 # JavaScript sourcemaps
 
-Upload sourcemaps with the normal Sentry tools; point them at this server.
+Upload sourcemaps with the normal Sentry tools; point them at mallard.
 Errors then show original files, lines, function names and source code, and
 issues stay the same across builds.
 
-You need: the server URL, its API token (`MALLARD_SERVER__API_TOKENS`) and a project slug.
-The org can be any value (`default` is fine).
+You need: the server URL, an API token (one of `server.api_tokens`) and a project
+slug. The org can be any value (`default` is fine). The server needs a place for
+the bundles: set `storage.artifacts_path`. `mallard setup <name> --sentry-cli`
+prints `SENTRY_URL`, `SENTRY_ORG`, `SENTRY_PROJECT` and `SENTRY_AUTH_TOKEN`.
 
 ## Vite / webpack / Rollup / esbuild plugin
 
@@ -18,7 +20,7 @@ export default defineConfig({
   build: { sourcemap: "hidden" },
   plugins: [
     sentryVitePlugin({
-      url: "https://errors.example.com",
+      url: "https://mallard.example.com/sentry",
       authToken: process.env.MALLARD_TOKEN,
       org: "default",
       project: "web",
@@ -37,12 +39,13 @@ matches files in `node_modules`.
 
 ```sh
 npx sentry-cli sourcemaps inject ./dist          # adds debug ids to .js and .map
-npx sentry-cli --url https://errors.example.com --auth-token "$MALLARD_TOKEN" \
+npx sentry-cli --url https://mallard.example.com --auth-token "$MALLARD_TOKEN" \
   sourcemaps upload --org default --project web ./dist
 ```
 
-Add `--release <name>` to also link the bundle to a release. Works with
-sentry-cli 2.x and 3.x.
+`--url` is the server root: `sentry-cli` refuses a URL with a path, so mallard
+serves its `/api/0` routes on the root too. Add `--release <name>` to also link the
+bundle to a release. Works with sentry-cli 2.x and 3.x.
 
 Release-only (no debug ids, e.g. an old build pipeline): skip `inject`, upload
 with `--release <name>` (and `--url-prefix '~/assets'` if the files are served
@@ -66,8 +69,7 @@ they arrive, and stored events are not reprocessed.
 
 - `mallard sourcemaps list -p web` shows uploaded bundles and their debug ids.
 - No symbolication: check that the debug id in the event
-  (`mallard events show <id> --json | jq .payload.debug_meta`) is in that list,
+  (`mallard events show <id> --raw --json | jq .payload.debug_meta`) is in that list,
   and that the bundle was uploaded to the same project.
 - `401` from the CLI: wrong `--auth-token`.
-- `501`: the server has no storage for artifacts (in mallard: `[storage]
-  artifacts_path` is empty).
+- `501`: the server has no storage for bundles: `storage.artifacts_path` is empty.

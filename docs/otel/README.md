@@ -1,20 +1,12 @@
 # mallard: the telemetry side
 
-> **Retired binary.** This page was written for the old standalone server and
-> CLI, which are gone (story 0002/06). The code lives on as
-> the `mallard-otel-*` libraries inside mallard: run `mallard serve` (query API under
-> `/otel`, OTLP on :4318/:4317) and the `mallard` CLI; see the
-> [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
+mallard receives OTLP (gRPC and HTTP) and stores traces, logs and metrics in the
+shared DuckLake catalog (schema `otel`): compact, sorted Parquet files plus a SQL
+catalog, on local disk or object storage. You read them with the `mallard` CLI,
+`mallard tui` or the HTTP API under `/otel`.
 
-**An OpenTelemetry collector that stores traces, logs and metrics in
-[DuckLake](https://ducklake.select), with a query API, a CLI and a terminal UI.**
-
-One Rust binary receives OTLP (gRPC and HTTP). It writes compact, sorted
-Parquet files plus a SQL catalog, on local disk or object storage. It answers
-"what is slow, what is failing, and why" in milliseconds. It is built for
-small and mid-sized companies: one 2-vCPU instance ingests ~80,000 spans per
-second, far more than thousands to tens of thousands of visitors a day
-produce.
+mallard is one binary and one server; this folder covers the telemetry half. Start
+with the [repo README](../../README.md) and [architecture](../architecture.md).
 
 ```
 $ mallard services -s 15m
@@ -27,59 +19,46 @@ $ mallard services -s 15m
 ╰─────────────────┴───────┴─────────┴────────┴─────────┴─────────┴─────────╯
 ```
 
-## Why
+## What it does
 
-- **Open data, no lock-in.** Everything is Parquet plus a DuckLake catalog.
-  Point any DuckDB at it and write SQL.
-- **Storage anywhere DuckLake goes.** The catalog can be a DuckDB file,
-  SQLite or PostgreSQL. Data can live on local disk, S3, S3-compatible
-  stores (MinIO, SeaweedFS, R2, ...), Google Cloud Storage or Azure.
-- **Cheap.** About 30 bytes per span on disk; retention drops whole days
-  without rewriting data. 1-2 vCPU and 2 GB RAM are enough.
-- **Fast where it matters.** Last-hour queries take 5-50 ms on a 68 M-span
-  lake with 2 threads ([capacity](docs/capacity.md)).
-- **Simple to run.** A single binary or container, extensions baked in, with
-  a Helm chart and compose files. No queue or cluster required.
-
-## Features
-
-- OTLP/gRPC (`:4317`) and OTLP/HTTP (`:4318`, protobuf and JSON, gzip/zstd)
-  for traces, logs and metrics (gauge, sum, histogram, exponential histogram,
-  summary).
-- Query API (`:8080`) with OpenAPI 3.1 ([docs/api.md](docs/api.md),
-  `/docs`):
+- OTLP/gRPC (`:4317`) and OTLP/HTTP (`:4318`, and `/v1/*` on `:8080`; protobuf and
+  JSON, gzip/deflate/zstd) for traces, logs and metrics (gauge, sum, histogram,
+  exponential histogram, summary).
+- Query API under `/otel` with OpenAPI 3.1 ([api.md](api.md), `/otel/docs`):
   - RED stats per service and operation
   - trace search and trace waterfalls
   - log search and live tail
-  - metric catalog and time series: counter rates with reset detection,
-    histogram percentiles, group-by
+  - metric catalog and time series: counter rates with reset detection, histogram
+    percentiles, group-by
   - optional guarded read-only SQL
-- `mallard` CLI: tables or JSON, `logs -f`, trace waterfalls in the terminal.
-- `mallard tui`: overview dashboard, trace search plus waterfall with span
-  details and logs, live logs, metric charts, status.
-- Back-pressure (HTTP 429 / gRPC `UNAVAILABLE`) instead of dropping data or
-  running out of memory. Automatic compaction, retention and snapshot expiry.
-- Bearer-token auth for ingest and query.
-- Usable as Rust libraries: embed the server, client, CLI or TUI
-  ([docs/embedding.md](docs/embedding.md)).
+- Back-pressure (HTTP 429 / gRPC `UNAVAILABLE`) instead of dropping data or running
+  out of memory. Automatic compaction, retention and snapshot expiry.
+- A bearer token for the query API (required) and optionally for ingest.
+- Open data: Parquet plus a DuckLake catalog. Any DuckDB of the same version can open
+  it ([data-model.md](data-model.md#opening-the-lake-without-the-server)).
+- The bridge (ADR 0009) links the sides: exceptions recorded by OTel SDKs become
+  Sentry issues, in a project named after the service, and Sentry transactions become
+  spans. Set in `[bridge]`.
+
+Measured numbers are in [capacity.md](capacity.md): about 80,000 spans/s on 2 CPUs,
+about 30 bytes per span on disk, last-hour queries in 5-50 ms on 68 M spans.
 
 ## Quick start
 
-With Docker:
+With Docker (local use only: the compose defaults are development credentials):
 
 ```sh
 docker compose -f deploy/compose/docker-compose.yml up -d --build
-docker compose -f deploy/compose/docker-compose.yml --profile loadgen up -d   # demo traffic
-docker compose -f deploy/compose/docker-compose.yml exec mallard mallard services
+docker compose -f deploy/compose/docker-compose.yml exec mallard mallard --token dev-token status
 ```
 
-From source (Rust 1.90+; the first build compiles DuckDB and takes ~2 min):
+From source (Rust 1.95+; the first build compiles DuckDB and takes ~2 min):
 
 ```sh
 cargo build --release
 MALLARD_SERVER__API_TOKENS=dev ./target/release/mallard serve &    # data in ./data/
-./target/release/mallard-otel-loadgen --rate 20 --duration 0 &  # demo traffic
-./target/release/mallard tui
+./target/release/mallard-otel-loadgen --rate 20 --duration 0 &     # demo traffic
+MALLARD_TOKEN=dev ./target/release/mallard tui
 ```
 
 Send your own telemetry:
@@ -89,56 +68,37 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 export OTEL_SERVICE_NAME=my-service
 ```
 
-Then explore:
+Then explore (with `MALLARD_TOKEN` set):
 
 ```sh
 mallard services                       # who is slow, who fails
-mallard traces list -S checkout -e          # failing checkout traces
-mallard telemetry trace <trace-id> -A            # waterfall with attributes
+mallard traces list -S checkout -e     # failing checkout traces
+mallard trace <trace-id>               # spans, Sentry errors and logs of one trace
 mallard logs -l error -f               # follow errors
 mallard metrics show http.server.request.duration -g p99 -b http.route
-curl localhost:8080/openapi.json   # the API
+curl localhost:8080/otel/openapi.json  # the API
 ```
 
 ## Documentation
 
 | | |
 |---|---|
-| [Architecture](docs/architecture.md) | components, write path, failure behaviour |
-| [Data model](docs/data-model.md) | tables, types, partitioning, sort order — and why (with measurements) |
-| [Configuration](docs/configuration.md) | every setting, env overrides, secrets |
-| [Storage backends](docs/storage-backends.md) | DuckDB/SQLite/PostgreSQL catalogs; local, S3, GCS, Azure, R2 |
-| [Deployment](docs/deployment.md) | container image, compose, Helm, Collector in front, TLS |
-| [Capacity](docs/capacity.md) | measured ingest, storage and query numbers; sizing guide |
-| [Operations](docs/operations.md) | monitoring, retention, backups, upgrades, troubleshooting |
-| [Query API](docs/api.md) | endpoints and semantics ([openapi.json](docs/openapi.json)) |
-| [CLI and TUI](docs/cli.md) | commands and keys |
-| [Embedding](docs/embedding.md) | using the crates as libraries |
-| [Decisions](docs/adr/) | ADRs: DuckLake, data model, durability, compaction, SQL endpoint |
-
-## Project layout
-
-```
-crates/mallard-otel-api       API types (OpenAPI schema source)
-crates/mallard-otel-server    collector + query API
-crates/mallard-otel-client    typed HTTP client
-crates/mallard-otel-cli       CLI and TUI
-crates/mallard-otel-loadgen   load generator (bin: mallard-otel-loadgen)
-deploy/ charts/      compose files and Helm chart
-bench/               reproducible experiments
-docs/ work/          documentation and work tracking
-```
+| [Architecture](architecture.md) | components, write path, failure behaviour |
+| [Data model](data-model.md) | tables, types, partitioning, sort order, and why (with measurements) |
+| [Configuration](configuration.md) | every `[otel.*]` key, the shared sections |
+| [Storage backends](storage-backends.md) | DuckDB/SQLite/PostgreSQL catalogs; local, S3, GCS, Azure, R2 |
+| [Deployment](deployment.md) | pointing SDKs at it, Collector in front, TLS |
+| [Capacity](capacity.md) | measured ingest, storage and query numbers; sizing guide |
+| [Operations](operations.md) | monitoring, retention, backups, upgrades, troubleshooting |
+| [Query API](api.md) | endpoints and semantics ([openapi.json](openapi.json)) |
+| [CLI and TUI](cli.md) | what [docs/cli.md](../cli.md) leaves out for this side |
+| [Library use](embedding.md) | how `mallard-server` and `mallard` use these crates |
+| [Decisions](adr/) | from before the merge: DuckLake, data model, durability, compaction, SQL endpoint; newer ones in [docs/adr/](../adr/) |
 
 ## Status
 
-Version 0.1: feature-complete for its scope, tested end to end (unit,
-integration with a real DuckLake, compose and Kubernetes runs), and reviewed.
-Known limitations: attribute values are stored as strings; in-memory buffering
-may lose up to `flush_interval` (5 s) of data on a hard crash. Put an
-OpenTelemetry Collector with a persistent queue in front if you need zero loss
+Known limits: attribute values are stored as strings; in-memory buffering may lose
+up to `otel.ingest.flush_interval` (5 s) of data on a hard crash. Put an OpenTelemetry
+Collector with a persistent queue in front if you need zero loss
 ([recipe](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss),
 [ADR 0003](adr/0003-ingest-durability.md)).
-
-## License
-
-MIT OR Apache-2.0 (see the repository root).
