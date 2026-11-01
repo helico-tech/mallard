@@ -1,33 +1,32 @@
 //! `odl` command line and terminal UI, usable as a library.
 //!
-//! - [`Cmd`] + [`run`]: mount the commands in another CLI.
+//! - [`Command`] + [`run`]: mount the commands in another CLI (global flags
+//!   such as the URL and token live in the host and arrive via [`Ctx`]).
 //! - [`Embedded`]: the TUI as a component without terminal setup.
+//!
+//! The same shape as `sdl_cli`: `Command`, `Ctx::new(client).with_json(…)`,
+//! `describe`, `HINTS`, `Embedded::open_trace`.
 
 mod fmt;
 mod severity;
-pub mod tui;
+mod tui;
 mod waterfall;
 
+pub use mallard_term::error::Hints;
 pub use tui::{Embedded, Outcome};
-
-/// For the `odl` binary.
-#[doc(hidden)]
-pub use fmt::{clean, paint_err};
 
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
+use mallard_term::color::{ColorChoice, Out, alert};
+use mallard_term::error::{Described, Failure};
 use odl_client::{Client, LogTail, api::*};
 
-use crate::fmt::{emit, json_safe, log_line, *};
+use crate::fmt::{json_safe, log_line, *};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, ValueEnum)]
-pub enum Output {
-    #[default]
-    Table,
-    Json,
-}
+/// Hints for the standalone `odl` binary.
+pub const HINTS: Hints = Hints { command: "odl", url_env: "ODL_URL", token_env: "ODL_TOKEN", project_env: "" };
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct Win {
@@ -44,7 +43,8 @@ pub struct Win {
 
 /// All `odl` commands. Embedders can mount this as a subcommand.
 #[derive(Subcommand, Debug)]
-pub enum Cmd {
+#[non_exhaustive]
+pub enum Command {
     /// Check that the server is up (no token needed); exit code 1 if not.
     Health,
     /// Server health, ingest counters and storage size.
@@ -86,7 +86,8 @@ pub enum Cmd {
         /// Attribute filter key=value (repeatable).
         #[arg(short, long)]
         attr: Vec<String>,
-        #[arg(short, long, default_value_t = 30)]
+        /// Max traces (`-l` still works).
+        #[arg(short = 'n', short_alias = 'l', long, default_value_t = 30)]
         limit: u32,
     },
     /// Show one trace as a waterfall.
@@ -190,49 +191,104 @@ pub(crate) fn attrs(a: &[String]) -> Option<String> {
 }
 
 /// Print `v` as pretty JSON or as the text `text` makes of it.
-fn print<T: serde::Serialize + ?Sized>(out: Output, v: &T, text: impl FnOnce(&T) -> String) -> Result<()> {
-    match out {
-        Output::Json => emit(&json_safe(&serde_json::to_string_pretty(v)?))?,
-        Output::Table => emit(&text(v))?,
+fn print<T: serde::Serialize + ?Sized>(ctx: &Ctx, v: &T, text: impl FnOnce(&T) -> String) -> Result<()> {
+    if ctx.json {
+        ctx.out.line(&json_safe(&serde_json::to_string_pretty(v)?))?;
+    } else {
+        ctx.out.line(&text(v))?;
     }
     Ok(())
 }
 
-/// Shared context for commands.
+/// What the commands need besides their own arguments:
+/// `Ctx::new(client).with_json(true)`. The same builder as `sdl_cli::Ctx`.
 #[derive(Debug)]
 pub struct Ctx {
-    pub client: Client,
-    pub output: Output,
+    client: Client,
+    json: bool,
+    out: Out,
+    hints: Hints,
 }
 
-/// Run one command.
+impl Ctx {
+    /// Table output, colour as `--color=auto` says, [`HINTS`].
+    pub fn new(client: Client) -> Self {
+        Ctx { client, json: false, out: Out::stdout(ColorChoice::Auto), hints: HINTS }
+    }
+
+    /// Print JSON instead of tables.
+    pub fn with_json(mut self, json: bool) -> Self {
+        self.json = json;
+        self
+    }
+
+    /// The `--color` flag (for stdout).
+    pub fn with_color(mut self, color: ColorChoice) -> Self {
+        self.out = Out::stdout(color);
+        self
+    }
+
+    pub fn with_hints(mut self, hints: Hints) -> Self {
+        self.hints = hints;
+        self
+    }
+
+    /// The friendly message, with the client error kept as its source.
+    fn err(&self, e: odl_client::Error) -> anyhow::Error {
+        let msg = describe(&e, self.client.base_url(), &self.hints);
+        anyhow::Error::new(e).context(Described(msg))
+    }
+}
+
+/// One-line, actionable message for a client error. Safe to print.
+pub fn describe(e: &odl_client::Error, url: &str, hints: &Hints) -> String {
+    use odl_client::Error as E;
+    let f = match e {
+        E::Api { status, message, .. } => Failure::Status { status: *status, message },
+        E::InvalidUrl(m) => Failure::InvalidUrl(m),
+        E::Http(h) if h.is_connect() => Failure::Connect,
+        E::Http(h) if h.is_timeout() => Failure::Timeout,
+        E::Http(h) if h.is_decode() => Failure::Decode(h.to_string()),
+        E::Http(h) => Failure::Other(h.to_string()),
+        e => return clean(&e.to_string()).into_owned(),
+    };
+    mallard_term::error::describe(f, url, hints)
+}
+
+/// Run one command. Client errors become one friendly line ([`describe`]).
 ///
 /// Output errors are returned too: a closed pipe (`odl logs | head`) is an
-/// [`std::io::Error`] of kind `BrokenPipe` in the chain, which a binary
-/// usually treats as success.
-pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
+/// [`std::io::Error`] of kind `BrokenPipe` in the chain, which
+/// `mallard_term::error::report` treats as success.
+pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
+    run_inner(cmd, ctx).await.map_err(|e| match e.downcast::<odl_client::Error>() {
+        Ok(e) => ctx.err(e),
+        Err(e) => e,
+    })
+}
+
+async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
     let c = &ctx.client;
-    let out = ctx.output;
     match cmd {
-        Cmd::Health => {
+        Command::Health => {
             let h = c.health().await?;
-            print(out, &h, |h| format!("{} {}", clean(&h.status), clean(&h.version)))
+            print(ctx, &h, |h| format!("{} {}", clean(&h.status), clean(&h.version)))
         }
-        Cmd::Status => {
+        Command::Status => {
             let s = c.stats().await?;
-            print(out, &s, |s| stats_text(s, c.base_url()))
+            print(ctx, &s, |s| stats_text(s, c.base_url()))
         }
-        Cmd::Services { w, all_spans } => {
+        Command::Services { w, all_spans } => {
             let (from, to, since) = w.parts();
             let v = c.services(&ServiceQuery { from, to, since, entry_only: Some(!all_spans) }).await?;
-            print(out, &v, |v| services_text(v))
+            print(ctx, &v, |v| services_text(v))
         }
-        Cmd::Ops { w, service, all_spans } => {
+        Command::Ops { w, service, all_spans } => {
             let (from, to, since) = w.parts();
             let v = c.operations(&OperationQuery { from, to, since, service, entry_only: Some(!all_spans) }).await?;
-            print(out, &v, |v| operations_text(v))
+            print(ctx, &v, |v| operations_text(v))
         }
-        Cmd::Traces { w, service, operation, errors, min_ms, max_ms, attr, limit } => {
+        Command::Traces { w, service, operation, errors, min_ms, max_ms, attr, limit } => {
             let (from, to, since) = w.parts();
             let v = c
                 .traces(&TraceQuery {
@@ -248,9 +304,9 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     limit: Some(limit),
                 })
                 .await?;
-            print(out, &v, |v| traces_text(v))
+            print(ctx, &v, |v| traces_text(v))
         }
-        Cmd::Trace { trace_id, since, attributes } => {
+        Command::Trace { trace_id, since, attributes } => {
             let id = &trace_id;
             let get = |since: String| async move {
                 c.trace(id, &TraceGetQuery { since: Some(since), ..Default::default() }).await
@@ -264,9 +320,9 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 }
                 r => r?,
             };
-            print(out, &t, |t| trace_lines(t, attributes).join("\n"))
+            print(ctx, &t, |t| trace_lines(t, attributes).join("\n"))
         }
-        Cmd::Logs { w, service, level, query, trace, attr, limit, follow } => {
+        Command::Logs { w, service, level, query, trace, attr, limit, follow } => {
             let min_severity = level
                 .as_deref()
                 .map(|l| severity::parse(l).ok_or_else(|| anyhow::anyhow!("unknown level {l:?}")))
@@ -287,7 +343,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             if !follow {
                 let mut v = c.logs(&q).await?;
                 v.reverse(); // print oldest first, like a log file
-                return print(out, &v, |v| v.iter().map(log_line).collect::<Vec<_>>().join("\n"));
+                return print(ctx, &v, |v| v.iter().map(log_line).collect::<Vec<_>>().join("\n"));
             }
             // Start where --from/--since say; the first poll shows the newest
             // `--limit` records of that window, like `tail -n N -f`.
@@ -305,13 +361,14 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     res = tail.poll() => match res {
                         Ok(v) => {
                             for r in &v {
-                                match out {
-                                    Output::Json => emit(&json_safe(&serde_json::to_string(r)?))?,
-                                    Output::Table => emit(&log_line(r))?,
+                                if ctx.json {
+                                    ctx.out.line(&json_safe(&serde_json::to_string(r)?))?;
+                                } else {
+                                    ctx.out.line(&log_line(r))?;
                                 }
                             }
                         }
-                        Err(e) => eprintln!("{} {}", paint_err("poll failed:"), clean(&format!("{:#}", anyhow::Error::new(e)))),
+                        Err(e) => eprintln!("{} {}", alert("poll failed:"), describe(&e, c.base_url(), &ctx.hints)),
                     },
                     _ = &mut ctrl_c => return Ok(()),
                 }
@@ -321,12 +378,12 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 }
             }
         }
-        Cmd::Metrics { w, service, query } => {
+        Command::Metrics { w, service, query } => {
             let (from, to, since) = w.parts();
             let v = c.metrics(&MetricListQuery { from, to, since, service, q: query }).await?;
-            print(out, &v, |v| metrics_text(v))
+            print(ctx, &v, |v| metrics_text(v))
         }
-        Cmd::Metric { name, w, service, agg, by, attr, step } => {
+        Command::Metric { name, w, service, agg, by, attr, step } => {
             let (from, to, since) = w.parts();
             let r = c
                 .metric_query(&MetricQuery {
@@ -341,13 +398,13 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     step,
                 })
                 .await?;
-            print(out, &r, metric_text)
+            print(ctx, &r, metric_text)
         }
-        Cmd::Sql { query, limit } => {
+        Command::Sql { query, limit } => {
             let r = c.sql(&query, Some(limit)).await?;
-            print(out, &r, sql_text)
+            print(ctx, &r, sql_text)
         }
-        Cmd::Tui { since } => tui::run_standalone(c.clone(), &since).await,
+        Command::Tui { since } => tui::run_standalone(c.clone(), &since).await,
     }
 }
 
@@ -360,10 +417,10 @@ mod tests {
     #[derive(Parser)]
     struct Cli {
         #[command(subcommand)]
-        cmd: Cmd,
+        cmd: Command,
     }
 
-    fn parse(args: &[&str]) -> std::result::Result<Cmd, clap::Error> {
+    fn parse(args: &[&str]) -> std::result::Result<Command, clap::Error> {
         Cli::try_parse_from(std::iter::once("odl").chain(args.iter().copied())).map(|c| c.cmd)
     }
 
@@ -379,7 +436,7 @@ mod tests {
     fn windows_are_validated() {
         assert!(parse(&["services", "--since", "bogus"]).is_err());
         assert!(parse(&["tui", "--since", "0s"]).is_err());
-        let Cmd::Services { w, .. } = parse(&["services", "--since", "1h30m"]).unwrap() else { panic!() };
+        let Command::Services { w, .. } = parse(&["services", "--since", "1h30m"]).unwrap() else { panic!() };
         assert_eq!(parse_window(&w.since).unwrap(), Duration::from_secs(5400));
         assert_eq!(w.parts().2.as_deref(), Some("1h30m"));
         let from = "2026-01-01T00:00:00Z".parse().unwrap();

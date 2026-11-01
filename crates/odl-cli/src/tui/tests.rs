@@ -458,7 +458,7 @@ fn status_renders() {
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);
     for needle in
-        ["Ingest", "Storage", "traces", "1234", "buffer", "duckdb", "spans", "100.0k", "compaction", "merged 12 files"]
+        ["Ingest", "Storage", "traces", "1.2k", "buffer", "duckdb", "spans", "100k", "compaction", "merged 12 files"]
     {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }

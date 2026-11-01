@@ -91,8 +91,8 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
             format!(
                 "buffer {} rows · {} of {}",
                 compact(i.buffered_rows as f64),
-                bytes(i.buffered_bytes as f64),
-                bytes(i.max_buffer_bytes as f64)
+                bytes(i.buffered_bytes),
+                bytes(i.max_buffer_bytes)
             ),
             theme::bold(),
         )),
@@ -147,19 +147,19 @@ fn draw_storage(f: &mut Frame, area: Rect, s: &Stats) {
         .tables
         .iter()
         .map(|t| {
-            let avg = if t.files > 0 { bytes(t.bytes as f64 / t.files as f64) } else { "–".into() };
+            let avg = if t.files > 0 { bytes(t.bytes as u64 / t.files as u64) } else { "–".into() };
             Row::new(vec![
                 Cell::from(t.name.clone()).style(theme::text()),
                 Cell::from(Line::from(compact(t.rows as f64)).right_aligned()).style(theme::bold()),
                 Cell::from(Line::from(compact(t.inlined_rows as f64)).right_aligned()).style(theme::dim()),
                 Cell::from(Line::from(compact(t.files as f64)).right_aligned()).style(theme::dim()),
-                Cell::from(Line::from(bytes(t.bytes as f64)).right_aligned()).style(theme::text()),
+                Cell::from(Line::from(bytes(t.bytes as u64)).right_aligned()).style(theme::text()),
                 Cell::from(Line::from(avg).right_aligned()).style(theme::muted()),
             ])
         })
         .collect();
     let header = Row::new(vec![
-        Cell::from(format!("table · {}", bytes(total_bytes as f64))),
+        Cell::from(format!("table · {}", bytes(total_bytes as u64))),
         Cell::from(Line::from("rows").right_aligned()),
         Cell::from(Line::from("inlined").right_aligned()),
         Cell::from(Line::from("files").right_aligned()),

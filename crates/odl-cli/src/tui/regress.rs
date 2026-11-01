@@ -338,7 +338,7 @@ fn huge_durations_saturate() {
 // 7: ANSI stripping for non-terminal output.
 #[test]
 fn strips_ansi() {
-    assert_eq!(crate::fmt::strip_ansi("\u{1b}[2mdim\u{1b}[0m x \u{1b}[31;1mred\u{1b}[39m"), "dim x red");
+    assert_eq!(mallard_term::color::strip_ansi("\u{1b}[2mdim\u{1b}[0m x \u{1b}[31;1mred\u{1b}[39m"), "dim x red");
 }
 
 // 12: the errors hint is hidden unless the host enables it.

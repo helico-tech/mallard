@@ -22,7 +22,7 @@ pub async fn run_standalone(client: Client, since: &str) -> Result<()> {
 /// so the runtime keeps running background loads (also on a current-thread
 /// runtime).
 async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut Embedded) -> Result<()> {
-    use futures_util::StreamExt;
+    use futures::StreamExt;
     let mut events = event::EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -7,9 +7,14 @@ mod tui;
 
 use std::path::PathBuf;
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mallard_client::Client;
+use mallard_term::color::{ColorChoice, Out};
+use mallard_term::error::{Described, Hints};
+use mallard_term::text::clean;
 
 #[derive(Parser)]
 #[command(
@@ -28,6 +33,9 @@ struct Cli {
     /// Print JSON instead of text.
     #[arg(long, global = true)]
     json: bool,
+    /// Colour: auto (a terminal without NO_COLOR), always or never.
+    #[arg(long, global = true, value_enum, default_value_t)]
+    color: ColorChoice,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -81,113 +89,134 @@ enum Cmd {
     #[command(alias = "otel")]
     Telemetry {
         #[command(subcommand)]
-        cmd: odl_cli::Cmd,
+        cmd: odl_cli::Command,
     },
 }
 
 /// Hints in `mallard errors …` messages name mallard's command and env vars.
-const ERRORS_HINTS: sdl_cli::Hints = sdl_cli::Hints {
+const ERRORS_HINTS: Hints = Hints {
     command: "mallard errors",
     url_env: "MALLARD_URL",
     token_env: "MALLARD_TOKEN",
     project_env: "MALLARD_PROJECT",
 };
 
+/// The same for `mallard telemetry …`.
+const TELEMETRY_HINTS: Hints = Hints { command: "mallard telemetry", ..ERRORS_HINTS };
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
+    let color = cli.color;
+    mallard_term::error::report(run(cli).await, color)
+}
+
+async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Serve { config } => return server_cmd::serve(config.as_deref()).await,
         Cmd::Check { config } => return server_cmd::check(config.as_deref()),
         Cmd::InstallExtensions { dir } => return server_cmd::install_extensions(&dir),
         _ => {}
     }
-    let client = Client::new(&cli.url, cli.token.as_deref())?;
+    let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
+    let out = Out::stdout(cli.color);
     match cli.cmd {
         Cmd::Serve { .. } | Cmd::Check { .. } | Cmd::InstallExtensions { .. } => unreachable!(),
-        Cmd::Status => status(&client, cli.json).await,
+        Cmd::Status => status(&client, cli.json, out).await,
         Cmd::Tui { project } => tui::run(&client, project).await,
         Cmd::Errors { project, cmd } => {
-            let ctx = sdl_cli::Ctx::new(client.sentry.clone()).with_project(project).with_json(cli.json);
-            sdl_cli::run(cmd, &ctx.with_hints(ERRORS_HINTS)).await
+            let ctx = sdl_cli::Ctx::new(client.sentry.clone())
+                .with_project(project)
+                .with_json(cli.json)
+                .with_color(cli.color)
+                .with_hints(ERRORS_HINTS);
+            sdl_cli::run(cmd, &ctx).await
         }
         Cmd::Telemetry { cmd } => {
-            let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
-            match odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await {
-                // `mallard telemetry logs | head`: the reader is gone, not a failure.
-                Err(e) if is_broken_pipe(&e) => Ok(()),
-                r => r,
-            }
+            let ctx = odl_cli::Ctx::new(client.otel.clone())
+                .with_json(cli.json)
+                .with_color(cli.color)
+                .with_hints(TELEMETRY_HINTS);
+            odl_cli::run(cmd, &ctx).await
         }
         Cmd::Trace { trace_id, since } => {
-            let t = client.trace_overview(&trace_id, since.as_deref()).await?;
+            let t = client.trace_overview(&trace_id, since.as_deref()).await.map_err(|e| described(e, &cli.url))?;
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&t)?);
+                out.line(&mallard_term::text::json_safe(&serde_json::to_string_pretty(&t)?))?;
             } else {
-                print!("{}", trace::render(&t));
+                out.line(&trace::render(&t))?;
             }
             Ok(())
         }
     }
 }
 
-async fn status(c: &Client, json: bool) -> Result<()> {
+/// One friendly line for a client error, worded and hinted like the
+/// `errors` and `telemetry` commands do it.
+fn describe(e: &mallard_client::Error, base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    match e {
+        mallard_client::Error::Sentry(e) => {
+            format!("errors: {}", sdl_cli::describe(e, &format!("{base_url}/sentry"), &ERRORS_HINTS))
+        }
+        mallard_client::Error::Otel(e) => {
+            format!("telemetry: {}", odl_cli::describe(e, &format!("{base_url}/otel"), &TELEMETRY_HINTS))
+        }
+        e => clean(&e.to_string()).into_owned(),
+    }
+}
+
+fn described(e: mallard_client::Error, base_url: &str) -> anyhow::Error {
+    let msg = describe(&e, base_url);
+    anyhow::Error::new(e).context(Described(msg))
+}
+
+async fn status(c: &Client, json: bool, out: Out) -> Result<()> {
+    use mallard_term::fmt::{bytes, compact};
     let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
+    let s = s.map_err(|e| describe(&e.into(), c.base_url()));
+    let o = o.map_err(|e| describe(&e.into(), c.base_url()));
     if json {
-        fn side<T: serde::Serialize>(r: Result<&T, String>) -> serde_json::Value {
+        fn side<T: serde::Serialize>(r: &Result<T, String>) -> serde_json::Value {
             match r {
                 Ok(v) => serde_json::json!({ "ok": true, "info": v }),
                 Err(e) => serde_json::json!({ "ok": false, "error": e }),
             }
         }
-        let v = serde_json::json!({
-            "sentry": side(s.as_ref().map_err(|e| e.to_string())),
-            "otel": side(o.as_ref().map_err(|e| error_chain(e))),
-        });
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        let v = serde_json::json!({ "sentry": side(&s), "otel": side(&o) });
+        out.line(&mallard_term::text::json_safe(&serde_json::to_string_pretty(&v)?))?;
         return Ok(());
     }
-    println!("server   {}", c.base_url());
+    let mut text = format!("server    {}\n", clean(c.base_url()));
+    let error = |e: &str| format!("{} {e}", mallard_term::color::red("ERROR"));
     match s {
-        Ok(i) => println!(
-            "sentry   ok  v{}  duckdb {}  queue {}/{}",
-            i.version, i.duckdb_version, i.queue_depth, i.queue_capacity
-        ),
-        Err(e) => println!("sentry   ERROR {e}"),
+        Ok(i) => text.push_str(&format!(
+            "errors    ok  v{}  duckdb {}  queue {}/{}\n",
+            clean(&i.version),
+            clean(&i.duckdb_version),
+            i.queue_depth,
+            i.queue_capacity
+        )),
+        Err(e) => text.push_str(&format!("errors    {}\n", error(&e))),
     }
     match o {
         Ok(st) => {
             let rows: i64 = st.storage.tables.iter().map(|t| t.rows + t.inlined_rows).sum();
-            let bytes: i64 = st.storage.tables.iter().map(|t| t.bytes).sum();
-            println!(
-                "otel     ok  v{}  up {}s  buffered {} rows  stored {} rows / {:.1} MB  flush errors {}",
-                st.version,
+            let size: i64 = st.storage.tables.iter().map(|t| t.bytes).sum();
+            text.push_str(&format!(
+                "telemetry ok  v{}  up {}s  buffered {} rows  stored {} rows / {}  flush errors {}",
+                clean(&st.version),
                 st.uptime_secs,
-                st.ingest.buffered_rows,
-                rows,
-                bytes as f64 / 1e6,
+                compact(st.ingest.buffered_rows as f64),
+                compact(rows as f64),
+                bytes(size.max(0) as u64),
                 st.ingest.flush_errors
-            );
+            ));
         }
-        Err(e) => println!("otel     ERROR {}", error_chain(&e)),
+        Err(e) => text.push_str(&format!("telemetry {}", error(&e))),
     }
+    out.line(&text)?;
     Ok(())
-}
-
-fn is_broken_pipe(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
-}
-
-/// An error and its causes on one line (`a: b: c`).
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut s = e.to_string();
-    let mut cause = e.source();
-    while let Some(c) = cause {
-        s.push_str(": ");
-        s.push_str(&c.to_string());
-        cause = c.source();
-    }
-    s
 }
 
 #[cfg(test)]
@@ -210,5 +239,35 @@ mod tests {
             let cli = Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
             assert!(matches!(cli.cmd, Cmd::Errors { project: Some(p), .. } if p == "web"), "{args:?}");
         }
+    }
+
+    /// Both sides fail with one line in the same style, naming mallard's
+    /// env vars (review 2.M).
+    #[tokio::test]
+    async fn both_sides_report_errors_alike() {
+        let mut lines = vec![];
+        for args in [
+            &["mallard", "--url", "http://127.0.0.1:9", "errors", "-p", "web", "issues", "list"][..],
+            &["mallard", "--url", "http://127.0.0.1:9", "telemetry", "services"][..],
+            &["mallard", "--url", "http://127.0.0.1:9", "trace", "0af7651916cd43dd8448eb211c80319c"][..],
+        ] {
+            let e = run(Cli::try_parse_from(args).unwrap()).await.unwrap_err();
+            let msg = mallard_term::error::message(&e);
+            assert!(msg.contains("cannot reach server at http://127.0.0.1:9/"), "{args:?}: {msg}");
+            assert!(msg.contains("set MALLARD_URL"), "{args:?}: {msg}");
+            assert!(!msg.contains('\n'), "{msg}");
+            lines.push(msg);
+        }
+        assert!(lines[0].starts_with("cannot reach server at http://127.0.0.1:9/sentry"), "{}", lines[0]);
+        assert!(lines[1].starts_with("cannot reach server at http://127.0.0.1:9/otel"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn shared_global_flags() {
+        let cli =
+            Cli::try_parse_from(["mallard", "telemetry", "traces", "-n", "5", "--json", "--color", "never"]).unwrap();
+        assert!(cli.json && cli.color == ColorChoice::Never);
+        assert!(Cli::try_parse_from(["mallard", "errors", "events", "list", "-t", "abc", "-n", "3"]).is_ok());
+        assert!(Cli::try_parse_from(["mallard", "errors", "issues", "list", "-s", "1h"]).is_ok());
     }
 }

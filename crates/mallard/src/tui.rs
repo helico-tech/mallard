@@ -68,7 +68,7 @@ impl Pane for Errors {
     }
 }
 
-struct Telemetry(odl_cli::tui::Embedded);
+struct Telemetry(odl_cli::Embedded);
 
 impl Pane for Telemetry {
     fn title(&self) -> &'static str {
@@ -78,7 +78,7 @@ impl Pane for Telemetry {
         self.0.draw(f, area)
     }
     fn handle(&mut self, ev: &Event) -> Option<Ask> {
-        use odl_cli::tui::Outcome;
+        use odl_cli::Outcome;
         match self.0.handle_event(ev) {
             Outcome::Consumed => Some(Ask::Nothing),
             Outcome::Ignored => None,
@@ -163,8 +163,8 @@ impl Host {
 
 /// The otel TUI, with its "e: errors of this trace" jump enabled: the
 /// errors tab can answer it.
-fn telemetry_pane(client: &Client) -> odl_cli::tui::Embedded {
-    let mut pane = odl_cli::tui::Embedded::new(client.otel.clone());
+fn telemetry_pane(client: &Client) -> odl_cli::Embedded {
+    let mut pane = odl_cli::Embedded::new(client.otel.clone());
     pane.set_errors_enabled(true);
     pane
 }

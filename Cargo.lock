@@ -2280,6 +2280,7 @@ dependencies = [
  "futures",
  "mallard-client",
  "mallard-server",
+ "mallard-term",
  "metrics-exporter-prometheus",
  "odl-cli",
  "ratatui",
@@ -2911,10 +2912,10 @@ dependencies = [
  "clap",
  "comfy-table",
  "crossterm",
- "futures-util",
+ "futures",
  "humantime",
+ "mallard-term",
  "odl-client",
- "owo-colors",
  "ratatui",
  "serde",
  "serde_json",
@@ -3084,12 +3085,6 @@ name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
-
-[[package]]
-name = "owo-colors"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
 name = "palette"

@@ -61,7 +61,7 @@ async fn client_against_server() {
     let task = tokio::spawn(async move { server.serve(sd).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let c = Client::new(&api, Some("tok".into())).unwrap();
+    let c = Client::new(&api, Some("tok")).unwrap();
     assert_eq!(c.health().await.unwrap().status, "ok");
     let unauth = Client::new(&api, None).unwrap();
     assert_eq!(unauth.stats().await.unwrap_err().status(), Some(401));

@@ -10,7 +10,8 @@ name = "odl"
 path = "src/main.rs"
 
 [dependencies]
-odl-client = { path = "../odl-client" }
+odl-client.workspace = true
+mallard-term.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -18,12 +19,11 @@ chrono.workspace = true
 humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-comfy-table = "8"
-owo-colors = "4"
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-futures-util = { version = "0.3", default-features = false }
-unicode-width = "0.2"
+comfy-table.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+unicode-width.workspace = true
 
 [lib]
 name = "odl_cli"

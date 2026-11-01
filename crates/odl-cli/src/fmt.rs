@@ -1,20 +1,19 @@
 //! Human-friendly output for the CLI.
 //!
-//! The `*_text` functions build the text of one command's output; `emit`
+//! The `*_text` functions build the text of one command's output; `Out::line`
 //! writes it. Every value that comes from the server goes through [`clean`]
 //! before it is styled: OTLP data is written by any app that can reach the
 //! collector, and must not be able to send escape sequences to the
 //! operator's terminal.
 
-use std::{
-    borrow::Cow,
-    io::{IsTerminal, Write},
-    sync::OnceLock,
-};
+use std::borrow::Cow;
 
-use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use comfy_table::{Cell, CellAlignment, Color};
+use mallard_term::color::{alert, bold, cyan, dim, green, red, yellow};
+pub(crate) use mallard_term::fmt::{bytes, compact, ms};
+pub(crate) use mallard_term::table::table;
+pub(crate) use mallard_term::text::{clean, json_safe};
 use odl_client::api::*;
-use owo_colors::OwoColorize;
 
 /// Append one formatted line to a `String`.
 macro_rules! put {
@@ -24,153 +23,8 @@ macro_rules! put {
     }};
 }
 
-/// Whether a stream may get ANSI colors: it is a terminal, `NO_COLOR` is
-/// unset or empty, and `TERM` is not `dumb`.
-fn colors_enabled(is_tty: bool) -> bool {
-    is_tty
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
-        && std::env::var("TERM").map_or(true, |t| t != "dumb")
-}
-
-/// Whether stdout gets ANSI colors.
-fn color() -> bool {
-    static C: OnceLock<bool> = OnceLock::new();
-    *C.get_or_init(|| colors_enabled(std::io::stdout().is_terminal()))
-}
-
-/// Characters that must not reach a terminal from untrusted text: control
-/// characters (they start escape sequences or move the cursor) except
-/// newline and tab, and the bidi controls that reorder what is shown.
-fn is_unsafe(c: char) -> bool {
-    (c.is_control() && c != '\n' && c != '\t')
-        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-}
-
-/// Make untrusted text safe to print: unsafe characters become visible
-/// escapes (`\u{1b}`).
-pub fn clean(s: &str) -> Cow<'_, str> {
-    if !s.chars().any(is_unsafe) {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        if is_unsafe(c) {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    Cow::Owned(out)
-}
-
-/// Escape what serde_json leaves raw in strings (DEL, C1 controls, bidi
-/// controls) as `\uXXXX`. Pretty-printed JSON has no such characters outside
-/// strings, so the result is the same JSON value.
-pub(crate) fn json_safe(json: &str) -> Cow<'_, str> {
-    if !json.chars().any(is_unsafe) {
-        return Cow::Borrowed(json);
-    }
-    let mut out = String::with_capacity(json.len() + 8);
-    for c in json.chars() {
-        if is_unsafe(c) {
-            out.push_str(&format!("\\u{:04x}", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    Cow::Owned(out)
-}
-
-/// Remove ANSI escape sequences (CSI `ESC [ ... final`). Only our own
-/// styling contains them: data is cleaned first.
-pub(crate) fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c == '\u{1b}' && it.peek() == Some(&'[') {
-            it.next();
-            for d in it.by_ref() {
-                if ('@'..='~').contains(&d) {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Write text to stdout, adding a final newline if missing. Colors are
-/// stripped when stdout is not a terminal or `NO_COLOR` is set.
-pub(crate) fn emit(text: &str) -> std::io::Result<()> {
-    emit_to(&mut std::io::stdout().lock(), text, color())
-}
-
-fn emit_to(w: &mut impl Write, text: &str, color: bool) -> std::io::Result<()> {
-    let text = if color { Cow::Borrowed(text) } else { Cow::Owned(strip_ansi(text)) };
-    w.write_all(text.as_bytes())?;
-    if !text.ends_with('\n') {
-        w.write_all(b"\n")?;
-    }
-    w.flush()
-}
-
-/// A red, bold label for stderr messages (plain when stderr gets no colors).
-pub fn paint_err(s: &str) -> String {
-    if colors_enabled(std::io::stderr().is_terminal()) { s.red().bold().to_string() } else { s.to_string() }
-}
-
-fn table(headers: &[&str]) -> Table {
-    let mut t = Table::new();
-    t.load_style(UTF8_FULL_CONDENSED.with_rounded_corners())
-        .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(headers.iter().map(|h| Cell::new(clean(h)).fg(Color::Cyan)));
-    t
-}
-
 fn num(v: impl Into<f64>) -> Cell {
     Cell::new(compact(v.into())).set_alignment(CellAlignment::Right)
-}
-
-pub fn compact(v: f64) -> String {
-    let a = v.abs();
-    if a >= 1e9 {
-        format!("{:.1}G", v / 1e9)
-    } else if a >= 1e6 {
-        format!("{:.1}M", v / 1e6)
-    } else if a >= 1e4 {
-        format!("{:.1}k", v / 1e3)
-    } else if a == a.trunc() || a >= 100.0 {
-        format!("{v:.0}")
-    } else if a >= 1.0 {
-        format!("{v:.2}")
-    } else {
-        format!("{v:.3}")
-    }
-}
-
-pub fn ms(v: f64) -> String {
-    if v >= 60_000.0 {
-        format!("{:.1}m", v / 60_000.0)
-    } else if v >= 1000.0 {
-        format!("{:.2}s", v / 1000.0)
-    } else if v >= 1.0 {
-        format!("{v:.1}ms")
-    } else {
-        format!("{:.0}µs", v * 1000.0)
-    }
-}
-
-pub fn bytes(b: f64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = b;
-    let mut i = 0;
-    while v >= 1000.0 && i < units.len() - 1 {
-        v /= 1000.0;
-        i += 1;
-    }
-    if i == 0 { format!("{v:.0} {}", units[i]) } else { format!("{v:.1} {}", units[i]) }
 }
 
 fn err_cell(rate: f64) -> Cell {
@@ -197,13 +51,13 @@ fn red_cells(r: &RedStats) -> Vec<Cell> {
 
 pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
     let mut out = String::new();
-    put!(out, "{} {} {}", "otel-ducklake".bold(), clean(&s.version), format!("({url})").dimmed());
+    put!(out, "{} {} {}", bold("otel-ducklake"), clean(&s.version), dim(&format!("({url})")));
     put!(
         out,
         "uptime {}   catalog {}   data {}   snapshot {}",
         uptime(s.uptime_secs),
-        s.storage.catalog_type.to_string().cyan(),
-        clean(&s.storage.data_path).cyan(),
+        cyan(&s.storage.catalog_type.to_string()),
+        cyan(&clean(&s.storage.data_path)),
         s.storage.snapshot_id
     );
     let i = &s.ingest;
@@ -216,23 +70,23 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
             num(sig.rejected as f64),
         ]);
     }
-    put!(out, "\n{}\n{t}", "Ingest".bold());
+    put!(out, "\n{}\n{t}", bold("Ingest"));
     let fill = i.buffered_bytes as f64 / i.max_buffer_bytes.max(1) as f64;
     put!(
         out,
         "buffer {} rows / {} of {} ({:.0}%)   flushes {}   flush errors {}",
         i.buffered_rows,
-        bytes(i.buffered_bytes as f64),
-        bytes(i.max_buffer_bytes as f64),
+        bytes(i.buffered_bytes),
+        bytes(i.max_buffer_bytes),
         fill * 100.0,
         i.flushes,
-        if i.flush_errors > 0 { i.flush_errors.red().to_string() } else { "0".green().to_string() }
+        if i.flush_errors > 0 { red(&i.flush_errors.to_string()) } else { green("0") }
     );
     if let Some(f) = &i.last_flush {
         put!(out, "last flush {} rows in {} at {}", f.rows, ms(f.duration_ms), f.at.format("%H:%M:%S"));
     }
     if let Some(e) = &i.last_flush_error {
-        put!(out, "{} {}", "last flush error:".red(), clean(e));
+        put!(out, "{} {}", red("last flush error:"), clean(e));
     }
     let mut t = table(&["table", "rows", "inlined", "files", "size"]);
     for tb in &s.storage.tables {
@@ -241,12 +95,12 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
             num(tb.rows as f64),
             num(tb.inlined_rows as f64),
             num(tb.files as f64),
-            Cell::new(bytes(tb.bytes as f64)).set_alignment(CellAlignment::Right),
+            Cell::new(bytes(tb.bytes as u64)).set_alignment(CellAlignment::Right),
         ]);
     }
-    put!(out, "\n{}\n{t}", "Storage".bold());
+    put!(out, "\n{}\n{t}", bold("Storage"));
     if let Some(m) = &s.storage.last_maintenance {
-        let status = if m.ok { "ok".green().to_string() } else { "failed".red().to_string() };
+        let status = if m.ok { green("ok") } else { red("failed") };
         put!(
             out,
             "last maintenance: {} {status} at {} — {}",
@@ -337,13 +191,13 @@ pub(crate) fn traces_text(v: &[TraceSummary]) -> String {
 pub(crate) fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
     let mut out = Vec::new();
     let Some(start) = t.spans.iter().map(|s| s.start_time).min() else {
-        out.push(format!("{} {}  (no spans)", "trace".bold(), clean(&t.trace_id)));
+        out.push(format!("{} {}  (no spans)", bold("trace"), clean(&t.trace_id)));
         return out;
     };
     let (rows, end_ns) = crate::waterfall::layout(&t.spans);
     out.push(format!(
         "{} {}  {}  {} spans  {}",
-        "trace".bold(),
+        bold("trace"),
         clean(&t.trace_id),
         start.format("%Y-%m-%d %H:%M:%S%.3f UTC"),
         t.spans.len(),
@@ -355,21 +209,21 @@ pub(crate) fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
         let (a, len) = crate::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
         let (a, len) = (a as usize, len as usize);
         let bar = format!("{}{}{}", " ".repeat(a), "█".repeat(len), " ".repeat(width.saturating_sub(a + len)));
-        let bar = if s.status_code == SpanStatus::Error { bar.red().to_string() } else { bar.cyan().to_string() };
-        let label = format!("{}{} {}", row.prefix, clean(&s.service_name).bold(), clean(&s.name));
-        let err = if s.status_code == SpanStatus::Error { format!(" {}", "✗".red()) } else { String::new() };
+        let bar = if s.status_code == SpanStatus::Error { red(&bar) } else { cyan(&bar) };
+        let label = format!("{}{} {}", row.prefix, bold(&clean(&s.service_name)), clean(&s.name));
+        let err = if s.status_code == SpanStatus::Error { format!(" {}", red("✗")) } else { String::new() };
         out.push(format!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6)));
         if show_attrs {
             let indent = " ".repeat(row.depth * 2 + 2);
             for (k, v) in &s.attributes {
-                out.push(format!("{}  {indent}{} = {}", " ".repeat(width + 10), clean(k).dimmed(), clean(v)));
+                out.push(format!("{}  {indent}{} = {}", " ".repeat(width + 10), dim(&clean(k)), clean(v)));
             }
             for e in &s.events {
                 out.push(format!(
                     "{}  {indent}• {} {}",
                     " ".repeat(width + 10),
-                    clean(&e.name).yellow(),
-                    fmt_attrs(&e.attributes).dimmed()
+                    yellow(&clean(&e.name)),
+                    dim(&fmt_attrs(&e.attributes))
                 ));
             }
         }
@@ -386,10 +240,10 @@ fn severity_label(n: u8, text: &str) -> String {
     let name = crate::severity::name(n, text);
     let padded = format!("{name:<5}");
     match name {
-        "ERROR" | "FATAL" => padded.red().bold().to_string(),
-        "WARN" => padded.yellow().to_string(),
-        "INFO" => padded.green().to_string(),
-        _ => padded.dimmed().to_string(),
+        "ERROR" | "FATAL" => alert(&padded),
+        "WARN" => yellow(&padded),
+        "INFO" => green(&padded),
+        _ => dim(&padded),
     }
 }
 
@@ -397,11 +251,11 @@ pub(crate) fn log_line(r: &LogRecord) -> String {
     let trace = r.trace_id.as_deref().map(|t| format!(" trace={}", clean(&t[..8.min(t.len())]))).unwrap_or_default();
     format!(
         "{} {} {} {}{}",
-        r.time.format("%m-%d %H:%M:%S%.3f").dimmed(),
+        dim(&r.time.format("%m-%d %H:%M:%S%.3f").to_string()),
         severity_label(r.severity_number, &r.severity_text),
-        clean(&r.service_name).cyan(),
+        cyan(&clean(&r.service_name)),
         clean(&r.body),
-        trace.dimmed()
+        dim(&trace)
     )
 }
 
@@ -440,9 +294,9 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
     put!(
         out,
         "{} {}  agg={}  step={}s  unit={}",
-        clean(&r.name).bold(),
-        r.metric_type.to_string().dimmed(),
-        clean(&r.agg).cyan(),
+        bold(&clean(&r.name)),
+        dim(&r.metric_type.to_string()),
+        cyan(&clean(&r.agg)),
         r.step_secs,
         if r.unit.is_empty() { Cow::Borrowed("-") } else { clean(&r.unit) }
     );
@@ -486,21 +340,16 @@ pub(crate) fn sql_text(r: &SqlResponse) -> String {
     }
     let summary =
         format!("{} rows{} in {}", r.rows.len(), if r.truncated { " (truncated)" } else { "" }, ms(r.elapsed_ms));
-    format!("{t}\n{}", summary.dimmed())
+    format!("{t}\n{}", dim(&summary))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // The number, size and duration cases moved to mallard-term's tests.
     #[test]
     fn formats() {
-        assert_eq!(ms(0.5), "500µs");
-        assert_eq!(ms(12.34), "12.3ms");
-        assert_eq!(ms(2500.0), "2.50s");
-        assert_eq!(compact(12_345.0), "12.3k");
-        assert_eq!(compact(3.0), "3");
-        assert_eq!(bytes(1_500_000.0), "1.5 MB");
         assert_eq!(sparkline(&[0.0, 1.0]).chars().count(), 2);
     }
 
@@ -523,16 +372,10 @@ mod tests {
         !s.chars().any(|c| c.is_control() && !matches!(c, '\u{1b}' | '\n' | '\t')) && !s.contains('\u{202e}')
     }
 
+    // `clean` itself is tested in mallard-term (both former test sets).
     #[test]
-    fn clean_escapes_control_characters() {
-        assert_eq!(clean("plain\ttext\nok"), "plain\ttext\nok");
-        assert!(matches!(clean("plain"), Cow::Borrowed(_)));
-        let c = clean(EVIL);
-        assert!(!c.chars().any(is_unsafe), "{c:?}");
-        assert!(c.contains("\\u{1b}]52"), "escapes stay visible: {c:?}");
-        let j = json_safe("[\"\u{9b}x\u{202e}\"]");
-        assert_eq!(j, "[\"\\u009bx\\u202e\"]");
-        assert_eq!(serde_json::from_str::<Vec<String>>(&j).unwrap(), vec!["\u{9b}x\u{202e}"]);
+    fn one_line_values_stay_on_one_line() {
+        assert_eq!(log_line(&record("a\nb")).lines().count(), 1, "a log body cannot fake a second record");
     }
 
     fn record(body: &str) -> LogRecord {
@@ -586,25 +429,5 @@ mod tests {
             },
         };
         assert!(only_sgr(&services_text(&[svc])));
-    }
-
-    struct BrokenPipe;
-    impl Write for BrokenPipe {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::ErrorKind::BrokenPipe.into())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    // Finding 7: a closed pipe is an error for the caller, not an exit.
-    #[test]
-    fn emit_returns_write_errors() {
-        let e = emit_to(&mut BrokenPipe, "x", false).unwrap_err();
-        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
-        let mut buf = Vec::new();
-        emit_to(&mut buf, "\u{1b}[31mred\u{1b}[0m", false).unwrap();
-        assert_eq!(buf, b"red\n");
     }
 }

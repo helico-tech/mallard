@@ -92,7 +92,7 @@ fn unit_fmt(unit: &str) -> fn(f64) -> String {
     match unit {
         "s" => |v| ms(v * 1000.0),
         "ms" => ms,
-        "By" => |v| crate::fmt::bytes(v),
+        "By" => |v| crate::fmt::bytes(v.max(0.0) as u64),
         _ => compact,
     }
 }
