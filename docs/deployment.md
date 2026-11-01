@@ -67,8 +67,9 @@ docker compose -f deploy/compose/docker-compose.postgres-s3.yml --profile loadge
 docker compose -f deploy/compose/docker-compose.postgres-s3.yml exec odl-1 odl status
 ```
 
-Replica `odl-1` listens on 4317/4318/8080, `odl-2` on 14317/14318/18080; put
-any load balancer in front. Both ingest, and each sees the other's data. Only
+Replica `odl-1` listens on 4317/4318/8080, `odl-2` on 14317/14318/18080, and
+the S3 endpoint on 8333, all on `127.0.0.1` only; put any load balancer in
+front. Both ingest, and each sees the other's data. Only
 `odl-1` runs catalog-wide maintenance. Verified: Parquet files appear under
 `s3://otel/lake/otel/spans/epoch_day=…/`, no flush errors on either replica.
 
@@ -84,6 +85,7 @@ Chart: [`charts/otel-ducklake`](../charts/otel-ducklake) (see its
 ```sh
 # single: StatefulSet + PVC, DuckDB-file catalog
 helm install otel charts/otel-ducklake -n observability --create-namespace
+# (an Ingress for the API is only allowed with auth.enabled=true)
 
 # shared: Deployment with N replicas, PostgreSQL catalog + object storage
 helm install otel charts/otel-ducklake -n observability -f my-values.yaml
@@ -104,7 +106,8 @@ envFrom:
   - secretRef: {name: odl-storage} # PGPASSWORD (and S3 keys without IRSA)
 auth:
   enabled: true
-  existingSecret: odl-tokens       # keys: api-token, ingest-token
+  existingSecret: odl-tokens       # key: api-token (+ ingest-token when ingestAuth)
+  ingestAuth: false                # true: OTLP needs a token too
 resources:
   limits: {cpu: "2", memory: 2Gi}
 duckdb:
@@ -169,5 +172,7 @@ ingress, a load balancer, a service mesh, or the Collector above.
 - `.github/workflows/ci.yml` (pushes and PRs): fmt, clippy `-D warnings`,
   tests, `helm lint` for both modes, Docker build.
 - `.github/workflows/release.yml` (tags `v*`): multi-arch image to
-  `ghcr.io/<owner>/otel-ducklake`; binaries for linux amd64/arm64 and macOS
-  arm64; the packaged chart, attached to the GitHub release.
+  `ghcr.io/<owner>/otel-ducklake` (`latest` only for non-prerelease tags);
+  binaries for linux amd64/arm64 (glibc ≥ 2.35) and macOS arm64; the
+  packaged chart, attached to the GitHub release. After the first release,
+  make the GHCR package public (or use `imagePullSecrets`).

@@ -38,8 +38,9 @@ let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // sch
   its own schema and tables, uses `try_clone()` of the connection, and never
   changes global DuckDB settings.
 - Merges and retention are scoped to this schema. Snapshot expiry and file
-  cleanup are catalog-wide: set `maintenance.catalog_wide = true` in exactly
-  one component.
+  cleanup are catalog-wide: when several applications share one catalog, set
+  `maintenance.catalog_wide = true` in exactly one of them (replicas of the
+  same application may all run it).
 - Pin the same `duckdb` version (`=1.20000.1`) and features (`bundled`,
   `appender-arrow`, `chrono`) in the whole workspace, and build
   `libduckdb-sys` without debug assertions:

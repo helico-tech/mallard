@@ -111,9 +111,10 @@ filesystem is read-only; DuckDB spills to `/data/tmp`.
 - Switching `mode: single` → `shared` does not migrate data: the DuckDB-file
   catalog on the PVC is not copied into PostgreSQL. Start fresh, or migrate
   the catalog yourself first.
-- Releases that add table columns: stop old replicas before new ones start
-  (scale to 0, upgrade, scale up), so old pods don't keep writing with the
-  previous column layout. Check the release notes.
+- Releases that add table columns roll normally: rows are appended by column
+  name, so old pods keep writing (new columns stay NULL for their rows) and
+  an older version starts against a newer table. Releases that change or
+  remove columns will say so in their notes.
 - The image on GHCR must be public, or set `imagePullSecrets`.
 
 See `values.yaml` for every option.

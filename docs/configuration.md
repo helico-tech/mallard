@@ -103,7 +103,7 @@ without rewriting files.
 | `retention_interval` | `1h` | Retention deletes, snapshot expiry and file cleanup. |
 | `snapshot_retention` | `1h` | Keep old snapshots (time travel) this long. |
 | `file_cleanup_delay` | `15m` | Delete unreferenced files only after this grace period, so running queries don't lose files. |
-| `catalog_wide` | `true` | Run snapshot expiry and file cleanup. They affect the whole catalog; when several applications share one, enable it in exactly one. |
+| `catalog_wide` | `true` | Run snapshot expiry and file cleanup. They affect the whole catalog. Running them on every replica of otel-ducklake is safe; when several *applications* share one catalog, let exactly one application run them. |
 
 ## `[query]`
 
