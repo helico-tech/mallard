@@ -11,14 +11,15 @@
 
 pub mod config;
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
 use axum::{Router, response::IntoResponse, routing::get};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::TraceLayer;
+use tonic::transport::server::TcpIncoming;
+use tower_http::{catch_panic::CatchPanicLayer, compression::CompressionLayer, trace::TraceLayer};
 use tracing::info;
 
 pub use config::Config;
@@ -71,30 +72,57 @@ impl Platform {
         r
     }
 
-    /// Bind all listeners and serve until `shutdown` is cancelled. Then stop
-    /// the receivers first and flush both libraries.
+    /// Bind the configured addresses, then [`Platform::serve_on`].
     pub async fn serve(self, shutdown: CancellationToken) -> Result<()> {
-        let s = &self.cfg.server;
-        let http_l = bind(&s.http_addr).await?;
-        let otlp_l = bind(&s.otlp_http_addr).await?;
-        let grpc_addr = s.otlp_grpc_addr.parse().with_context(|| format!("parsing {}", s.otlp_grpc_addr))?;
-        info!(http = %s.http_addr, otlp_http = %s.otlp_http_addr, otlp_grpc = %s.otlp_grpc_addr, "listening");
+        let listeners = Listeners::bind(&self.cfg.server).await?;
+        self.serve_on(listeners, shutdown).await
+    }
 
-        let http = self.http_router().layer(TraceLayer::new_for_http());
-        let otlp = self.otel.otlp_http_router().layer(TraceLayer::new_for_http());
+    /// Serve on already bound listeners until `shutdown` is cancelled or
+    /// any listener fails. Then stop the receivers first and flush both
+    /// libraries, so nothing arrives after the final flush.
+    pub async fn serve_on(self, listeners: Listeners, shutdown: CancellationToken) -> Result<()> {
+        let Listeners { http, otlp_http, otlp_grpc } = listeners;
+        info!(
+            http = %http.local_addr()?, otlp_http = %otlp_http.local_addr()?, otlp_grpc = %otlp_grpc.local_addr()?,
+            "listening"
+        );
+
+        let http_app = self
+            .http_router()
+            .layer(CompressionLayer::new())
+            .layer(CatchPanicLayer::new())
+            .layer(TraceLayer::new_for_http())
+            .into_make_service_with_connect_info::<SocketAddr>();
+        let otlp_app = self
+            .otel
+            .otlp_http_router()
+            .layer(CatchPanicLayer::new())
+            .layer(TraceLayer::new_for_http())
+            .into_make_service_with_connect_info::<SocketAddr>();
         let grpc = tonic::transport::Server::builder().add_routes(self.otel.grpc_routes());
 
+        // Whichever receiver stops first (error or shutdown) stops the others.
         let sd = shutdown.clone();
-        let t1 =
-            tokio::spawn(async move { axum::serve(http_l, http).with_graceful_shutdown(sd.cancelled_owned()).await });
+        let t1 = tokio::spawn(async move {
+            let r = axum::serve(http, http_app).with_graceful_shutdown(sd.clone().cancelled_owned()).await;
+            sd.cancel();
+            r.context("HTTP server")
+        });
         let sd = shutdown.clone();
-        let t2 =
-            tokio::spawn(async move { axum::serve(otlp_l, otlp).with_graceful_shutdown(sd.cancelled_owned()).await });
+        let t2 = tokio::spawn(async move {
+            let r = axum::serve(otlp_http, otlp_app).with_graceful_shutdown(sd.clone().cancelled_owned()).await;
+            sd.cancel();
+            r.context("OTLP/HTTP server")
+        });
         let sd = shutdown.clone();
-        let t3 = tokio::spawn(async move { grpc.serve_with_shutdown(grpc_addr, sd.cancelled_owned()).await });
+        let t3 = tokio::spawn(async move {
+            let incoming = TcpIncoming::from(otlp_grpc);
+            let r = grpc.serve_with_incoming_shutdown(incoming, sd.clone().cancelled_owned()).await;
+            sd.cancel();
+            r.context("OTLP/gRPC server")
+        });
 
-        // Background jobs stop only after all receivers are down, so
-        // nothing arrives after the final flush.
         let receivers_down = CancellationToken::new();
         let otel_bg = self.otel.run_background(receivers_down.clone().cancelled_owned());
         let sentry_bg = self.sentry.run_background(receivers_down.clone().cancelled_owned());
@@ -114,6 +142,24 @@ impl Platform {
     }
 }
 
+/// The three listening sockets. Bind them up front so a busy port fails
+/// start-up instead of leaving the server half running.
+pub struct Listeners {
+    pub http: TcpListener,
+    pub otlp_http: TcpListener,
+    pub otlp_grpc: TcpListener,
+}
+
+impl Listeners {
+    pub async fn bind(cfg: &config::ServerConfig) -> Result<Listeners> {
+        Ok(Listeners {
+            http: bind(&cfg.http_addr).await?,
+            otlp_http: bind(&cfg.otlp_http_addr).await?,
+            otlp_grpc: bind(&cfg.otlp_grpc_addr).await?,
+        })
+    }
+}
+
 async fn readyz(sentry: Router) -> axum::response::Response {
     use tower::ServiceExt;
     let req = axum::http::Request::get("/readyz").body(axum::body::Body::empty()).expect("static request");
@@ -125,4 +171,22 @@ async fn readyz(sentry: Router) -> axum::response::Response {
 
 async fn bind(addr: &str) -> Result<TcpListener> {
     TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_busy_port_fails_start_up() {
+        let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = config::ServerConfig {
+            http_addr: "127.0.0.1:0".into(),
+            otlp_http_addr: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        cfg.otlp_grpc_addr = busy.local_addr().unwrap().to_string();
+        let err = Listeners::bind(&cfg).await.err().expect("gRPC port is taken");
+        assert!(err.to_string().contains("binding"), "{err}");
+    }
 }

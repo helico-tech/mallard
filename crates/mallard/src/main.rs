@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await
         }
         Cmd::Trace { trace_id, since } => {
-            let t = client.trace_overview_since(&trace_id, since.as_deref()).await?;
+            let t = client.trace_overview(&trace_id, since.as_deref()).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&t)?);
             } else {
@@ -121,18 +121,21 @@ async fn main() -> Result<()> {
 async fn status(c: &Client, json: bool) -> Result<()> {
     let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
     if json {
-        let v = serde_json::json!({
-            "sentry": s.as_ref().map(|x| serde_json::to_value(x).unwrap()).map_err(|e| e.to_string()),
-            "otel": o.as_ref().map(|x| serde_json::to_value(x).unwrap()).map_err(|e| e.to_string()),
-        });
+        fn side<T: serde::Serialize, E: std::fmt::Display>(r: &Result<T, E>) -> serde_json::Value {
+            match r {
+                Ok(v) => serde_json::json!({ "ok": true, "info": v }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
+        let v = serde_json::json!({ "sentry": side(&s), "otel": side(&o) });
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
     println!("server   {}", c.base_url());
     match s {
         Ok(i) => println!(
-            "sentry   ok  v{}  duckdb {}  queue {}/{}  catalog {}",
-            i.version, i.duckdb_version, i.queue_depth, i.queue_capacity, i.catalog
+            "sentry   ok  v{}  duckdb {}  queue {}/{}",
+            i.version, i.duckdb_version, i.queue_depth, i.queue_capacity
         ),
         Err(e) => println!("sentry   ERROR {e}"),
     }

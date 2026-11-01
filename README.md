@@ -38,7 +38,7 @@ The compose stack runs mallard with a Postgres catalog and an S3 bucket
 
 ```sh
 cargo install --path crates/mallard
-MALLARD_SERVER__API_TOKENS='["dev-token"]' mallard serve -c config/mallard.example.toml
+MALLARD_API_TOKEN=dev-token mallard serve -c config/mallard.example.toml
 ```
 
 Data goes to `./data` by default.

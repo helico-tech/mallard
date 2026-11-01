@@ -6,24 +6,23 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use mallard_client::{Client, sdl_client::types::CreateProject};
-use mallard_server::{Config, Platform};
+use mallard_server::{Config, Listeners, Platform};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const TOKEN: &str = "test-token";
 const TRACES: usize = 40;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+/// Bind all three on port 0 first, so parallel tests never race for ports.
+async fn listeners() -> Listeners {
+    let l = || tokio::net::TcpListener::bind("127.0.0.1:0");
+    Listeners { http: l().await.unwrap(), otlp_http: l().await.unwrap(), otlp_grpc: l().await.unwrap() }
 }
 
-fn config(dir: &std::path::Path) -> Config {
+fn config(dir: &std::path::Path, l: &Listeners) -> Config {
     let mut c = Config::default();
-    let (http, otlp, grpc) = (free_port(), free_port(), free_port());
-    c.server.http_addr = format!("127.0.0.1:{http}");
-    c.server.otlp_http_addr = format!("127.0.0.1:{otlp}");
-    c.server.otlp_grpc_addr = format!("127.0.0.1:{grpc}");
-    c.server.public_url = format!("http://127.0.0.1:{http}");
+    c.server.public_url = format!("http://{}", l.http.local_addr().unwrap());
+    c.server.otlp_http_addr = l.otlp_http.local_addr().unwrap().to_string();
     c.server.api_tokens = vec![TOKEN.into()];
     c.storage.catalog = dir.join("catalog.ducklake").display().to_string();
     c.storage.data_path = format!("{}/lake/", dir.display());
@@ -38,12 +37,14 @@ struct Running {
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
-async fn start(cfg: Config) -> Running {
+async fn start(dir: &std::path::Path) -> Running {
+    let l = listeners().await;
+    let cfg = config(dir, &l);
     let url = cfg.server.public_url.clone();
     let otlp_url = format!("http://{}", cfg.server.otlp_http_addr);
     let platform = Platform::new(cfg).await.expect("platform starts");
     let stop = CancellationToken::new();
-    let task = tokio::spawn(platform.serve(stop.clone()));
+    let task = tokio::spawn(platform.serve_on(l, stop.clone()));
     let http = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while http.get(format!("{url}/healthz")).send().await.is_err() {
@@ -75,6 +76,7 @@ async fn send_sentry_event(http: &reqwest::Client, url: &str, project: u32, key:
         "exception": {"values": [{"type": "TypeError", "value": format!("boom {}", i % 3),
             "stacktrace": {"frames": [{"function": "handler", "filename": "app.js", "lineno": 3}]}}]},
         "contexts": {"trace": {"trace_id": trace, "span_id": span}},
+        "user": {"ip_address": "{{auto}}"},
     });
     let body = format!("{}\n{}\n{}\n", json!({"event_id": event_id}), json!({"type": "event"}), event);
     let r = http
@@ -109,7 +111,7 @@ async fn wait_for_all(client: &Client) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let all = join_all((0..TRACES).map(|i| async move {
-            let t = client.trace_overview(&ids(i).0).await.unwrap();
+            let t = client.trace_overview(&ids(i).0, None).await.unwrap();
             t.spans.len() == 1 && t.errors.len() == 1 && t.logs.len() == 1
         }))
         .await;
@@ -125,7 +127,7 @@ async fn wait_for_all(client: &Client) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn errors_and_telemetry_share_one_lake() {
     let dir = tempfile::tempdir().unwrap();
-    let srv = start(config(dir.path())).await;
+    let srv = start(dir.path()).await;
     let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
     let project = client
         .sentry
@@ -145,7 +147,11 @@ async fn errors_and_telemetry_share_one_lake() {
     join_all(sends).await;
     wait_for_all(&client).await;
 
-    let t = client.trace_overview(&ids(7).0).await.unwrap();
+    let t = client.trace_overview(&ids(7).0, None).await.unwrap();
+    // `{{auto}}` is filled from the peer address, so ConnectInfo reaches sentry.
+    let ev =
+        client.sentry.event(&project.id.to_string(), &t.errors[0].event_id, Some(&t.errors[0].issue_id)).await.unwrap();
+    assert_eq!(ev.payload["user"]["ip_address"], "127.0.0.1", "client IP: {}", ev.payload["user"]);
     assert_eq!(t.spans[0].span_id, ids(7).1);
     assert_eq!(t.errors[0].span_id.as_deref(), Some(ids(7).1.as_str()));
     assert_eq!(t.logs[0].body, "payment 7 failed");
@@ -154,7 +160,7 @@ async fn errors_and_telemetry_share_one_lake() {
     assert_eq!(ready.status(), 200);
 
     // Unknown trace: empty, not an error.
-    let none = client.trace_overview(&"f".repeat(32)).await.unwrap();
+    let none = client.trace_overview(&"f".repeat(32), None).await.unwrap();
     assert!(none.spans.is_empty() && none.errors.is_empty() && none.logs.is_empty());
 
     // Bad token is rejected on both sides.
@@ -164,7 +170,7 @@ async fn errors_and_telemetry_share_one_lake() {
 
     // Shutdown flushes both; a new process on the same lake sees everything.
     srv.stop().await;
-    let srv = start(config(dir.path())).await;
+    let srv = start(dir.path()).await;
     let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
     wait_for_all(&client).await;
     srv.stop().await;
