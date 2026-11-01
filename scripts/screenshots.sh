@@ -11,15 +11,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 command -v rsvg-convert >/dev/null || { echo "needs rsvg-convert (brew install librsvg)" >&2; exit 1; }
-cargo build -q -p mallard-server -p mallard
+cargo build -q -p mallard
 
 data=$(mktemp -d)
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$data"' EXIT
 
 export MALLARD_URL=http://localhost:8080 MALLARD_TOKEN=dev-token
-bin=target/debug/mallard-server
+bin=target/debug/mallard
 (cd "$data" && MALLARD_SERVER__API_TOKENS='["dev-token"]' MALLARD_SERVER__PUBLIC_URL=$MALLARD_URL \
-  MALLARD_OTEL__INGEST__FLUSH_INTERVAL=1s exec "$OLDPWD"/$bin > server.log 2>&1) &
+  MALLARD_OTEL__INGEST__FLUSH_INTERVAL=1s exec "$OLDPWD"/$bin serve > server.log 2>&1) &
 pid=$!
 for _ in $(seq 1 60); do curl -fsS "$MALLARD_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 

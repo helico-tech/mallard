@@ -320,7 +320,7 @@ mallard
   send-test
   tui
   help agents                               NEW: agent guide (same text as docs/agents.md)
-  (serve, check — until story 07 moves them to mallard-server)
+  (serve, check — moved out by story 07, back behind a feature since ADR 0023)
 ```
 
 Kept aliases (hidden): `errors …`, `sentry …`, `telemetry …`, `otel …`,

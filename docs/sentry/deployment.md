@@ -344,7 +344,7 @@ Watch `/metrics` (`sdl_write_batch_seconds`, `sdl_ingest_rejected_total`,
 - `GET /readyz`: readiness, runs a query through the reader pool.
 - `GET /metrics`: Prometheus metrics (no token).
 - `POST /v1/maintenance` (token): flush inlined data and compact now.
-- `mallard-server maintenance [--full]` (no server running with a DuckDB-file
+- `mallard maintenance [--full]` (no server running with a DuckDB-file
   or SQLite catalog): both sides' maintenance once, then exit. `--full` only
   changes the telemetry tables. Next to running pods on Postgres it can lose a
   conflict against their maintenance; it then exits with an error and is safe

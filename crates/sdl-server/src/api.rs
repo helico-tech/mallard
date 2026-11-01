@@ -489,7 +489,7 @@ async fn run_sql(State(state): S, J(req): J<SqlRequest>) -> ApiResult<SqlRespons
         return Err(ApiErr::new(
             StatusCode::FORBIDDEN,
             "disabled",
-            "SQL over the error tables is disabled; set sentry.query.enable_sql = true in the mallard-server config",
+            "SQL over the error tables is disabled; set sentry.query.enable_sql = true in the mallard config",
         ));
     }
     let limit = req.limit.unwrap_or(1000);

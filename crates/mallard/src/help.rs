@@ -108,6 +108,10 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["send-test"], "mallard send-test --dsn \"$SENTRY_DSN\""),
     (&["tui"], "mallard tui -p web"),
     (&["help"], "mallard help agents\n  mallard help issues list"),
+    (&["serve"], "mallard serve -c mallard.toml\n  MALLARD_CONFIG=mallard.toml mallard serve"),
+    (&["check"], "mallard check -c mallard.toml\n  mallard check -c mallard.toml --connect --json"),
+    (&["maintenance"], "mallard maintenance -c mallard.toml\n  mallard maintenance -c mallard.toml --full"),
+    (&["install-extensions"], "mallard install-extensions --dir /opt/duckdb/extensions"),
 ];
 
 /// The clap command with the examples added.

@@ -15,13 +15,14 @@ pub enum LogFormat {
 }
 
 /// Install the global tracing subscriber. `RUST_LOG` overrides the default
-/// filter. No ANSI colors when stdout is not a terminal (files, container
+/// filter. Logs go to stderr: stdout is data only (ADR 0008). No ANSI colors
+/// when stderr is not a terminal (files, container
 /// log drivers).
 pub fn init_tracing(format: LogFormat) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,tower_http=warn,h2=warn,tonic=warn".into());
-    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let b = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi);
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let b = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi).with_writer(std::io::stderr);
     match format {
         LogFormat::Json => b.json().init(),
         LogFormat::Text => b.init(),

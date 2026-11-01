@@ -145,21 +145,21 @@ cores. Every replica can serve queries over all data.
 ## Reproducing
 
 The numbers above were measured with the standalone `otel-ducklake`
-binary, which is retired; this runs the same load against `mallard-server`:
+binary, which is retired; this runs the same load against `mallard serve`:
 
 ```sh
-cargo build --release -p mallard-server -p odl-loadgen
+cargo build --release -p mallard -p odl-loadgen
 docker build -f deploy/docker/Dockerfile -t mallard:dev .
 LOADGEN=./target/release/odl-loadgen bench/otel/capacity/steady-state.sh 2 2g 1200MB 100 500 1500 3000 6000 10000
 
 # query latency: backfill 7 days into a lake, then query it
 MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
-  ./target/release/mallard-server &
+  ./target/release/mallard serve &
 ./target/release/odl-loadgen --endpoint http://127.0.0.1:4318 --backfill 7d --rate 10 --batch 500 --concurrency 8
 kill %1; wait   # the DuckDB-file catalog allows one process at a time
 MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
-  ./target/release/mallard-server maintenance --full   # merge all files, as the measured run did
+  ./target/release/mallard maintenance --full   # merge all files, as the measured run did
 MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
-  ./target/release/mallard-server &
+  ./target/release/mallard serve &
 MALLARD_TOKEN=dev bench/otel/capacity/query-latency.sh http://127.0.0.1:8080/otel <data end, RFC 3339> <a trace id>
 ```

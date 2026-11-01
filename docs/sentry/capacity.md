@@ -27,13 +27,13 @@ Parquet.
 
 Reproduce (the numbers below were measured with the standalone
 `sentry-ducklake` binary, which is retired; this runs the same load against
-`mallard-server`):
+`mallard serve`):
 
 ```sh
-cargo build --release -p mallard-server -p sdl-loadgen
+cargo build --release -p mallard -p sdl-loadgen
 MALLARD_SERVER__API_TOKENS=dev MALLARD_STORAGE__CATALOG=/tmp/mallard/catalog.ducklake \
 MALLARD_STORAGE__DATA_PATH=/tmp/mallard/lake/ MALLARD_DUCKDB__MEMORY_LIMIT=2GB MALLARD_DUCKDB__THREADS=4 \
-  ./target/release/mallard-server &
+  ./target/release/mallard serve &
 ./target/release/sdl-loadgen --url http://127.0.0.1:8080 --token dev ingest --rate 0 --events 1000000 --concurrency 1024
 curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maintenance   # flush + compact now
 ./target/release/sdl-loadgen --url http://127.0.0.1:8080 --token dev query

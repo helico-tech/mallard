@@ -2,8 +2,9 @@
 
 Errors, traces, logs and metrics in one place, stored in a
 [DuckLake](https://ducklake.select) (DuckDB catalog + Parquet files on disk
-or object storage). Two binaries: `mallard-server`, and `mallard`, a small
-CLI and terminal UI that talks to it over HTTP (no DuckDB inside).
+or object storage). One binary: `mallard serve` runs the server; the `mallard`
+CLI and terminal UI talk to it over HTTP. Need only the client? A slim build
+has the same CLI and TUI with no server and no DuckDB.
 
 - **Errors**: point any Sentry SDK at mallard by changing only the DSN.
   Issues, grouping, releases, sourcemaps (`sentry-cli` uploads work).
@@ -68,10 +69,13 @@ The compose stack runs mallard with a Postgres catalog and an S3 bucket
 
 ```sh
 cargo install --path crates/mallard
-MALLARD_API_TOKEN=dev-token mallard-server -c config/mallard.example.toml
+MALLARD_API_TOKEN=dev-token mallard serve -c config/mallard.example.toml
 ```
 
-Data goes to `./data` by default.
+Data goes to `./data` by default. The first build compiles DuckDB and takes
+a few minutes. For only the CLI and TUI, on a machine that talks to a server
+elsewhere: `cargo install --path crates/mallard --no-default-features` (quick
+to build, much smaller, no `serve`; [ADR 0023](docs/adr/0023-one-binary.md)).
 
 ## Kubernetes
 
@@ -98,7 +102,7 @@ folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
 ## CLI
 
 ```sh
-mallard-server -c mallard.toml            # run the server (separate binary)
+mallard serve -c mallard.toml             # run the server (or MALLARD_CONFIG)
 mallard status                            # health of both sides (exit 6 when one is down)
 mallard setup web                         # project + DSN + OTLP env vars
 mallard issues list --since 1h            # errors: issues, events, projects
@@ -127,7 +131,7 @@ key can be overridden with `MALLARD_<SECTION>__<KEY>`, e.g.
 `MALLARD_OTEL__RETENTION__TRACES=0` or `MALLARD_SERVER__API_TOKENS=a,b`
 (text settings keep the value as is; lists may be comma separated).
 `${NAME}` inside a text value is replaced by environment variable `NAME`.
-`mallard-server check -c mallard.toml --connect` validates a file and opens the
+`mallard check -c mallard.toml --connect` validates a file and opens the
 catalog.
 
 ## More

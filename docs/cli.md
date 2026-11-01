@@ -1,6 +1,6 @@
 # mallard CLI and TUI
 
-The `mallard` CLI/TUI (ADR 0007: separate from `mallard-server`), two
+The `mallard` binary: server, CLI and TUI (ADR 0023). The CLI and TUI have two
 sides that look and behave alike (ADR 0006). The shared
 pieces live in `crates/mallard-term`.
 
@@ -27,6 +27,18 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard schema [tables]`, `mallard schema attrs` | the tables and columns `sql` can query, per `side` (`errors` tables need `sql --errors`); attribute keys with counts, or the top values of `--key` (`--signal spans\|logs\|metrics`, `-S`, `--metric`; sampled) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
 | `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |
+
+The server commands read the config from `-c/--config` or `MALLARD_CONFIG`, put
+after the command (`mallard serve -c mallard.toml`); `--url` and `--token` do
+not apply to them. A build with `--no-default-features` has all of the above but
+not these: there they are a usage error (exit 2) that says so.
+
+| command | what |
+|---|---|
+| `mallard serve` | run the server until Ctrl-C or SIGTERM; logs go to stderr |
+| `mallard check [--connect]` | validate the config (a bad one is exit 2); `--connect` also opens the catalog and storage |
+| `mallard maintenance [--full]` | both sides' maintenance once, then exit; stop the server first with a DuckDB-file or SQLite catalog |
+| `mallard install-extensions --dir <dir>` | download all DuckDB extensions, for running without internet (the Docker image does this) |
 
 The old paths still work, hidden: `mallard errors …` (= the `sdl` command
 set: `info`, `stats`, `maintenance`, …) and `mallard telemetry …` (= `odl`:

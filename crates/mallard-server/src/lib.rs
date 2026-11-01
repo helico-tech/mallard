@@ -12,6 +12,7 @@
 //! OTLP/gRPC is served on `server.otlp_grpc_addr`.
 
 pub mod bridge;
+pub mod commands;
 pub mod config;
 
 use std::{net::SocketAddr, sync::Arc};
@@ -232,7 +233,7 @@ impl Platform {
     }
 }
 
-/// Run both sides' maintenance once on the lake of `cfg` (`mallard-server
+/// Run both sides' maintenance once on the lake of `cfg` (`mallard
 /// maintenance`). Sentry: flush inlined rows, retention, compaction. Otel:
 /// the same for the telemetry tables (`full`: merge all files below the
 /// target size), then the catalog-wide snapshot expiry and file cleanup, so

@@ -37,6 +37,17 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      # The slim build: the same CLI and TUI with no server and no DuckDB (ADR 0023).
+      - name: Without the server
+        run: |
+          cargo clippy -p mallard --no-default-features --all-targets --locked -- -D warnings
+          cargo test -p mallard --no-default-features --locked
+          cargo build -p mallard --no-default-features --locked
+          tree=$(cargo tree -p mallard --no-default-features --locked -e all)
+          if grep -i duckdb <<<"$tree"; then
+            echo "::error::DuckDB in the --no-default-features tree"
+            exit 1
+          fi
 
   helm:
     name: helm lint
@@ -109,8 +120,8 @@ jobs:
       # ("Directory not empty") on a half-restored copy; it re-unpacks if needed.
       - name: Drop cached DuckDB source tree
         run: rm -rf target/duckdb-sources
-      - name: Build server
-        run: cargo build -p mallard-server --locked
+      - name: Build mallard
+        run: cargo build -p mallard --locked
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -124,5 +135,5 @@ jobs:
       - name: Run e2e tests
         working-directory: e2e/sentry
         env:
-          MALLARD_SERVER_BIN: ${{ github.workspace }}/target/debug/mallard-server
+          MALLARD_BIN: ${{ github.workspace }}/target/debug/mallard
         run: npm test

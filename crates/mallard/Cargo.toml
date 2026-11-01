@@ -1,6 +1,6 @@
 [package]
 name = "mallard"
-description = "mallard: CLI and terminal UI for errors, traces, logs and metrics stored in mallard-server"
+description = "mallard: the server, CLI and terminal UI for errors, traces, logs and metrics on one DuckLake"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,15 @@ publish = false
 name = "mallard"
 path = "src/main.rs"
 
+# `server` adds `serve`, `check`, `maintenance` and `install-extensions`, and
+# with them DuckDB. `--no-default-features` builds the same CLI and TUI without
+# (ADR 0023; CI checks `cargo tree`).
+[features]
+default = ["server"]
+server = ["dep:mallard-server"]
+
 [dependencies]
+mallard-server = { workspace = true, optional = true }
 mallard-client.workspace = true
 odl-cli.workspace = true
 sdl-cli.workspace = true
@@ -27,6 +35,33 @@ mallard-term.workspace = true
 comfy-table.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+
+# Never `mallard-server` here: a dev-dependency cannot be optional, so DuckDB
+# would be back in the slim build's `cargo tree` and `cargo test`. The tests
+# below use the optional dependency above instead.
+[dev-dependencies]
+metrics-exporter-prometheus.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+# They run the real binary against a server in the test process, or `serve` itself.
+[[test]]
+name = "agent_cli"
+required-features = ["server"]
+
+[[test]]
+name = "agent_cli_p1"
+required-features = ["server"]
+
+[[test]]
+name = "maintenance"
+required-features = ["server"]
+
+[[test]]
+name = "serve"
+required-features = ["server"]
 
 [lints]
 workspace = true

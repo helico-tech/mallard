@@ -24,7 +24,7 @@ The standalone `otel-ducklake` binary that read this file is retired. In
 mallard these keys live under `[otel.*]` (`ingest`, `retention`,
 `maintenance`, `query`); `[server]`, `[storage]`, `[duckdb]` and the tokens
 are mallard's. See [config/mallard.example.toml](../../config/mallard.example.toml)
-and check a config with `mallard-server check --connect`.
+and check a config with `mallard check --connect`.
 
 Durations: `500ms`, `5s`, `10m`, `6h`, `7d`, `1h30m`; `0` means "off" or
 "forever" where noted. Sizes: `512MB`, `2GB` (powers of 1000) or `1GiB`

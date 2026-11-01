@@ -2238,13 +2238,19 @@ dependencies = [
  "crossterm",
  "futures",
  "mallard-client",
+ "mallard-server",
  "mallard-term",
+ "metrics-exporter-prometheus",
  "odl-cli",
  "ratatui",
+ "reqwest",
  "sdl-cli",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -2304,7 +2310,6 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
- "clap",
  "futures",
  "hex",
  "mallard-client",

@@ -4,30 +4,14 @@
 //! `ops --compare`, `series`, `setup --sentry-cli`, `--quiet` and
 //! not-found messages that say it once.
 
+#[path = "../../mallard-server/tests/common/mod.rs"]
 mod common;
 
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use common::*;
 use serde_json::Value;
-
-fn mallard_bin() -> PathBuf {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let exe = std::env::current_exe().unwrap();
-        let dir = exe.parent().and_then(|d| d.parent()).expect("target/<profile>/deps/<test>");
-        let bin = dir.join(format!("mallard{}", std::env::consts::EXE_SUFFIX));
-        if !bin.exists() {
-            let ok = Command::new(env!("CARGO")).args(["build", "-p", "mallard", "--bin", "mallard"]).status();
-            assert!(ok.is_ok_and(|s| s.success()), "cargo build -p mallard failed");
-        }
-        bin
-    })
-    .clone()
-}
 
 /// One run of the binary.
 struct Out {
@@ -59,7 +43,7 @@ impl Out {
 }
 
 async fn mallard(url: &str, args: &[&str]) -> Out {
-    let (bin, url) = (mallard_bin(), url.to_string());
+    let (bin, url) = (env!("CARGO_BIN_EXE_mallard"), url.to_string());
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     tokio::task::spawn_blocking(move || {
         let o = Command::new(bin)

@@ -35,7 +35,7 @@ What to watch:
 
 ## One-shot maintenance
 
-`mallard-server maintenance [--full]` runs both sides' maintenance once and
+`mallard maintenance [--full]` runs both sides' maintenance once and
 exits: Sentry's flush, retention and compaction, then otel's flush and merge
 of small files (`--full`: all files below the target size), retention, snapshot
 expiry and file cleanup. Stop the server first with a DuckDB-file or SQLite
