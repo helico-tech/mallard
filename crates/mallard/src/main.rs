@@ -172,10 +172,9 @@ fn described(e: mallard_client::Error, base_url: &str) -> anyhow::Error {
 }
 
 async fn status(c: &Client, json: bool, out: Out) -> Result<()> {
-    use mallard_term::fmt::{bytes, compact};
     let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
-    let s = s.map_err(|e| describe(&e.into(), c.base_url()));
-    let o = o.map_err(|e| describe(&e.into(), c.base_url()));
+    let s = s.map_err(|e| sdl_cli::describe(&e, c.sentry.base_url(), &ERRORS_HINTS));
+    let o = o.map_err(|e| odl_cli::describe(&e, c.otel.base_url(), &TELEMETRY_HINTS));
     if json {
         fn side<T: serde::Serialize>(r: &Result<T, String>) -> serde_json::Value {
             match r {
@@ -187,8 +186,19 @@ async fn status(c: &Client, json: bool, out: Out) -> Result<()> {
         out.line(&mallard_term::text::json_safe(&serde_json::to_string_pretty(&v)?))?;
         return Ok(());
     }
-    let mut text = format!("server    {}\n", clean(c.base_url()));
-    let error = |e: &str| format!("{} {e}", mallard_term::color::red("ERROR"));
+    out.line(&status_text(c.base_url(), s, o))?;
+    Ok(())
+}
+
+/// The text of `mallard status`: one line per side, server text cleaned.
+fn status_text(
+    base_url: &str,
+    s: Result<mallard_client::sdl_client::types::ServerInfo, String>,
+    o: Result<mallard_client::odl_client::api::Stats, String>,
+) -> String {
+    use mallard_term::fmt::{bytes, compact};
+    let mut text = format!("server    {}\n", clean(base_url));
+    let error = |e: &str| format!("{} {}", mallard_term::color::red("ERROR"), clean(e));
     match s {
         Ok(i) => text.push_str(&format!(
             "errors    ok  v{}  duckdb {}  queue {}/{}\n",
@@ -215,8 +225,7 @@ async fn status(c: &Client, json: bool, out: Out) -> Result<()> {
         }
         Err(e) => text.push_str(&format!("telemetry {}", error(&e))),
     }
-    out.line(&text)?;
-    Ok(())
+    text
 }
 
 #[cfg(test)]
@@ -269,5 +278,19 @@ mod tests {
         assert!(cli.json && cli.color == ColorChoice::Never);
         assert!(Cli::try_parse_from(["mallard", "errors", "events", "list", "-t", "abc", "-n", "3"]).is_ok());
         assert!(Cli::try_parse_from(["mallard", "errors", "issues", "list", "-s", "1h"]).is_ok());
+    }
+
+    #[test]
+    fn status_names_each_side_once_and_cleans_server_text() {
+        let text = status_text(
+            "http://h",
+            Err("cannot reach server at http://h/sentry (is it running? set MALLARD_URL)".into()),
+            Err("down\x1b[2J".into()),
+        );
+        let plain = mallard_term::color::strip_ansi(&text);
+        assert_eq!(
+            plain,
+            "server    http://h\nerrors    ERROR cannot reach server at http://h/sentry (is it running? set MALLARD_URL)\ntelemetry ERROR down\\u{1b}[2J"
+        );
     }
 }
