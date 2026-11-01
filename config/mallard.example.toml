@@ -10,7 +10,7 @@
 # Unknown keys are errors.
 
 [server]
-http_addr = "0.0.0.0:8080"        # Sentry ingest (/sentry), APIs (/sentry/v1, /otel/api/v1), OTLP/HTTP (/v1/*), /metrics
+http_addr = "0.0.0.0:8080"        # Sentry ingest (/sentry), APIs (/sentry/v1, /otel/api/v1, /api/v1), OTLP/HTTP (/v1/*), /metrics
 otlp_http_addr = "0.0.0.0:4318"   # OTLP/HTTP on the standard port
 otlp_grpc_addr = "0.0.0.0:4317"   # OTLP/gRPC
 metrics_addr = ""                 # e.g. "0.0.0.0:9090": serve /metrics there instead of on http_addr

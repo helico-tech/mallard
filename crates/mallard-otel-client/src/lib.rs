@@ -132,6 +132,12 @@ impl Client {
         Self::send(self.req(reqwest::Method::GET, path).query(q)).await
     }
 
+    /// GET any JSON path under the base URL, with the token and these errors.
+    /// For the server's API next to the telemetry one (`mallard-client`).
+    pub async fn get_json<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T> {
+        self.get(path, q).await
+    }
+
     pub async fn health(&self) -> Result<Health> {
         self.get("/api/v1/health", &()).await
     }
