@@ -1,0 +1,102 @@
+# Architecture
+
+```
+   Sentry SDKs (browser, node, python, rust, ...)        sentry-cli / bundler plugins
+            │ POST /api/{project}/envelope/                     │ /api/0/... (token)
+            v                                                   v
+ ┌──────────────────────── sentry-ducklake (one process) ──────────────────────────┐
+ │  ingest.rs            sourcemaps.rs                api.rs (/v1, token)          │
+ │  auth, decompress,    chunk upload, assemble,      issues, events, stats,       │
+ │  CORS, 429            bundle index, resolver ──┐   projects, OpenAPI, /docs     │
+ │      │                                         │          │                      │
+ │      v                                         │          v                      │
+ │  sdl-protocol (pure): envelope -> normalize -> symbolicate -> group             │
+ │      │                                         │          │                      │
+ │      v  bounded queue                          │          │ reader pool          │
+ │  db/writer.rs: ONE thread, group commit        │          │ (cloned conns)       │
+ │      │                                         │          │                      │
+ └──────┼─────────────────────────────────────────┼──────────┼──────────────────────┘
+        v                                         v          v
+   DuckDB 2.0 + DuckLake ──── catalog: DuckDB file | PostgreSQL | SQLite
+        │                     data:    Parquet under <storage>/lake/
+        └──────────── object storage (S3 default, GCS, Azure, local) ────────────┐
+                      sourcemap bundles under <storage>/artifacts/ (object_store) │
+                                                                                 ┘
+   sdl CLI / TUI  ──(sdl-client, /v1)──>  api.rs
+```
+
+## Crates
+
+| Crate | Role | Depends on |
+|---|---|---|
+| `sdl-protocol` | Sentry wire protocol, no I/O: DSN/auth parsing, envelopes, lenient event normalization, grouping, sourcemap symbolication | serde, sourcemap |
+| `sdl-types` | `/v1` request/response types; `openapi` feature derives the schema | serde, utoipa |
+| `sdl-server` | library (`Server`) + `sentry-ducklake` binary | protocol, types, duckdb, axum, object_store |
+| `sdl-client` | typed async client for `/v1` | types, reqwest |
+| `sdl-cli` | `sdl` CLI + TUI; library (`Command`, `run`, `Embedded`) | client, ratatui |
+| `sdl-loadgen` | load generator and query benchmark | client |
+
+## Request flow (ingest)
+
+1. **HTTP**: `RequestDecompressionLayer` handles `Content-Encoding` (gzip,
+   deflate, br, zstd). Body size is capped after decompression
+   (`SDL_MAX_BODY_BYTES`). CORS mirrors the origin, so browser SDKs work from
+   any site (the DSN key is public by design).
+2. **Auth**: the public key comes from `X-Sentry-Auth`, `Authorization:
+   Sentry ...`, `?sentry_key=`, or the envelope header `dsn`, and must match
+   the project in the URL.
+3. **Envelope**: items are parsed; `event` items are processed, all other item
+   types (transactions, sessions, replays, attachments, client reports, ...)
+   are accepted and dropped (see [compatibility.md](compatibility.md)).
+4. **Normalize** (`sdl-protocol::event`): one canonical shape regardless of SDK
+   (exception list vs `{values}`, float vs RFC 3339 timestamps, tags as map or
+   pairs, `message` vs `logentry`, `{{auto}}` IP, User-Agent -> browser/os).
+5. **Symbolicate**: frames' minified files are resolved to sourcemaps (debug id
+   first, then release + dist + url), frames are rewritten, originals kept in
+   `raw_stacktrace`. Lookups and parsed maps are cached.
+6. **Group** (`sdl-protocol::grouping`): fingerprint -> 64-bit hash (see
+   below). Title and culprit are derived like Sentry's.
+7. **Queue + commit**: the event goes to the writer queue with a reply
+   channel; the HTTP response is sent after the batch commits. Duplicate
+   event ids (SDK retries) within an hour are acknowledged but not stored
+   twice.
+
+## Grouping
+
+1. A custom `fingerprint` wins; `{{ default }}` expands to the default hash.
+2. Each exception in the chain contributes its type plus its in-app frames
+   (all frames if none is in-app). A frame is `module|filename` + `function`,
+   normalized: bundle hashes (`main.4f3a2b1c.js`), query strings, line numbers
+   and anonymous function names do not split issues.
+3. An exception without frames uses type + value with variable parts masked
+   (numbers, UUIDs, hex, dates, IPs, emails).
+4. Then a thread / top-level stack trace, then the message template.
+
+Symbolication runs **before** grouping, so a JS issue survives rebuilds.
+
+## Concurrency model
+
+- **One writer thread** (`ducklake-writer`, a plain OS thread) owns the write
+  connection. Writes from anywhere else are bugs. This rules out DuckLake
+  write conflicts inside the process and makes batching natural.
+- **Reader pool**: `SDL_READERS` connections cloned from the same DuckDB
+  instance, used via `spawn_blocking`. Each query sees the latest committed
+  snapshot.
+- **Caches** (projects, issue status, known bundles) live in memory and are
+  updated by the writer after a commit. Consequence: **one process per
+  catalog**. See [issue 0001](../work/issues/0001-multi-replica-caches.md).
+
+## Embedding
+
+`sdl_server::Server` is a library: `Server::new(cfg)` (opens its own DuckDB)
+or `Server::with_connection(cfg, conn)` (shares a connection that already has
+the catalog attached; only creates its schema), then mount `router()` /
+`ingest_router()` / `api_router()` anywhere (paths are relative; DSNs follow
+`public_url`, which may include a prefix). The library installs no global
+tracing subscriber or metrics recorder. `shutdown()` drains the queue and
+flushes. obs-ducklake uses this to run Sentry ingest next to OTLP on one
+catalog.
+
+## Decisions
+
+See [docs/adr/](adr/).

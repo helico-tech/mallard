@@ -1,0 +1,16 @@
+[package]
+name = "sdl-types"
+description = "Request/response types of the sentry-ducklake HTTP API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+openapi = ["dep:utoipa"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+utoipa = { workspace = true, optional = true }
