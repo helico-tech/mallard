@@ -15,6 +15,7 @@ Examples:
   mallard status
   mallard setup checkout --platform node >> .env
   mallard issues list --since 1h --sort count -n 10
+  mallard logs --app checkout -l warn --since 10m
   mallard find 0af7651916cd43dd8448eb211c80319c
   mallard logs -S checkout -l warn --since 10m --format ndjson
 

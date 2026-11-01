@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mallard_sentry_client::types::*;
 use mallard_term::error::Hints;
+use mallard_term::tui::Scope;
+use mallard_term::tui::suggest::{Suggest, Want};
 use ratatui::widgets::TableState;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -16,7 +18,10 @@ use std::time::{Duration, Instant};
 /// Time window of the issue list, the stats and the issue detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Window {
+    FiveMinutes,
+    QuarterHour,
     Hour,
+    SixHours,
     Day,
     Week,
     TwoWeeks,
@@ -24,12 +29,24 @@ pub(super) enum Window {
 }
 
 impl Window {
+    /// What `t` cycles through on its own. In a host, the host has the list of all tabs.
     pub(super) const ALL: [Window; 5] = [Window::Hour, Window::Day, Window::Week, Window::TwoWeeks, Window::Month];
+
+    /// The window with this `since`, of those a host can ask for.
+    pub(super) fn parse(since: &str) -> Option<Window> {
+        [Window::FiveMinutes, Window::QuarterHour, Window::SixHours]
+            .into_iter()
+            .chain(Window::ALL)
+            .find(|w| w.since() == since)
+    }
 
     /// The API's `since` value.
     pub(super) fn since(self) -> &'static str {
         match self {
+            Window::FiveMinutes => "5m",
+            Window::QuarterHour => "15m",
             Window::Hour => "1h",
+            Window::SixHours => "6h",
             Window::Day => "24h",
             Window::Week => "7d",
             Window::TwoWeeks => "14d",
@@ -40,13 +57,21 @@ impl Window {
     /// Stats bucket size that gives ~50 bars.
     pub(super) fn interval(self) -> &'static str {
         match self {
+            Window::FiveMinutes => "10s",
+            Window::QuarterHour => "30s",
             Window::Hour => "1m",
+            Window::SixHours => "10m",
             Window::Day => "30m",
             Window::Week => "3h",
             Window::TwoWeeks => "6h",
             Window::Month => "12h",
         }
     }
+}
+
+/// A project's name, or its slug when the list has not come yet.
+fn clean_name(project: Option<&Project>, slug: &str) -> String {
+    crate::fmt::clean(project.map_or(slug, |p| p.name.as_str())).into_owned()
 }
 
 /// The item `step` places after `cur` in `all`, wrapping around.
@@ -70,11 +95,27 @@ pub(super) struct IssuesKey {
     pub query: String,
 }
 
+/// The search bar's text, read like the web UI's box: a `key=value` word is a tag filter,
+/// the other words search the text.
+pub(super) fn split_filter(q: &str) -> (Option<String>, Vec<String>) {
+    let mut text = vec![];
+    let mut tags = vec![];
+    for word in mallard_term::tui::suggest::tokenize(q) {
+        match word.split_once('=') {
+            Some((k, v)) if !k.is_empty() && !k.contains(':') => tags.push(format!("{k}:{v}")),
+            _ => text.push(word),
+        }
+    }
+    ((!text.is_empty()).then(|| text.join(" ")), tags)
+}
+
 impl IssuesKey {
     pub(super) fn query(&self) -> IssueQuery {
+        let (query, tag) = split_filter(&self.query);
         IssueQuery {
             status: Some(self.status.as_str().into()),
-            query: (!self.query.is_empty()).then(|| self.query.clone()),
+            query,
+            tag,
             since: Some(self.window.since().into()),
             sort: Some(self.sort.as_str().into()),
             limit: Some(200),
@@ -88,12 +129,40 @@ pub(super) enum Req {
     Info,
     Projects,
     Issues(IssuesKey),
-    Stats { project: String, window: Window },
-    Issue { project: String, id: String, window: Window },
-    Events { project: String, issue: String, before: Option<String> },
-    Event { project: String, issue: String, event_id: String },
-    SetStatus { project: String, id: String, status: IssueStatus },
-    Trace { trace_id: String },
+    Stats {
+        project: String,
+        window: Window,
+    },
+    Issue {
+        project: String,
+        id: String,
+        window: Window,
+    },
+    Events {
+        project: String,
+        issue: String,
+        before: Option<String>,
+    },
+    Event {
+        project: String,
+        issue: String,
+        event_id: String,
+    },
+    SetStatus {
+        project: String,
+        id: String,
+        status: IssueStatus,
+    },
+    Trace {
+        trace_id: String,
+    },
+    /// Keys or values for the search bar: for `scope`, in this project and window.
+    Suggest {
+        project: String,
+        window: Window,
+        scope: String,
+        want: Want,
+    },
 }
 
 /// What a request loads; used to count the loads in flight.
@@ -108,6 +177,7 @@ pub(super) enum Kind {
     Event,
     Status,
     Trace,
+    Suggest,
 }
 
 impl Req {
@@ -122,6 +192,7 @@ impl Req {
             Req::Event { .. } => Kind::Event,
             Req::SetStatus { .. } => Kind::Status,
             Req::Trace { .. } => Kind::Trace,
+            Req::Suggest { .. } => Kind::Suggest,
         }
     }
 }
@@ -179,6 +250,12 @@ pub(super) enum Resp {
         trace_id: String,
         result: Res<EventList>,
     },
+    /// `items` is `None` when the fetch failed; that is only ever a small note.
+    Suggest {
+        scope: String,
+        want: Want,
+        items: Option<Vec<(String, u64)>>,
+    },
     /// A background load of this kind panicked.
     Panicked {
         kind: Kind,
@@ -198,6 +275,7 @@ impl Resp {
             Resp::Event { .. } => Kind::Event,
             Resp::SetStatus { .. } => Kind::Status,
             Resp::Trace { .. } => Kind::Trace,
+            Resp::Suggest { .. } => Kind::Suggest,
             Resp::Panicked { kind, .. } => *kind,
         }
     }
@@ -430,6 +508,13 @@ pub(super) struct App {
     pub started_at: Instant,
     /// The host's command name, for hints.
     pub hints: Hints,
+    /// In a host with one window and one app picker for its tabs: `t`, `T` and `p` are
+    /// the host's, and with no app chosen there is no project (no "first project").
+    pub hosted: bool,
+    /// The host chose an app without a project: its slug.
+    pub no_project: Option<String>,
+    /// The search bar's list.
+    pub suggest: Suggest,
 }
 
 impl App {
@@ -465,6 +550,9 @@ impl App {
             last_info: Instant::now(),
             started_at: Instant::now(),
             hints: crate::HINTS,
+            hosted: false,
+            no_project: None,
+            suggest: Suggest::new(&[]),
         }
     }
 
@@ -475,11 +563,83 @@ impl App {
         self.track(r)
     }
 
-    fn track(&mut self, reqs: Vec<Req>) -> Vec<Req> {
+    /// Count the loads in flight. Not suggestions: they are quiet (no spinner) and a
+    /// newer one aborts the one before, so they may never answer.
+    pub(super) fn track(&mut self, reqs: Vec<Req>) -> Vec<Req> {
         for r in &reqs {
-            *self.pending.entry(r.kind()).or_default() += 1;
+            if r.kind() != Kind::Suggest {
+                *self.pending.entry(r.kind()).or_default() += 1;
+            }
         }
         reqs
+    }
+
+    /// The host's window for all tabs: what to reload.
+    pub(super) fn set_window(&mut self, window: Window) -> Vec<Req> {
+        if window == self.window {
+            return vec![];
+        }
+        self.window = window;
+        self.stats = None;
+        let mut r = self.reload_list();
+        r.extend(self.detail_requests());
+        r
+    }
+
+    /// The host's app: its project, or an empty tab that says why. What to reload.
+    pub(super) fn set_scope(&mut self, scope: &Scope) -> Vec<Req> {
+        let (project, no_project) = match scope {
+            Scope::All => (None, None),
+            Scope::App { project: Some(p), .. } => (Some(p.as_str()), None),
+            Scope::App { slug, project: None, .. } => (None, Some(slug.clone())),
+        };
+        self.no_project = no_project;
+        let same = match (project, self.current_project()) {
+            (Some(p), Some(c)) => c.slug == p,
+            _ => project == self.project.as_deref(),
+        };
+        if same {
+            return vec![];
+        }
+        self.screen = Screen::Issues;
+        self.back.clear();
+        self.issues_error = None;
+        self.stats_error = None;
+        match project {
+            Some(p) => {
+                self.toast(format!("switched to {}", clean_name(self.projects.iter().find(|x| x.slug == p), p)), false);
+                self.switch_project(p.to_string());
+                self.reload_list()
+            }
+            None => {
+                self.project = None;
+                self.issues.clear();
+                self.issues_loaded = false;
+                self.stats = None;
+                vec![]
+            }
+        }
+    }
+
+    /// The empty list offers a wider window when a host has one window for all tabs: 1h
+    /// is its default, and older issues must not look like no issues.
+    pub(super) fn offers_day(&self) -> bool {
+        self.hosted
+            && self.project.is_some()
+            && self.issues_loaded
+            && self.issues.is_empty()
+            && self.issues_error.is_none()
+            && matches!(self.window, Window::FiveMinutes | Window::QuarterHour | Window::Hour | Window::SixHours)
+    }
+
+    /// The fetch the open search bar's list asks for.
+    fn suggest_request(&mut self, now: Instant) -> Option<Req> {
+        self.input.as_ref()?;
+        let project = self.project.clone()?;
+        let scope = format!("{project}|{}", self.window.since());
+        self.suggest.set_scope(scope.clone());
+        let want = self.suggest.poll(now)?;
+        Some(Req::Suggest { project, window: self.window, scope, want })
     }
 
     pub(super) fn in_flight(&self, kind: Kind) -> bool {
@@ -602,7 +762,7 @@ impl App {
         if self.toast.as_ref().is_some_and(|t| now.duration_since(t.at) > TOAST_FOR) {
             self.toast = None;
         }
-        let mut reqs = vec![];
+        let mut reqs: Vec<Req> = self.suggest_request(now).into_iter().collect();
         if now.duration_since(self.last_info) >= INFO_EVERY && !self.in_flight(Kind::Info) {
             self.last_info = now;
             reqs.push(Req::Info);

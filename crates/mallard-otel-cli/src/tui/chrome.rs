@@ -102,6 +102,9 @@ impl Embedded {
             return;
         }
         let mut spans = widgets::hints(&self.hints());
+        if self.hosted {
+            spans.extend(widgets::hints(&[("p", "app")]));
+        }
         spans.extend(widgets::hints(&[("?", "help"), ("q", "quit")]));
         let line = Line::from(spans);
         let mut hints_area = area;
@@ -156,9 +159,28 @@ impl Embedded {
         }
     }
 
+    /// The app has no telemetry in the window: say so, and how to get it.
+    pub(super) fn draw_no_telemetry(&self, f: &mut Frame, area: Rect, slug: &str, since: &str) {
+        let lines = vec![
+            Line::from(Span::styled(format!("App {slug} has no telemetry in the last {since}"), theme::bold())),
+            Line::from(Span::styled(
+                format!("set OTEL_SERVICE_NAME={slug} in the app (mallard setup {slug})"),
+                theme::dim(),
+            )),
+            Line::from(Span::styled("t widens the window · p picks another app", theme::dim())),
+        ];
+        let y = area.y + area.height.saturating_sub(3) / 2;
+        f.render_widget(
+            Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            Rect { y, height: 3.min(area.height), ..area },
+        );
+    }
+
     pub(super) fn draw_help(&self, f: &mut Frame, area: Rect) {
         // The keys every tab shares come first (mallard_term::tui::keys).
-        let mut rows: Vec<(&str, &str)> = keys::SHARED.to_vec();
+        let picker = keys::APP_PICKER.to_string();
+        let mut rows: Vec<(&str, &str)> =
+            keys::SHARED.iter().copied().filter(|(k, _)| self.hosted || *k != picker).collect();
         rows.extend([
             ("", ""),
             ("Overview", "↵ service → operations → traces"),
@@ -173,6 +195,7 @@ impl Embedded {
             ("", "filter: service=checkout op=\"GET /\" errors min=250ms key=value"),
             ("Logs", "/ filter  s severity  space follow  ↵ details  o open trace"),
             ("", "filter: service=api level=warn trace=<id> words to find"),
+            ("", "in a filter: tab accepts a suggestion, ↑↓ choose"),
             ("Metrics", "/ search  ↵ chart  a aggregation  b group by"),
             ("", ""),
             ("", keys::TIMES),

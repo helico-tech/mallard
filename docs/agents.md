@@ -47,7 +47,7 @@ Exit codes:
 | 1 | internal error | report it |
 | 2 | usage: bad flag, id, window or field | fix the call (see `--help`) |
 | 3 | auth: missing or wrong token | set `MALLARD_TOKEN` |
-| 4 | not found (or `find` found nothing) | check the id, widen `--since` |
+| 4 | not found (or `find` found nothing; `--app`: no such app, or it lacks that side) | check the id, widen `--since` |
 | 5 | conflict | |
 | 6 | unavailable: server down, busy, timeout; `status` with a side down | retry later |
 | 7 | turned off on the server (SQL) | ask for `otel.query.enable_sql = true` (`sql --errors`: `sentry.query.enable_sql`) |
@@ -74,10 +74,19 @@ mallard logs -S checkout -q "order 42" --since 5m --wait 20s
 
 **Which apps are there?** An app is a project and the services with the same slug, or
 either alone. `project` is null without a project, `services` empty without telemetry
-in the window. Use the slug with `-p`; use a name from `services` with `-S`.
+in the window. Use the slug with `--app`: it means the project on `issues`, `events`,
+`releases`, `sourcemaps`, `find` and `series errors`, and all its service names on `traces list`,
+`logs`, `ops`, `metrics`, `schema attrs` and `series spans|logs`.
 ```sh
 mallard apps --since 7d --json --fields slug,project,services
+mallard issues list --app checkout --since 1h
+mallard logs --app checkout -l warn --since 10m
 ```
+`--app` replaces `-p` and `-S`: both together is exit 2 (`MALLARD_PROJECT` just gives way), and so
+is `--app` on a command that uses neither, or `events list --trace`. An app without that side, or
+an unknown app, is exit 4, not an empty list; the message says what to do. If the list of apps
+is incomplete then it is exit 6: retry. Services count with data in the command's window or the
+last 24h, so `--wait` does not wait for an app's first data: use `-S <name> --wait` then.
 
 **What is this id?** (pasted from a log or a bug report)
 ```sh

@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-01
 ---
@@ -14,3 +14,6 @@ Story 0004/01 asked for the same output, so it stays. An agent cannot tell.
 ## Notes
 Printing `warning: …` on stderr does not touch stdout or the exit code, and
 `mallard apps` and `mallard trace` already do it.
+
+Fixed with story 0004/03: `mallard find` prints them on stderr, like `--app` does. Stdout and exit
+codes are the same.

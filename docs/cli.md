@@ -30,7 +30,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard sql "<select>" [--errors]` | read-only SQL over the telemetry tables, or with `--errors` over `events`, `issues`, `issue_activity` (exit 7 when off; ADR 0011; `-n` rows and 32 MiB per answer, ADR 0015) |
 | `mallard schema [tables]`, `mallard schema attrs` | the tables and columns `sql` can query, per `side` (`errors` tables need `sql --errors`); attribute keys with counts, or the top values of `--key` (`--signal spans\|logs\|metrics`, `-S`, `--metric`; sampled) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
-| `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |
+| `mallard tui [-p project \| --app slug]` | both TUIs as tabs, one app and one time window: F1 errors, F2 telemetry |
 | `mallard web [--addr a]` | the Web UI on `127.0.0.1:8088`: the same screens and keys in a browser |
 
 The server commands read the config from `-c/--config` or `MALLARD_CONFIG`, put
@@ -59,6 +59,7 @@ Global (any position):
 | `--url` | `MALLARD_URL` | server base URL |
 | `--token` | `MALLARD_TOKEN` | API token |
 | `-p, --project` | `MALLARD_PROJECT` | Sentry project id or slug; optional with one project |
+| `--app slug` | | an app (`mallard apps`): its project and its services, in place of `-p` and `-S` |
 | `--format text\|json\|ndjson` | `MALLARD_FORMAT` | output format; `--json` = `--format json` |
 | `--fields a,b` | | keep only these top-level fields (unknown field: exit 2) |
 | `--raw` | | include raw payloads (Sentry `payload`, resource attributes) |
@@ -80,6 +81,20 @@ Per command, the same letter for the same thing on both sides:
 
 Default windows differ where the data does: issues 14d, events all (30d
 with `--trace`), traces/logs/metrics 1h, `trace` and `find` 7d.
+
+`--app <slug>` works where `-p` or `-S` do: `issues`, `events`, `releases`, `sourcemaps`,
+`find`, `series errors` take the app's project; `traces list`, `logs`, `ops`, `metrics`,
+`schema attrs`, `series spans|logs` take all its service names (ADR 0027, 0028). There is no
+`app=` in any filter.
+
+- It replaces `-p` and `-S`: giving one next to it is exit 2. `MALLARD_PROJECT` is only a
+  default and gives way to the flag. An empty `--app ""` means no app.
+- Everywhere else it is exit 2, and so is `events list --trace`, which looks in all projects.
+- A side the app lacks, or an unknown app, is exit 4 with what to do, never an empty list
+  that looks like "no errors". An app's services are those with data in the command's window
+  or the last 24 hours. So `--wait` does not wait for an app's first data; use `-S` for that.
+- If the list of apps had warnings and the side is not in it, that is exit 6, because the side
+  may only be unreadable. Otherwise the warnings go to stderr and the command runs.
 
 ## Output
 
@@ -130,15 +145,47 @@ These keys mean the same on both tabs and every screen (the list is
 | `?` | help |
 | `ctrl-c` | quit |
 | `F1` `F2` | switch tab (`mallard tui`) |
+| `p` | choose the app, on every screen (`mallard tui`; `mallard errors tui`: switch project) |
 
 Screen keys:
 
 | tab | keys |
 |---|---|
-| errors, issue list | `s` sort, `p` project, `R` `I` `U` resolve / ignore / unresolve |
+| errors, issue list | `s` sort, `R` `I` `U` resolve / ignore / unresolve; `d` the last 24h, on an empty list in a shorter window |
 | errors, issue detail | `[` `]` older / newer event, `a` in-app frames, `w` raw frames, `R` `I` `U` |
 | telemetry, traces | `E` errors only, `l` logs of the trace; `⚠ n`: Sentry errors of the trace or span, `x` on a marked span opens its error |
 | telemetry, logs | `s` severity, `space` follow, `o` open the trace, `c` clear filter |
 | telemetry, metrics | `a` `A` aggregation, `b` group by |
 
 Writes (issue status) are capitals, so `r` can never change data.
+
+### One app and one time window (`mallard tui`)
+
+The top bar shows the app and the window of both tabs. `p` opens the picker. "All apps" is the
+default: telemetry shows every service, and the errors tab asks you to pick an app, because
+errors are per project. `-p` or `--app` is the first choice. An app without a side says so on
+that tab, with what to do. Opening an event of another project moves the picker along.
+
+`t` and `T` change the window on both tabs: 5m, 15m, 1h, 6h, 24h, 7d, 14d, 30d, up to the smaller
+of the two sides' `max_window_secs`, starting at 1h. The errors tab on its own (`mallard errors
+tui`) keeps its 24h start and its own list. An empty issue list in a window under 24h offers `d`:
+show last 24h, so older issues do not look like no issues.
+
+### Suggestions in a filter
+
+The `/` filters of traces, logs and issues suggest keys, then values with counts. `tab` accepts,
+`↑↓` choose, `↵` still applies what is typed. Typing never waits on the server: answers come in
+the background, per window and app, and a failure is at most the small note "suggestions
+unavailable".
+
+| filter | keys | values from |
+|---|---|---|
+| traces | `service=`, `op=`, `errors`, `min=`, `max=`, span attributes | `/services` (inside an app: its services), `/operations`, `/attributes` |
+| logs | `service=`, `level=`, `trace=`, log attributes | `/services` (inside an app: its services), the levels, `/attributes` |
+| issues | tags of the project | `/projects/{p}/tags` |
+
+In the issue filter, `key=value` is a tag filter and the other words search the text, as in the
+web UI. In an app, `service=` can only name one of its services: another is refused with a message
+and nothing is read for it. `trace=` on logs follows the trace across apps, because it asks by id.
+`op=` values come from at most the last 24h. Difference with the web UI, on purpose: there a
+suggestion is taken only after you move to it; here the first one is ready for `tab`.

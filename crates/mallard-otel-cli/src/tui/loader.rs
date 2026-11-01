@@ -36,6 +36,8 @@ pub enum Kind {
     TraceErrors,
     /// Error events of the open trace.
     SpanErrors,
+    /// Keys or values for the filter bar. Quiet: it fails as data and shows no spinner.
+    Suggest,
 }
 
 /// A loaded value.
@@ -57,6 +59,7 @@ pub enum Data {
     MetricQuery(MetricQueryResult),
     /// From the host's error lookup, which fails in its own way.
     Errors(Result<crate::ErrorMap, String>),
+    Suggest(Box<super::suggestions::Answer>),
 }
 
 pub struct Loaded {
@@ -149,7 +152,7 @@ impl Loader {
     }
 
     pub fn any_pending(&self) -> bool {
-        !self.pending.is_empty()
+        self.pending.iter().any(|k| *k != Kind::Suggest)
     }
 
     /// Results of the latest request per kind that arrived since last call.

@@ -24,7 +24,8 @@ has the same CLI and TUI with no server and no DuckDB.
 ## The terminal UI
 
 `mallard tui`: errors on F1, telemetry on F2, and `x` jumps between them by
-trace id.
+trace id. One app picker (`p`) and one time window (`t`) for both, and filters
+that suggest keys and values while you type.
 
 **An issue, with the trace of the request that failed** — open an issue,
 press `x`, and the telemetry tab shows that request's spans with the failing
@@ -117,6 +118,7 @@ mallard find <id>                         # trace, event or issue id: what is it
 mallard trace <trace-id>                  # spans + errors + logs of one trace
 mallard traces list --errors              # telemetry: traces, logs, services, ops, metrics, sql
 mallard logs --around <time> -S checkout  # logs around an error
+mallard logs --app checkout -l warn       # --app: one app's project and services
 mallard tui                               # F1 errors, F2 telemetry
 mallard issues list -n 20 --json --fields id,title,count
 ```

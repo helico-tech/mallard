@@ -116,6 +116,7 @@ pub(crate) fn chart_fmt(unit: &str, agg: &str, max_abs: f64) -> Box<dyn Fn(f64) 
 impl Embedded {
     pub(crate) fn refresh_metrics(&mut self, force: bool) {
         let since = self.since().to_string();
+        let service = self.scoped(None);
         if let Some(c) = &mut self.metrics.chart {
             if !force && !due(c.refreshed, Duration::from_secs(10)) {
                 return;
@@ -123,6 +124,7 @@ impl Embedded {
             let q = MetricQuery {
                 name: c.info.name.clone(),
                 since: Some(since),
+                service,
                 agg: Some(c.aggs[c.agg].to_string()),
                 group_by: (!c.group_by.trim().is_empty()).then(|| c.group_by.trim().to_string()),
                 ..Default::default()
@@ -136,7 +138,7 @@ impl Embedded {
         if !force && !due(self.metrics.refreshed, Duration::from_secs(30)) {
             return;
         }
-        let q = MetricListQuery { since: Some(since), ..Default::default() };
+        let q = MetricListQuery { since: Some(since), service, ..Default::default() };
         let c = self.client.clone();
         if self.loader.load(Kind::MetricList, force, async move { c.metrics(&q).await }, Data::MetricList) {
             self.metrics.refreshed = Some(Instant::now());

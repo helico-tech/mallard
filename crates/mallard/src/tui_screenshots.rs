@@ -166,11 +166,7 @@ async fn screenshots() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let client = Client::new(&url, token.as_deref()).unwrap();
-    let tabs: Vec<Box<dyn Pane>> = vec![
-        Box::new(mallard_sentry_cli::Embedded::new(client.sentry.clone(), Some("api".into()))),
-        Box::new(telemetry_pane(&client)),
-    ];
-    let mut host = Host { tabs, active: ERRORS, base_url: url.clone() };
+    let mut host = super::host(&client, Some("api".into()));
     let mut term = Terminal::new(TestBackend::new(COLS, ROWS)).unwrap();
     let wait = Duration::from_millis(2500);
 
@@ -191,9 +187,11 @@ async fn screenshots() {
     settle(&mut host, &mut term, wait).await;
     save(&term, &dir, "telemetry-logs", "mallard tui — logs of that trace");
 
-    // Fresh telemetry tab for the overview.
+    // Fresh telemetry tab for the overview, on all apps.
     host.tabs[TELEMETRY] = Box::new(telemetry_pane(&client));
     host.active = TELEMETRY;
+    host.shared.selected = picker::Selected::All;
+    host.apply_scope();
     settle(&mut host, &mut term, wait).await;
     save(&term, &dir, "telemetry-overview", "mallard tui — telemetry");
 }

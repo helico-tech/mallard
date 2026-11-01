@@ -94,10 +94,15 @@ pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs, wait: &WaitArgs)
         let q =
             FindQuery { id: hex.clone(), project: r.project.clone(), from: Some(w.from), to: Some(w.to), since: None };
         let found = r.client.find(&q).await.map_err(|e| crate::described(e, r.client.base_url()))?;
-        let matches: Vec<Match> = found.map_or_else(Vec::new, |f| f.matches.into_iter().map(Match::from).collect());
-        anyhow::Ok((w, matches))
+        let (matches, warnings) = found.map_or_else(Default::default, |f| (f.matches, f.warnings));
+        let matches: Vec<Match> = matches.into_iter().map(Match::from).collect();
+        anyhow::Ok((w, matches, warnings))
     };
-    let ((w, matches), waited) = until(&r.output, wait, fetch, |(_, m)| !m.is_empty()).await?.split();
+    let ((w, matches, warnings), waited) = until(&r.output, wait, fetch, |(_, m, _)| !m.is_empty()).await?.split();
+    // A source that failed next to a match: the list may be incomplete.
+    for warning in &warnings {
+        eprintln!("warning: {}", clean(warning));
+    }
     let list = List::new(matches).window(w);
     if r.output.text() {
         for m in &list.items {
