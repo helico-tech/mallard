@@ -477,6 +477,24 @@ impl Gen<'_> {
                         self.rng.random_range(1..255)
                     ),
                 ));
+                // High-cardinality values, as in real traffic.
+                let path = route
+                    .http_route
+                    .replace("{id}", &self.rng.random_range(1..50_000u32).to_string());
+                let sid: u64 = self.rng.random();
+                attrs.push(kv(
+                    "url.full",
+                    &format!("https://shop.example.com{path}?utm_source=mail&sid={sid:016x}"),
+                ));
+                attrs.push(kv(
+                    "user.id",
+                    &format!("u-{}", self.rng.random_range(1..20_000u32)),
+                ));
+                let rid: u128 = self.rng.random();
+                attrs.push(kv(
+                    "http.request.header.x-request-id",
+                    &format!("{rid:032x}"),
+                ));
             }
         } else {
             attrs.push(kv("rpc.system", "grpc"));
@@ -533,13 +551,18 @@ impl Gen<'_> {
             .push((route.service, route.name, status_code, dur_ms));
         // logs
         if self.rng.random_bool(self.logs_per_span.min(1.0)) {
+            let user = self.rng.random_range(1..20_000u32);
+            let order: u32 = self.rng.random();
             self.log(
                 route.service,
                 start + 1000,
                 &id,
                 9,
                 "INFO",
-                format!("handled {} in {:.1}ms", route.name, dur_ms),
+                format!(
+                    "handled {} for user u-{user} order {order:08x} in {:.1}ms",
+                    route.name, dur_ms
+                ),
             );
         }
         if dur_ms > route.base_ms * 4.0 && self.rng.random_bool(0.5) {

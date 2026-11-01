@@ -32,6 +32,13 @@ enum Cmd {
     Config,
     /// Load the config, attach storage, create tables, then exit.
     Check,
+    /// Run maintenance once (flush inlined rows, merge files, retention) and exit.
+    /// With a DuckDB-file or SQLite catalog, stop the server first.
+    Maintenance {
+        /// Also merge files up to the target size (not only small files).
+        #[arg(long)]
+        full: bool,
+    },
     /// Download DuckDB extensions into `duckdb.extension_directory` (used when
     /// building container images, so they can run without internet access).
     InstallExtensions {
@@ -68,6 +75,23 @@ async fn main() -> Result<()> {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(&cfg.server.log_format);
             odl_server::store::install_extensions(&cfg, &names)?;
+            Ok(())
+        }
+        Cmd::Maintenance { full } => {
+            let cfg = Config::load(cli.config.as_deref())?;
+            init_tracing(&cfg.server.log_format);
+            let lake = odl_server::store::Lake::open(&cfg)?;
+            let conn = lake.connect()?;
+            let settings = odl_server::store::maintenance::Settings::from_config(&cfg)?;
+            let t0 = std::time::Instant::now();
+            let small = odl_server::store::maintenance::compact(&conn, &lake.schema, Some(settings.small_file_size))?;
+            info!(detail = %small, "compaction");
+            if full {
+                let d = odl_server::store::maintenance::compact(&conn, &lake.schema, None)?;
+                info!(detail = %d, "full compaction");
+            }
+            let d = odl_server::store::maintenance::retention(&conn, &lake.schema, &settings)?;
+            info!(detail = %d, elapsed_ms = t0.elapsed().as_millis() as u64, "retention");
             Ok(())
         }
         Cmd::Check => {
