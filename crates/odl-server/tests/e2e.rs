@@ -683,6 +683,33 @@ async fn http_ingest_checks_the_token_before_reading_the_body() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Browser exporters send a CORS preflight without a token; it is answered
+/// before the token check, and the real request still needs the token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn otlp_http_answers_cors_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = lake_config(dir.path());
+    cfg.auth.ingest_tokens = vec!["in".into()];
+    let server = Server::new(cfg).await.unwrap();
+    let preflight = Request::options("/v1/traces")
+        .header(header::ORIGIN, "https://app.example")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type,authorization")
+        .body(Body::empty())
+        .unwrap();
+    let resp = server.otlp_http_router().oneshot(preflight).await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://app.example");
+    let post = Request::post("/v1/traces")
+        .header(header::ORIGIN, "https://app.example")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = server.otlp_http_router().oneshot(post).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://app.example");
+}
+
 /// OTLP/gRPC through a real tonic client: the token is checked before the
 /// message is decoded, and an accepted export is queryable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

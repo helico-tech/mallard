@@ -15,7 +15,8 @@ pub mod config;
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use axum::{Router, response::IntoResponse, routing::get};
+use axum::{Router, routing::get};
+use mallard_common::http::readiness;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +29,7 @@ use config::{OTEL_PREFIX, SENTRY_PREFIX};
 
 pub struct Platform {
     cfg: Arc<Config>,
-    otel: odl_server::Server,
+    otel: Arc<odl_server::Server>,
     sentry: sdl_server::Server,
     metrics: Option<PrometheusHandle>,
 }
@@ -41,7 +42,8 @@ impl Platform {
         let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
             .await?
             .context("opening the DuckLake catalog")?;
-        let otel = odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?;
+        let otel =
+            Arc::new(odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?);
         let sentry = sdl_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
             .await
             .context("starting sentry")?;
@@ -68,14 +70,13 @@ impl Platform {
 
     /// Everything served on `server.http_addr`.
     pub fn http_router(&self) -> Router {
-        // Ready = sentry's writer thread is alive (otel's health is static).
-        let sentry_ready = self.sentry.router();
+        let (sentry, otel) = (self.sentry.clone(), self.otel.clone());
         let mut r = Router::new()
             .nest(SENTRY_PREFIX, self.sentry.router())
             .nest(OTEL_PREFIX, self.otel.api_router())
             .merge(self.otel.otlp_http_router())
             .route("/healthz", get(|| async { "ok" }))
-            .route("/readyz", get(move || readyz(sentry_ready.clone())));
+            .route("/readyz", get(move || ready(sentry.clone(), otel.clone())));
         if self.cfg.server.metrics_addr.is_empty() {
             r = r.merge(self.metrics_router());
         }
@@ -199,13 +200,11 @@ impl Listeners {
     }
 }
 
-async fn readyz(sentry: Router) -> axum::response::Response {
-    use tower::ServiceExt;
-    let req = axum::http::Request::get("/readyz").body(axum::body::Body::empty()).expect("static request");
-    match sentry.oneshot(req).await {
-        Ok(r) => r.into_response(),
-        Err(e) => match e {},
-    }
+/// Ready when both sides are ready; the body names what is not.
+async fn ready(sentry: sdl_server::Server, otel: Arc<odl_server::Server>) -> axum::response::Response {
+    let (s, o) = tokio::join!(sentry.ready(), otel.ready());
+    let why: Vec<String> = [s, o].into_iter().filter_map(Result::err).collect();
+    readiness(if why.is_empty() { Ok(()) } else { Err(why.join("; ")) })
 }
 
 async fn bind(addr: &str) -> Result<TcpListener> {

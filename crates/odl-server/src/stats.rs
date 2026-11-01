@@ -74,6 +74,11 @@ impl Stats {
         *self.last_maintenance.lock().unwrap() = Some(info);
     }
 
+    /// The error of the last flush, when it failed (cleared by a success).
+    pub fn last_flush_error(&self) -> Option<String> {
+        self.last_flush_error.lock().unwrap().clone()
+    }
+
     pub fn last_maintenance(&self) -> Option<MaintenanceInfo> {
         self.last_maintenance.lock().unwrap().clone()
     }

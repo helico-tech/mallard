@@ -17,7 +17,7 @@ use crate::sourcemaps::MAX_REFS_PER_EVENT;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use chrono::Utc;
@@ -27,32 +27,15 @@ use sdl_protocol::{NormalizeContext, ProcessedEvent, auth, normalize_event, symb
 use serde_json::{Value, json};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use std::time::Instant;
 use tower_http::decompression::RequestDecompressionLayer;
 use uuid::Uuid;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::mirror_request())
-        .allow_methods([Method::POST, Method::OPTIONS])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            header::CONTENT_ENCODING,
-            header::AUTHORIZATION,
-            header::ACCEPT,
-            header::ORIGIN,
-            header::HeaderName::from_static("x-sentry-auth"),
-            header::HeaderName::from_static("x-requested-with"),
-            header::HeaderName::from_static("sentry-trace"),
-            header::HeaderName::from_static("baggage"),
-        ])
-        .expose_headers([
-            header::RETRY_AFTER,
-            header::HeaderName::from_static("x-sentry-error"),
-            header::HeaderName::from_static("x-sentry-rate-limits"),
-        ])
-        .max_age(Duration::from_secs(3600));
+    let cors = mallard_common::http::ingest_cors(
+        &["x-sentry-auth", "x-requested-with", "sentry-trace", "baggage"],
+        &["x-sentry-error", "x-sentry-rate-limits"],
+    );
     Router::new()
         .route("/api/{project_id}/envelope/", post(envelope))
         .route("/api/{project_id}/envelope", post(envelope))

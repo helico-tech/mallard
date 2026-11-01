@@ -16,7 +16,6 @@ mallard-duck.workspace = true
 axum.workspace = true
 tonic.workspace = true
 tower-http.workspace = true
-tower = { workspace = true, features = ["util"] }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

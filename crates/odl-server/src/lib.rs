@@ -167,6 +167,26 @@ impl Server {
         api::openapi()
     }
 
+    /// Ready to serve: the last flush (if any) succeeded and the catalog
+    /// answers. The error is a short reason (details are logged).
+    pub async fn ready(&self) -> std::result::Result<(), String> {
+        if let Some(e) = self.stats.last_flush_error() {
+            tracing::warn!(error = %e, "readiness: the last flush failed");
+            return Err("otel flush failing".into());
+        }
+        let probe = async {
+            let conn = self.lake.connect()?;
+            let sql = format!("SELECT id FROM {}.current_snapshot()", store::CATALOG);
+            tokio::task::spawn_blocking(move || conn.query_row(&sql, [], |r| r.get::<_, i64>(0))).await??;
+            anyhow::Ok(())
+        };
+        let res = probe.await;
+        res.map(|_| ()).map_err(|e| {
+            tracing::warn!(error = %store::redact(&format!("{e:#}")), "readiness check failed");
+            "otel catalog not ready".to_string()
+        })
+    }
+
     /// Run the flusher and (if enabled) maintenance until `shutdown`
     /// completes, then flush remaining buffered data. Stop the receivers
     /// before the shutdown future resolves so nothing arrives afterwards.
