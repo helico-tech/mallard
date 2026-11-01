@@ -1,8 +1,10 @@
 //! DuckLake table definitions. See docs/data-model.md for the reasoning.
 //!
 //! Rules:
-//! - Column order here MUST match the Arrow batches built in `otlp::convert`
-//!   (the appender maps columns by position). `tests/lake.rs` checks this.
+//! - Column names, order and types here MUST match the Arrow batches built in
+//!   `otlp::convert`; `convert::tests::batches_match_table_definitions`
+//!   checks this. The flusher appends by column name, so a table that a
+//!   newer version extended still accepts these batches.
 //! - New columns may only be appended at the end; `migrate` adds them with
 //!   `ALTER TABLE ... ADD COLUMN`.
 //! - All timestamps are `TIMESTAMP` (microseconds, UTC, no time zone).
@@ -152,10 +154,17 @@ pub const METRIC_SUMMARIES: TableDef = TableDef {
     ],
 };
 
-pub const TABLES: &[&TableDef] =
-    &[&SPANS, &LOGS, &METRIC_POINTS, &METRIC_HISTOGRAMS, &METRIC_EXP_HISTOGRAMS, &METRIC_SUMMARIES];
+/// All tables, in [`TableId`] order.
+pub const TABLES: [&TableDef; 6] = [
+    TableId::Spans.def(),
+    TableId::Logs.def(),
+    TableId::MetricPoints.def(),
+    TableId::MetricHistograms.def(),
+    TableId::MetricExpHistograms.def(),
+    TableId::MetricSummaries.def(),
+];
 
-/// Index of a table in [`TABLES`]; used by the write buffer.
+/// A table; also its index in [`TABLES`] and in the write buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TableId {
     Spans = 0,
@@ -175,8 +184,15 @@ impl TableId {
         TableId::MetricExpHistograms,
         TableId::MetricSummaries,
     ];
-    pub fn def(self) -> &'static TableDef {
-        TABLES[self as usize]
+    pub const fn def(self) -> &'static TableDef {
+        match self {
+            TableId::Spans => &SPANS,
+            TableId::Logs => &LOGS,
+            TableId::MetricPoints => &METRIC_POINTS,
+            TableId::MetricHistograms => &METRIC_HISTOGRAMS,
+            TableId::MetricExpHistograms => &METRIC_EXP_HISTOGRAMS,
+            TableId::MetricSummaries => &METRIC_SUMMARIES,
+        }
     }
 }
 
@@ -210,6 +226,7 @@ mod tests {
         }
         for (i, id) in TableId::ALL.iter().enumerate() {
             assert_eq!(*id as usize, i);
+            assert_eq!(TABLES[i].name, id.def().name);
         }
     }
 }
