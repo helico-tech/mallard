@@ -52,6 +52,8 @@ const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
         license(name = "MIT OR Apache-2.0")
     ),
     modifiers(&BearerAuth),
+    // Used only by query parameters, which do not register their schemas.
+    components(schemas(odl_api::AttributeSignal, odl_api::LogOrder)),
     tags(
         (name = "system", description = "Health and statistics"),
         (name = "traces", description = "Services, operations and traces"),
