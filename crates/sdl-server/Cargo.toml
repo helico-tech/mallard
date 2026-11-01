@@ -51,6 +51,6 @@ envy = "0.4"
 humantime-serde = "1"
 
 [dev-dependencies]
-reqwest.workspace = true
 sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 tempfile = "3"
+reqwest = { workspace = true, features = ["multipart"] }

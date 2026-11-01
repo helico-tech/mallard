@@ -52,7 +52,7 @@ type ApiResult<T> = Result<Json<T>, ApiErr>;
 #[derive(OpenApi)]
 #[openapi(
     info(title = "sentry-ducklake API", description = "Query and manage errors stored by sentry-ducklake. Ingest uses the Sentry protocol at /api/{project_id}/envelope/."),
-    paths(info, list_projects, create_project, get_project, list_issues, get_issue, update_issue, list_events, get_event, project_stats, list_sourcemaps, run_maintenance),
+    paths(info, events_by_trace, list_projects, create_project, get_project, list_issues, get_issue, update_issue, list_events, get_event, project_stats, list_sourcemaps, run_maintenance),
     components(schemas(
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
@@ -80,6 +80,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let v1 = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/projects", get(list_projects).post(create_project))
+        .route("/v1/events", get(events_by_trace))
         .route("/v1/projects/{project}", get(get_project))
         .route("/v1/projects/{project}/issues", get(list_issues))
         .route("/v1/projects/{project}/issues/{issue_id}", get(get_issue).patch(update_issue))
@@ -252,7 +253,25 @@ async fn update_issue(State(state): S, Path((p, id)): Path<(String, String)>, Js
 async fn list_events(State(state): S, Path(p): Path<String>, Query(q): Query<EventQuery>) -> ApiResult<EventList> {
     let pid = project(&state, &p)?.id;
     let g = q.issue.as_deref().map(issue_hash).transpose()?;
+    if q.trace_id.as_deref().is_some_and(|t| sdl_protocol::event::parse_trace_id(t).is_none()) {
+        return Err(bad("trace_id must be 32 hex characters"));
+    }
     Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q)).await?))
+}
+
+#[utoipa::path(get, path = "/v1/events", params(TraceQuery),
+    description = "Events of one trace across all projects (for linking errors to traces).",
+    responses((status = 200, body = EventList), (status = 400, body = ApiError)))]
+async fn events_by_trace(State(state): S, Query(q): Query<TraceQuery>) -> ApiResult<EventList> {
+    let t = sdl_protocol::event::parse_trace_id(&q.trace_id).ok_or_else(|| bad("trace_id must be 32 hex characters"))?;
+    let span = q
+        .span_id
+        .as_deref()
+        .map(|s| sdl_protocol::event::parse_span_id(s).ok_or_else(|| bad("span_id must be 16 hex characters")))
+        .transpose()?;
+    let w = Window::parse(q.since.as_deref(), "30d", Utc::now()).map_err(bad)?;
+    let limit = q.limit.unwrap_or(50);
+    Ok(Json(state.db.read(move |c, ns| read::events_by_trace(c, ns, t, span, &w, limit)).await?))
 }
 
 #[derive(serde::Deserialize, utoipa::IntoParams)]

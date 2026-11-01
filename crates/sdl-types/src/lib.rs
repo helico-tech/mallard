@@ -139,6 +139,7 @@ pub struct UpdateIssue {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct EventSummary {
     pub event_id: String,
+    pub project_id: u32,
     pub issue_id: String,
     pub timestamp: DateTime<Utc>,
     pub received_at: DateTime<Utc>,
@@ -259,12 +260,31 @@ pub struct EventQuery {
     /// Only events of this issue (16 hex characters).
     #[serde(default)]
     pub issue: Option<String>,
+    /// Only events of this trace (32 hex characters).
+    #[serde(default)]
+    pub trace_id: Option<String>,
     /// Max events (default 50, max 500).
     #[serde(default)]
     pub limit: Option<u32>,
     /// Cursor from a previous page.
     #[serde(default)]
     pub before: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct TraceQuery {
+    /// Trace id (32 hex characters). Required.
+    pub trace_id: String,
+    /// Only the event captured in this span (16 hex characters).
+    #[serde(default)]
+    pub span_id: Option<String>,
+    /// Window to search, e.g. `24h`, `30d` (default `30d`).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Max events (default 50, max 500).
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

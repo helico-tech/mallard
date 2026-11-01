@@ -282,11 +282,12 @@ fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Windo
 }
 
 const EVENT_COLUMNS: &str = "event_id::VARCHAR, group_hash, epoch_us(timestamp), epoch_us(received_at), title, level,
-    platform, environment, release, user_key, message, trace_id::VARCHAR, span_id";
+    platform, environment, release, user_key, message, trace_id::VARCHAR, span_id, project_id";
 
 fn event_summary(r: &duckdb::Row<'_>) -> duckdb::Result<EventSummary> {
     Ok(EventSummary {
         event_id: r.get::<_, String>(0)?.replace('-', ""),
+        project_id: r.get::<_, i32>(13)? as u32,
         issue_id: group_id(r.get(1)?),
         timestamp: us_to_dt(r.get(2)?),
         received_at: us_to_dt(r.get(3)?),
@@ -316,6 +317,11 @@ pub fn list_events(
         sql.push_str(" AND group_hash = ?");
         p.push(Box::new(g));
     }
+    if let Some(t) = q.trace_id.as_deref() {
+        let t = sdl_protocol::event::parse_trace_id(t).ok_or_else(|| anyhow::anyhow!("trace_id must be 32 hex characters"))?;
+        sql.push_str(" AND trace_id = ?::UUID");
+        p.push(Box::new(t.to_string()));
+    }
     if let Some(before) = q.before.as_deref().and_then(|c| c.parse::<i64>().ok()) {
         sql.push_str(" AND received_at < make_timestamp(?)");
         p.push(Box::new(before));
@@ -329,6 +335,31 @@ pub fn list_events(
         .then(|| events.last().map(|e| e.received_at.timestamp_micros().to_string()))
         .flatten();
     Ok(EventList { events, next_cursor })
+}
+
+/// Events of one trace across all projects, newest first. The window keeps
+/// the scan to recent daily partitions.
+pub fn events_by_trace(
+    conn: &Connection,
+    ns: &Ns,
+    trace_id: uuid::Uuid,
+    span_id: Option<u64>,
+    w: &Window,
+    limit: u32,
+) -> Result<EventList> {
+    let mut sql = format!(
+        "SELECT {EVENT_COLUMNS} FROM $S.events WHERE received_at >= make_timestamp(?) AND trace_id = ?::UUID"
+    );
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(w.start_us()), Box::new(trace_id.to_string())];
+    if let Some(s) = span_id {
+        sql.push_str(" AND span_id = ?");
+        p.push(Box::new(s));
+    }
+    sql.push_str(" ORDER BY received_at DESC LIMIT ?");
+    p.push(Box::new(limit.clamp(1, 500) as i64));
+    let mut stmt = conn.prepare(&ns.sql(&sql))?;
+    let events = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), event_summary)?.collect::<Result<_, _>>()?;
+    Ok(EventList { events, next_cursor: None })
 }
 
 pub fn event_detail(
@@ -350,7 +381,7 @@ pub fn event_detail(
     sql.push_str(" LIMIT 1");
     let row = conn
         .query_row(&ns.sql(&sql), params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
-            Ok((event_summary(r)?, r.get::<_, Option<String>>(13)?, r.get::<_, Option<String>>(14)?, r.get::<_, String>(15)?))
+            Ok((event_summary(r)?, r.get::<_, Option<String>>(14)?, r.get::<_, Option<String>>(15)?, r.get::<_, String>(16)?))
         })
         .optional()?;
     Ok(row.map(|(summary, culprit, tags, payload)| {

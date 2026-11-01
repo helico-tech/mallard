@@ -282,6 +282,19 @@ impl Db {
     }
 }
 
+impl Drop for Db {
+    /// Safety net for embedders that forget `shutdown()`: stop and join the
+    /// writer so DuckDB is not torn down under a running thread.
+    fn drop(&mut self) {
+        if let Some(handle) = self.writer_thread.lock().expect("lock").take() {
+            let (tx, _rx) = oneshot::channel();
+            if self.tx.send(WriteCmd::Shutdown { reply: tx }).is_ok() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 /// Hide passwords in catalog strings for logs and /v1/info.
 pub fn redact(catalog: &str) -> String {
     catalog
