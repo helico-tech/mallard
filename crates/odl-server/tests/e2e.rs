@@ -812,6 +812,20 @@ async fn upgrade_adds_exemplars_to_an_old_catalog() {
     assert_eq!(points, vec![0.0, 1.0], "the old row is still read");
     shutdown.cancel();
     bg.await.unwrap();
+    // Compaction copes with files from before and after the new column.
+    drop(api);
+    drop(server);
+    let c = cfg.clone();
+    tokio::task::spawn_blocking(move || odl_server::run_maintenance(&c, false)).await.unwrap().unwrap();
+    let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
+    let got: (i64, i64) = conn
+        .query_row(
+            "SELECT count(*), sum(len(exemplars))::BIGINT FROM lake.otel.metric_points WHERE metric_name = 'http.requests'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(got, (2, 1));
 }
 
 /// A tiny request that would expand enormously is refused before allocating.
