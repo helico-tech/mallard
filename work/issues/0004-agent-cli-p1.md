@@ -34,3 +34,7 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
 - `maintenance` and `stats` are only under the hidden `mallard errors …`.
 - Spec side findings still open: breadcrumb order in `events show` text,
   release endpoints are stubs.
+
+## Polish found in review (2026-11-01)
+- Not-found errors repeat themselves: `not found: issue not found`
+  (`mallard-term` describe prefix + the server message).
