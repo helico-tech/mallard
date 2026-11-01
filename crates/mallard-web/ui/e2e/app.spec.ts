@@ -448,6 +448,23 @@ test.describe("the TUI keeps its state", () => {
     await expect(page).toHaveURL(/\/issues\//);
   });
 
+  test("on a slow machine, quick keys do not undo each other", async ({ page }) => {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.type("min=1ms");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/f=min/);
+    await page.keyboard.press("c");
+    await expect(page).not.toHaveURL(/f=/);
+    await page.keyboard.press("E");
+    await page.keyboard.press("t");
+    await expect(page).toHaveURL(/f=errors/);
+    await expect(page).toHaveURL(/w=6h/);
+  });
+
   test("logs have a cursor from the start: o, Enter, q", async ({ page }) => {
     await page.goto(`/telemetry/logs?f=${encodeURIComponent("service=checkout-api")}`);
     await expect(page.getByRole("log").getByRole("row").first()).toBeVisible();
@@ -679,6 +696,7 @@ test.describe("the filter bar suggests", () => {
 
   test("logs suggest levels; issues suggest tags", async ({ page }) => {
     await page.goto("/telemetry/logs");
+    await expect(page.getByRole("log").getByRole("row").first()).toBeVisible();
     await page.keyboard.press("/");
     await page.keyboard.type("level=w");
     await expect(page.getByRole("option", { name: "warn" })).toBeVisible();
@@ -709,6 +727,7 @@ test.describe("search with Cmd-K", () => {
     const res = await request.get("http://127.0.0.1:38080/otel/api/v1/traces?since=1h&limit=1", { headers: { authorization: `Bearer ${TOKEN}` } });
     const [trace] = (await res.json()) as { trace_id: string }[];
     await page.goto("/telemetry/status");
+    await expect(page.getByRole("heading", { name: "Ingest", exact: true })).toBeVisible();
     await page.keyboard.press("ControlOrMeta+k");
     await box(page).fill(trace!.trace_id);
     await expect(page).toHaveURL(new RegExp(`/telemetry/traces/${trace!.trace_id}`));
@@ -720,6 +739,7 @@ test.describe("search with Cmd-K", () => {
     const res = await request.get("http://127.0.0.1:38080/sentry/v1/projects/web/issues?since=1h&limit=1", { headers: { authorization: `Bearer ${TOKEN}` } });
     const { issues } = (await res.json()) as { issues: { id: string }[] };
     await page.goto("/telemetry/status");
+    await expect(page.getByRole("heading", { name: "Ingest", exact: true })).toBeVisible();
     await page.keyboard.press("ControlOrMeta+k");
     await box(page).fill(issues[0]!.id);
     await expect(page).toHaveURL(new RegExp(`/errors/web/issues/${issues[0]!.id}`));
@@ -728,6 +748,7 @@ test.describe("search with Cmd-K", () => {
 
   test("an unknown id says so; a name finds apps; it works while typing elsewhere", async ({ page }) => {
     await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("/");
     await page.keyboard.press("ControlOrMeta+k");
     await box(page).fill("0".repeat(32));

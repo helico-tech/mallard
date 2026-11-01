@@ -3,7 +3,7 @@
 // current ones, and `?app=` (empty) means All apps.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { matchPath, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { matchPath, useLocation, useNavigate, useSearchParams, type NavigateFunction } from "react-router-dom";
 import { apps as appsApi } from "@/api/app";
 import { otel } from "@/api/otel";
 import { sentry } from "@/api/sentry";
@@ -39,10 +39,19 @@ interface Scope {
 
 const Ctx = createContext<Scope | null>(null);
 
+/** Changes the address as it is now. A render can lag behind it (the address changes
+ *  at once, the screen a moment later), and starting from that render's parameters
+ *  would silently undo a change made in between, such as two quick keys. */
+export function writeParams(navigate: NavigateFunction, change: (p: URLSearchParams) => void, replace = false): void {
+  const p = new URLSearchParams(window.location.search);
+  change(p);
+  navigate({ pathname: window.location.pathname, search: `?${p.toString()}` }, { replace });
+}
+
 export function ScopeProvider({ children }: { children: ReactNode }) {
   const { pathname, search } = useLocation();
   const navigate = useNavigate();
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
 
   // Limits of both sides; the shell's live state keeps these two fresh.
   const info = useQuery({ queryKey: ["sentry", "info"], queryFn: ({ signal }) => sentry.info(signal) });
@@ -77,6 +86,9 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
     lastApp.current = app;
     if (shownApp.current !== null && shownApp.current !== app) forgetApp();
     shownApp.current = app;
+    // The address has moved on since this render: writing now would undo that. The
+    // render of the new address comes through here too.
+    if (window.location.pathname !== pathname || window.location.search !== search) return;
     const next = new URLSearchParams(search);
     next.set("w", w);
     if (app && !pathProject) next.set("app", app);
@@ -90,12 +102,9 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
     (next: string) => {
       // At once: the address can move on (F1) before this window has been drawn.
       lastW.current = next;
-      setParams((p) => {
-        p.set("w", next);
-        return p;
-      });
+      writeParams(navigate, (p) => p.set("w", next));
     },
-    [setParams],
+    [navigate],
   );
   const cycle = useCallback(
     (dir: 1 | -1) => {
@@ -111,7 +120,7 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
   const setApp = useCallback(
     (slug: string) => {
       lastApp.current = slug;
-      const next = new URLSearchParams(search);
+      const next = new URLSearchParams(window.location.search);
       if (pathname.startsWith("/errors")) {
         // An issue or trace belongs to the old app; the list of the new one has the filters.
         const target = apps.find((a) => a.slug === slug);
@@ -130,7 +139,7 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
       const trace = matchPath("/telemetry/traces/:id", pathname);
       navigate({ pathname: trace ? "/telemetry/traces" : pathname, search: `?${next.toString()}` });
     },
-    [apps, navigate, pathname, search],
+    [apps, navigate, pathname],
   );
 
   const hasProject = found ? found.project !== null && found.project !== undefined : false;
@@ -168,20 +177,17 @@ export function useWindow(): Pick<Scope, "w" | "windows" | "setW" | "cycle"> {
 
 /** Sets one search param; empty removes it. */
 export function useParam(name: string, fallback = ""): [string, (v: string, replace?: boolean) => void] {
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
   const value = params.get(name) ?? fallback;
   const set = useCallback(
     (v: string, replace = false) => {
-      setParams(
-        (p) => {
-          if (v) p.set(name, v);
-          else p.delete(name);
-          return p;
-        },
-        { replace },
-      );
+      writeParams(navigate, (p) => {
+        if (v) p.set(name, v);
+        else p.delete(name);
+      }, replace);
     },
-    [name, setParams],
+    [name, navigate],
   );
   return [value, set];
 }
