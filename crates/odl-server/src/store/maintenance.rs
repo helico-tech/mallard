@@ -197,10 +197,21 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
     Ok(format!("{flushed} inlined rows; merged {merged} files into {created}"))
 }
 
+/// `now - d`, or `None` when that is before the earliest representable time.
+fn before(now: DateTime<Utc>, d: Duration) -> Option<DateTime<Utc>> {
+    TimeDelta::from_std(d).ok().and_then(|d| now.checked_sub_signed(d))
+}
+
 /// Cut-off for a retention: aligned to the UTC day when retention >= 1 day.
-pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> DateTime<Utc> {
-    let raw = now - TimeDelta::from_std(retention).unwrap_or(TimeDelta::MAX);
-    if retention >= Duration::from_secs(86_400) { raw.duration_trunc(TimeDelta::days(1)).unwrap_or(raw) } else { raw }
+/// `None` when the retention reaches back further than any timestamp: keep
+/// everything.
+pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> Option<DateTime<Utc>> {
+    let raw = before(now, retention)?;
+    Some(if retention >= Duration::from_secs(86_400) {
+        raw.duration_trunc(TimeDelta::days(1)).unwrap_or(raw)
+    } else {
+        raw
+    })
 }
 
 pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String> {
@@ -213,7 +224,10 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
         if keep.is_zero() {
             continue;
         }
-        let cutoff = retention_cutoff(now, *keep).naive_utc();
+        let Some(cutoff) = retention_cutoff(now, *keep) else {
+            continue;
+        };
+        let cutoff = cutoff.naive_utc();
         let n =
             conn.execute(&format!("DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?", t.name, t.time_column), [cutoff])?;
         deleted += n;
@@ -221,10 +235,10 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
     let mut detail = format!("deleted {deleted} expired rows");
     if s.catalog_wide {
         // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
-        // time zone can't shift the cut-off.
-        let epoch = |d: Duration| -> f64 {
-            (now - TimeDelta::from_std(d).unwrap_or(TimeDelta::zero())).timestamp_micros() as f64 / 1e6
-        };
+        // time zone can't shift the cut-off. A delay reaching back before the
+        // earliest representable time keeps everything (cut-off 1970).
+        let epoch =
+            |d: Duration| -> f64 { before(now, d).unwrap_or(DateTime::UNIX_EPOCH).timestamp_micros() as f64 / 1e6 };
         let snap_cut = epoch(s.snapshot_retention);
         let expired: i64 = conn.query_row(
             &format!(
@@ -274,8 +288,16 @@ mod tests {
     fn cutoff_aligns_to_days() {
         let now = Utc.with_ymd_and_hms(2026, 10, 31, 13, 45, 0).unwrap();
         let c = retention_cutoff(now, Duration::from_secs(7 * 86400));
-        assert_eq!(c, Utc.with_ymd_and_hms(2026, 10, 24, 0, 0, 0).unwrap());
+        assert_eq!(c, Some(Utc.with_ymd_and_hms(2026, 10, 24, 0, 0, 0).unwrap()));
         let c = retention_cutoff(now, Duration::from_secs(3600));
-        assert_eq!(c, Utc.with_ymd_and_hms(2026, 10, 31, 12, 45, 0).unwrap());
+        assert_eq!(c, Some(Utc.with_ymd_and_hms(2026, 10, 31, 12, 45, 0).unwrap()));
+    }
+
+    #[test]
+    fn huge_retention_keeps_everything_instead_of_panicking() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 31, 13, 45, 0).unwrap();
+        let huge = humantime::parse_duration("300000y").unwrap();
+        assert_eq!(retention_cutoff(now, huge), None);
+        assert_eq!(retention_cutoff(now, Duration::MAX), None);
     }
 }
