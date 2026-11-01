@@ -7,8 +7,10 @@ export ODL_URL=http://localhost:8080     # default
 export ODL_TOKEN=...                     # if auth.api_tokens is set
 ```
 
-Global flags: `--url`, `--token`, `-o table|json`. Time windows:
-`-s/--since 15m` (default `1h`) or `--from/--to` (RFC 3339).
+Global flags: `--url`, `--token`, `--json` (old: `-o json`), `--color
+auto|always|never`. Time windows: `-s/--since 15m` (default `1h`) or
+`--from/--to` (RFC 3339). Flags, output style, time zone (UTC) and TUI keys
+are the same as on the errors side: [../cli.md](../cli.md).
 
 ## Commands
 
@@ -18,7 +20,7 @@ Global flags: `--url`, `--token`, `-o table|json`. Time windows:
 | `odl status` | ingest counters, buffer, flushes, storage per table, last maintenance |
 | `odl services [-s 1h] [--all-spans]` | rate, error %, p50/p95/p99 per service |
 | `odl ops [-S svc]` | the same per operation |
-| `odl traces [-S svc] [-O op] [-e] [--min-ms 500] [-a k=v] [-l 30]` | search traces |
+| `odl traces [-S svc] [-O op] [-e] [--min-ms 500] [-a k=v] [-n 30]` | search traces |
 | `odl trace <id> [-A]` | waterfall of one trace (`-A`: attributes and events) |
 | `odl logs [-S svc] [-l warn] [-q text] [-t trace] [-a k=v] [-n 100] [-f]` | search logs; `-f` follows like `tail -f` |
 | `odl metrics [-S svc] [-q name]` | metric catalog |
@@ -30,12 +32,12 @@ Examples:
 
 ```sh
 odl services -s 15m
-odl traces -S checkout -e -l 10
+odl traces -S checkout -e -n 10
 odl trace 0af7651916cd43dd8448eb211c80319c -A
 odl logs -l error -f
 odl metric http.server.request.duration -g p99 -b http.route -s 6h --step 5m
 odl sql "SELECT name, count(*) FROM spans WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
-odl traces -e -o json | jq -r '.[].trace_id'
+odl traces -e --json | jq -r '.[].trace_id'
 ```
 
 ## TUI
@@ -51,22 +53,20 @@ odl traces -e -o json | jq -r '.[].trace_id'
 | **4 Metrics** | searchable metric list. Enter shows a chart with a selectable aggregation (avg, p50…p99, rate, …) and group-by. |
 | **5 Status** | ingest counters, buffer gauge, flushes, per-table storage, last maintenance. |
 
-Keys (press `?` in the TUI for the full list):
+Keys (press `?` in the TUI for the full list). The keys every tab shares
+are in [../cli.md](../cli.md): move, Enter open, Esc/`q` back, `/` filter,
+`t`/`T` time window (5m, 15m, 1h, 6h, 24h, 7d), `r` refresh, `x` errors of
+this trace (in `mallard tui`), `?` help, Ctrl-C quit. All times are UTC.
 
 | key | action |
 |---|---|
 | `1`–`5`, Tab, Shift-Tab | switch view |
-| `t` / `T` | next / previous time window (5m, 15m, 1h, 6h, 24h, 7d) |
-| `r` | refresh now |
 | `/` or `f` | edit filter (`service=api op="GET /" errors min=250ms key=value`) |
-| ↑↓ `j` `k` PgUp PgDn `g` `G` | move |
-| Enter / Esc | open / back |
 | `E` | traces: errors only |
 | `l` | trace/span: show its logs |
 | `o` | logs: open the log's trace |
 | `s`, space | logs: cycle severity, pause/follow |
 | `a` / `b` | metric chart: cycle aggregation, set group-by |
-| `q`, Ctrl-C | quit |
 
-The TUI is also a library component (`odl_cli::tui::Embedded`) for embedding
+The TUI is also a library component (`odl_cli::Embedded`) for embedding
 in other terminal apps; see [embedding.md](embedding.md).

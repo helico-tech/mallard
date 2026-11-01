@@ -25,6 +25,7 @@
 |---|---|
 | `mallard` | The one binary. `serve` runs the server; `status`, `trace`, `errors …` (= `sdl-cli` commands), `telemetry …` (= `odl-cli` commands) and `tui` talk to a server over HTTP. |
 | `mallard-server` | Loads config, opens the shared catalog (`odl_server::store::open_connection`), builds both sides on it, mounts their routers, runs their background jobs, owns logging, metrics and shutdown. |
+| `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables, formats, colour, error lines, TUI theme, keys and `Outcome` (ADR 0006). Depends on neither client. |
 | `mallard-client` | Wraps `sdl-client` (`<url>/sentry`) and `odl-client` (`<url>/otel`) behind one base URL + token; trace correlation (spans + errors + logs). |
 | `sdl-*` | Sentry side. See [sentry/architecture.md](sentry/architecture.md). |
 | `odl-*` | OpenTelemetry side. See [otel/architecture.md](otel/architecture.md). |

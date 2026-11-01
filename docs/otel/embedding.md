@@ -65,11 +65,13 @@ let new_records = tail.poll().await?;
 ```rust
 // Mount the `odl` commands under your own CLI:
 #[derive(clap::Subcommand)]
-enum Top { #[command(subcommand)] Otel(odl_cli::Cmd), /* ... */ }
-odl_cli::run(cmd, &odl_cli::Ctx { client, output: odl_cli::Output::Table }).await?;
+enum Top { #[command(subcommand)] Otel(odl_cli::Command), /* ... */ }
+let result = odl_cli::run(cmd, &odl_cli::Ctx::new(client).with_json(false).with_hints(my_hints)).await;
+// `error: …` on stderr and an ExitCode, as every mallard CLI does:
+let code = mallard_term::error::report(result, mallard_term::color::ColorChoice::Auto);
 
 // Embed the TUI as a component (you own the terminal and the event loop):
-let mut otel = odl_cli::tui::Embedded::new(client);
+let mut otel = odl_cli::Embedded::new(client);
 // in your loop: otel.tick(); terminal.draw(|f| otel.draw(f, area)); match otel.handle_event(&ev) { .. }
 ```
 
@@ -79,10 +81,11 @@ Requirements and hooks:
   as tokio tasks); without one the TUI shows "no tokio runtime". Don't block
   the runtime thread waiting for terminal events: use crossterm's
   `EventStream` or a separate thread.
-- `Embedded::set_errors_enabled(true)` shows the `e errors` hint when your
-  host handles `Outcome::OpenErrors` (off by default).
+- `Embedded::set_errors_enabled(true)` shows the `x errors` hint when your
+  host handles `Outcome::Jump` (off by default).
 - Keys with Ctrl/Alt modifiers (except Ctrl-C) and F1/F2 return `Ignored`.
 
-F1 and F2 are left to the host. `Outcome::OpenErrors(trace_id)` signals that
+F1 and F2 are left to the host. `Outcome::Jump(trace_id)` (the shared
+`mallard_term::tui::Outcome`) signals that
 the user asked for errors linked to a trace (for example in an error
 tracker); `Embedded::open_trace(id)` jumps to a trace.
