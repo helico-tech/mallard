@@ -73,9 +73,14 @@ mallard trace <trace-id>                  # spans + errors + logs of one trace
 mallard errors issues list                # Sentry side: projects, issues, events, sourcemaps
 mallard telemetry traces --errors         # OTel side: services, traces, logs, metrics, sql
 mallard tui                               # F1 errors, F2 telemetry
+mallard errors issues list -s 24h -n 20 --json    # same flags on both sides
 ```
 
-Client commands read `MALLARD_URL` and `MALLARD_TOKEN`.
+Client commands read `MALLARD_URL` and `MALLARD_TOKEN`. Both sides share
+flags (`--json`, `--color`, `-s/--since`, `-n/--limit`, `-q`, `-t/--trace`),
+one output style (times in UTC) and one set of TUI keys (`r` refresh, `t`
+time window, `x` same trace on the other tab, `?` help). See
+[docs/cli.md](docs/cli.md).
 
 ## Configuration
 

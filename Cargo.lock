@@ -213,7 +213,7 @@ dependencies = [
  "atoi",
  "base64 0.23.1",
  "chrono",
- "comfy-table 8.0.1",
+ "comfy-table",
  "half",
  "lexical-core",
  "num-traits",
@@ -745,17 +745,6 @@ checksum = "4356eba6976435498d05a311ee9fc486da3bc81c200d3f0d7dd9703b41913f92"
 dependencies = [
  "bytes",
  "memchr",
-]
-
-[[package]]
-name = "comfy-table"
-version = "7.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "958c5d6ecf1f214b4c2bbbbf6ab9523a864bd136dcf71a7e8904799acfe1ad47"
-dependencies = [
- "crossterm",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]
@@ -2291,6 +2280,7 @@ dependencies = [
  "futures",
  "mallard-client",
  "mallard-server",
+ "mallard-term",
  "metrics-exporter-prometheus",
  "odl-cli",
  "ratatui",
@@ -2340,6 +2330,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "mallard-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "ratatui",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2908,12 +2910,12 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "comfy-table 8.0.1",
+ "comfy-table",
  "crossterm",
- "futures-util",
+ "futures",
  "humantime",
+ "mallard-term",
  "odl-client",
- "owo-colors",
  "ratatui",
  "serde",
  "serde_json",
@@ -2932,6 +2934,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3082,12 +3085,6 @@ name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
-
-[[package]]
-name = "owo-colors"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
 name = "palette"
@@ -3995,9 +3992,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "comfy-table 7.2.2",
+ "comfy-table",
  "crossterm",
  "futures",
+ "mallard-term",
  "ratatui",
  "reqwest",
  "sdl-client",
@@ -4005,7 +4003,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "unicode-width",
  "url",
  "uuid",
 ]

@@ -168,7 +168,7 @@ async fn logs_initial_failure_is_retried() {
     }))
     .await;
     let mut e = Embedded::new(Client::new(&url, None).unwrap());
-    e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
     assert!(settle(&mut e, |e| e.logs.error.is_some(), Duration::from_secs(3)).await);
     assert!(e.logs.retry_at.is_some(), "a retry is scheduled");
     e.logs.retry_at = Some(Instant::now()); // don't wait the back-off in the test
@@ -204,7 +204,7 @@ async fn trace_detail_retry_and_refresh() {
     let loaded = |e: &Embedded| e.traces.detail.as_ref().is_some_and(|d| d.trace.is_some());
     assert!(settle(&mut e, loaded, Duration::from_secs(3)).await, "never retried");
     let before = count(&hits, &path);
-    e.handle_event(&ev(KeyCode::Char('r'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('r'), KeyModifiers::NONE));
     assert!(
         settle(&mut e, |_| count(&hits, &path) > before, Duration::from_secs(3)).await,
         "r did not refresh the open trace"
@@ -215,7 +215,7 @@ async fn trace_detail_retry_and_refresh() {
 #[test]
 fn modifier_keys_are_ignored() {
     let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
-    e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
     let level = e.logs.query.clone();
     assert_eq!(e.handle_event(&ev(KeyCode::Char('s'), KeyModifiers::CONTROL)), Outcome::Ignored);
     assert_eq!(e.logs.query, level, "Ctrl-S must not change the severity");
@@ -223,9 +223,9 @@ fn modifier_keys_are_ignored() {
     assert!(e.prompt.is_none());
     assert_eq!(e.handle_event(&ev(KeyCode::Char('k'), KeyModifiers::ALT)), Outcome::Ignored);
     // Shifted letters still work (E = errors only in traces).
-    e.handle_event(&ev(KeyCode::Char('2'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('2'), KeyModifiers::NONE));
     assert_eq!(e.handle_event(&ev(KeyCode::Char('E'), KeyModifiers::SHIFT)), Outcome::Consumed);
-    e.handle_event(&ev(KeyCode::Char('?'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('?'), KeyModifiers::NONE));
     assert!(e.help);
     assert_eq!(e.handle_event(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), Outcome::Quit);
 }
@@ -338,7 +338,7 @@ fn huge_durations_saturate() {
 // 7: ANSI stripping for non-terminal output.
 #[test]
 fn strips_ansi() {
-    assert_eq!(crate::fmt::strip_ansi("\u{1b}[2mdim\u{1b}[0m x \u{1b}[31;1mred\u{1b}[39m"), "dim x red");
+    assert_eq!(mallard_term::color::strip_ansi("\u{1b}[2mdim\u{1b}[0m x \u{1b}[31;1mred\u{1b}[39m"), "dim x red");
 }
 
 // 12: the errors hint is hidden unless the host enables it.
@@ -403,7 +403,7 @@ async fn aggregation_change_supersedes_pending_query() {
     });
     e.tick();
     assert!(settle(&mut e, |_| count(&hits, "/api/v1/metrics/query") == 1, Duration::from_secs(1)).await);
-    e.handle_event(&ev(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('a'), KeyModifiers::NONE));
     let sent = |_: &Embedded| hits.lock().unwrap().iter().any(|q| q.contains("agg=increase"));
     assert!(settle(&mut e, sent, Duration::from_millis(400)).await, "new aggregation not sent while the old one ran");
     // Both answers say "rate": neither may be shown as "increase".
@@ -439,7 +439,7 @@ async fn drill_down_supersedes_pending_traces() {
     let op = OperationSummary { service: "checkout".into(), name: "GET /cart".into(), kind: SpanKind::Server, red };
     e.overview.ops = Some(("checkout".into(), vec![op]));
     e.overview.ops_sel.select(Some(0));
-    e.handle_event(&ev(KeyCode::Enter, KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(e.view, View::Traces);
     let sent = |_: &Embedded| hits.lock().unwrap().iter().any(|q| q.contains("service=checkout"));
     assert!(settle(&mut e, sent, Duration::from_millis(400)).await, "filtered list not requested");
@@ -450,7 +450,7 @@ async fn drill_down_supersedes_pending_traces() {
 #[test]
 fn errors_flash_once_and_clear() {
     let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
-    let err = odl_client::Error::Api { status: 503, error: "busy".into(), message: "busy".into() };
+    let err = odl_client::Error::Api { status: 503, code: "busy".into(), message: "busy".into() };
     e.apply_error(Kind::LogTail, &err);
     assert!(e.flash.take().is_some());
     e.apply_error(Kind::LogTail, &err);
@@ -466,7 +466,7 @@ fn errors_flash_once_and_clear() {
 #[test]
 fn trace_lookup_backs_off() {
     let mut d = crate::tui::views::traces::Detail::new(TID.into(), None);
-    let err = odl_client::Error::Api { status: 404, error: "not_found".into(), message: "trace not found".into() };
+    let err = odl_client::Error::Api { status: 404, code: "not_found".into(), message: "trace not found".into() };
     let mut last = Duration::ZERO;
     for _ in 0..6 {
         d.on_error(&err);
@@ -479,7 +479,7 @@ fn trace_lookup_backs_off() {
     let mut d = crate::tui::views::traces::Detail::new(TID.into(), None);
     let too_large = odl_client::Error::Api {
         status: 400,
-        error: "bad_request".into(),
+        code: "bad_request".into(),
         message: "larger than query.max_window".into(),
     };
     d.on_error(&too_large);
@@ -505,8 +505,8 @@ fn long_prompt_input_scrolls() {
 #[test]
 fn prompt_leaves_modifier_keys_to_the_host() {
     let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
-    e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
-    e.handle_event(&ev(KeyCode::Char('/'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('3'), KeyModifiers::NONE));
+    let _ = e.handle_event(&ev(KeyCode::Char('/'), KeyModifiers::NONE));
     assert!(e.prompt.is_some());
     assert_eq!(e.handle_event(&ev(KeyCode::Char('s'), KeyModifiers::CONTROL)), Outcome::Ignored);
     assert_eq!(e.handle_event(&ev(KeyCode::Char('x'), KeyModifiers::ALT)), Outcome::Ignored);

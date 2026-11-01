@@ -1,11 +1,13 @@
 //! Text view of a trace: the span tree, with each Sentry error and log
-//! record shown under the span it happened in.
+//! record shown under the span it happened in. Every string from the server
+//! goes through `mallard_term::text::clean` (review 1.M1); times are UTC.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 
 use mallard_client::TraceOverview;
+use mallard_term::fmt::ms;
+use mallard_term::text::clean;
 
 pub fn render(t: &TraceOverview) -> String {
     let mut out = String::new();
@@ -16,9 +18,9 @@ pub fn render(t: &TraceOverview) -> String {
         (Some(s), Some(e)) => {
             let _ = writeln!(
                 out,
-                "  {}  {:.1} ms  {} spans  {} errors  {} logs\n",
+                "  {}  {}  {} spans  {} errors  {} logs\n",
                 s.format("%Y-%m-%d %H:%M:%S%.3f UTC"),
-                (e - s).num_microseconds().unwrap_or(0) as f64 / 1000.0,
+                ms((e - s).num_microseconds().unwrap_or(0) as f64 / 1000.0),
                 t.spans.len(),
                 t.errors.len(),
                 t.logs.len()
@@ -50,11 +52,12 @@ pub fn render(t: &TraceOverview) -> String {
         let mark = if s.status_code == mallard_client::odl_client::api::SpanStatus::Error { "✖" } else { "•" };
         let _ = writeln!(
             out,
-            "{pad}{mark} {}  {}  {:.1} ms  (+{offset:.1} ms)  {}",
+            "{pad}{mark} {}  {}  {}  (+{})  {}",
             clean(&s.service_name),
             clean(&s.name),
-            s.duration_ns as f64 / 1e6,
-            s.span_id
+            ms(s.duration_ns as f64 / 1e6),
+            ms(offset),
+            clean(&s.span_id)
         );
         for (k, e) in t.errors.iter().enumerate() {
             if e.span_id.as_deref() == Some(s.span_id.as_str()) {
@@ -63,8 +66,8 @@ pub fn render(t: &TraceOverview) -> String {
                     out,
                     "{pad}    ⚠ error  {}  (issue {}, event {})",
                     clean(&e.title),
-                    e.issue_id,
-                    e.event_id
+                    clean(&e.issue_id),
+                    clean(&e.event_id)
                 );
             }
         }
@@ -95,8 +98,8 @@ pub fn render(t: &TraceOverview) -> String {
                 e.timestamp.format("%H:%M:%S%.3f"),
                 clean(&e.title),
                 e.project_id,
-                e.issue_id,
-                e.event_id
+                clean(&e.issue_id),
+                clean(&e.event_id)
             );
         }
     }
@@ -123,23 +126,67 @@ pub fn render(t: &TraceOverview) -> String {
     out
 }
 
-/// Server text comes from instrumented apps: drop control characters so it
-/// cannot send escape sequences to the terminal.
-pub fn clean(s: &str) -> Cow<'_, str> {
-    if s.chars().any(char::is_control) {
-        Cow::Owned(s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect())
-    } else {
-        Cow::Borrowed(s)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::clean;
+    use super::*;
+    use mallard_client::odl_client::api::{LogRecord, Span, SpanKind, SpanStatus};
+
+    /// OSC 52, a screen clear, a C1 CSI, a newline and a bidi override.
+    const EVIL: &str = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\u{9b}31m\nd\u{202e}e";
+
+    fn span(id: &str, parent: Option<&str>) -> Span {
+        Span {
+            trace_id: "0af7651916cd43dd8448eb211c80319c".into(),
+            span_id: id.into(),
+            parent_span_id: parent.map(str::to_string),
+            name: EVIL.into(),
+            service_name: EVIL.into(),
+            kind: SpanKind::Server,
+            start_time: chrono::Utc::now(),
+            duration_ns: 1_500_000,
+            status_code: SpanStatus::Error,
+            status_message: EVIL.into(),
+            attributes: Default::default(),
+            resource_attributes: Default::default(),
+            events: vec![],
+            links: vec![],
+            trace_state: String::new(),
+            scope_name: String::new(),
+            scope_version: String::new(),
+        }
+    }
+
+    fn log(span_id: Option<&str>) -> LogRecord {
+        LogRecord {
+            time: chrono::Utc::now(),
+            observed_time: chrono::Utc::now(),
+            service_name: EVIL.into(),
+            severity_number: 9,
+            severity_text: EVIL.into(),
+            body: EVIL.into(),
+            trace_id: None,
+            span_id: span_id.map(str::to_string),
+            event_name: String::new(),
+            scope_name: String::new(),
+            attributes: Default::default(),
+            resource_attributes: Default::default(),
+        }
+    }
 
     #[test]
-    fn control_characters_are_removed() {
-        assert_eq!(clean("plain"), "plain");
-        assert_eq!(clean("a\x1b]52;c;ZXZpbA==\x07b\nc"), "a ]52;c;ZXZpbA== b c");
+    fn server_text_cannot_reach_the_terminal() {
+        let t = TraceOverview {
+            trace_id: mallard_client::TraceId::parse("0af7651916cd43dd8448eb211c80319c").unwrap(),
+            spans: vec![span("1", None), span(EVIL, Some("1"))],
+            errors: vec![],
+            logs: vec![log(Some("1")), log(None)],
+            logs_truncated: false,
+            warnings: vec![EVIL.into()],
+        };
+        let out = render(&t);
+        let bad: Vec<char> = out.chars().filter(|c| (c.is_control() && *c != '\n') || *c == '\u{202e}').collect();
+        assert!(bad.is_empty(), "{bad:?} in\n{out}");
+        assert!(out.contains("1.5ms"), "durations use the shared format: {out}");
+        assert_eq!(out.lines().filter(|l| l.contains("✖")).count(), 2, "one line per span: {out}");
     }
 }

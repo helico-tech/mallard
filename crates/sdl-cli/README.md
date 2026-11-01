@@ -17,11 +17,16 @@ export SDL_URL=http://localhost:8000 SDL_TOKEN=<SDL_API_TOKEN of the server>
 | `--token` | `SDL_TOKEN` | – | API token (the server's `SDL_API_TOKEN`) |
 | `-p, --project` | `SDL_PROJECT` | only project | project id or slug |
 | `--json` | | off | raw JSON output (for scripts) |
+| `--color` | `NO_COLOR` | `auto` | `auto`, `always` or `never` |
+
+Flags, output style, time zone (UTC) and TUI keys are the same as on the
+telemetry side; see [docs/cli.md](../../docs/cli.md) and ADR 0006.
 
 When the server has exactly one project, `-p` is optional.
 Text that comes from events (titles, messages, frames, tags, ...) or from
-the server is stripped of terminal control characters before it is printed,
-so an event can't send escape sequences to your terminal. `--json` output
+the server is cleaned before it is printed: control and bidi characters are
+shown as escapes (`\u{1b}`), so an event can't send escape sequences to
+your terminal. `--json` output
 keeps the data, with control and bidi characters escaped as `\uXXXX`.
 Output to a closed pipe (`sdl issues list | head`) ends quietly with exit 0.
 Errors are one line on stderr with exit code 1, e.g.
@@ -35,15 +40,15 @@ sdl info                                   server version, storage, queue depth
 sdl projects list
 sdl projects create <name> [--slug s] [--platform node]   prints the DSN
 sdl projects show <project>                               DSN first, then details
-sdl issues list [--status unresolved|resolved|ignored|all] [-q text] [--since 24h]
-                [--sort last_seen|first_seen|count|users] [--env e] [--release r] [--limit n]
-sdl issues show <id> [--since 24h]         details, releases, tag breakdown, activity
+sdl issues list [--status unresolved|resolved|ignored|all] [-q text] [-s 24h]
+                [--sort last_seen|first_seen|count|users] [--env e] [--release r] [-n limit]
+sdl issues show <id> [-s 24h]              details, releases, tag breakdown, activity
 sdl issues resolve|ignore|unresolve <id>...
-sdl events list [--issue id | --trace trace_id] [--limit n]
+sdl events list [--issue id | -t trace_id] [-n limit]
 sdl events show <event_id> [--issue id]    exception chain, frames (newest first,
                                            in-app highlighted with source context),
                                            breadcrumbs, tags, user, request
-sdl stats [--since 24h] [--interval 1h]    totals and events per bucket
+sdl stats [-s 24h] [--interval 1h]        totals and events per bucket
 sdl sourcemaps list                        uploaded artifact bundles
 sdl maintenance                            flush, compact and expire now
 sdl send-test --dsn <dsn> [--message m]    send a test error (Sentry envelope protocol)
@@ -96,29 +101,26 @@ short terminals.
 
 ### Keys
 
+The keys every tab shares (`?` lists them first) are in
+[docs/cli.md](../../docs/cli.md): move, `↵` open, `esc`/`q` back, `/`
+search, `t`/`T` time window, `r` refresh, `x` same trace on the other tab,
+`?` help, `ctrl-c` quit. Ctrl/alt + key is ignored (only plain keys run
+actions), except `ctrl-c` / `ctrl-q` quit and `ctrl-u` clears the search.
+
 | Where | Key | Action |
 |---|---|---|
-| everywhere | `↑ ↓` `j k`, `g G`, `PgUp PgDn` | move |
-| | ctrl/alt + key | ignored (only plain keys run actions), except `ctrl-c` / `ctrl-q` quit and `ctrl-u` clears the search |
-| | `R` | refresh now |
-| | `?` | help |
-| | `ctrl-c` | quit |
-| issue list | `⏎` | open issue |
-| | `tab` `← →` `1-4` | status tab (unresolved / resolved / ignored / all) |
-| | `/` | search title and culprit (`esc` clears) |
+| issue list | `tab` `← →` `1-4` | status tab (unresolved / resolved / ignored / all) |
 | | `s` | cycle sort (last seen, first seen, events, users) |
 | | `t` / `T` | cycle time window (1h, 24h, 7d, 14d, 30d) |
 | | `p` | switch project |
-| | `r` `i` `u` | resolve / ignore / unresolve |
-| | `q` | quit |
+| | `R` `I` `U` | resolve / ignore / unresolve |
 | issue detail | `tab` `← →` `1-5` | section |
 | | `[` `]` | older / newer event |
 | | `a` | only in-app frames |
 | | `w` | raw (unsymbolicated) frames, when the event has them |
-| | `t` | error events of the shown event's trace (all projects) |
+| | `x` | error events of the shown event's trace (`mallard tui`: the trace on the telemetry tab) |
 | | `⏎` (Events) | show that event |
-| | `r` `i` `u` | change status |
-| | `esc` `q` | back |
+| | `R` `I` `U` | change status |
 
 ## As a library
 
@@ -126,23 +128,23 @@ The crate is also a library (`sdl_cli`) so other programs can mount it:
 
 - `sdl_cli::Command` + `sdl_cli::run(cmd, &Ctx)`: the subcommands above.
   Global flags stay in the host; it builds
-  `Ctx::new(client).with_project(p).with_json(j).with_hints(h)`.
-  `Hints` names the host's command and env vars in messages
-  (default `Hints::SDL`: `sdl …`, `SDL_URL`, `SDL_TOKEN`, `SDL_PROJECT`).
-  Errors keep the `sdl_client::Error` as their source, so a host can
-  downcast them.
+  `Ctx::new(client).with_project(p).with_json(j).with_color(c).with_hints(h)`.
+  `Hints` (from `mallard-term`) names the host's command and env vars in
+  messages (default `sdl_cli::HINTS`: `sdl …`, `SDL_URL`, `SDL_TOKEN`,
+  `SDL_PROJECT`). Errors keep the `sdl_client::Error` as their source, so a
+  host can downcast them; end with `mallard_term::error::report`.
 - `sdl_cli::Embedded`: the TUI as a component without terminal setup:
   `new(client, project)` (optionally `.with_hints(h)`), `draw(frame, area)`
   (draws only inside `area`), `handle_event(&Event) -> Outcome`
-  (`Consumed`, `Ignored`, `Quit`, `OpenTrace(trace_id)`; `#[non_exhaustive]`),
-  `tick()` (call a few times per second; applies finished loads, never
-  blocks), `take_fatal()` and `show_trace_errors(trace_id)`.
+  (the shared `mallard_term::tui::Outcome`: `Consumed`, `Ignored`, `Quit`,
+  `Jump(trace_id)`), `tick()` (call a few times per second; applies finished
+  loads, never blocks), `take_fatal()` and `open_trace(trace_id)`.
   F1 and F2 and ctrl/alt keys (other than `ctrl-c`/`ctrl-q`, which return
   `Quit`) are `Ignored`.
   **Runtime requirement:** call `Embedded::new` inside a tokio runtime
   context (from async code, or under `Runtime::enter`); it panics otherwise.
   It keeps that runtime's handle and spawns loads on it, so `draw`,
-  `handle_event`, `tick` and `show_trace_errors` may then be called from any
+  `handle_event`, `tick` and `open_trace` may then be called from any
   thread. Dropping it cancels the loads still running.
   **Internal errors:** a panicking load is caught; `take_fatal()` returns
   its message once (check it after `tick`). The panic hook has already run,

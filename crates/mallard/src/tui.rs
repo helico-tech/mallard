@@ -8,89 +8,66 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures::StreamExt;
 use mallard_client::Client;
+use mallard_term::tui::{Outcome, theme};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-/// What a hosted tab asked for.
-enum Ask {
-    Nothing,
-    Quit,
-    /// Show this trace in the telemetry tab.
-    Trace(String),
-    /// Show this trace's Sentry errors in the errors tab.
-    Errors(String),
-}
-
-/// One library TUI, as the host sees it.
+/// One library TUI, as the host sees it. Both libraries return the shared
+/// [`Outcome`]; `Outcome::Jump(trace)` opens the trace on the other tab.
 trait Pane {
     fn title(&self) -> &'static str;
     fn draw(&mut self, f: &mut Frame, area: Rect);
-    fn handle(&mut self, ev: &Event) -> Option<Ask>; // None = ignored
+    fn handle(&mut self, ev: &Event) -> Outcome;
     fn tick(&mut self);
-    fn open(&mut self, trace_id: &str);
+    fn open_trace(&mut self, trace_id: &str);
     /// An internal error (a panicked background load) after `tick`.
     fn take_fatal(&mut self) -> Option<String> {
         None
     }
 }
 
-struct Errors(sdl_cli::Embedded);
-
-impl Pane for Errors {
+impl Pane for sdl_cli::Embedded {
     fn title(&self) -> &'static str {
         "Errors"
     }
     fn draw(&mut self, f: &mut Frame, area: Rect) {
-        self.0.draw(f, area)
+        sdl_cli::Embedded::draw(self, f, area)
     }
-    fn handle(&mut self, ev: &Event) -> Option<Ask> {
-        match self.0.handle_event(ev) {
-            sdl_cli::Outcome::Consumed => Some(Ask::Nothing),
-            sdl_cli::Outcome::Ignored => None,
-            sdl_cli::Outcome::Quit => Some(Ask::Quit),
-            sdl_cli::Outcome::OpenTrace(t) => Some(Ask::Trace(t)),
-            _ => Some(Ask::Nothing),
-        }
+    fn handle(&mut self, ev: &Event) -> Outcome {
+        self.handle_event(ev)
     }
     fn tick(&mut self) {
-        self.0.tick()
+        sdl_cli::Embedded::tick(self)
     }
-    fn open(&mut self, trace_id: &str) {
-        self.0.show_trace_errors(trace_id)
+    fn open_trace(&mut self, trace_id: &str) {
+        sdl_cli::Embedded::open_trace(self, trace_id)
     }
     fn take_fatal(&mut self) -> Option<String> {
-        self.0.take_fatal()
+        sdl_cli::Embedded::take_fatal(self)
     }
 }
 
-struct Telemetry(odl_cli::tui::Embedded);
-
-impl Pane for Telemetry {
+impl Pane for odl_cli::Embedded {
     fn title(&self) -> &'static str {
         "Telemetry"
     }
     fn draw(&mut self, f: &mut Frame, area: Rect) {
-        self.0.draw(f, area)
+        odl_cli::Embedded::draw(self, f, area)
     }
-    fn handle(&mut self, ev: &Event) -> Option<Ask> {
-        use odl_cli::tui::Outcome;
-        match self.0.handle_event(ev) {
-            Outcome::Consumed => Some(Ask::Nothing),
-            Outcome::Ignored => None,
-            Outcome::Quit => Some(Ask::Quit),
-            Outcome::OpenErrors(t) => Some(Ask::Errors(t)),
-        }
+    fn handle(&mut self, ev: &Event) -> Outcome {
+        self.handle_event(ev)
     }
     fn tick(&mut self) {
-        self.0.tick()
+        odl_cli::Embedded::tick(self)
     }
-    fn open(&mut self, trace_id: &str) {
-        self.0.open_trace(trace_id);
+    fn open_trace(&mut self, trace_id: &str) {
+        // An invalid id is shown in the tab itself.
+        let _ = odl_cli::Embedded::open_trace(self, trace_id);
     }
 }
 
@@ -106,18 +83,18 @@ const TELEMETRY: usize = 1;
 impl Host {
     fn draw(&mut self, f: &mut Frame) {
         let [bar, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(f.area());
-        let mut spans = vec![Span::styled(" mallard ", Style::new().fg(Color::Black).bg(Color::Indexed(141)))];
+        let mut spans = vec![Span::styled(" mallard ", theme::tab_active())];
         for (i, t) in self.tabs.iter().enumerate() {
             let label = format!(" F{} {} ", i + 1, t.title());
             let style = if i == self.active {
                 Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
-                Style::new().fg(Color::DarkGray)
+                theme::tab_inactive()
             };
             spans.push(Span::raw(" "));
             spans.push(Span::styled(label, style));
         }
-        spans.push(Span::styled(format!("   {}", self.base_url), Style::new().fg(Color::DarkGray)));
+        spans.push(Span::styled(format!("   {}", mallard_term::text::clean(&self.base_url)), theme::faint()));
         f.render_widget(Paragraph::new(Line::from(spans)), bar);
         self.tabs[self.active].draw(f, body);
     }
@@ -133,10 +110,13 @@ impl Host {
             return true;
         }
         match self.tabs[self.active].handle(ev) {
-            None | Some(Ask::Nothing) => true,
-            Some(Ask::Quit) => false,
-            Some(Ask::Trace(t)) => self.jump(TELEMETRY, &t),
-            Some(Ask::Errors(t)) => self.jump(ERRORS, &t),
+            Outcome::Consumed | Outcome::Ignored => true,
+            Outcome::Quit => false,
+            Outcome::Jump(t) => {
+                // Two tabs: a jump always goes to the other one.
+                let other = if self.active == ERRORS { TELEMETRY } else { ERRORS };
+                self.jump(other, &t)
+            }
         }
     }
 
@@ -154,7 +134,7 @@ impl Host {
 
     fn jump(&mut self, tab: usize, trace_id: &str) -> bool {
         if let Some(p) = self.tabs.get_mut(tab) {
-            p.open(trace_id);
+            p.open_trace(trace_id);
             self.active = tab;
         }
         true
@@ -163,8 +143,8 @@ impl Host {
 
 /// The otel TUI, with its "e: errors of this trace" jump enabled: the
 /// errors tab can answer it.
-fn telemetry_pane(client: &Client) -> odl_cli::tui::Embedded {
-    let mut pane = odl_cli::tui::Embedded::new(client.otel.clone());
+fn telemetry_pane(client: &Client) -> odl_cli::Embedded {
+    let mut pane = odl_cli::Embedded::new(client.otel.clone());
     pane.set_errors_enabled(true);
     pane
 }
@@ -173,8 +153,8 @@ pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
     // Fail fast with a clear message instead of an empty screen.
     client.sentry.info().await.map_err(|e| anyhow::anyhow!("cannot reach {}: {e}", client.base_url()))?;
     let tabs: Vec<Box<dyn Pane>> = vec![
-        Box::new(Errors(sdl_cli::Embedded::new(client.sentry.clone(), project).with_hints(crate::ERRORS_HINTS))),
-        Box::new(Telemetry(telemetry_pane(client))),
+        Box::new(sdl_cli::Embedded::new(client.sentry.clone(), project).with_hints(crate::ERRORS_HINTS)),
+        Box::new(telemetry_pane(client)),
     ];
     let mut host = Host { tabs, active: ERRORS, base_url: client.base_url().to_string() };
 
@@ -209,7 +189,7 @@ mod tests {
     struct Fake {
         opened: Vec<String>,
         title: &'static str,
-        ask_on_x: fn() -> Ask,
+        ask_on_x: fn() -> Outcome,
         fatal: Option<String>,
     }
     impl Pane for Fake {
@@ -219,15 +199,15 @@ mod tests {
         fn draw(&mut self, f: &mut Frame, area: Rect) {
             f.render_widget(Paragraph::new(format!("{} body", self.title)), area)
         }
-        fn handle(&mut self, ev: &Event) -> Option<Ask> {
+        fn handle(&mut self, ev: &Event) -> Outcome {
             match ev {
-                Event::Key(k) if k.code == KeyCode::Char('x') => Some((self.ask_on_x)()),
-                Event::Key(k) if k.code == KeyCode::Char('q') => Some(Ask::Quit),
-                _ => None,
+                Event::Key(k) if k.code == KeyCode::Char('x') => (self.ask_on_x)(),
+                Event::Key(k) if k.code == KeyCode::Char('q') => Outcome::Quit,
+                _ => Outcome::Ignored,
             }
         }
         fn tick(&mut self) {}
-        fn open(&mut self, trace_id: &str) {
+        fn open_trace(&mut self, trace_id: &str) {
             self.opened.push(trace_id.into())
         }
         fn take_fatal(&mut self) -> Option<String> {
@@ -242,11 +222,16 @@ mod tests {
     fn host() -> Host {
         Host {
             tabs: vec![
-                Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Trace("t1".into()), fatal: None }),
+                Box::new(Fake {
+                    opened: vec![],
+                    title: "Errors",
+                    ask_on_x: || Outcome::Jump("t1".into()),
+                    fatal: None,
+                }),
                 Box::new(Fake {
                     opened: vec![],
                     title: "Telemetry",
-                    ask_on_x: || Ask::Errors("t2".into()),
+                    ask_on_x: || Outcome::Jump("t2".into()),
                     fatal: None,
                 }),
             ],
@@ -286,8 +271,12 @@ mod tests {
     fn an_internal_error_in_a_tab_ends_the_tui() {
         let mut h = host();
         assert!(h.tick().is_ok());
-        h.tabs[ERRORS] =
-            Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Nothing, fatal: Some("boom".into()) });
+        h.tabs[ERRORS] = Box::new(Fake {
+            opened: vec![],
+            title: "Errors",
+            ask_on_x: || Outcome::Consumed,
+            fatal: Some("boom".into()),
+        });
         let err = h.tick().unwrap_err().to_string();
         assert_eq!(err, "internal error in the Errors tab: boom");
     }
@@ -296,10 +285,7 @@ mod tests {
     async fn library_panes_draw_inside_their_area() {
         let c = Client::new("http://127.0.0.1:9", None).unwrap();
         let mut h = Host {
-            tabs: vec![
-                Box::new(Errors(sdl_cli::Embedded::new(c.sentry.clone(), None))),
-                Box::new(Telemetry(telemetry_pane(&c))),
-            ],
+            tabs: vec![Box::new(sdl_cli::Embedded::new(c.sentry.clone(), None)), Box::new(telemetry_pane(&c))],
             active: ERRORS,
             base_url: c.base_url().into(),
         };
@@ -309,6 +295,30 @@ mod tests {
             h.active = tab;
             let s = screen(&mut h);
             assert!(s.starts_with(" mallard "), "top bar stays on tab {tab}: {s:?}");
+        }
+    }
+
+    /// Review 2.O: one key map. `?` on either tab lists the same shared
+    /// keys, both tabs use the one theme, and the bar stays on top.
+    #[tokio::test]
+    async fn help_on_both_tabs_lists_the_same_shared_keys() {
+        let c = Client::new("http://127.0.0.1:9", None).unwrap();
+        let mut h = Host {
+            tabs: vec![Box::new(sdl_cli::Embedded::new(c.sentry.clone(), None)), Box::new(telemetry_pane(&c))],
+            active: ERRORS,
+            base_url: c.base_url().into(),
+        };
+        for tab in [KeyCode::F(1), KeyCode::F(2)] {
+            h.on_event(&key(tab));
+            h.on_event(&key(KeyCode::Char('?')));
+            let mut t = Terminal::new(TestBackend::new(140, 50)).unwrap();
+            t.draw(|f| h.draw(f)).unwrap();
+            let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+            for (_, what) in mallard_term::tui::keys::SHARED {
+                assert!(s.contains(what), "{tab:?}: missing {what:?}");
+            }
+            assert!(s.contains("All times are UTC."), "{tab:?}");
+            h.on_event(&key(KeyCode::Esc));
         }
     }
 }

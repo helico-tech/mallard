@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
+use mallard_term::tui::keys;
 use odl_client::api::*;
 use ratatui::{
     Frame,
@@ -243,12 +244,12 @@ impl Embedded {
                     d.scroll = d.scroll.saturating_sub(10);
                     return Some(Outcome::Consumed);
                 }
-                KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Left => {
+                KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('h' | 'q') | KeyCode::Left => {
                     self.traces.detail = None;
                     self.traces.refreshed = None;
                     return Some(Outcome::Consumed);
                 }
-                KeyCode::Char('e') => return Some(Outcome::OpenErrors(d.trace_id.clone())),
+                KeyCode::Char(keys::JUMP) => return Some(Outcome::Jump(d.trace_id.clone())),
                 KeyCode::Char('l') => {
                     let id = d.trace_id.clone();
                     self.logs_for_trace(&id);
@@ -271,7 +272,7 @@ impl Embedded {
         }
         let selected = t.sel.selected().and_then(|i| t.list.get(i)).map(|x| x.trace_id.clone());
         match k.code {
-            KeyCode::Char('/' | 'f') => {
+            KeyCode::Char(keys::SEARCH | 'f') => {
                 let v = t.filter.to_query();
                 self.start_prompt(
                     PromptTarget::TraceFilter,
@@ -299,7 +300,7 @@ impl Embedded {
                 self.open_trace_detail(selected?);
                 Some(Outcome::Consumed)
             }
-            KeyCode::Char('e') => selected.map(Outcome::OpenErrors),
+            KeyCode::Char(keys::JUMP) => selected.map(Outcome::Jump),
             KeyCode::Char('l') => {
                 self.logs_for_trace(&selected?);
                 Some(Outcome::Consumed)
@@ -323,13 +324,13 @@ impl Embedded {
         let filter_line = Line::from(vec![
             TSpan::styled(" ⌕ ", theme::accent()),
             if q.is_empty() {
-                TSpan::styled("all traces · press / to filter", theme::muted())
+                TSpan::styled("all traces · press / to filter", theme::faint())
             } else {
                 TSpan::styled(q, theme::bold())
             },
         ]);
         let block =
-            widgets::panel_with("Traces", Line::from(format!(" {} newest ", t.list.len())).style(theme::muted()), true);
+            widgets::panel_with("Traces", Line::from(format!(" {} newest ", t.list.len())).style(theme::faint()), true);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let [fl, table_area] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
@@ -345,9 +346,9 @@ impl Embedded {
                 };
                 let frac = tr.duration_ms / max_dur;
                 let filled = ((frac * 10.0).round() as usize).clamp(1, 10);
-                let bar_color = if tr.error_count > 0 { theme::ERR } else { theme::ACCENT };
+                let bar_color = if tr.error_count > 0 { theme::RED } else { theme::ACCENT };
                 TRow::new(vec![
-                    Cell::from(widgets::local(tr.start_time, if long { "%m-%d %H:%M:%S" } else { "%H:%M:%S%.3f" }))
+                    Cell::from(widgets::utc(tr.start_time, if long { "%m-%d %H:%M:%S" } else { "%H:%M:%S%.3f" }))
                         .style(theme::dim()),
                     Cell::from(Line::from(vec![
                         TSpan::styled("● ", Style::new().fg(theme::service_color(&svc))),
@@ -357,15 +358,15 @@ impl Embedded {
                     Cell::from(Line::from(ms(tr.duration_ms)).right_aligned()).style(theme::text()),
                     Cell::from(Line::from(vec![
                         TSpan::styled("▬".repeat(filled), Style::new().fg(bar_color)),
-                        TSpan::styled("─".repeat(10 - filled), theme::muted()),
+                        TSpan::styled("─".repeat(10 - filled), theme::faint()),
                     ])),
                     Cell::from(Line::from(compact(tr.span_count as f64)).right_aligned()).style(theme::dim()),
                     if tr.error_count > 0 {
                         Cell::from(Line::from(format!("✗ {}", tr.error_count)).right_aligned()).style(theme::error())
                     } else {
-                        Cell::from(Line::from("·").right_aligned()).style(theme::muted())
+                        Cell::from(Line::from("·").right_aligned()).style(theme::faint())
                     },
-                    Cell::from(tr.services.join(" ")).style(theme::muted()),
+                    Cell::from(tr.services.join(" ")).style(theme::faint()),
                 ])
             })
             .collect();
@@ -399,8 +400,8 @@ impl Embedded {
         if empty {
             let (msg, style) = match &t.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None if t.refreshed.is_some() => ("no matching traces in this window".into(), theme::muted()),
-                None => ("loading…".into(), theme::muted()),
+                None if t.refreshed.is_some() => ("no matching traces in this window".into(), theme::faint()),
+                None => ("loading…".into(), theme::faint()),
             };
             widgets::placeholder(f, table_area, &msg, style);
         }
@@ -422,7 +423,7 @@ impl Embedded {
             f.render_widget(block, area);
             let (msg, style) = match &d.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None => ("loading trace…".to_string(), theme::muted()),
+                None => ("loading trace…".to_string(), theme::faint()),
             };
             widgets::placeholder(f, inner, &msg, style);
             return;
@@ -471,7 +472,7 @@ impl Embedded {
             }
             r.push_str(&bar.into_iter().collect::<String>());
         }
-        f.render_widget(TSpan::styled(format!(" {r}"), theme::muted()), ruler);
+        f.render_widget(TSpan::styled(format!(" {r}"), theme::faint()), ruler);
         // Build items only for what fits: traces can have thousands of spans.
         let sel = d.sel.selected();
         let (shown, sel) = widgets::visible(d.sel.offset_mut(), sel, d.rows.len(), list_area.height);
@@ -481,7 +482,7 @@ impl Embedded {
                 let s = &trace.spans[row.span];
                 let is_err = s.status_code == SpanStatus::Error;
                 let svc_color = theme::service_color(&s.service_name);
-                let mut label: Vec<TSpan> = vec![TSpan::styled(row.prefix.clone(), theme::muted())];
+                let mut label: Vec<TSpan> = vec![TSpan::styled(row.prefix.clone(), theme::faint())];
                 let used = widgets::width(&row.prefix);
                 let svc = widgets::trunc(&s.service_name, 14.min(label_w.saturating_sub(used + 2)).max(1));
                 let rest = label_w.saturating_sub(used + widgets::width(&svc) + 1);
@@ -495,7 +496,7 @@ impl Embedded {
                 ));
                 label.push(TSpan::raw(" ".repeat(pad + 1)));
                 let (start, len) = waterfall::bar(row.offset_ns, row.duration_ns, d.total_ns, bar_w as u16);
-                let bar_color = if is_err { theme::ERR } else { svc_color };
+                let bar_color = if is_err { theme::RED } else { svc_color };
                 label.push(TSpan::raw(" ".repeat(start as usize)));
                 label.push(TSpan::styled("█".repeat(len as usize), Style::new().fg(bar_color)));
                 label.push(TSpan::raw(" ".repeat(bar_w.saturating_sub((start + len) as usize))));
@@ -518,9 +519,9 @@ impl Embedded {
 
 fn section(title: &str) -> Line<'static> {
     Line::from(vec![
-        TSpan::styled("── ", theme::muted()),
+        TSpan::styled("── ", theme::faint()),
         TSpan::styled(title.to_string(), theme::dim().add_modifier(Modifier::BOLD)),
-        TSpan::styled(" ──────────────────────────", theme::muted()),
+        TSpan::styled(" ──────────────────────────", theme::faint()),
     ])
 }
 
@@ -535,9 +536,9 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
     let trace_start = d.trace.as_ref().and_then(|t| t.spans.iter().map(|s| s.start_time).min()).unwrap_or(s.start_time);
     let offset = (s.start_time - trace_start).num_nanoseconds().unwrap_or(0) as f64 / 1e6;
     let sc = match s.status_code {
-        SpanStatus::Error => theme::ERR,
-        SpanStatus::Ok => theme::OK,
-        SpanStatus::Unset => theme::MUTED,
+        SpanStatus::Error => theme::RED,
+        SpanStatus::Ok => theme::GREEN,
+        SpanStatus::Unset => theme::FAINT,
     };
     let status = s.status_code.as_str();
     let mut out = vec![
@@ -545,7 +546,7 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
             TSpan::styled(format!(" {status} "), theme::badge(sc)),
             TSpan::raw(" "),
             TSpan::styled(format!("● {}", s.service_name), Style::new().fg(theme::service_color(&s.service_name))),
-            TSpan::styled(format!("  {}", s.kind.as_str().to_lowercase()), theme::muted()),
+            TSpan::styled(format!("  {}", s.kind.as_str().to_lowercase()), theme::faint()),
         ]),
         Line::from(vec![
             TSpan::styled("  duration ", theme::dim()),
@@ -560,7 +561,7 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
     if let Some(p) = &s.parent_span_id {
         out.push(kv_line("parent", p));
     }
-    out.push(kv_line("start ", &widgets::local(s.start_time, "%Y-%m-%d %H:%M:%S%.6f")));
+    out.push(kv_line("start ", &widgets::utc(s.start_time, "%Y-%m-%d %H:%M:%S%.6f")));
     if !s.scope_name.is_empty() {
         out.push(kv_line("scope ", &format!("{} {}", s.scope_name, s.scope_version)));
     }
@@ -612,7 +613,7 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
         for l in span_logs {
             let (lbl, c) = theme::severity(l.severity_number, &l.severity_text);
             out.push(Line::from(vec![
-                TSpan::styled(format!("  {} ", widgets::local(l.time, "%H:%M:%S%.3f")), theme::dim()),
+                TSpan::styled(format!("  {} ", widgets::utc(l.time, "%H:%M:%S%.3f")), theme::dim()),
                 TSpan::styled(format!("{lbl:<5} "), Style::new().fg(c)),
                 TSpan::styled(l.body.clone(), theme::text()),
             ]));

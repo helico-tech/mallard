@@ -113,7 +113,7 @@ pub(crate) async fn send(dsn_str: &str, message: &str) -> Result<(Dsn, String)> 
     let id = serde_json::from_str::<Value>(&text)
         .ok()
         .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
-        .map(|id| crate::fmt::clean(&id))
+        .map(|id| crate::fmt::clean(&id).into_owned())
         .unwrap_or(event_id);
     Ok((dsn, id))
 }

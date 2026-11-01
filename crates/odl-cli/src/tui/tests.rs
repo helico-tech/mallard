@@ -260,17 +260,17 @@ fn overview_renders() {
 #[test]
 fn traces_render_and_waterfall() {
     let mut e = fixture();
-    e.handle_event(&ch('2'));
+    let _ = e.handle_event(&ch('2'));
     assert_eq!(e.view, View::Traces);
     all_sizes(&mut e);
     let s = render(&mut e, 160, 40);
     for needle in ["Traces", "POST /checkout", "123.4ms", "✗ 2", "frontend payment"] {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
-    // 'e' asks the host for errors of the selected trace
-    assert_eq!(e.handle_event(&ch('e')), Outcome::OpenErrors(TID.into()));
+    // 'x' asks the host for errors of the selected trace
+    assert_eq!(e.handle_event(&ch('x')), Outcome::Jump(TID.into()));
     // open the waterfall
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     assert!(e.traces.detail.is_some());
     let s = render(&mut e, 160, 40);
     assert!(s.contains("loading trace"), "{s}");
@@ -290,48 +290,48 @@ fn traces_render_and_waterfall() {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
     // select the failing span: details show the exception
-    e.handle_event(&ch('G'));
+    let _ = e.handle_event(&ch('G'));
     let s = render(&mut e, 160, 40);
     assert!(s.contains("PaymentDeclinedError"), "{s}");
     assert!(s.contains("at charge (pay.go:42)"), "{s}");
-    assert_eq!(e.handle_event(&ch('e')), Outcome::OpenErrors(TID.into()));
+    assert_eq!(e.handle_event(&ch('x')), Outcome::Jump(TID.into()));
     // l -> logs of this trace
-    e.handle_event(&ch('l'));
+    let _ = e.handle_event(&ch('l'));
     assert_eq!(e.view, View::Logs);
     assert_eq!(e.logs.filter.trace.as_deref(), Some(TID));
     // back to the trace, esc returns to the list
-    e.handle_event(&ch('2'));
-    e.handle_event(&key(KeyCode::Esc));
+    let _ = e.handle_event(&ch('2'));
+    let _ = e.handle_event(&key(KeyCode::Esc));
     assert!(e.traces.detail.is_none());
 }
 
 #[test]
 fn trace_filter_prompt() {
     let mut e = fixture();
-    e.handle_event(&ch('2'));
-    e.handle_event(&ch('/'));
+    let _ = e.handle_event(&ch('2'));
+    let _ = e.handle_event(&ch('/'));
     assert!(e.prompt.is_some());
     let s = render(&mut e, 120, 30);
     assert!(s.contains("filter traces"), "{s}");
     for c in "service=payment errors".chars() {
-        e.handle_event(&ch(c));
+        let _ = e.handle_event(&ch(c));
     }
     // keys go to the prompt, not to global shortcuts
     assert_eq!(e.view, View::Traces);
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     assert!(e.prompt.is_none());
     assert_eq!(e.traces.filter.service.as_deref(), Some("payment"));
     assert!(e.traces.filter.errors_only);
     // invalid filter flashes an error and keeps the old one
-    e.handle_event(&ch('/'));
-    e.handle_event(&key(KeyCode::Char('u')).with_ctrl());
+    let _ = e.handle_event(&ch('/'));
+    let _ = e.handle_event(&key(KeyCode::Char('u')).with_ctrl());
     for c in "bogus".chars() {
-        e.handle_event(&ch(c));
+        let _ = e.handle_event(&ch(c));
     }
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     assert!(e.flash.as_ref().is_some_and(|f| f.1));
     assert_eq!(e.traces.filter.service.as_deref(), Some("payment"));
-    e.handle_event(&ch('E'));
+    let _ = e.handle_event(&ch('E'));
     assert!(!e.traces.filter.errors_only);
 }
 
@@ -353,7 +353,7 @@ impl Ctrl for Event {
 #[test]
 fn logs_render_and_keys() {
     let mut e = fixture();
-    e.handle_event(&ch('3'));
+    let _ = e.handle_event(&ch('3'));
     all_sizes(&mut e);
     let s = render(&mut e, 160, 40);
     for needle in ["Volume", "error", "Logs", "following", "payment declined: card expired", "WARN", "ERROR", "◆"] {
@@ -372,15 +372,15 @@ fn logs_render_and_keys() {
     assert!(render(&mut e, 160, 40).contains("older records skipped"));
     assert_eq!(e.logs.sel.selected(), Some(5));
     // pause
-    e.handle_event(&ch(' '));
+    let _ = e.handle_event(&ch(' '));
     assert!(!e.logs.follow);
     // details popup (up past the new record and the gap marker)
-    e.handle_event(&ch('k'));
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&ch('k'));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     assert!(e.logs.detail.is_none(), "no details for the gap marker");
-    e.handle_event(&ch('k'));
-    e.handle_event(&ch('k'));
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&ch('k'));
+    let _ = e.handle_event(&ch('k'));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     let s = render(&mut e, 160, 40);
     assert!(s.contains("Log record"), "{s}");
     assert!(s.contains("order.id"), "{s}");
@@ -388,12 +388,12 @@ fn logs_render_and_keys() {
     assert_eq!(e.handle_event(&ch('q')), Outcome::Consumed);
     assert!(e.logs.detail.is_none());
     // o on a record with a trace opens the trace
-    e.handle_event(&ch('o'));
+    let _ = e.handle_event(&ch('o'));
     assert_eq!(e.view, View::Traces);
     assert_eq!(e.traces.detail.as_ref().map(|d| d.trace_id.as_str()), Some(TID));
     // severity cycle rewrites the filter
-    e.handle_event(&ch('3'));
-    e.handle_event(&ch('s'));
+    let _ = e.handle_event(&ch('3'));
+    let _ = e.handle_event(&ch('s'));
     assert_eq!(e.logs.filter.level, Some(9));
     assert!(e.logs.records.is_empty(), "filter change reloads");
 }
@@ -401,13 +401,13 @@ fn logs_render_and_keys() {
 #[test]
 fn metrics_render_and_chart() {
     let mut e = fixture();
-    e.handle_event(&ch('4'));
+    let _ = e.handle_event(&ch('4'));
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);
     for needle in ["Metrics", "app.request.duration", "histogram", "18"] {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     let c: &ChartState = e.metrics.chart.as_ref().unwrap();
     assert_eq!(c.aggs[c.agg], "p95");
     let now = Utc::now();
@@ -429,36 +429,36 @@ fn metrics_render_and_chart() {
     for needle in ["app.request.duration · histogram · s", "p95", "checkout", "last", "390.0ms"] {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
-    e.handle_event(&ch('a'));
+    let _ = e.handle_event(&ch('a'));
     let c = e.metrics.chart.as_ref().unwrap();
     assert_eq!(c.aggs[c.agg], "p50");
-    e.handle_event(&ch('b'));
+    let _ = e.handle_event(&ch('b'));
     for ch_ in "http.route".chars() {
-        e.handle_event(&ch(ch_));
+        let _ = e.handle_event(&ch(ch_));
     }
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     assert_eq!(e.metrics.chart.as_ref().unwrap().group_by, "http.route");
-    e.handle_event(&key(KeyCode::Esc));
+    let _ = e.handle_event(&key(KeyCode::Esc));
     assert!(e.metrics.chart.is_none());
     // live search
-    e.handle_event(&ch('/'));
+    let _ = e.handle_event(&ch('/'));
     for ch_ in "zzz".chars() {
-        e.handle_event(&ch(ch_));
+        let _ = e.handle_event(&ch(ch_));
     }
     assert!(e.metrics.visible().is_empty());
-    e.handle_event(&key(KeyCode::Esc));
-    e.handle_event(&key(KeyCode::Esc));
+    let _ = e.handle_event(&key(KeyCode::Esc));
+    let _ = e.handle_event(&key(KeyCode::Esc));
     assert_eq!(e.metrics.visible().len(), 1);
 }
 
 #[test]
 fn status_renders() {
     let mut e = fixture();
-    e.handle_event(&ch('5'));
+    let _ = e.handle_event(&ch('5'));
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);
     for needle in
-        ["Ingest", "Storage", "traces", "1234", "buffer", "duckdb", "spans", "100.0k", "compaction", "merged 12 files"]
+        ["Ingest", "Storage", "traces", "1.2k", "buffer", "duckdb", "spans", "100k", "compaction", "merged 12 files"]
     {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
@@ -483,15 +483,15 @@ fn global_keys() {
     assert_eq!(e.handle_event(&key(KeyCode::BackTab)), Outcome::Consumed);
     assert_eq!(e.view, View::Overview);
     let before = e.since().to_string();
-    e.handle_event(&ch('t'));
+    let _ = e.handle_event(&ch('t'));
     assert_ne!(e.since(), before);
-    e.handle_event(&ch('T'));
+    let _ = e.handle_event(&ch('T'));
     assert_eq!(e.since(), before);
-    e.handle_event(&ch('?'));
+    let _ = e.handle_event(&ch('?'));
     assert!(e.help);
     let s = render(&mut e, 120, 40);
     assert!(s.contains("Keys"), "{s}");
-    e.handle_event(&ch('x'));
+    let _ = e.handle_event(&ch('x'));
     assert!(!e.help);
     assert_eq!(e.handle_event(&ch('q')), Outcome::Quit);
     assert_eq!(e.handle_event(&key(KeyCode::Char('c')).with_ctrl()), Outcome::Quit);
@@ -542,46 +542,46 @@ async fn live_snapshot() {
     let url = std::env::var("ODL_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m").unwrap();
     for (k, name) in [('1', "overview"), ('2', "traces"), ('3', "logs"), ('4', "metrics"), ('5', "status")] {
-        e.handle_event(&ch(k));
+        let _ = e.handle_event(&ch(k));
         settle(&mut e).await;
         println!("===== {name} =====\n{}", render(&mut e, 150, 42));
     }
     // waterfall of the newest error trace
-    e.handle_event(&ch('2'));
-    e.handle_event(&ch('E'));
+    let _ = e.handle_event(&ch('2'));
+    let _ = e.handle_event(&ch('E'));
     settle(&mut e).await;
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     settle(&mut e).await;
-    e.handle_event(&ch('j'));
+    let _ = e.handle_event(&ch('j'));
     println!("===== trace waterfall =====\n{}", render(&mut e, 150, 42));
-    e.handle_event(&ch('G'));
+    let _ = e.handle_event(&ch('G'));
     println!("===== deepest span =====\n{}", render(&mut e, 150, 42));
     // metric chart grouped by service
-    e.handle_event(&ch('4'));
-    e.handle_event(&ch('/'));
+    let _ = e.handle_event(&ch('4'));
+    let _ = e.handle_event(&ch('/'));
     for c in "duration".chars() {
-        e.handle_event(&ch(c));
+        let _ = e.handle_event(&ch(c));
     }
-    e.handle_event(&key(KeyCode::Enter));
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     settle(&mut e).await;
-    e.handle_event(&ch('b'));
+    let _ = e.handle_event(&ch('b'));
     for c in "service.name".chars() {
-        e.handle_event(&ch(c));
+        let _ = e.handle_event(&ch(c));
     }
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     settle(&mut e).await;
     println!("===== metric chart =====\n{}", render(&mut e, 150, 42));
     // logs: errors only, then a record's details
-    e.handle_event(&ch('3'));
+    let _ = e.handle_event(&ch('3'));
     for _ in 0..3 {
-        e.handle_event(&ch('s'));
+        let _ = e.handle_event(&ch('s'));
     }
     settle(&mut e).await;
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     println!("===== error logs + detail =====\n{}", render(&mut e, 150, 42));
-    e.handle_event(&key(KeyCode::Esc));
-    e.handle_event(&ch('1'));
+    let _ = e.handle_event(&key(KeyCode::Esc));
+    let _ = e.handle_event(&ch('1'));
     println!("===== overview 80x24 =====\n{}", render(&mut e, 80, 24));
 }
 
@@ -590,7 +590,7 @@ async fn live_snapshot() {
 #[test]
 fn long_lists_scroll() {
     let mut e = fixture();
-    e.handle_event(&ch('3'));
+    let _ = e.handle_event(&ch('3'));
     let many: Vec<LogRecord> = (0..5000).map(|i| log(i, 9, &format!("record-{i:04}"), None)).collect();
     e.logs_tail_loaded(many, false);
     e.logs.sel.select(Some(e.logs.records.len() - 1));
@@ -602,7 +602,7 @@ fn long_lists_scroll() {
     // Waterfall: the selected span is drawn when scrolled.
     let spans: Vec<odl_client::api::Span> =
         (0..3000).map(|i| crate::waterfall::tests::span(&format!("{i:016}"), None, i, 1)).collect();
-    e.handle_event(&ch('2'));
+    let _ = e.handle_event(&ch('2'));
     e.traces.detail = Some(crate::tui::views::traces::Detail::new(TID.into(), None));
     e.traces.detail.as_mut().unwrap().requested = true;
     e.traces.set_trace(Trace { trace_id: TID.into(), spans });
@@ -633,7 +633,7 @@ fn time_windows() {
 #[test]
 fn empty_operations_are_not_loading() {
     let mut e = fixture();
-    e.handle_event(&key(KeyCode::Enter));
+    let _ = e.handle_event(&key(KeyCode::Enter));
     assert!(e.overview.ops.is_some());
     assert!(render(&mut e, 120, 40).contains("loading operations"));
     e.overview.set_operations(vec![]);
@@ -649,4 +649,34 @@ fn nav_on_empty_and_short_lists() {
     assert_eq!(nav(2, 3, &k(KeyCode::Down), 10), Some(2));
     assert_eq!(nav(2, 3, &k(KeyCode::PageUp), 10), Some(0));
     assert_eq!(nav(0, 3, &k(KeyCode::Char('G')), 0), Some(2));
+}
+
+/// Review 2.O: the keys both tabs share mean the same here as on the
+/// errors tab. `x` jumps, `e` no longer does; `w` is no longer a second
+/// window key (it is "raw frames" on the errors tab); `q` leaves a
+/// drill-down instead of quitting; help lists the shared keys.
+#[test]
+fn shared_keys_mean_the_same_as_on_the_errors_tab() {
+    let mut e = fixture();
+    e.set_errors_enabled(true);
+    let _ = e.handle_event(&ch('2'));
+    assert_eq!(e.handle_event(&ch('e')), Outcome::Ignored);
+    assert_eq!(e.handle_event(&ch('x')), Outcome::Jump(TID.into()));
+    let since = e.since().to_string();
+    assert_eq!(e.handle_event(&ch('w')), Outcome::Ignored);
+    assert_eq!(e.since(), since);
+    let _ = e.handle_event(&ch('t'));
+    assert_ne!(e.since(), since, "t is the time window");
+    let _ = e.handle_event(&key(KeyCode::Enter));
+    assert!(e.traces.detail.is_some());
+    assert_eq!(e.handle_event(&ch('q')), Outcome::Consumed, "q goes back from the waterfall");
+    assert!(e.traces.detail.is_none());
+    assert_eq!(e.handle_event(&ch('q')), Outcome::Quit, "q quits on the first screen");
+
+    let _ = e.handle_event(&ch('?'));
+    let s = render(&mut e, 140, 50);
+    for (_, what) in mallard_term::tui::keys::SHARED {
+        assert!(s.contains(what), "missing {what:?} in\n{s}");
+    }
+    assert!(s.contains("All times are UTC."), "{s}");
 }

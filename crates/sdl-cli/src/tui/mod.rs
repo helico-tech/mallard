@@ -11,10 +11,11 @@ mod fixtures;
 mod theme;
 mod ui;
 
-use crate::cli::{Hints, describe};
+use crate::cli::describe;
 use app::{App, FetchError, Kind, Req, Resp};
 use crossterm::event::{Event, KeyEventKind};
 use futures::FutureExt;
+use mallard_term::error::Hints;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use sdl_client::Client;
@@ -27,20 +28,9 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-/// What the host should do after [`Embedded::handle_event`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
-pub enum Outcome {
-    /// The key was used.
-    Consumed,
-    /// The key was not used; the host may handle it.
-    Ignored,
-    /// The user asked to quit (`q` on the issue list, `ctrl-c`).
-    Quit,
-    /// The user pressed `t` on an event that has this trace id.
-    OpenTrace(String),
-}
+/// What the host should do after [`Embedded::handle_event`]; `x` on an
+/// event with a trace id is [`Outcome::Jump`].
+pub use mallard_term::tui::Outcome;
 
 /// The TUI as an embeddable component. Data loads run as tasks on the tokio
 /// runtime that was current when [`Embedded::new`] was called; their results
@@ -75,7 +65,7 @@ impl Embedded {
         Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false, tasks: vec![] }
     }
 
-    /// Name the host's command and env vars in hints (default [`Hints::SDL`]).
+    /// Name the host's command and env vars in hints (default [`crate::HINTS`]).
     pub fn with_hints(mut self, hints: Hints) -> Self {
         self.app.hints = hints;
         self
@@ -119,8 +109,9 @@ impl Embedded {
         self.app.fatal.take()
     }
 
-    /// Show the error events of this trace (all projects).
-    pub fn show_trace_errors(&mut self, trace_id: &str) {
+    /// Show the error events of this trace (all projects). The other side's
+    /// `Embedded::open_trace` has the same name.
+    pub fn open_trace(&mut self, trace_id: &str) {
         self.ensure_started();
         let reqs = self.app.show_trace(trace_id);
         self.dispatch(reqs);
@@ -242,7 +233,7 @@ pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
                 ev = events.next() => match ev {
                     Some(Ok(ev)) => match ui.handle_event(&ev) {
                         Outcome::Quit => break,
-                        Outcome::OpenTrace(t) => ui.show_trace_errors(&t),
+                        Outcome::Jump(t) => ui.open_trace(&t),
                         Outcome::Consumed | Outcome::Ignored => {}
                     },
                     Some(Err(e)) => return Err(e.into()),
@@ -280,7 +271,7 @@ mod tests {
     /// error instead of hanging.
     #[tokio::test]
     async fn embedded_draw_handle_tick() {
-        let client = Client::new("http://127.0.0.1:9", "t").unwrap();
+        let client = Client::new("http://127.0.0.1:9", Some("t")).unwrap();
         let mut ui = Embedded::new(client, Some("web".into()));
         let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();
         term.draw(|f| ui.draw(f, Rect { x: 0, y: 1, width: 120, height: 34 })).unwrap();
@@ -306,7 +297,7 @@ mod tests {
         let s = screen(&term);
         assert!(s.contains("cannot reach server"), "{s}");
 
-        ui.show_trace_errors("b7644661850f40e69380d8c9ea253e84");
+        ui.open_trace("b7644661850f40e69380d8c9ea253e84");
         term.draw(|f| ui.draw(f, f.area())).unwrap();
         assert!(screen(&term).contains("Trace"));
         assert_eq!(ui.handle_event(&key(KeyCode::Esc)), Outcome::Consumed);
@@ -320,12 +311,12 @@ mod tests {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let mut ui = {
             let _guard = rt.enter();
-            Embedded::new(Client::new("http://127.0.0.1:9", "t").unwrap(), None)
+            Embedded::new(Client::new("http://127.0.0.1:9", Some("t")).unwrap(), None)
         };
         // Not in a runtime context here: these spawn loads and must not panic.
-        assert_eq!(ui.handle_event(&key(KeyCode::Char('R'))), Outcome::Consumed);
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('r'))), Outcome::Consumed);
         ui.tick();
-        ui.show_trace_errors("b7644661850f40e69380d8c9ea253e84");
+        ui.open_trace("b7644661850f40e69380d8c9ea253e84");
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| ui.draw(f, f.area())).unwrap();
     }
@@ -333,7 +324,7 @@ mod tests {
     /// The host learns about a panicked load through `take_fatal`.
     #[tokio::test]
     async fn a_panicked_load_reaches_the_host() {
-        let mut ui = Embedded::new(Client::new("http://127.0.0.1:9", "t").unwrap(), Some("web".into()));
+        let mut ui = Embedded::new(Client::new("http://127.0.0.1:9", Some("t")).unwrap(), Some("web".into()));
         assert_eq!(ui.take_fatal(), None);
         ui.tx.send(Resp::Panicked { kind: Kind::Info, msg: "boom".into() }).unwrap();
         ui.tick();
@@ -347,7 +338,7 @@ mod tests {
         // Accepts connections but never answers, so the loads hang.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let mut ui = Embedded::new(Client::new(&url, "t").unwrap(), Some("web".into()));
+        let mut ui = Embedded::new(Client::new(&url, Some("t")).unwrap(), Some("web".into()));
         ui.tick();
         let tasks = ui.tasks.clone();
         assert!(!tasks.is_empty() && tasks.iter().all(|t| !t.is_finished()));

@@ -110,8 +110,8 @@ impl Client {
     pub fn new(base_url: &str, token: Option<&str>) -> Result<Self, Error> {
         let base = base_url.trim_end_matches('/').to_string();
         let token = token.filter(|t| !t.is_empty()).map(str::to_string);
-        let sentry = sdl_client::Client::new(&format!("{base}/sentry"), token.as_deref().unwrap_or(""))?;
-        let otel = odl_client::Client::new(&format!("{base}/otel"), token.clone())?;
+        let sentry = sdl_client::Client::new(&format!("{base}/sentry"), token.as_deref())?;
+        let otel = odl_client::Client::new(&format!("{base}/otel"), token.as_deref())?;
         Ok(Client { base, token, sentry, otel })
     }
 

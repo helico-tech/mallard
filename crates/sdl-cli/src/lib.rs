@@ -15,7 +15,8 @@ mod paint;
 mod send_test;
 mod tui;
 
-pub use cli::{Ctx, Hints, describe, run};
+pub use cli::{Ctx, HINTS, describe, run};
+pub use mallard_term::error::Hints;
 pub use tui::{Embedded, Outcome};
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -37,7 +38,7 @@ pub enum Command {
     /// Event counts over time for the project.
     Stats {
         /// Window, e.g. 1h, 24h, 7d.
-        #[arg(long, default_value = "24h")]
+        #[arg(short, long, default_value = "24h")]
         since: String,
         /// Bucket size, e.g. 1h (default: window / 24).
         #[arg(long)]
@@ -145,7 +146,7 @@ pub struct IssueListArgs {
     #[arg(long, short = 'q')]
     pub query: Option<String>,
     /// Window, e.g. 1h, 24h, 14d (server default 14d).
-    #[arg(long)]
+    #[arg(short, long)]
     pub since: Option<String>,
     #[arg(long, value_enum, default_value = "last_seen")]
     pub sort: SortBy,
@@ -156,7 +157,7 @@ pub struct IssueListArgs {
     #[arg(long)]
     pub release: Option<String>,
     /// Max issues (server default 50, max 500).
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub limit: Option<u32>,
 }
 
@@ -169,7 +170,7 @@ pub enum IssuesCmd {
     Show {
         id: String,
         /// Window for counts and tags, e.g. 24h (server default 14d).
-        #[arg(long)]
+        #[arg(short, long)]
         since: Option<String>,
     },
     /// Mark issues resolved (they reopen on a new event).
@@ -198,9 +199,10 @@ pub enum EventsCmd {
         #[arg(long)]
         issue: Option<String>,
         /// Only events of this trace id (searches all projects).
-        #[arg(long, conflicts_with = "issue")]
+        #[arg(short, long, conflicts_with = "issue")]
         trace: Option<String>,
-        #[arg(long)]
+        /// Max events.
+        #[arg(short = 'n', long)]
         limit: Option<u32>,
     },
     /// One event: exception, stack trace, breadcrumbs, tags, user, request.

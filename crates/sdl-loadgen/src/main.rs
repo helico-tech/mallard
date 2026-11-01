@@ -216,7 +216,7 @@ async fn ingest(
     breadcrumbs: usize,
     gzip: bool,
 ) -> Result<()> {
-    let client = sdl_client::Client::new(&cli.url, &cli.token)?;
+    let client = sdl_client::Client::new(&cli.url, Some(&cli.token))?;
     let project = ensure_project(&client, &cli.project).await?;
     let url = format!("{}/api/{}/envelope/", cli.url.trim_end_matches('/'), project.id);
     let auth = format!("Sentry sentry_version=7, sentry_client=sdl-loadgen/0.1, sentry_key={}", project.public_key);
@@ -351,7 +351,7 @@ async fn timed<T, F: std::future::Future<Output = Result<T, sdl_client::Error>>>
 
 async fn query(cli: &Cli, reps: usize) -> Result<()> {
     use sdl_client::types::*;
-    let c = sdl_client::Client::new(&cli.url, &cli.token)?;
+    let c = sdl_client::Client::new(&cli.url, Some(&cli.token))?;
     let p = cli.project.as_str();
     let stats = c.stats(p, &WindowQuery { since: Some("30d".into()), interval: None }).await?;
     println!("project {p}: {} events in 30d, {} issues\n", stats.total_events, stats.unique_issues);

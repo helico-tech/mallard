@@ -39,6 +39,6 @@ cargo run -p odl-server -- openapi > docs/openapi.json   # after API changes (a 
   `otlp/convert.rs`.
 - User input reaches SQL only as bound parameters.
 - Public library surface (`Server`, `store::open_connection`, `odl_client`,
-  `odl_cli::{Cmd, Ctx, run}`, `tui::Embedded`) is used by obs-ducklake. Don't
+  `odl_cli::{Command, Ctx, run, Embedded}`) is used by obs-ducklake. Don't
   break it silently.
 - Work tracking: `work/queue.md` → stories/issues; decisions → `docs/adr/`.

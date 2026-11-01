@@ -2,24 +2,24 @@
 
 use std::ops::Range;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Paragraph, Sparkline, Widget},
+    widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph, Sparkline, Widget},
 };
 
 use super::theme;
 
+pub use mallard_term::tui::{centered, hints};
+
 /// Rounded panel with a styled title.
 pub fn panel(title: &str, focused: bool) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+    mallard_term::tui::rounded()
         .border_style(if focused { theme::border_focus() } else { theme::border() })
         .title(Line::from(vec![Span::raw(" "), Span::styled(title.to_string(), theme::title()), Span::raw(" ")]))
 }
@@ -39,14 +39,9 @@ pub fn placeholder(f: &mut Frame, area: Rect, msg: &str, style: Style) {
     f.render_widget(Paragraph::new(Span::styled(msg.to_string(), style)).alignment(Alignment::Center), r);
 }
 
-pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let [v] = Layout::vertical([Constraint::Length(height.min(area.height))]).flex(Flex::Center).areas(area);
-    let [h] = Layout::horizontal([Constraint::Length(width.min(area.width))]).flex(Flex::Center).areas(v);
-    h
-}
-
-pub fn local(t: DateTime<Utc>, fmt: &str) -> String {
-    t.with_timezone(&Local).format(fmt).to_string()
+/// `t` formatted in UTC, like every time in both TUIs and CLIs.
+pub fn utc(t: DateTime<Utc>, fmt: &str) -> String {
+    t.format(fmt).to_string()
 }
 
 /// Terminal display width of a string (wide CJK/emoji count as 2).
@@ -54,30 +49,10 @@ pub fn width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
 
-/// Truncate to `width` terminal columns with an ellipsis; control characters
-/// become spaces.
+/// Untrusted text cut to `width` terminal columns with an ellipsis: cleaned
+/// first (control and bidi characters become visible escapes).
 pub fn trunc(s: &str, width: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    if width == 0 {
-        return String::new();
-    }
-    let clean = |c: char| if c.is_control() { ' ' } else { c };
-    let total: usize = s.chars().map(|c| clean(c).width().unwrap_or(0)).sum();
-    if total <= width {
-        return s.chars().map(clean).collect();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in s.chars().map(clean) {
-        let w = c.width().unwrap_or(0);
-        if used + w + 1 > width {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out.push('…');
-    out
+    mallard_term::text::truncate(&mallard_term::text::clean(s), width)
 }
 
 /// A KPI tile: label, big value, optional sparkline underneath.
@@ -91,8 +66,7 @@ pub struct Tile<'a> {
 
 impl Tile<'_> {
     pub fn render(self, f: &mut Frame, area: Rect) {
-        let block =
-            Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::border());
+        let block = mallard_term::tui::rounded();
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.height == 0 || inner.width == 0 {
@@ -103,7 +77,7 @@ impl Tile<'_> {
             Line::from(vec![
                 Span::styled(self.label.to_uppercase(), theme::dim().add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
-                Span::styled(self.sub, theme::muted()),
+                Span::styled(self.sub, theme::faint()),
             ]),
             rows[0],
         );
@@ -135,7 +109,7 @@ pub fn time_labels(x0: f64, x1: f64) -> Vec<String> {
     };
     [x0, (x0 + x1) / 2.0, x1]
         .iter()
-        .map(|t| DateTime::from_timestamp(*t as i64, 0).map(|d| local(d, fmt)).unwrap_or_default())
+        .map(|t| DateTime::from_timestamp(*t as i64, 0).map(|d| utc(d, fmt)).unwrap_or_default())
         .collect()
 }
 
@@ -172,7 +146,7 @@ pub fn time_chart(
     if x0 > x1 {
         let inner = block.inner(area);
         f.render_widget(block, area);
-        placeholder(f, inner, "no data in this window", theme::muted());
+        placeholder(f, inner, "no data in this window", theme::faint());
         return;
     }
     if let Some([a, b]) = x_bounds {
@@ -201,14 +175,14 @@ pub fn time_chart(
         .x_axis(
             Axis::default()
                 .bounds([x0, x1])
-                .style(theme::muted())
-                .labels(xl.into_iter().map(|l| Span::styled(l, theme::muted()))),
+                .style(theme::faint())
+                .labels(xl.into_iter().map(|l| Span::styled(l, theme::faint()))),
         )
         .y_axis(
             Axis::default()
                 .bounds([y0, y1])
-                .style(theme::muted())
-                .labels([fmt_y(y0), fmt_y((y0 + y1) / 2.0), fmt_y(y1)].map(|l| Span::styled(l, theme::muted()))),
+                .style(theme::faint())
+                .labels([fmt_y(y0), fmt_y((y0 + y1) / 2.0), fmt_y(y1)].map(|l| Span::styled(l, theme::faint()))),
         )
         // Legends live in panel titles / tables so they never cover data.
         .legend_position(None);
@@ -308,16 +282,6 @@ pub fn visible(offset: &mut usize, selected: Option<usize>, len: usize, height: 
     (start..end, selected.filter(|s| (start..end).contains(s)).map(|s| s - start))
 }
 
-/// Key hint spans: `[k] label`.
-pub fn hints(items: &[(&str, &str)]) -> Vec<Span<'static>> {
-    let mut out = Vec::new();
-    for (k, label) in items {
-        out.push(Span::styled(format!(" {k} "), theme::key()));
-        out.push(Span::styled(format!(" {label}  "), theme::dim()));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +292,15 @@ mod tests {
         assert_eq!(trunc("hello world", 6), "hello…");
         assert_eq!(trunc("a\nb", 5), "a b");
         assert_eq!(trunc("x", 0), "");
+        // Review 2.N: bidi overrides are not passed through either.
+        assert!(!trunc("a\u{202e}b", 20).contains('\u{202e}'));
+    }
+
+    #[test]
+    fn chart_labels_are_utc() {
+        // 2026-01-01 10:00:00 UTC, whatever the local time zone is.
+        let x = 1_767_261_600.0;
+        assert_eq!(time_labels(x, x + 600.0)[0], "10:00:00");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
+use mallard_term::tui::keys;
 use odl_client::api::*;
 use ratatui::{
     Frame,
@@ -92,7 +93,7 @@ fn unit_fmt(unit: &str) -> fn(f64) -> String {
     match unit {
         "s" => |v| ms(v * 1000.0),
         "ms" => ms,
-        "By" => |v| crate::fmt::bytes(v),
+        "By" => |v| crate::fmt::bytes(v.max(0.0) as u64),
         _ => compact,
     }
 }
@@ -154,7 +155,7 @@ impl Embedded {
     pub(crate) fn key_metrics(&mut self, k: &KeyEvent) -> Option<Outcome> {
         if let Some(c) = &mut self.metrics.chart {
             match k.code {
-                KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h' | 'q') => {
                     self.metrics.chart = None;
                     self.loader.cancel(Kind::MetricQuery);
                 }
@@ -189,7 +190,7 @@ impl Embedded {
             return Some(Outcome::Consumed);
         }
         match k.code {
-            KeyCode::Char('/' | 'f') => {
+            KeyCode::Char(keys::SEARCH | 'f') => {
                 let v = self.metrics.search.clone();
                 self.start_prompt(PromptTarget::MetricSearch, "search metrics", "type to filter · ↵ done", &v);
                 Some(Outcome::Consumed)
@@ -232,7 +233,7 @@ impl Embedded {
         let visible = m.visible();
         let block = widgets::panel_with(
             "Metrics",
-            Line::from(format!(" {} of {} ", visible.len(), m.list.len())).style(theme::muted()),
+            Line::from(format!(" {} of {} ", visible.len(), m.list.len())).style(theme::faint()),
             true,
         );
         let inner = block.inner(area);
@@ -242,7 +243,7 @@ impl Embedded {
             Line::from(vec![
                 Span::styled(" ⌕ ", theme::accent()),
                 if m.search.is_empty() {
-                    Span::styled("press / to search", theme::muted())
+                    Span::styled("press / to search", theme::faint())
                 } else {
                     Span::styled(m.search.clone(), theme::bold())
                 },
@@ -254,10 +255,10 @@ impl Embedded {
             .map(|mi| {
                 let kind = match mi.metric_type.as_str() {
                     "gauge" => ("gauge", theme::CYAN),
-                    "sum" => ("counter", theme::OK),
+                    "sum" => ("counter", theme::GREEN),
                     "histogram" => ("histogram", theme::ACCENT2),
                     "exponential_histogram" => ("exp hist", theme::ACCENT2),
-                    "summary" => ("summary", theme::WARN),
+                    "summary" => ("summary", theme::YELLOW),
                     other => (other, theme::DIM),
                 };
                 Row::new(vec![
@@ -266,7 +267,7 @@ impl Embedded {
                     Cell::from(mi.unit.clone()).style(theme::dim()),
                     Cell::from(Line::from(compact(mi.series_count as f64)).right_aligned()).style(theme::text()),
                     Cell::from(Line::from(compact(mi.point_count as f64)).right_aligned()).style(theme::dim()),
-                    Cell::from(mi.services.join(" ")).style(theme::muted()),
+                    Cell::from(mi.services.join(" ")).style(theme::faint()),
                 ])
             })
             .collect();
@@ -299,9 +300,9 @@ impl Embedded {
         if empty {
             let (msg, style) = match &m.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None if m.refreshed.is_some() && !m.list.is_empty() => ("no metric matches".into(), theme::muted()),
-                None if m.refreshed.is_some() => ("no metrics in this window".into(), theme::muted()),
-                None => ("loading…".into(), theme::muted()),
+                None if m.refreshed.is_some() && !m.list.is_empty() => ("no metric matches".into(), theme::faint()),
+                None if m.refreshed.is_some() => ("no metrics in this window".into(), theme::faint()),
+                None => ("loading…".into(), theme::faint()),
             };
             widgets::placeholder(f, table_area, &msg, style);
         }
@@ -316,12 +317,12 @@ impl Embedded {
             if i == c.agg {
                 chips.push(Span::styled(format!(" {a} "), theme::badge(theme::ACCENT)));
             } else {
-                chips.push(Span::styled(format!(" {a} "), theme::muted()));
+                chips.push(Span::styled(format!(" {a} "), theme::faint()));
             }
         }
         chips.push(Span::styled("   by ", theme::dim()));
         chips.push(if c.group_by.is_empty() {
-            Span::styled("(none) b to set", theme::muted())
+            Span::styled("(none) b to set", theme::faint())
         } else {
             Span::styled(c.group_by.clone(), theme::bold())
         });
@@ -342,7 +343,7 @@ impl Embedded {
         if c.result.is_none() {
             let (msg, style) = match &c.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None => ("loading…".into(), theme::muted()),
+                None => ("loading…".into(), theme::faint()),
             };
             widgets::placeholder(f, chart_area, &msg, style);
             return;

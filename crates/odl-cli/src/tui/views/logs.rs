@@ -7,6 +7,7 @@ use std::{
 
 use chrono::{TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
+use mallard_term::tui::keys;
 use odl_client::{LogTail, api::*};
 use ratatui::{
     Frame,
@@ -279,7 +280,7 @@ impl Embedded {
             return Some(Outcome::Consumed);
         }
         match k.code {
-            KeyCode::Char('/' | 'f') => {
+            KeyCode::Char(keys::SEARCH | 'f') => {
                 let v = self.logs.query.clone();
                 self.start_prompt(
                     PromptTarget::LogFilter,
@@ -355,13 +356,13 @@ impl Embedded {
         let pts = self.logs.series.as_ref().map(|s| s.points.as_slice()).unwrap_or(&[]);
         let sum = |g: fn(&LogSeriesPoint) -> u64| pts.iter().map(g).sum::<u64>();
         let legend = Line::from(vec![
-            Span::styled(" ■ ", Style::new().fg(theme::ERR)),
+            Span::styled(" ■ ", Style::new().fg(theme::RED)),
             Span::styled(format!("error {} ", compact(sum(|p| p.error) as f64)), theme::dim()),
-            Span::styled(" ■ ", Style::new().fg(theme::WARN)),
+            Span::styled(" ■ ", Style::new().fg(theme::YELLOW)),
             Span::styled(format!("warn {} ", compact(sum(|p| p.warn) as f64)), theme::dim()),
             Span::styled(" ■ ", Style::new().fg(theme::CYAN)),
             Span::styled(format!("info {} ", compact(sum(|p| p.info) as f64)), theme::dim()),
-            Span::styled(" ■ ", Style::new().fg(theme::MUTED)),
+            Span::styled(" ■ ", Style::new().fg(theme::FAINT)),
             Span::styled(format!("debug {} ", compact(sum(|p| p.debug) as f64)), theme::dim()),
         ]);
         // The volume query has no trace, level or attribute filter.
@@ -372,13 +373,13 @@ impl Embedded {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if pts.is_empty() {
-            widgets::placeholder(f, inner, "no logs in this window", theme::muted());
+            widgets::placeholder(f, inner, "no logs in this window", theme::faint());
             return;
         }
         let buckets: Vec<Vec<u64>> = pts.iter().map(|p| vec![p.error, p.warn, p.info, p.debug]).collect();
         let [bars, axis] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
         f.render_widget(
-            widgets::StackedBars { buckets: &buckets, colors: &[theme::ERR, theme::WARN, theme::CYAN, theme::MUTED] },
+            widgets::StackedBars { buckets: &buckets, colors: &[theme::RED, theme::YELLOW, theme::CYAN, theme::FAINT] },
             bars,
         );
         let (a, b) = (pts.first().unwrap().time, pts.last().unwrap().time);
@@ -391,7 +392,7 @@ impl Embedded {
         let used = left.chars().count() + gap1 + mid.chars().count();
         let gap2 = w.saturating_sub(used + right.chars().count());
         f.render_widget(
-            Span::styled(format!("{left}{}{mid}{}{right}", " ".repeat(gap1), " ".repeat(gap2)), theme::muted()),
+            Span::styled(format!("{left}{}{mid}{}{right}", " ".repeat(gap1), " ".repeat(gap2)), theme::faint()),
             axis,
         );
     }
@@ -400,11 +401,11 @@ impl Embedded {
         let long = self.window_secs() > 86_400.0;
         let l = &mut self.logs;
         let state = if l.follow {
-            Span::styled(" ● following ", Style::new().fg(theme::OK))
+            Span::styled(" ● following ", Style::new().fg(theme::GREEN))
         } else {
-            Span::styled(" ‖ paused ", Style::new().fg(theme::WARN))
+            Span::styled(" ‖ paused ", Style::new().fg(theme::YELLOW))
         };
-        let right = Line::from(vec![state, Span::styled(format!("· {} records ", l.records.len()), theme::muted())]);
+        let right = Line::from(vec![state, Span::styled(format!("· {} records ", l.records.len()), theme::faint())]);
         let block = widgets::panel_with("Logs", right, true);
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -412,7 +413,7 @@ impl Embedded {
         let filter_line = Line::from(vec![
             Span::styled(" ⌕ ", theme::accent()),
             if l.query.is_empty() {
-                Span::styled("all logs · press / to filter, s for severity", theme::muted())
+                Span::styled("all logs · press / to filter, s for severity", theme::faint())
             } else {
                 Span::styled(l.query.clone(), theme::bold())
             },
@@ -430,25 +431,25 @@ impl Embedded {
                     LogRow::Record(r) => r,
                     LogRow::Gap(t) => {
                         return Row::new(vec![
-                            Cell::from(widgets::local(*t, time_fmt)).style(theme::muted()),
+                            Cell::from(widgets::utc(*t, time_fmt)).style(theme::faint()),
                             Cell::from(""),
                             Cell::from(""),
                             Cell::from(Span::styled(
                                 "… older records skipped (paused or too many to show) …",
-                                theme::muted(),
+                                theme::faint(),
                             )),
                         ]);
                     }
                 };
                 let (lbl, c) = theme::severity(r.severity_number, &r.severity_text);
-                let body_style = if r.severity_number >= 17 { Style::new().fg(theme::ERR) } else { theme::text() };
+                let body_style = if r.severity_number >= 17 { Style::new().fg(theme::RED) } else { theme::text() };
                 let mut body = vec![];
                 if r.trace_id.is_some() {
-                    body.push(Span::styled("◆ ", theme::muted()));
+                    body.push(Span::styled("◆ ", theme::faint()));
                 }
                 body.push(Span::styled(widgets::trunc(&r.body, 400), body_style));
                 Row::new(vec![
-                    Cell::from(widgets::local(r.time, time_fmt)).style(theme::dim()),
+                    Cell::from(widgets::utc(r.time, time_fmt)).style(theme::dim()),
                     Cell::from(Span::styled(format!("{lbl:<5}"), Style::new().fg(c).add_modifier(Modifier::BOLD))),
                     Cell::from(Span::styled(
                         widgets::trunc(&r.service_name, 20),
@@ -480,8 +481,8 @@ impl Embedded {
         if empty {
             let (msg, style) = match &l.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None if l.loaded => ("no logs match · waiting for new records…".into(), theme::muted()),
-                None => ("loading…".into(), theme::muted()),
+                None if l.loaded => ("no logs match · waiting for new records…".into(), theme::faint()),
+                None => ("loading…".into(), theme::faint()),
             };
             widgets::placeholder(f, table_area, &msg, style);
         }
@@ -501,7 +502,7 @@ impl Embedded {
                 Span::styled(format!(" {lbl} "), theme::badge(c)),
                 Span::raw("  "),
                 Span::styled(format!("● {}", r.service_name), Style::new().fg(theme::service_color(&r.service_name))),
-                Span::styled(format!("  {}", widgets::local(r.time, "%Y-%m-%d %H:%M:%S%.6f")), theme::dim()),
+                Span::styled(format!("  {}", widgets::utc(r.time, "%Y-%m-%d %H:%M:%S%.6f")), theme::dim()),
             ]),
             Line::raw(""),
         ];
@@ -513,14 +514,14 @@ impl Embedded {
             lines.push(Line::from(vec![
                 Span::styled(format!("{:>10}  ", "trace"), theme::dim()),
                 Span::styled(t.clone(), theme::accent()),
-                Span::styled("  (o to open)", theme::muted()),
+                Span::styled("  (o to open)", theme::faint()),
             ]));
         }
         if let Some(s) = &r.span_id {
             lines.push(kv("span", s.clone()));
         }
         lines.push(kv("severity", format!("{} ({})", r.severity_text, r.severity_number)));
-        lines.push(kv("observed", widgets::local(r.observed_time, "%Y-%m-%d %H:%M:%S%.6f")));
+        lines.push(kv("observed", widgets::utc(r.observed_time, "%Y-%m-%d %H:%M:%S%.6f")));
         if !r.event_name.is_empty() {
             lines.push(kv("event", r.event_name.clone()));
         }

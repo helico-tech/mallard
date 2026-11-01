@@ -31,7 +31,6 @@ fn u16_sat(n: usize) -> u16 {
 
 pub(super) const MIN_WIDTH: u16 = 50;
 pub(super) const MIN_HEIGHT: u16 = 12;
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub(super) fn render(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Clear, area);
@@ -72,7 +71,7 @@ fn too_small(f: &mut Frame, area: Rect) {
 }
 
 fn rounded<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
-    Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(th::border()).title(title)
+    mallard_term::tui::rounded().title(title)
 }
 
 fn title_span(s: &str) -> Span<'static> {
@@ -85,21 +84,17 @@ fn load_state(error: Option<&str>, loading: &str) -> Paragraph<'static> {
     let line = match error {
         Some(e) => Line::from(vec![
             Span::styled(format!("✗ {e}"), Style::new().fg(th::RED)),
-            Span::styled("  · R retry", th::dim()),
+            Span::styled("  · r retry", th::dim()),
         ]),
         None => Line::from(Span::styled(loading.to_string(), th::dim())),
     };
     Paragraph::new(line).alignment(Alignment::Center).wrap(Wrap { trim: true })
 }
 
-pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
-}
+use mallard_term::tui::{centered, hints};
 
 fn spinner(app: &App) -> &'static str {
-    SPINNER[app.spinner % SPINNER.len()]
+    mallard_term::tui::spinner(app.spinner)
 }
 
 // ---------------------------------------------------------------- header
@@ -164,15 +159,6 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 
 // ---------------------------------------------------------------- footer
 
-fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
-    let mut v = vec![Span::raw(" ")];
-    for (k, d) in pairs {
-        v.push(Span::styled(k.to_string(), th::key()));
-        v.push(Span::styled(format!(" {d}  "), th::dim()));
-    }
-    v
-}
-
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let line = if let Some(input) = &app.input {
         Line::from(vec![
@@ -187,7 +173,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else if let Some(e) = app.offline.as_ref().or(app.global_error.as_ref()) {
         Line::from(vec![
             Span::styled(format!(" ✗ {e}"), Style::new().fg(th::RED)),
-            Span::styled("   R retry", th::dim()),
+            Span::styled("   r retry", th::dim()),
         ])
     } else {
         let pairs: &[(&str, &str)] = match app.view() {
@@ -199,7 +185,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ("s", "sort"),
                 ("t", "window"),
                 ("p", "project"),
-                ("r/i/u", "resolve/ignore/unresolve"),
+                ("R/I/U", "resolve/ignore/unresolve"),
+                ("r", "refresh"),
                 ("?", "help"),
                 ("q", "quit"),
             ],
@@ -209,8 +196,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ("[ ]", "older/newer event"),
                 ("a", "in-app"),
                 ("w", "raw"),
-                ("t", "trace"),
-                ("r/i/u", "status"),
+                ("x", "trace"),
+                ("R/I/U", "status"),
                 ("esc", "back"),
                 ("?", "help"),
             ],
@@ -314,7 +301,7 @@ mod tests {
         app.now = now();
         let s = draw(&mut app, 140, 40);
         assert!(!s.chars().any(|c| c.is_control() && c != '\n'), "control character in buffer:\n{s}");
-        assert!(s.contains("evil\u{FFFD}]52;c;cHduZWQ=\u{FFFD} \u{FFFD}[2Jtitle"), "{s}");
+        assert!(s.contains("evil\\u{1b}]52;c;cHduZWQ=\\u{7} \\u{1b}[2Jtitle"), "{s}");
         assert!(s.contains("cul prit    x"), "{s}");
     }
 
@@ -443,6 +430,11 @@ mod tests {
         press(&mut app, KeyCode::Char('?'));
         let s = draw(&mut app, 120, 40);
         assert!(s.contains("Keys") && s.contains("older / newer event"), "{s}");
+        // The shared keys (the same list as on the telemetry tab) and the time zone.
+        for (_, what) in mallard_term::tui::keys::SHARED {
+            assert!(s.contains(what), "missing {what:?} in\n{s}");
+        }
+        assert!(s.contains("All times are UTC."), "{s}");
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Char('p'));
         let s = draw(&mut app, 120, 40);

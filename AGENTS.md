@@ -28,13 +28,14 @@ After otel API changes: `cargo run -p odl-server -- openapi > docs/otel/openapi.
 | `crates/mallard` | the `mallard` binary: `serve`, `status`, `trace`, `errors …`, `telemetry …`, `tui` |
 | `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, shutdown |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
+| `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error lines, TUI theme/keys/`Outcome` (ADR 0006) |
 | `crates/sdl-*` | Sentry side: `sdl-protocol` (pure protocol), `sdl-server` (ingest, writer, `/v1` API), `sdl-types`, `sdl-client`, `sdl-cli` (commands + TUI component), `sdl-loadgen` |
 | `crates/odl-*` | OpenTelemetry side: `odl-server` (OTLP receivers, storage, maintenance, query API), `odl-api`, `odl-client`, `odl-cli` (commands + TUI component), `odl-loadgen` |
 | `config/` | example configs |
 | `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
 | `bench/otel/` | reproducible experiments and capacity runs |
-| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
+| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 `sdl-server` and `odl-server` still build their standalone binaries
@@ -56,6 +57,8 @@ The product is `mallard`.
 - DuckDB 2.0 lambdas use `lambda x: expr` (the `->` form is removed).
 - User input reaches SQL only as bound parameters.
 - Errors and traces join on `trace_id` (UUID) and `span_id` (UBIGINT).
+- CLIs and TUIs print through `mallard-term`: server text goes through
+  `text::clean`, shared TUI keys come from `tui::keys` (ADR 0006).
 
 ## Work
 

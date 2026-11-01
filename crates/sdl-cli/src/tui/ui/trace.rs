@@ -33,7 +33,7 @@ pub(super) fn render_trace(f: &mut Frame, area: Rect, app: &mut App) {
                 .map(|p| p.slug.clone())
                 .unwrap_or_else(|| e.project_id.to_string());
             Row::new(vec![
-                Cell::from(Span::styled(th::level_label(&e.level), th::badge(&e.level))),
+                Cell::from(Span::styled(th::level_label(&e.level), th::level_badge(&e.level))),
                 Cell::from(Span::styled(project, Style::new().fg(th::ACCENT2))),
                 Cell::from(Span::styled(e.title.clone(), th::bold())),
                 Cell::from(Span::styled(e.span_id.clone().unwrap_or_default(), th::faint())),
@@ -52,7 +52,7 @@ pub(super) fn render_trace(f: &mut Frame, area: Rect, app: &mut App) {
         ],
     )
     .header(Row::new(["LEVEL", "PROJECT", "EVENT", "SPAN", "WHEN"]).style(th::faint().bold()))
-    .row_highlight_style(th::selected_row())
+    .row_highlight_style(th::selected())
     .highlight_symbol(Span::styled("▌", th::accent()))
     .highlight_spacing(HighlightSpacing::Always)
     .column_spacing(1);

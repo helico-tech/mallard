@@ -45,22 +45,10 @@ use input::{Input, InputResult};
 use loader::{Data, Kind, Loader};
 pub use standalone::run_standalone;
 
-/// What the host should do after an event.
-///
-/// Deliberately not `#[non_exhaustive]`: the host lives in the same
-/// workspace, and its exhaustive `match` makes the compiler point at every
-/// place that must handle a new jump target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The UI used the event.
-    Consumed,
-    /// Not handled; the host may use it.
-    Ignored,
-    /// The user asked to quit.
-    Quit,
-    /// The user asked for errors related to this trace id (e.g. Sentry issues).
-    OpenErrors(String),
-}
+/// What the host should do after an event; `x` on a trace is
+/// [`Outcome::Jump`] (errors of this trace).
+pub use mallard_term::tui::Outcome;
+use mallard_term::tui::keys;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum View {
@@ -193,9 +181,9 @@ impl Embedded {
         }
     }
 
-    /// Show the `e errors` key in hints and help. The key always returns
-    /// [`Outcome::OpenErrors`]; enable this when the host can act on it
-    /// (e.g. an error tracker is connected). Off by default.
+    /// Show the `x errors` key in hints and help. The key always returns
+    /// [`Outcome::Jump`]; enable this when the host can act on it (e.g. an
+    /// error tracker is connected). Off by default.
     pub fn set_errors_enabled(&mut self, enabled: bool) {
         self.errors_enabled = enabled;
     }
@@ -429,7 +417,7 @@ impl Embedded {
         }
         match k.code {
             KeyCode::Char('q') => Outcome::Quit,
-            KeyCode::Char('?') => {
+            KeyCode::Char(keys::HELP) => {
                 self.help = true;
                 Outcome::Consumed
             }
@@ -444,15 +432,15 @@ impl Embedded {
                 self.set_view(VIEWS[j].0);
                 Outcome::Consumed
             }
-            KeyCode::Char('t' | 'w') => {
+            KeyCode::Char(keys::WINDOW_NEXT) => {
                 self.cycle_window(true);
                 Outcome::Consumed
             }
-            KeyCode::Char('T' | 'W') => {
+            KeyCode::Char(keys::WINDOW_PREV) => {
                 self.cycle_window(false);
                 Outcome::Consumed
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char(keys::REFRESH) => {
                 self.invalidate();
                 self.stats_at = None;
                 self.flash("refreshing…");
