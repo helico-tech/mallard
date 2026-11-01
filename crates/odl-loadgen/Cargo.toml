@@ -1,0 +1,22 @@
+[package]
+name = "odl-loadgen"
+description = "Realistic OTLP load generator for otel-ducklake benchmarks and demos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "odl-loadgen"
+path = "src/main.rs"
+
+[dependencies]
+opentelemetry-proto.workspace = true
+prost.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+flate2.workspace = true
+humantime.workspace = true
+chrono.workspace = true

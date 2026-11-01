@@ -1,0 +1,12 @@
+[package]
+name = "odl-api"
+description = "Shared HTTP API types for otel-ducklake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+utoipa.workspace = true
