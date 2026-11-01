@@ -73,10 +73,14 @@ impl Config {
     pub fn load(path: Option<&Path>) -> Result<Config> {
         let mut fig = Figment::new();
         if let Some(p) = path {
-            let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            let text =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             fig = fig.merge(Toml::string(&expand_env(&text)?));
         }
-        let mut cfg: Config = fig.merge(env_overrides()).extract().context("invalid configuration")?;
+        let mut cfg: Config = fig
+            .merge(env_overrides())
+            .extract()
+            .context("invalid configuration")?;
         cfg.normalize();
         cfg.validate()?;
         Ok(cfg)
@@ -86,13 +90,20 @@ impl Config {
     /// empty entries are dropped.
     pub fn normalize(&mut self) {
         for list in [&mut self.server.api_tokens, &mut self.server.ingest_tokens] {
-            *list = list.iter().flat_map(|t| t.split(',')).map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect();
+            *list = list
+                .iter()
+                .flat_map(|t| t.split(','))
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .collect();
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
-            self.server.public_url.starts_with("http://") || self.server.public_url.starts_with("https://"),
+            self.server.public_url.starts_with("http://")
+                || self.server.public_url.starts_with("https://"),
             "server.public_url must start with http:// or https://"
         );
         self.otel_config().validate().context("otel")?;
@@ -118,8 +129,12 @@ impl Config {
         let mut c = self.sentry.clone();
         c.lake_alias = odl_server::store::CATALOG.into();
         c.schema = "sentry".into();
-        c.public_url = format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/'));
-        c.api_token = (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(","));
+        c.public_url = format!(
+            "{}{SENTRY_PREFIX}",
+            self.server.public_url.trim_end_matches('/')
+        );
+        c.api_token =
+            (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(","));
         c.catalog_wide_maintenance = false;
         // Global DuckDB settings belong to the platform ([duckdb]); a per-
         // library `SET threads` would also throttle otel on the shared DB.
@@ -131,7 +146,9 @@ impl Config {
 /// `OBS_<SECTION>__<KEY>` variables. Names without `__` (e.g. `OBS_CONFIG`,
 /// or `OBS_API_TOKEN` used through `${...}` in the file) are not overrides.
 fn env_overrides() -> Env {
-    Env::prefixed("OBS_").filter(|k| k.as_str().contains("__")).split("__")
+    Env::prefixed("OBS_")
+        .filter(|k| k.as_str().contains("__"))
+        .split("__")
 }
 
 /// Replace `${NAME}` with the value of environment variable NAME.
@@ -149,7 +166,8 @@ fn expand_env(text: &str) -> Result<String> {
             let after = &rest[i + 2..];
             let end = after.find('}').context("unterminated ${ in config")?;
             let name = &after[..end];
-            let val = std::env::var(name).with_context(|| format!("environment variable {name} is not set"))?;
+            let val = std::env::var(name)
+                .with_context(|| format!("environment variable {name} is not set"))?;
             out.push_str(&val);
             rest = &after[end + 1..];
         }
@@ -202,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)] // figment's Jail API returns figment::Error
     fn only_section_vars_override() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("OBS_CONFIG", "/etc/x.toml");
@@ -229,8 +248,14 @@ mod tests {
     fn env_expansion() {
         // SAFETY: test-only, single-threaded use of a unique variable name.
         unsafe { std::env::set_var("OBS_TEST_SECRET_X", "s3cr3t") };
-        assert_eq!(expand_env("k = \"${OBS_TEST_SECRET_X}\"").unwrap(), "k = \"s3cr3t\"");
+        assert_eq!(
+            expand_env("k = \"${OBS_TEST_SECRET_X}\"").unwrap(),
+            "k = \"s3cr3t\""
+        );
         assert!(expand_env("${OBS_TEST_MISSING_Y}").is_err());
-        assert_eq!(expand_env("  # ${OBS_TEST_MISSING_Y}\n").unwrap(), "  # ${OBS_TEST_MISSING_Y}\n");
+        assert_eq!(
+            expand_env("  # ${OBS_TEST_MISSING_Y}\n").unwrap(),
+            "  # ${OBS_TEST_MISSING_Y}\n"
+        );
     }
 }

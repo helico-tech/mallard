@@ -8,10 +8,20 @@ use clap::{Parser, Subcommand};
 use obs_client::Client;
 
 #[derive(Parser)]
-#[command(name = "obs", version, about = "Errors, traces, logs and metrics from obs-ducklake", propagate_version = true)]
+#[command(
+    name = "obs",
+    version,
+    about = "Errors, traces, logs and metrics from obs-ducklake",
+    propagate_version = true
+)]
 struct Cli {
     /// Server base URL (its http_addr).
-    #[arg(long, env = "OBS_URL", default_value = "http://localhost:8080", global = true)]
+    #[arg(
+        long,
+        env = "OBS_URL",
+        default_value = "http://localhost:8080",
+        global = true
+    )]
     url: String,
     /// API token (one of the server's server.api_tokens).
     #[arg(long, env = "OBS_TOKEN", hide_env_values = true, global = true)]
@@ -64,14 +74,35 @@ async fn main() -> Result<()> {
         Cmd::Status => status(&client, cli.json).await,
         Cmd::Tui { project } => tui::run(&client, project).await,
         Cmd::Sentry { project, cmd } => {
-            sdl_cli::run(cmd, &sdl_cli::Ctx { client: client.sentry.clone(), project, json: cli.json }).await
+            sdl_cli::run(
+                cmd,
+                &sdl_cli::Ctx {
+                    client: client.sentry.clone(),
+                    project,
+                    json: cli.json,
+                },
+            )
+            .await
         }
         Cmd::Otel { cmd } => {
-            let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
-            odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await
+            let output = if cli.json {
+                odl_cli::Output::Json
+            } else {
+                odl_cli::Output::Table
+            };
+            odl_cli::run(
+                cmd,
+                &odl_cli::Ctx {
+                    client: client.otel.clone(),
+                    output,
+                },
+            )
+            .await
         }
         Cmd::Trace { trace_id, since } => {
-            let t = client.trace_overview_since(&trace_id, since.as_deref()).await?;
+            let t = client
+                .trace_overview_since(&trace_id, since.as_deref())
+                .await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&t)?);
             } else {
@@ -102,7 +133,12 @@ async fn status(c: &Client, json: bool) -> Result<()> {
     }
     match o {
         Ok(st) => {
-            let rows: i64 = st.storage.tables.iter().map(|t| t.rows + t.inlined_rows).sum();
+            let rows: i64 = st
+                .storage
+                .tables
+                .iter()
+                .map(|t| t.rows + t.inlined_rows)
+                .sum();
             let bytes: i64 = st.storage.tables.iter().map(|t| t.bytes).sum();
             println!(
                 "otel     ok  v{}  up {}s  buffered {} rows  stored {} rows / {:.1} MB  flush errors {}",

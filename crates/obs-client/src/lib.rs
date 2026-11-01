@@ -50,9 +50,15 @@ impl Client {
     pub fn new(base_url: &str, token: Option<&str>) -> Result<Self, Error> {
         let base = base_url.trim_end_matches('/').to_string();
         let token = token.filter(|t| !t.is_empty()).map(str::to_string);
-        let sentry = sdl_client::Client::new(&format!("{base}/sentry"), token.as_deref().unwrap_or(""))?;
+        let sentry =
+            sdl_client::Client::new(&format!("{base}/sentry"), token.as_deref().unwrap_or(""))?;
         let otel = odl_client::Client::new(&format!("{base}/otel"), token.clone())?;
-        Ok(Client { base, token, sentry, otel })
+        Ok(Client {
+            base,
+            token,
+            sentry,
+            otel,
+        })
     }
 
     pub fn base_url(&self) -> &str {
@@ -65,11 +71,22 @@ impl Client {
 
     /// Spans, Sentry errors and logs of one trace. `since` bounds the search
     /// window (e.g. `24h`, `7d`); default: each library's default.
-    pub async fn trace_overview_since(&self, trace_id: &str, since: Option<&str>) -> Result<TraceOverview, Error> {
-        let id: String = trace_id.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_lowercase();
+    pub async fn trace_overview_since(
+        &self,
+        trace_id: &str,
+        since: Option<&str>,
+    ) -> Result<TraceOverview, Error> {
+        let id: String = trace_id
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect::<String>()
+            .to_lowercase();
         let since = since.map(str::to_string);
         let spans = async {
-            let q = TraceGetQuery { since: since.clone(), ..Default::default() };
+            let q = TraceGetQuery {
+                since: since.clone(),
+                ..Default::default()
+            };
             match self.otel.trace(&id, &q).await {
                 Ok(t) => Ok(t.spans),
                 Err(e) if e.status() == Some(404) => Ok(vec![]),
@@ -77,7 +94,11 @@ impl Client {
             }
         };
         let errors = async {
-            let q = sdl_client::types::TraceQuery { trace_id: id.clone(), since: since.clone(), ..Default::default() };
+            let q = sdl_client::types::TraceQuery {
+                trace_id: id.clone(),
+                since: since.clone(),
+                ..Default::default()
+            };
             Ok::<_, Error>(self.sentry.events_by_trace_query(&q).await?.events)
         };
         let logs = async {
@@ -91,7 +112,12 @@ impl Client {
             Ok::<_, Error>(self.otel.logs(&q).await?)
         };
         let (spans, errors, logs) = tokio::try_join!(spans, errors, logs)?;
-        Ok(TraceOverview { trace_id: id, spans, errors, logs })
+        Ok(TraceOverview {
+            trace_id: id,
+            spans,
+            errors,
+            logs,
+        })
     }
 
     pub async fn trace_overview(&self, trace_id: &str) -> Result<TraceOverview, Error> {

@@ -14,7 +14,11 @@ const TOKEN: &str = "test-token";
 const TRACES: usize = 40;
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn config(dir: &std::path::Path) -> Config {
@@ -50,7 +54,12 @@ async fn start(cfg: Config) -> Running {
         assert!(Instant::now() < deadline, "server did not come up");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Running { url, otlp_url, stop, task }
+    Running {
+        url,
+        otlp_url,
+        stop,
+        task,
+    }
 }
 
 impl Running {
@@ -61,7 +70,10 @@ impl Running {
 }
 
 fn ids(i: usize) -> (String, String) {
-    (format!("{:032x}", 0xabc0_0000_u128 + i as u128), format!("{:016x}", 0x5000 + i as u64))
+    (
+        format!("{:032x}", 0xabc0_0000_u128 + i as u128),
+        format!("{:016x}", 0x5000 + i as u64),
+    )
 }
 
 async fn send_sentry_event(http: &reqwest::Client, url: &str, project: u32, key: &str, i: usize) {
@@ -76,10 +88,18 @@ async fn send_sentry_event(http: &reqwest::Client, url: &str, project: u32, key:
             "stacktrace": {"frames": [{"function": "handler", "filename": "app.js", "lineno": 3}]}}]},
         "contexts": {"trace": {"trace_id": trace, "span_id": span}},
     });
-    let body = format!("{}\n{}\n{}\n", json!({"event_id": event_id}), json!({"type": "event"}), event);
+    let body = format!(
+        "{}\n{}\n{}\n",
+        json!({"event_id": event_id}),
+        json!({"type": "event"}),
+        event
+    );
     let r = http
         .post(format!("{url}/sentry/api/{project}/envelope/"))
-        .header("X-Sentry-Auth", format!("Sentry sentry_version=7, sentry_key={key}"))
+        .header(
+            "X-Sentry-Auth",
+            format!("Sentry sentry_version=7, sentry_key={key}"),
+        )
         .body(body)
         .send()
         .await
@@ -90,7 +110,8 @@ async fn send_sentry_event(http: &reqwest::Client, url: &str, project: u32, key:
 async fn send_otlp(http: &reqwest::Client, otlp_url: &str, i: usize) {
     let (trace, span) = ids(i);
     let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-    let resource = json!({"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}]});
+    let resource =
+        json!({"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}]});
     let spans = json!({"resourceSpans": [{"resource": resource, "scopeSpans": [{"spans": [{
         "traceId": trace, "spanId": span, "name": "POST /pay", "kind": 2,
         "startTimeUnixNano": ns.to_string(), "endTimeUnixNano": (ns + 5_000_000).to_string(),
@@ -99,7 +120,12 @@ async fn send_otlp(http: &reqwest::Client, otlp_url: &str, i: usize) {
         "timeUnixNano": ns.to_string(), "severityNumber": 17, "severityText": "ERROR",
         "body": {"stringValue": format!("payment {i} failed")}, "traceId": trace, "spanId": span}]}]}]});
     for (path, body) in [("traces", spans), ("logs", logs)] {
-        let r = http.post(format!("{otlp_url}/v1/{path}")).json(&body).send().await.unwrap();
+        let r = http
+            .post(format!("{otlp_url}/v1/{path}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
         assert!(r.status().is_success(), "otlp {path}: {}", r.status());
     }
 }
@@ -117,7 +143,10 @@ async fn wait_for_all(client: &Client) {
         if done == TRACES {
             return;
         }
-        assert!(Instant::now() < deadline, "only {done}/{TRACES} traces complete");
+        assert!(
+            Instant::now() < deadline,
+            "only {done}/{TRACES} traces complete"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
@@ -129,17 +158,33 @@ async fn errors_and_telemetry_share_one_lake() {
     let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
     let project = client
         .sentry
-        .create_project(&CreateProject { name: "shop".into(), slug: None, platform: Some("node".into()) })
+        .create_project(&CreateProject {
+            name: "shop".into(),
+            slug: None,
+            platform: Some("node".into()),
+        })
         .await
         .unwrap();
-    assert!(project.dsn.contains("/sentry/"), "DSN points at the nested Sentry router: {}", project.dsn);
+    assert!(
+        project.dsn.contains("/sentry/"),
+        "DSN points at the nested Sentry router: {}",
+        project.dsn
+    );
 
     // Both libraries write to the same catalog at the same time.
     let http = reqwest::Client::new();
     let sends = (0..TRACES).map(|i| {
-        let (http, url, otlp, key) = (http.clone(), srv.url.clone(), srv.otlp_url.clone(), project.public_key.clone());
+        let (http, url, otlp, key) = (
+            http.clone(),
+            srv.url.clone(),
+            srv.otlp_url.clone(),
+            project.public_key.clone(),
+        );
         async move {
-            tokio::join!(send_sentry_event(&http, &url, project.id, &key, i), send_otlp(&http, &otlp, i));
+            tokio::join!(
+                send_sentry_event(&http, &url, project.id, &key, i),
+                send_otlp(&http, &otlp, i)
+            );
         }
     });
     join_all(sends).await;

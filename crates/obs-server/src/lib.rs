@@ -40,9 +40,18 @@ impl Platform {
         let conn = tokio::task::spawn_blocking(move || odl_server::store::open_connection(&c))
             .await?
             .context("opening the DuckLake catalog")?;
-        let otel = odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?;
-        let sentry = sdl_server::Server::with_connection(scfg, conn).await.context("starting sentry")?;
-        Ok(Platform { cfg: Arc::new(cfg), otel, sentry, metrics: None })
+        let otel = odl_server::Server::with_connection(ocfg, conn.try_clone()?)
+            .await
+            .context("starting otel")?;
+        let sentry = sdl_server::Server::with_connection(scfg, conn)
+            .await
+            .context("starting sentry")?;
+        Ok(Platform {
+            cfg: Arc::new(cfg),
+            otel,
+            sentry,
+            metrics: None,
+        })
     }
 
     /// Serve this Prometheus recorder at `/metrics`.
@@ -77,25 +86,46 @@ impl Platform {
         let s = &self.cfg.server;
         let http_l = bind(&s.http_addr).await?;
         let otlp_l = bind(&s.otlp_http_addr).await?;
-        let grpc_addr = s.otlp_grpc_addr.parse().with_context(|| format!("parsing {}", s.otlp_grpc_addr))?;
+        let grpc_addr = s
+            .otlp_grpc_addr
+            .parse()
+            .with_context(|| format!("parsing {}", s.otlp_grpc_addr))?;
         info!(http = %s.http_addr, otlp_http = %s.otlp_http_addr, otlp_grpc = %s.otlp_grpc_addr, "listening");
 
         let http = self.http_router().layer(TraceLayer::new_for_http());
-        let otlp = self.otel.otlp_http_router().layer(TraceLayer::new_for_http());
+        let otlp = self
+            .otel
+            .otlp_http_router()
+            .layer(TraceLayer::new_for_http());
         let grpc = tonic::transport::Server::builder().add_routes(self.otel.grpc_routes());
 
         let sd = shutdown.clone();
-        let t1 = tokio::spawn(async move { axum::serve(http_l, http).with_graceful_shutdown(sd.cancelled_owned()).await });
+        let t1 = tokio::spawn(async move {
+            axum::serve(http_l, http)
+                .with_graceful_shutdown(sd.cancelled_owned())
+                .await
+        });
         let sd = shutdown.clone();
-        let t2 = tokio::spawn(async move { axum::serve(otlp_l, otlp).with_graceful_shutdown(sd.cancelled_owned()).await });
+        let t2 = tokio::spawn(async move {
+            axum::serve(otlp_l, otlp)
+                .with_graceful_shutdown(sd.cancelled_owned())
+                .await
+        });
         let sd = shutdown.clone();
-        let t3 = tokio::spawn(async move { grpc.serve_with_shutdown(grpc_addr, sd.cancelled_owned()).await });
+        let t3 = tokio::spawn(async move {
+            grpc.serve_with_shutdown(grpc_addr, sd.cancelled_owned())
+                .await
+        });
 
         // Background jobs stop only after all receivers are down, so
         // nothing arrives after the final flush.
         let receivers_down = CancellationToken::new();
-        let otel_bg = self.otel.run_background(receivers_down.clone().cancelled_owned());
-        let sentry_bg = self.sentry.run_background(receivers_down.clone().cancelled_owned());
+        let otel_bg = self
+            .otel
+            .run_background(receivers_down.clone().cancelled_owned());
+        let sentry_bg = self
+            .sentry
+            .run_background(receivers_down.clone().cancelled_owned());
         let receivers = async {
             let (a, b, c) = tokio::join!(t1, t2, t3);
             receivers_down.cancel();
@@ -114,7 +144,9 @@ impl Platform {
 
 async fn readyz(sentry: Router) -> axum::response::Response {
     use tower::ServiceExt;
-    let req = axum::http::Request::get("/readyz").body(axum::body::Body::empty()).expect("static request");
+    let req = axum::http::Request::get("/readyz")
+        .body(axum::body::Body::empty())
+        .expect("static request");
     match sentry.oneshot(req).await {
         Ok(r) => r.into_response(),
         Err(e) => match e {},
@@ -122,5 +154,7 @@ async fn readyz(sentry: Router) -> axum::response::Response {
 }
 
 async fn bind(addr: &str) -> Result<TcpListener> {
-    TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))
+    TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding {addr}"))
 }

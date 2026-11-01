@@ -21,7 +21,7 @@ odl-api = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-api" }
 odl-client = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-client" }
 odl-cli = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-cli" }
 obs-client = { path = "crates/obs-client" }
-# Must stay identical to both libraries (ADR 0001).
+# Must stay identical to both libraries (ADR 0001); features = union of both.
 duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono", "json", "parquet"] }
 axum = "0.8"
 tonic = "0.14"

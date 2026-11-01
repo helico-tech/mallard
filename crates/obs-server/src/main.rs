@@ -31,7 +31,9 @@ enum Cmd {
     },
 }
 
-const ALL_EXTENSIONS: &[&str] = &["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "mysql", "json", "parquet"];
+const ALL_EXTENSIONS: &[&str] = &[
+    "ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "mysql", "json", "parquet",
+];
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,7 +52,10 @@ async fn main() -> Result<()> {
 async fn serve(cfg: Config) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     if cfg.server.log_format == "json" {
-        tracing_subscriber::fmt().json().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init();
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
@@ -70,10 +75,14 @@ async fn serve(cfg: Config) -> Result<()> {
 fn install_extensions(dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let conn = duckdb::Connection::open_in_memory()?;
-    let d = dir.to_str().context("extension dir must be UTF-8")?.replace('\'', "''");
+    let d = dir
+        .to_str()
+        .context("extension dir must be UTF-8")?
+        .replace('\'', "''");
     conn.execute_batch(&format!("SET extension_directory = '{d}'"))?;
     for ext in ALL_EXTENSIONS {
-        conn.execute_batch(&format!("INSTALL {ext}")).with_context(|| format!("installing extension {ext}"))?;
+        conn.execute_batch(&format!("INSTALL {ext}"))
+            .with_context(|| format!("installing extension {ext}"))?;
         println!("installed {ext}");
     }
     Ok(())
@@ -83,7 +92,8 @@ async fn wait_for_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
         tokio::select! { _ = ctrl_c => {}, _ = term.recv() => {} }
     }
     #[cfg(not(unix))]

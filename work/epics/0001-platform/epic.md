@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 created: 2026-10-31
 ---
 # Epic 0001 — Combined observability platform
@@ -23,7 +23,7 @@ Out of scope: new ingest features (belong in the libraries), a web UI.
 - `cargo test --workspace` passes, including an end-to-end test.
 
 ## Dependencies
-Waiting on library targets from both sibling repos (requested 2026-10-31).
+sentry-ducklake and otel-ducklake, pinned in `libs.lock` (ADR 0003).
 
 ## Stories
 1. [01-library-contract](01-library-contract.md)

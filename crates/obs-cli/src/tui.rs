@@ -2,7 +2,6 @@
 //! F1 errors (sentry-ducklake), F2 telemetry (otel-ducklake). Jumps between
 //! them go by trace id.
 
-use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -61,6 +60,32 @@ impl Pane for Errors {
     }
 }
 
+struct Telemetry(odl_cli::tui::Embedded);
+
+impl Pane for Telemetry {
+    fn title(&self) -> &'static str {
+        "Telemetry"
+    }
+    fn draw(&mut self, f: &mut Frame, area: Rect) {
+        self.0.draw(f, area)
+    }
+    fn handle(&mut self, ev: &Event) -> Option<Ask> {
+        use odl_cli::tui::Outcome;
+        match self.0.handle_event(ev) {
+            Outcome::Consumed => Some(Ask::Nothing),
+            Outcome::Ignored => None,
+            Outcome::Quit => Some(Ask::Quit),
+            Outcome::OpenErrors(t) => Some(Ask::Errors(t)),
+        }
+    }
+    fn tick(&mut self) {
+        self.0.tick()
+    }
+    fn open(&mut self, trace_id: &str) {
+        self.0.open_trace(trace_id)
+    }
+}
+
 struct Host {
     tabs: Vec<Box<dyn Pane>>,
     active: usize,
@@ -72,8 +97,12 @@ const TELEMETRY: usize = 1;
 
 impl Host {
     fn draw(&mut self, f: &mut Frame) {
-        let [bar, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(f.area());
-        let mut spans = vec![Span::styled(" obs ", Style::new().fg(Color::Black).bg(Color::Indexed(141)))];
+        let [bar, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(f.area());
+        let mut spans = vec![Span::styled(
+            " obs ",
+            Style::new().fg(Color::Black).bg(Color::Indexed(141)),
+        )];
         for (i, t) in self.tabs.iter().enumerate() {
             let label = format!(" F{} {} ", i + 1, t.title());
             let style = if i == self.active {
@@ -84,7 +113,10 @@ impl Host {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(label, style));
         }
-        spans.push(Span::styled(format!("   {}", self.base_url), Style::new().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("   {}", self.base_url),
+            Style::new().fg(Color::DarkGray),
+        ));
         f.render_widget(Paragraph::new(Line::from(spans)), bar);
         self.tabs[self.active].draw(f, body);
     }
@@ -118,9 +150,23 @@ impl Host {
 
 pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
     // Fail fast with a clear message instead of an empty screen.
-    client.sentry.info().await.map_err(|e| anyhow::anyhow!("cannot reach {}: {e}", client.base_url()))?;
-    let tabs: Vec<Box<dyn Pane>> = vec![Box::new(Errors(sdl_cli::Embedded::new(client.sentry.clone(), project)))];
-    let mut host = Host { tabs, active: ERRORS, base_url: client.base_url().to_string() };
+    client
+        .sentry
+        .info()
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot reach {}: {e}", client.base_url()))?;
+    let tabs: Vec<Box<dyn Pane>> = vec![
+        Box::new(Errors(sdl_cli::Embedded::new(
+            client.sentry.clone(),
+            project,
+        ))),
+        Box::new(Telemetry(odl_cli::tui::Embedded::new(client.otel.clone()))),
+    ];
+    let mut host = Host {
+        tabs,
+        active: ERRORS,
+        base_url: client.base_url().to_string(),
+    };
 
     let mut term = ratatui::init();
     let result = event_loop(&mut term, &mut host).await;
@@ -136,7 +182,7 @@ async fn event_loop(term: &mut ratatui::DefaultTerminal, host: &mut Host) -> Res
         tokio::select! {
             ev = events.next() => match ev {
                 Some(Ok(ev)) => if !host.on_event(&ev) { return Ok(()) },
-                Some(Err(e)) => return Err(io::Error::from(e).into()),
+                Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()),
             },
             _ = tick.tick() => for t in host.tabs.iter_mut() { t.tick() },
@@ -182,8 +228,16 @@ mod tests {
     fn host() -> Host {
         Host {
             tabs: vec![
-                Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Trace("t1".into()) }),
-                Box::new(Fake { opened: vec![], title: "Telemetry", ask_on_x: || Ask::Errors("t2".into()) }),
+                Box::new(Fake {
+                    opened: vec![],
+                    title: "Errors",
+                    ask_on_x: || Ask::Trace("t1".into()),
+                }),
+                Box::new(Fake {
+                    opened: vec![],
+                    title: "Telemetry",
+                    ask_on_x: || Ask::Errors("t2".into()),
+                }),
             ],
             active: ERRORS,
             base_url: "http://x".into(),
@@ -203,7 +257,10 @@ mod tests {
         assert!(screen(&mut h).contains("Errors body"));
         assert!(h.on_event(&key(KeyCode::F(2))));
         assert!(screen(&mut h).contains("Telemetry body"));
-        assert!(h.on_event(&key(KeyCode::F(9))), "unknown F-key is passed on, not a crash");
+        assert!(
+            h.on_event(&key(KeyCode::F(9))),
+            "unknown F-key is passed on, not a crash"
+        );
         assert_eq!(h.active, TELEMETRY);
     }
 
@@ -218,15 +275,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sentry_pane_draws_inside_its_area() {
+    async fn library_panes_draw_inside_their_area() {
         let c = Client::new("http://127.0.0.1:9", None).unwrap();
         let mut h = Host {
-            tabs: vec![Box::new(Errors(sdl_cli::Embedded::new(c.sentry.clone(), None)))],
+            tabs: vec![
+                Box::new(Errors(sdl_cli::Embedded::new(c.sentry.clone(), None))),
+                Box::new(Telemetry(odl_cli::tui::Embedded::new(c.otel.clone()))),
+            ],
             active: ERRORS,
             base_url: c.base_url().into(),
         };
         h.tabs[0].tick();
-        let s = screen(&mut h);
-        assert!(s.starts_with(" obs "), "top bar stays: {s:?}");
+        h.tabs[1].tick();
+        for tab in [ERRORS, TELEMETRY] {
+            h.active = tab;
+            let s = screen(&mut h);
+            assert!(s.starts_with(" obs "), "top bar stays on tab {tab}: {s:?}");
+        }
     }
 }
