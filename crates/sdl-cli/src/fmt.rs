@@ -209,11 +209,13 @@ fn clean_value(v: &mut Value, keep_newlines: bool) {
 
 /// [`clean_text`] every string (and object key) inside an API response, so
 /// no field of it can carry terminal escape sequences. Used for all
-/// non-JSON output; `--json` output is escaped by serde instead.
-pub fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> T {
-    let Ok(mut value) = serde_json::to_value(&v) else { return v };
+/// non-JSON output; `--json` output is escaped by serde instead. Fails
+/// closed: a value that does not survive the JSON round trip is an error,
+/// never returned uncleaned.
+pub fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> Result<T, serde_json::Error> {
+    let mut value = serde_json::to_value(&v)?;
     clean_value(&mut value, keep_newlines);
-    serde_json::from_value(value).unwrap_or(v)
+    serde_json::from_value(value)
 }
 
 #[cfg(test)]
@@ -276,9 +278,21 @@ mod tests {
     #[test]
     fn sanitize_cleans_nested_strings_and_keys() {
         let v = serde_json::json!({"t\x1b[2J": ["x\x1b]0;pwn\x07", {"k": "\u{9b}"}], "n": 1});
-        let s = sanitize(v, false).to_string();
+        let s = sanitize(v, false).unwrap().to_string();
         assert!(!s.contains('\u{1b}') && !s.contains('\u{9b}') && !s.contains('\u{7}'), "{s}");
         assert!(s.contains("\"n\":1"));
+    }
+
+    #[test]
+    fn sanitize_fails_closed() {
+        #[derive(Serialize, serde::Deserialize, Debug)]
+        struct Ratio {
+            label: String,
+            value: f64,
+        }
+        // NaN serializes to null, which does not deserialize as f64.
+        let r = sanitize(Ratio { label: "\x1b[2Jx".into(), value: f64::NAN }, false);
+        assert!(r.is_err(), "{r:?}");
     }
 
     #[test]

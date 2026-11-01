@@ -265,7 +265,7 @@ async fn info(ctx: &Ctx) -> Result<()> {
     if ctx.json {
         return ctx.print_json(&i);
     }
-    let i = fmt::sanitize(i, true);
+    let i = fmt::sanitize(i, true)?;
     out!("{} {}", p::bold("sentry-ducklake"), i.version);
     kv("server", ctx.url())?;
     kv("duckdb", &i.duckdb_version)?;
@@ -282,7 +282,7 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&ps);
             }
-            let ps = fmt::sanitize(ps, true);
+            let ps = fmt::sanitize(ps, true)?;
             if ps.is_empty() {
                 out!("no projects yet; create one with: {} projects create <name>", ctx.hints.command);
                 return Ok(());
@@ -306,7 +306,7 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&pr);
             }
-            let pr = fmt::sanitize(pr, true);
+            let pr = fmt::sanitize(pr, true)?;
             out!("{} created project {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
             print_project(&pr, &ctx.hints)?;
             Ok(())
@@ -316,7 +316,7 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&pr);
             }
-            let pr = fmt::sanitize(pr, true);
+            let pr = fmt::sanitize(pr, true)?;
             print_project(&pr, &ctx.hints)?;
             Ok(())
         }
@@ -375,7 +375,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&list);
             }
-            let list = fmt::sanitize(list, true);
+            let list = fmt::sanitize(list, true)?;
             if list.issues.is_empty() {
                 out!("no issues match (window {} .. now)", fmt::timestamp(list.window_start));
                 return Ok(());
@@ -415,7 +415,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&d);
             }
-            print_issue(&fmt::sanitize(d, true), &fmt::clean(&project), &ctx.hints)?;
+            print_issue(&fmt::sanitize(d, true)?, &fmt::clean(&project), &ctx.hints)?;
             Ok(())
         }
         IssuesCmd::Resolve { ids } => set_status(ctx, &project, &ids, IssueStatus::Resolved).await,
@@ -523,7 +523,7 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&list);
             }
-            let list = fmt::sanitize(list, true);
+            let list = fmt::sanitize(list, true)?;
             if list.events.is_empty() {
                 out!("no events");
                 return Ok(());
@@ -563,7 +563,7 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&e);
             }
-            print_event(&fmt::sanitize(e, true))?;
+            print_event(&fmt::sanitize(e, true)?)?;
             Ok(())
         }
     }
@@ -696,7 +696,7 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
     if ctx.json {
         return ctx.print_json(&s);
     }
-    let s = fmt::sanitize(s, true);
+    let s = fmt::sanitize(s, true)?;
     out!(
         "{} {}",
         p::bold("Project stats"),
@@ -739,7 +739,7 @@ async fn sourcemaps(ctx: &Ctx) -> Result<()> {
     if ctx.json {
         return ctx.print_json(&list);
     }
-    let list = fmt::sanitize(list, true);
+    let list = fmt::sanitize(list, true)?;
     if list.is_empty() {
         out!("no sourcemaps uploaded (upload with sentry-cli sourcemaps upload)");
         return Ok(());
