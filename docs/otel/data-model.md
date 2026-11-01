@@ -125,14 +125,20 @@ WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR
 **Alternatives considered** (see [ADR 0002](adr/0002-data-model.md)):
 
 - `VARIANT` (typed, can be shredded into columns with statistics). DuckLake 1.1
-  supports it, but attribute keys contain dots (`http.route`), which collide
-  with variant path syntax. Type preservation matters little once common
-  numeric attributes are filtered with `TRY_CAST`. We may revisit this for
-  promoted columns.
+  supports it and dotted keys work (`variant_extract(attributes, 'http.route')`),
+  but it is measured about 2-8× slower than the map on attribute queries, shredded
+  and all, at the same size. The Rust `duckdb` crate cannot decode the type
+  either ([bench/typed-attributes](../../bench/otel/typed-attributes/README.md)).
 - `JSON` text: larger, and needs parsing on every read.
-- Promoting many semantic-convention attributes to columns: faster filters,
-  but a large and ever-changing schema. Today only `service_name` is promoted.
-  More can be appended later without rewriting old data (see 10).
+- Promoting semantic-convention attributes to columns: faster filters, but a
+  large and ever-changing schema. Today only `service_name` is promoted.
+  Measured for `http.route`, `http.response.status_code` and `db.system.name`:
+  a query that reads only the column is 6-11× faster, but the API filter must
+  also see resource attributes and rows from before the column, and then the
+  gain is 1.3-2.4× (from about 200-400 ms to 100-300 ms for one hour of 2 M
+  spans), for one API path and three keys. Not worth a permanent schema
+  change until real installs hit this path. More can be appended later
+  without rewriting old data (see 12).
 
 ### 6. Sort order inside files
 
