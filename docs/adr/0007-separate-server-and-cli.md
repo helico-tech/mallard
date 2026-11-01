@@ -1,7 +1,7 @@
 # 0007 — Separate server and CLI/TUI binaries
 
 ## Status
-accepted (supersedes the one-binary part of 0004)
+accepted (supersedes the one-binary part of 0004); the binary split is superseded by 0023, the crate split stays
 
 ## Context
 ADR 0004 bundled the server and the CLI/TUI into one `mallard` binary. The

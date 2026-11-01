@@ -23,8 +23,8 @@
 
 | crate | role |
 |---|---|
-| `mallard` | The CLI/TUI binary (ADR 0007): one flat command tree (ADR 0008) mounting `sdl-cli` and `odl-cli` commands, plus `status`, `setup`, `find`, `trace`, `series`, `help agents`, `tui`; `errors …`/`telemetry …` are hidden aliases. HTTP only; no DuckDB, no server code. |
-| `mallard-server` | Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. The bridge (`src/bridge/`, ADR 0009, 0013, 0021) turns Sentry transactions and streamed spans into OTel spans and OTel exceptions into Sentry events through the libraries' hooks. Its `mallard-server` binary installs logging and the Prometheus recorder (`mallard-common`). |
+| `mallard` | The one product binary (ADR 0023): one flat command tree (ADR 0008) mounting `sdl-cli` and `odl-cli` commands, plus `status`, `setup`, `find`, `trace`, `series`, `help agents`, `tui`; `errors …`/`telemetry …` are hidden aliases. These speak HTTP only. Feature `server` (on by default) adds `serve`, `check`, `maintenance`, `install-extensions` from `mallard-server`; with `--no-default-features` the same CLI and TUI build with no DuckDB (CI checks `cargo tree`). |
+| `mallard-server` | A library, run by `mallard serve`. Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. The bridge (`src/bridge/`, ADR 0009, 0013, 0021) turns Sentry transactions and streamed spans into OTel spans and OTel exceptions into Sentry events through the libraries' hooks. `commands` is what the server commands run, and the only place that installs logging and the Prometheus recorder (`mallard-common`). |
 | `mallard-common` | Shared by both sides (ADR 0005): duration/size parsing, query windows, the `ApiError` body; with feature `server` the config loader, bearer tokens, HTTP helpers (`ApiErr`, `Q`, `J`, `require_bearer`, CORS, docs page, readiness), logging, signals, Prometheus. |
 | `mallard-duck` | The only crate that depends on `duckdb`: `[storage]`/`[duckdb]` types, `open_connection`, extensions, secrets, SQL quoting, identifier check, redaction, object-store options for sourcemaps, and the read-only SQL guard (`sql`) both sides' SQL endpoints use (ADR 0011). |
 | `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables (plain when piped), formats, colour, error kinds and exit codes, the output contract (`--format`, `--fields`, list envelope, `--quiet` notes), window flags and `--wait` polling (ADR 0006, 0008), TUI theme, keys and `Outcome`. Depends on neither client. |
@@ -55,12 +55,13 @@
 - One `duckdb` crate version for the workspace (it is bundled and linked
   once): only `mallard-duck` depends on it; everything else uses
   `mallard_duck::duckdb`.
-- Binaries: only `mallard-server` and `mallard` (plus the dev load
-  generators `sdl-loadgen`, `odl-loadgen`); the `sdl-*`/`odl-*` crates are
-  libraries (the standalone `sentry-ducklake`, `otel-ducklake`, `sdl`,
+- Binaries: only `mallard` (plus the dev load generators `sdl-loadgen`,
+  `odl-loadgen`); `mallard-server` and the `sdl-*`/`odl-*` crates are libraries
+  (the standalone `sentry-ducklake`, `otel-ducklake`, `mallard-server`, `sdl`,
   `odl` binaries are gone).
-- Library crates have no global side effects; the binaries set up logging,
-  metrics and the runtime (with `mallard-common`).
+- Library crates have no global side effects. Logging and metrics are set up by
+  `mallard_server::commands`, which only the server commands of the binary call,
+  so CLI commands never get them. Logs go to stderr; stdout is data only (ADR 0008).
 - One config file, TOML, sections `[server]`, `[storage]`, `[duckdb]`,
   `[bridge]` (mallard's), `[sentry]`, `[otel]` (only what each side owns). One loader
   (`mallard_common::config`): env overrides `MALLARD_<SECTION>__<KEY>`

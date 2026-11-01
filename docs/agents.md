@@ -191,3 +191,17 @@ it was cut short: raise `-n` or select fewer columns.
 - Lists are capped by `--limit` (`-n`); keep it small and use `--fields`. An issue
   cursor keeps its window and sort; changing `--sort` with a cursor is exit 2.
 - The old paths `mallard errors …` and `mallard telemetry …` still work.
+
+## Running a server
+
+The same binary runs the server, so a local one needs nothing else:
+
+```sh
+MALLARD_API_TOKEN=dev mallard serve -c mallard.toml &   # or MALLARD_CONFIG; logs on stderr
+until MALLARD_TOKEN=dev mallard status >/dev/null; do sleep 1; done   # exit 6 until it is up
+mallard check -c mallard.toml --connect --json          # exit 2: bad config; exit 1: catalog or storage failed
+mallard maintenance -c mallard.toml --full              # flush, retention, compaction, then exit
+```
+
+`-c` comes after the command. A build with `--no-default-features` has no server:
+these commands are exit 2 there and `mallard status` needs a server elsewhere.

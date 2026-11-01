@@ -1,4 +1,6 @@
 # mallard configuration. Every key is optional; shown values are defaults.
+# Run with `mallard serve -c <file>` (or MALLARD_CONFIG); `mallard check -c <file>`
+# validates it.
 # Environment variables override the file: MALLARD_<SECTION>__<KEY>, e.g.
 #   MALLARD_STORAGE__DATA_PATH=s3://my-bucket/lake/
 #   MALLARD_OTEL__RETENTION__TRACES=0          (string settings keep the text as is)
