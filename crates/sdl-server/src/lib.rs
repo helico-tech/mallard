@@ -28,7 +28,7 @@ mod ingest;
 mod sourcemaps;
 mod storage;
 
-pub use config::Config;
+pub use config::{Config, Secret};
 pub use db::install_all_extensions;
 
 use anyhow::{Context, Result};

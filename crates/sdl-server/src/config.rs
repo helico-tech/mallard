@@ -62,7 +62,7 @@ pub struct Config {
     /// separated. The binary requires one; without one the API rejects all
     /// requests.
     #[arg(long, env = "SDL_API_TOKEN", hide_env_values = true)]
-    pub api_token: Option<String>,
+    pub api_token: Option<Secret>,
 
     /// Delete events older than this many days (0 = keep forever).
     #[arg(long, env = "SDL_RETENTION_DAYS", default_value_t = 90)]
@@ -198,6 +198,42 @@ impl Default for Config {
     }
 }
 
+/// A string that `Debug` does not print, so `?cfg` cannot leak a token.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("\"***\"")
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Secret(s)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Secret(s.to_string())
+    }
+}
+
+impl std::str::FromStr for Secret {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(s.into())
+    }
+}
+
 impl Config {
     /// Read `<PREFIX><FIELD>` environment variables, e.g. with prefix
     /// `OBS_SENTRY_`: `OBS_SENTRY_PUBLIC_URL`, `OBS_SENTRY_BATCH_WINDOW=250ms`.
@@ -208,8 +244,8 @@ impl Config {
 
     pub fn api_tokens(&self) -> Vec<String> {
         self.api_token
-            .as_deref()
-            .unwrap_or("")
+            .as_ref()
+            .map_or("", Secret::expose)
             .split(',')
             .map(str::trim)
             .filter(|t| !t.is_empty())
@@ -262,6 +298,15 @@ mod tests {
         assert_eq!(c.batch_window, Duration::from_millis(250));
         assert_eq!(c.retention_days, 90);
         assert_eq!(c.api_tokens(), vec!["t"]);
+    }
+
+    #[test]
+    fn debug_hides_the_api_token() {
+        let c = Config { api_token: Some("hunter2".into()), ..Config::default() };
+        assert!(!format!("{c:?}").contains("hunter2"));
+        assert_eq!(c.api_tokens(), vec!["hunter2"]);
+        let c = T::parse_from(["t", "--api-token", "a,b"]).c;
+        assert_eq!(c.api_tokens(), vec!["a", "b"]);
     }
 
     #[test]
