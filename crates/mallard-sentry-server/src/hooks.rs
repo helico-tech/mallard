@@ -38,6 +38,9 @@ pub struct Spans<'a> {
     /// of the trace, `sdk` the SDK), not checked. Borrowed: one envelope can
     /// hold many items, and its headers can be large.
     pub envelope_headers: &'a Map<String, Value>,
+    /// The address of the request, as for `user.ip_address = "{{auto}}"` of
+    /// an event (`ingest.trust_forwarded_for` applies).
+    pub client_ip: Option<&'a str>,
     /// The item's JSON, not parsed or checked.
     pub payload: &'a [u8],
 }
