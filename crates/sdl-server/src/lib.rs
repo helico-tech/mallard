@@ -21,7 +21,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Or run the `sentry-ducklake` binary ([`Standalone`]). The library
+//! Or open it on its own with [`Standalone`] (used by the tests). The library
 //! installs no global tracing subscriber or metrics recorder; it only emits
 //! `tracing` events and `metrics` counters.
 
@@ -37,7 +37,7 @@ mod storage;
 pub use config::{
     Artifacts, Config, Host, IngestConfig, MaintenanceConfig, QueryConfig, RetentionConfig, SourcemapConfig,
 };
-pub use hooks::{EventObserver, IngestError, Transaction, TransactionSink};
+pub use hooks::{EventObserver, IngestError, SpanSink, Spans, Transaction, TransactionSink};
 pub use standalone::{Secret, Standalone};
 
 use anyhow::{Context, Result};
@@ -62,6 +62,8 @@ struct AppState {
     recent_events: moka::sync::Cache<(u32, uuid::Uuid), ()>,
     /// Gets transactions instead of dropping them (set by the host).
     transaction_sink: OnceLock<Arc<dyn TransactionSink>>,
+    /// Gets span items instead of dropping them (set by the host).
+    span_sink: OnceLock<Arc<dyn SpanSink>>,
     /// Told about stored SDK events (set by the host).
     event_observer: OnceLock<Arc<dyn EventObserver>>,
 }
@@ -126,6 +128,7 @@ impl Server {
                 tokens,
                 recent_events,
                 transaction_sink: OnceLock::new(),
+                span_sink: OnceLock::new(),
                 event_observer: OnceLock::new(),
             }),
         })
@@ -154,6 +157,12 @@ impl Server {
     /// once, before serving; a second call is an error.
     pub fn set_transaction_sink(&self, sink: Arc<dyn TransactionSink>) -> Result<()> {
         self.state.transaction_sink.set(sink).map_err(|_| anyhow::anyhow!("transaction sink already set"))
+    }
+
+    /// Hand `span` items (span streaming) to `sink` instead of dropping
+    /// them. Set it once, before serving; a second call is an error.
+    pub fn set_span_sink(&self, sink: Arc<dyn SpanSink>) -> Result<()> {
+        self.state.span_sink.set(sink).map_err(|_| anyhow::anyhow!("span sink already set"))
     }
 
     /// Report stored SDK events to `observer`. Set it once; a second call

@@ -73,11 +73,11 @@ enum Cmd {
     Status,
     /// Create a project if it does not exist; print its DSN and the OTLP env vars.
     Setup(setup::SetupArgs),
-    /// What is this id (trace, event or issue)? Prints matches and the command to see more.
+    /// What is this id (trace, event, issue or span)? Prints matches and the command to see more.
     Find {
-        /// A trace or event id (32 hex) or an issue id (16 hex).
+        /// A trace or event id (32 hex) or an issue or span id (16 hex).
         id: String,
-        /// Where to look for traces and events (default 7d).
+        /// Where to look for traces, events and spans (default 7d).
         #[command(flatten)]
         window: WindowArgs,
         #[command(flatten)]
@@ -92,6 +92,9 @@ enum Cmd {
     /// Sentry projects: list, show, create.
     #[command(subcommand)]
     Projects(sdl_cli::ProjectsCmd),
+    /// Releases seen in error events: first/last seen, events, issues, new issues.
+    #[command(subcommand)]
+    Releases(sdl_cli::ReleasesCmd),
     /// Traces: list (search), show (spans, errors and logs of one trace).
     #[command(subcommand)]
     Traces(TracesCmd),
@@ -109,8 +112,10 @@ enum Cmd {
     /// Metrics: list, show (values over time).
     #[command(subcommand)]
     Metrics(MetricsCmd),
-    /// Read-only SQL over the telemetry tables (the server must enable it).
-    Sql(odl_cli::SqlArgs),
+    /// Read-only SQL over the telemetry tables, or the error tables with --errors (the server must enable it).
+    Sql(SqlCmd),
+    /// Tables and columns for `sql`; `schema attrs`: attribute keys and values.
+    Schema(SchemaArgs),
     /// Uploaded sourcemap bundles.
     #[command(subcommand)]
     Sourcemaps(sdl_cli::SourcemapsCmd),
@@ -163,12 +168,38 @@ struct TraceShowArgs {
     wait: WaitArgs,
 }
 
+/// `sql`: one command for both sides' tables (ADR 0011).
+#[derive(clap::Args)]
+struct SqlCmd {
+    #[command(flatten)]
+    sql: odl_cli::SqlArgs,
+    /// Query the error tables (events, issues, issue_activity) instead of the
+    /// telemetry tables (spans, logs, metric_*).
+    #[arg(long)]
+    errors: bool,
+}
+
 #[derive(Subcommand)]
 enum MetricsCmd {
     /// Metric names, types and series counts (default window 1h).
     List(odl_cli::MetricListArgs),
     /// One metric over time: aggregate, group by attributes.
     Show(odl_cli::MetricArgs),
+}
+
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct SchemaArgs {
+    #[command(subcommand)]
+    cmd: Option<SchemaCmd>,
+}
+
+#[derive(Subcommand)]
+enum SchemaCmd {
+    /// Tables and columns that `sql` can query (the default).
+    Tables,
+    /// Attribute keys with counts, or the top values of one key (sampled; default window 1h).
+    Attrs(odl_cli::AttrArgs),
 }
 
 /// Hints in messages name mallard's commands and env vars.
@@ -262,6 +293,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Issues(c) => sdl_cli::run(sdl_cli::Command::Issues(c), &r.sentry()).await,
         Cmd::Events(c) => sdl_cli::run(sdl_cli::Command::Events(c), &r.sentry()).await,
         Cmd::Projects(c) => sdl_cli::run(sdl_cli::Command::Projects(c), &r.sentry()).await,
+        Cmd::Releases(c) => sdl_cli::run(sdl_cli::Command::Releases(c), &r.sentry()).await,
         Cmd::Sourcemaps(c) => sdl_cli::run(sdl_cli::Command::Sourcemaps(c), &r.sentry()).await,
         Cmd::SendTest { dsn, message } => sdl_cli::run(sdl_cli::Command::SendTest { dsn, message }, &r.sentry()).await,
         Cmd::Traces(TracesCmd::List(a)) => odl_cli::run(odl_cli::Command::Traces(a), &r.otel()).await,
@@ -272,7 +304,17 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Series(c) => series::run(&r, c).await,
         Cmd::Metrics(MetricsCmd::List(a)) => odl_cli::run(odl_cli::Command::Metrics(a), &r.otel()).await,
         Cmd::Metrics(MetricsCmd::Show(a)) => odl_cli::run(odl_cli::Command::Metric(a), &r.otel()).await,
-        Cmd::Sql(a) => odl_cli::run(odl_cli::Command::Sql(a), &r.otel()).await,
+        Cmd::Sql(SqlCmd { sql, errors: true }) => {
+            let a = sdl_cli::SqlArgs { query: sql.query, limit: sql.limit };
+            sdl_cli::run(sdl_cli::Command::Sql(a), &r.sentry()).await
+        }
+        Cmd::Sql(SqlCmd { sql, errors: false }) => odl_cli::run(odl_cli::Command::Sql(sql), &r.otel()).await,
+        Cmd::Schema(SchemaArgs { cmd: None | Some(SchemaCmd::Tables) }) => {
+            odl_cli::run(odl_cli::Command::Schema, &r.otel()).await
+        }
+        Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) => {
+            odl_cli::run(odl_cli::Command::Attrs(a), &r.otel()).await
+        }
         Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
         Cmd::Help { topic } => help::run(&topic, &r.output),
         Cmd::Errors { cmd } => sdl_cli::run(cmd, &r.sentry()).await,
@@ -329,6 +371,12 @@ mod tests {
             &["issues", "ignore", "a", "b"],
             &["events", "list", "--issue", "85fede14250ec6be", "--since", "1d"],
             &["events", "show", "0af7651916cd43dd8448eb211c80319c", "--raw"],
+            &["issues", "list", "--tag", "url=/checkout", "--tag", "user=u-42", "--cursor", "c"],
+            &["events", "list", "--since", "1h", "--tag", "user=u-42", "--release", "web@1", "--env", "prod"],
+            &["events", "list", "-q", "timeout", "--cursor", "c", "-n", "5"],
+            &["events", "list", "--since", "1h", "--tag", "user=u-42", "--cursor", "c", "--wait", "30s"],
+            &["releases", "list", "--since", "30d", "-n", "5"],
+            &["sql", "--errors", "SELECT count(*) FROM events"],
             &["projects", "create", "web", "--if-not-exists"],
             &["traces", "list", "-S", "checkout", "--errors", "--since", "15m"],
             &["traces", "show", "0af7651916cd43dd8448eb211c80319c", "--from", "1d"],
@@ -341,6 +389,14 @@ mod tests {
             &["metrics", "list", "-q", "http"],
             &["metrics", "show", "http.server.duration", "-g", "p95", "-b", "http.route"],
             &["sql", "SELECT 1"],
+            &["schema"],
+            &["schema", "tables"],
+            &["schema", "attrs", "--signal", "spans", "-S", "checkout"],
+            &["schema", "attrs", "--signal", "logs", "--key", "http.route", "--since", "6h", "-n", "10"],
+            &["schema", "attrs", "--signal", "metrics", "--metric", "http.server.request.duration"],
+            &["traces", "list", "--cursor", "1730000000000000:0af7651916cd43dd8448eb211c80319c"],
+            &["logs", "--cursor", "1730000000000000:1f"],
+            &["find", "85fede14250ec6be"],
             &["sourcemaps", "list"],
             &["send-test", "--dsn", "http://k@h/1"],
             &["tui"],
@@ -406,6 +462,38 @@ mod tests {
     }
 
     #[test]
+    fn tags_cursor_and_sql_side() {
+        let Cmd::Issues(sdl_cli::IssuesCmd::List(a)) = parse_ok(&["issues", "list", "--tag", "url=/a=b"]).cmd else {
+            panic!("issues list")
+        };
+        assert_eq!(a.tag, ["url:/a=b"], "split at the first =; sent as key:value");
+        for bad in [
+            &["issues", "list", "--tag", "novalue"][..],
+            &["issues", "list", "--tag", "=v"],
+            &["issues", "list", "--tag", "a:b=c"],
+        ] {
+            assert!(try_parse(bad).is_err(), "{bad:?}");
+        }
+        assert!(try_parse(&["events", "list", "--trace", "0af7651916cd43dd8448eb211c80319c", "--tag", "a=b"]).is_err());
+        let Cmd::Sql(s) = parse_ok(&["sql", "--errors", "SELECT 1", "-n", "5"]).cmd else { panic!("sql") };
+        assert!(s.errors && s.sql.limit == 5 && s.sql.query == "SELECT 1");
+        let Cmd::Sql(s) = parse_ok(&["sql", "SELECT 1"]).cmd else { panic!("sql") };
+        assert!(!s.errors, "telemetry by default");
+    }
+
+    #[test]
+    fn schema_and_cursor_flags() {
+        assert!(try_parse(&["schema", "attrs", "--signal", "events"]).is_err(), "spans, logs or metrics");
+        assert!(try_parse(&["schema", "nope"]).is_err());
+        assert!(try_parse(&["logs", "-f", "--cursor", "1:a"]).is_err(), "a follow has no pages");
+        let Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) = parse_ok(&["schema", "attrs"]).cmd else {
+            panic!("schema attrs")
+        };
+        assert_eq!((a.signal, a.limit, a.key), (mallard_client::odl_client::api::AttributeSignal::Spans, 50, None));
+        assert!(matches!(parse_ok(&["schema"]).cmd, Cmd::Schema(SchemaArgs { cmd: None })));
+    }
+
+    #[test]
     fn wait_and_follow_flags_are_checked() {
         for args in [
             &["traces", "list", "--wait", "soon"][..],
@@ -414,6 +502,7 @@ mod tests {
             &["logs", "--until-match", "x"],
             &["ops", "--compare", "0s"],
             &["-q", "issues", "list"],
+            &["logs", "-f", "--cursor", "1:a"],
         ] {
             assert!(try_parse(args).is_err(), "{args:?}");
         }

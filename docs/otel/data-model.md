@@ -236,7 +236,8 @@ read in ad-hoc SQL.
 - `temporality` is kept per point (`cumulative`, `delta`, or empty for
   gauges). The query API handles both: increase = difference of last values
   per bucket for cumulative (a drop counts as a counter reset), and sum of
-  values for delta.
+  values for delta. One metric may mix both: each series is handled by
+  its own temporality.
 - Integer values are stored as `DOUBLE`, which is exact up to 2^53.
 - Non-finite values (`NaN`, `±Infinity`; in OTLP/JSON the strings `"NaN"`,
   `"Infinity"`, `"-Infinity"`) are stored as the DOUBLE values `nan` and

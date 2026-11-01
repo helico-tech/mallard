@@ -1,6 +1,6 @@
 [package]
 name = "sdl-loadgen"
-description = "Load generator for sentry-ducklake: realistic Sentry envelopes at a target rate"
+description = "Load generator for mallard: realistic Sentry envelopes at a target rate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -14,7 +14,7 @@ pub mod writer;
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use mallard_duck::duckdb::Connection;
+use mallard_duck::duckdb::{Connection, InterruptHandle};
 use sdl_types::IssueStatus;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -172,7 +172,11 @@ impl Db {
         let n = cfg.query.readers.max(1);
         let mut readers = Vec::with_capacity(n);
         for _ in 0..n {
-            readers.push(conn.try_clone()?);
+            let r = conn.try_clone()?;
+            // Default schema of the readers, for `POST /v1/sql` (`FROM events`).
+            // Our own queries name `$S` in full.
+            r.execute_batch(&ns.sql("USE $S"))?;
+            readers.push(r);
         }
         let writer_conn = conn.try_clone()?;
         drop(conn);
@@ -271,6 +275,86 @@ impl Db {
             result.unwrap_or_else(|_| Err(anyhow!("query panicked")))
         })
         .await?
+    }
+}
+
+/// Where a [`Db::read_for`] query is, for interrupting it.
+enum Run {
+    Waiting,
+    Running(Arc<InterruptHandle>),
+    Done,
+    /// Given up before it started: it must not start.
+    Cancelled,
+}
+
+/// Interrupts the query of a [`Db::read_for`] when the request ends first
+/// (timeout or a dropped request). DuckDB only stops the running statement,
+/// so it keeps interrupting until the closure is done; `Done` is set under
+/// the same lock before the connection goes back, so an interrupt never
+/// reaches the next query on it.
+struct StopOnDrop(Arc<Mutex<Run>>);
+
+/// A panic in a query closure poisons the lock; the state is still valid.
+fn lock(m: &Mutex<Run>) -> std::sync::MutexGuard<'_, Run> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let mut run = lock(&self.0);
+        match &*run {
+            Run::Waiting => *run = Run::Cancelled,
+            Run::Running(_) => {
+                drop(run);
+                let state = self.0.clone();
+                tokio::spawn(async move {
+                    loop {
+                        match &*lock(&state) {
+                            Run::Running(h) => h.interrupt(),
+                            _ => return,
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                });
+            }
+            Run::Done | Run::Cancelled => {}
+        }
+    }
+}
+
+impl Db {
+    /// [`Db::read`] that gives up after `timeout` (`Ok(None)`): the query is
+    /// interrupted, and its connection returns to the pool once it stopped.
+    pub async fn read_for<T: Send + 'static>(
+        &self,
+        timeout: std::time::Duration,
+        f: impl FnOnce(&Connection, &Ns) -> Result<T> + Send + 'static,
+    ) -> Result<Option<T>> {
+        let state = Arc::new(Mutex::new(Run::Waiting));
+        let s = state.clone();
+        let read = self.read(move |c, ns| {
+            {
+                let mut run = lock(&s);
+                if matches!(*run, Run::Cancelled) {
+                    return Err(anyhow!("query cancelled"));
+                }
+                *run = Run::Running(c.interrupt_handle());
+            }
+            // `Done` also when `f` panics.
+            struct SetDone(Arc<Mutex<Run>>);
+            impl Drop for SetDone {
+                fn drop(&mut self) {
+                    *lock(&self.0) = Run::Done;
+                }
+            }
+            let _done = SetDone(s.clone());
+            f(c, ns)
+        });
+        let _stop = StopOnDrop(state);
+        match tokio::time::timeout(timeout, read).await {
+            Ok(r) => r.map(Some),
+            Err(_) => Ok(None),
+        }
     }
 }
 
@@ -384,7 +468,7 @@ pub(crate) mod tests {
         let mut before = None;
         for _ in 0..5 {
             let q = sdl_types::EventQuery { limit: Some(2), ..Default::default() };
-            let page = db.read(move |c, ns| read::list_events(c, ns, 1, None, &q, None, before)).await.unwrap();
+            let page = db.read(move |c, ns| read::list_events(c, ns, 1, None, &q, &[], None, before)).await.unwrap();
             for e in &page.events {
                 assert!(seen.insert(e.event_id.clone()), "event {} on two pages", e.event_id);
             }
@@ -429,7 +513,7 @@ pub(crate) mod tests {
         let list = db
             .read(move |c, ns| {
                 let q = sdl_types::IssueQuery::default();
-                read::list_issues(c, ns, 1, &q, &w, read::StatusFilter::All, read::IssueSort::LastSeen)
+                read::list_issues(c, ns, 1, &q, &[], &w, read::StatusFilter::All, read::IssueSort::LastSeen, None)
             })
             .await
             .unwrap();
@@ -480,6 +564,26 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1);
+        db.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_for_interrupts_a_slow_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let slow = db
+            .read_for(Duration::from_millis(200), |c, _| {
+                Ok(c.query_row("SELECT sum(i) FROM range(1000000000000) t(i)", [], |r| r.get::<_, i128>(0))?)
+            })
+            .await
+            .unwrap();
+        assert!(slow.is_none(), "timed out");
+        // The only reader comes back once the query stopped, and is not
+        // interrupted again.
+        let next = tokio::time::timeout(Duration::from_secs(20), select_one(&db)).await;
+        assert_eq!(next.expect("the reader came back").unwrap(), 1);
+        let fast = db.read_for(Duration::from_secs(5), |c, _| Ok(c.query_row("SELECT 2", [], |r| r.get::<_, i32>(0))?));
+        assert_eq!(fast.await.unwrap(), Some(2));
         db.shutdown().await;
     }
 

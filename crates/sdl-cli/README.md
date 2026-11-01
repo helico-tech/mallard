@@ -1,5 +1,10 @@
 # sdl — CLI and TUI for sentry-ducklake
 
+> **Retired binary.** The standalone `sdl` binary is gone (story 0002/06);
+> this crate is the library behind `mallard`'s Sentry commands (see
+> [docs/cli.md](../../docs/cli.md)), with `MALLARD_URL`/`MALLARD_TOKEN`
+> instead of `SDL_URL`/`SDL_TOKEN`.
+
 `sdl` talks to a sentry-ducklake server through its `/v1` API (via
 `sdl-client`). It lists and changes issues, shows events with their stack
 traces, sends test errors to a DSN, and has a live terminal dashboard.
@@ -42,13 +47,18 @@ sdl projects create <name> [--slug s] [--platform node]   prints the DSN
 sdl projects show <project>                               DSN first, then details
 sdl issues list [--status unresolved|resolved|ignored|all] [-q text] [-s 24h]
                 [--sort last_seen|first_seen|count|users] [--env e] [--release r] [-n limit]
+                [--tag key=value]... [--cursor c]
 sdl issues show <id> [-s 24h]              details, releases, tag breakdown, activity
 sdl issues resolve|ignore|unresolve <id>...
-sdl events list [--issue id | -t trace_id] [-n limit]
+sdl events list [--issue id | -t trace_id] [-n limit] [-s 1h] [--tag key=value]...
+                [--release r] [--env e] [-q text] [--cursor c]
 sdl events show <event_id> [--issue id]    exception chain, frames (newest first,
                                            in-app highlighted with source context),
                                            breadcrumbs, tags, user, request
 sdl stats [-s 24h] [--interval 1h]        totals and events per bucket
+sdl releases list [-s 14d] [-n limit]      releases seen in events (derived; not sentry-cli's)
+sdl sql "<select>" [-n limit]              read-only SQL over events, issues, issue_activity
+                                           (server: SDL_ENABLE_SQL; exit 7 when off)
 sdl sourcemaps list                        uploaded artifact bundles
 sdl maintenance                            flush, compact and expire now
 sdl send-test --dsn <dsn> [--message m]    send a test error (Sentry envelope protocol)

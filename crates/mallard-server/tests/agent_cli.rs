@@ -1,6 +1,7 @@
 //! The agent contract end to end (ADR 0008): the real `mallard` binary
-//! against a mallard server in this process. Covers `setup`, `find`,
-//! `issues list --new`, `issues resolve --reason`, `logs --around`,
+//! against a mallard server in this process. Covers `setup`, `find` (also
+//! span ids), `issues list --new`, `issues resolve --reason`, `logs --around`,
+//! `schema`, `schema attrs`, `--cursor`,
 //! `--fields`, ndjson, plain text when piped, exit codes and JSON errors.
 //!
 //! The binary is `target/<profile>/mallard`: `cargo test --workspace`
@@ -231,9 +232,125 @@ async fn agent_contract_end_to_end() {
     let o = mallard(url, &["--token", "wrong", "status", "--json"]).await;
     assert_eq!(o.code, 3, "{}", o.stderr);
 
+    // find: a span id resolves to its trace.
+    let (_, span) = ids(0);
+    let v = mallard(url, &["find", &span, "--json"]).await.ok().json();
+    let m = v["items"].as_array().unwrap().iter().find(|m| m["kind"] == "span").cloned().expect("span match");
+    assert_eq!((m["trace_id"].as_str(), m["service"].as_str()), (Some(trace.as_str()), Some("checkout")), "{v}");
+    assert_eq!(m["next"], format!("mallard trace {trace}"));
+
+    // schema and schema attrs.
+    let s = mallard(url, &["schema", "--json"]).await.ok().json();
+    assert_eq!(
+        (s["items"][0]["name"].as_str(), s["items"][0]["time_column"].as_str()),
+        (Some("spans"), Some("start_time"))
+    );
+    let a = mallard(url, &["schema", "attrs", "--key", "service.name", "--since", "1h", "--json"]).await.ok().json();
+    assert_eq!((a["items"][0]["value"].as_str(), a["items"][0]["count"].as_u64()), (Some("checkout"), Some(1)), "{a}");
+    let text = mallard(url, &["schema", "attrs", "--signal", "logs"]).await.ok();
+    assert!(text.stdout.lines().any(|l| l.trim_start().starts_with("service.name")), "{}", text.stdout);
+
+    // --cursor: a second request, then two pages of one trace and one log each.
+    send_otlp(&http, &srv.otlp_url, 1).await;
+    eventually("second trace", || async {
+        let l = mallard(url, &["traces", "list", "--json"]).await.ok().json();
+        (l["count"] == 2).then_some(())
+    })
+    .await;
+    for cmd in [&["traces", "list"][..], &["logs"]] {
+        let first = mallard(url, &[cmd, &["-n", "1", "--since", "1h", "--json"]].concat()).await.ok().json();
+        let cursor = first["next_cursor"].as_str().unwrap_or_else(|| panic!("{cmd:?}: {first}")).to_string();
+        assert_eq!(first["truncated"], true);
+        let (from, to) = (first["window"]["from"].as_str().unwrap(), first["window"]["to"].as_str().unwrap());
+        let args = [cmd, &["-n", "1", "--from", from, "--to", to, "--cursor", cursor.as_str(), "--json"]].concat();
+        let second = mallard(url, &args).await.ok().json();
+        assert_eq!((second["count"].as_u64(), second["next_cursor"].is_null()), (Some(1), true), "{cmd:?}: {second}");
+        assert_ne!(first["items"][0], second["items"][0], "{cmd:?}");
+        let nd = mallard(url, &[cmd, &["-n", "1", "--since", "1h", "--format", "ndjson"]].concat()).await.ok();
+        assert!(nd.stderr.contains("--cursor "), "{cmd:?}: the note has the cursor: {}", nd.stderr);
+    }
+    let o = mallard(url, &["logs", "--cursor", "nope", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (2, Some("usage")), "{}", o.stderr);
+
     srv.stop().await;
     // The server is gone: status says so with exit code 6.
     let o = mallard(url, &["status", "--json"]).await;
     assert_eq!((o.code, o.json()["ok"].as_bool()), (6, Some(false)));
     assert_eq!(o.error()["retryable"], true);
+}
+
+/// Agent CLI P1, Sentry side: `--tag`, `--cursor`, `releases list` and
+/// `sql --errors` (on, and off with exit 7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tags_cursors_releases_and_error_sql() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| c.sentry.query.enable_sql = true).await;
+    let url = srv.url.clone();
+    let url = url.as_str();
+    let s = mallard(url, &["setup", "web", "--json"]).await.ok().json();
+    let (pid, key) = (s["project"]["id"].as_u64().unwrap(), s["project"]["public_key"].as_str().unwrap());
+    let http = reqwest::Client::new();
+    for (msg, release, user) in [("a", "web@1", "u-1"), ("b", "web@2", "u-2"), ("c", "web@2", "u-1")] {
+        let event = serde_json::json!({"message": msg, "level": "error", "release": release, "tags": {"user": user}});
+        let r = http
+            .post(format!("{url}/sentry/api/{pid}/store/?sentry_key={key}&sentry_version=7"))
+            .body(event.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "{}", r.status());
+    }
+
+    // --tag on issues and events.
+    let l = mallard(url, &["issues", "list", "--tag", "user=u-1", "--json", "--fields", "title"]).await.ok().json();
+    let mut titles: Vec<&str> = l["items"].as_array().unwrap().iter().map(|i| i["title"].as_str().unwrap()).collect();
+    titles.sort();
+    assert_eq!(titles, ["a", "c"], "{l}");
+    let e = mallard(url, &["events", "list", "--tag", "user=u-2", "--release", "web@2", "--json"]).await.ok().json();
+    assert_eq!(e["count"], 1, "{e}");
+
+    // --cursor: two pages of issues, nothing twice.
+    let p1 = mallard(url, &["issues", "list", "-n", "2", "--json"]).await.ok().json();
+    assert_eq!((p1["count"].as_u64(), p1["truncated"].as_bool()), (Some(2), Some(true)), "{p1}");
+    let cursor = p1["next_cursor"].as_str().expect("a cursor").to_string();
+    let text = mallard(url, &["issues", "list", "-n", "2"]).await.ok();
+    // A new cursor (the window ends now), same shape.
+    assert!(text.stderr.contains("next page: --cursor last_seen:"), "{}", text.stderr);
+    assert!(!text.stdout.contains("--cursor"), "the note is not data: {}", text.stdout);
+    let nd = mallard(url, &["events", "list", "-n", "1", "--format", "ndjson"]).await.ok();
+    assert_eq!(nd.stdout.lines().count(), 1);
+    assert!(nd.stderr.contains("next page: --cursor "), "{}", nd.stderr);
+    let p2 = mallard(url, &["issues", "list", "-n", "2", "--cursor", &cursor, "--json"]).await.ok().json();
+    assert_eq!(p2["count"], 1, "{p2}");
+    assert_ne!(p2["items"][0]["id"], p1["items"][0]["id"]);
+    assert_ne!(p2["items"][0]["id"], p1["items"][1]["id"]);
+    let o = mallard(url, &["issues", "list", "--cursor", &cursor, "--sort", "count", "--json"]).await;
+    assert_eq!(o.code, 2, "{}", o.stderr);
+
+    // releases list.
+    let r = mallard(url, &["releases", "list", "--json", "--fields", "version,events,new_issues"]).await.ok().json();
+    assert_eq!(r["items"][0], serde_json::json!({"version": "web@2", "events": 2, "new_issues": 2}), "{r}");
+    assert!(r["window"]["from"].is_string());
+    let text = mallard(url, &["releases", "list"]).await.ok();
+    assert!(text.stdout.contains("web@1") && text.stdout.contains("web@2"), "{}", text.stdout);
+
+    // sql --errors on this server; the telemetry side is still off.
+    let q = "SELECT tags['user'] AS u, count(*) AS n FROM events GROUP BY 1 ORDER BY 1";
+    let v = mallard(url, &["sql", "--errors", q, "--json"]).await.ok().json();
+    assert_eq!(v["rows"], serde_json::json!([["u-1", 2], ["u-2", 1]]), "{v}");
+    let text = mallard(url, &["sql", "--errors", q]).await.ok();
+    assert!(text.stdout.contains("u-1") && text.stdout.contains("2 rows"), "{}", text.stdout);
+    let o = mallard(url, &["sql", "--errors", "SELECT * FROM spans", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (2, Some("usage")), "{}", o.stderr);
+    let o = mallard(url, &["sql", "SELECT 1", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (7, Some("disabled")), "{}", o.stderr);
+    srv.stop().await;
+
+    // And with the Sentry side's SQL off: exit 7 naming the setting.
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let o = mallard(&srv.url, &["sql", "--errors", "SELECT 1", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (7, Some("disabled")), "{}", o.stderr);
+    assert!(o.error()["message"].as_str().unwrap().contains("sentry.query.enable_sql"), "{}", o.stderr);
+    srv.stop().await;
 }

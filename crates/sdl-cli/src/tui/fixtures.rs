@@ -168,7 +168,10 @@ pub(super) fn loaded_app() -> App {
         max_window_secs: None,
     })));
     let key = app.issues_key().unwrap();
-    app.on_response(Resp::Issues(key, Ok(IssueList { issues: issues(), window_start: now(), window_end: now() })));
+    app.on_response(Resp::Issues(
+        key,
+        Ok(IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None }),
+    ));
     app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
     assert!(!app.loading(), "{:?}", app.pending);
     app.now = now();

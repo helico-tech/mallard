@@ -1,7 +1,8 @@
 //! The bridge between the two sides (docs/adr/0009-bridge.md), in process:
 //!
-//! - Sentry transactions → OTel spans: sdl-server hands each transaction
-//!   item to [`Transactions`], which queues it for `dedupe_window`. The
+//! - Sentry transactions and span items (span streaming, ADR 0013) → OTel
+//!   spans: sdl-server hands each `transaction` and `span` item to
+//!   [`Transactions`], which queues it for `dedupe_window`. The
 //!   [`TransactionWorker`] then converts it on a blocking thread, drops the
 //!   spans the app also sent over OTLP ([`OtlpSpans`], ADR 0010) and
 //!   buffers the rest with `odl_server::Server::ingest_traces`. A full
@@ -14,6 +15,7 @@
 //!   `sdl_server::Server::ingest_event` in the project of its service.
 
 pub mod exception;
+pub mod span;
 mod stacktrace;
 pub mod transaction;
 
@@ -36,11 +38,11 @@ use uuid::Uuid;
 use crate::config::BridgeConfig;
 use exception::OtelException;
 
-/// Sentry transactions waiting for their dedupe window: at most this many
-/// and this many payload bytes; more are dropped.
+/// Sentry transactions and span items waiting for their dedupe window: at
+/// most this many and this many payload bytes; more are dropped.
 const TRANSACTION_QUEUE: usize = 50_000;
 const TRANSACTION_QUEUE_BYTES: usize = 256 << 20;
-/// Transactions converted and stored at once (blocking threads).
+/// Transactions and span items converted and stored at once (blocking threads).
 const TRANSACTION_WORKERS: usize = 32;
 /// OTLP span ids are remembered in two generations; a new one starts when
 /// the current one is this old or holds this many ids (ADR 0010).
@@ -57,7 +59,7 @@ const SEEN_SPANS: u64 = 200_000;
 /// The bridge's background workers; each is `None` when its half is off.
 #[derive(Default)]
 pub struct Workers {
-    /// Stores Sentry transactions as spans (`bridge.transactions`).
+    /// Stores Sentry transactions and span items as spans (`bridge.transactions`).
     pub transactions: Option<TransactionWorker>,
     /// Stores OTel exceptions as Sentry events (`bridge.exceptions`).
     pub exceptions: Option<ExceptionWorker>,
@@ -72,7 +74,9 @@ pub fn install(cfg: &BridgeConfig, sentry: &sdl_server::Server, otel: &Arc<odl_s
         let otlp_spans = Arc::new(OtlpSpans::new(OTLP_SPAN_GENERATION, OTLP_SPANS_PER_GENERATION));
         let held = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel(TRANSACTION_QUEUE);
-        sentry.set_transaction_sink(Arc::new(Transactions { tx, window: cfg.dedupe_window, held }))?;
+        let sink = Arc::new(Transactions { tx, window: cfg.dedupe_window, held });
+        sentry.set_transaction_sink(sink.clone())?;
+        sentry.set_span_sink(sink)?;
         hook.spans = Some(otlp_spans.clone());
         workers.transactions =
             Some(TransactionWorker { rx, store: Arc::new(SpanStore { otel: otel.clone(), otlp_spans }) });
@@ -134,7 +138,7 @@ where
     while tasks.join_next().await.is_some() {}
 }
 
-/// Queues Sentry transactions for their dedupe window.
+/// Queues Sentry transactions and span items for their dedupe window.
 struct Transactions {
     tx: mpsc::Sender<Delayed<Held>>,
     window: Duration,
@@ -142,27 +146,66 @@ struct Transactions {
     held: Arc<AtomicUsize>,
 }
 
-/// A queued transaction.
+/// A queued transaction or span item.
 struct Held {
+    kind: Kind,
     project_slug: String,
     payload: Vec<u8>,
     _bytes: Release,
 }
 
-impl sdl_server::TransactionSink for Transactions {
-    fn transaction(&self, t: sdl_server::Transaction) {
-        let n = t.payload.len();
+/// What a queued payload is.
+enum Kind {
+    Transaction,
+    /// A v2 `span` item and what its envelope's headers say.
+    Spans(span::Defaults),
+}
+
+impl Kind {
+    /// The metric that counts outcomes of this kind of item.
+    fn metric(&self) -> &'static str {
+        match self {
+            Kind::Transaction => "mallard_bridge_transactions_total",
+            Kind::Spans(_) => "mallard_bridge_span_items_total",
+        }
+    }
+
+    fn count(&self, result: &'static str) {
+        count(self.metric(), result);
+    }
+}
+
+impl Transactions {
+    fn queue(&self, kind: Kind, project_slug: String, payload: &[u8]) {
+        let n = payload.len();
         if self.held.fetch_add(n, Ordering::Relaxed) + n > TRANSACTION_QUEUE_BYTES {
             self.held.fetch_sub(n, Ordering::Relaxed);
-            count_transaction("busy");
+            kind.count("busy");
             return;
         }
         // A copy: the payload may be a slice of a much larger envelope body.
-        let item =
-            Held { project_slug: t.project_slug, payload: t.payload.to_vec(), _bytes: Release(self.held.clone(), n) };
-        if self.tx.try_send(Delayed { due: tokio::time::Instant::now() + self.window, item }).is_err() {
-            count_transaction("busy");
+        let item = Held { kind, project_slug, payload: payload.to_vec(), _bytes: Release(self.held.clone(), n) };
+        if let Err(e) = self.tx.try_send(Delayed { due: tokio::time::Instant::now() + self.window, item }) {
+            let (mpsc::error::TrySendError::Full(d) | mpsc::error::TrySendError::Closed(d)) = e;
+            d.item.kind.count("busy");
         }
+    }
+}
+
+impl sdl_server::TransactionSink for Transactions {
+    fn transaction(&self, t: sdl_server::Transaction) {
+        self.queue(Kind::Transaction, t.project_slug, &t.payload);
+    }
+}
+
+impl sdl_server::SpanSink for Transactions {
+    fn spans(&self, s: sdl_server::Spans<'_>) {
+        if s.content_type != Some(span::V2_CONTENT_TYPE) {
+            // A standalone span of older SDKs (issue 0040).
+            count("mallard_bridge_span_items_total", "unsupported");
+            return;
+        }
+        self.queue(Kind::Spans(span::Defaults::from_headers(s.envelope_headers)), s.project_slug, s.payload);
     }
 }
 
@@ -175,7 +218,7 @@ impl Drop for Release {
     }
 }
 
-/// Converts due Sentry transactions and stores them as spans.
+/// Converts due Sentry transactions and span items and stores them as spans.
 pub struct TransactionWorker {
     rx: mpsc::Receiver<Delayed<Held>>,
     store: Arc<SpanStore>,
@@ -189,8 +232,9 @@ impl TransactionWorker {
         run_delayed(self.rx, stop, TRANSACTION_WORKERS, move |t: Held| {
             let store = store.clone();
             async move {
+                let metric = t.kind.metric();
                 let result = tokio::task::spawn_blocking(move || store.store(&t)).await;
-                count_transaction(result.unwrap_or("error"));
+                count(metric, result.unwrap_or("error"));
             }
         })
         .await;
@@ -203,11 +247,18 @@ struct SpanStore {
 }
 
 impl SpanStore {
-    /// Convert one transaction, drop the spans that came over OTLP too and
-    /// buffer the rest; the outcome for the metric. Blocking.
+    /// Convert one transaction or span item, drop the spans that came over
+    /// OTLP too and buffer the rest; the outcome for the metric. Blocking.
     fn store(&self, t: &Held) -> &'static str {
-        let Ok(tx) = serde_json::from_slice(&t.payload) else { return "invalid" };
-        let Some(mut req) = transaction::to_otlp(&tx, &t.project_slug) else { return "invalid" };
+        let Ok(payload) = serde_json::from_slice(&t.payload) else { return "invalid" };
+        let req = match &t.kind {
+            Kind::Transaction => transaction::to_otlp(&payload, &t.project_slug),
+            Kind::Spans(defaults) => span::to_otlp(&payload, defaults, &t.project_slug),
+        };
+        let Some(mut req) = req else { return "invalid" };
+        if req.resource_spans.is_empty() {
+            return "invalid"; // a span item without one valid span
+        }
         let dropped = self.otlp_spans.remove_seen(&mut req);
         if dropped > 0 {
             metrics::counter!("mallard_bridge_duplicate_spans_total").increment(dropped);
@@ -223,7 +274,7 @@ impl SpanStore {
             Err(OtelError::Backpressure(_)) => "otel_full",
             Err(OtelError::TooLarge(_)) => "too_large",
             Err(e) => {
-                tracing::warn!(error = %e, "storing a Sentry transaction as spans failed");
+                tracing::warn!(error = %e, "storing Sentry spans failed");
                 "error"
             }
         }
@@ -305,8 +356,8 @@ impl OtlpSpans {
     }
 }
 
-fn count_transaction(result: &'static str) {
-    metrics::counter!("mallard_bridge_transactions_total", "result" => result).increment(1);
+fn count(metric: &'static str, result: &'static str) {
+    metrics::counter!(metric, "result" => result).increment(1);
 }
 
 fn count_exception(result: &'static str) {

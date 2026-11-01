@@ -6,8 +6,8 @@
 //! - [`Host`]: what the application around it decides: the public URL,
 //!   API tokens, where sourcemap bundles go, and whether this side runs
 //!   catalog-wide maintenance.
-//! - The `sentry-ducklake` binary builds both from flags or `SDL_*`
-//!   environment variables ([`crate::Standalone`]).
+//! - [`crate::Standalone`] builds both from flags or `SDL_*` environment
+//!   variables (used by the tests).
 
 use std::time::Duration;
 
@@ -79,6 +79,12 @@ pub struct QueryConfig {
     /// Max time span a single query may cover, e.g. `366d`.
     #[serde(with = "duration")]
     pub max_window: Duration,
+    /// Enable `POST /v1/sql`: read-only SQL over `events`, `issues` and
+    /// `issue_activity` (ADR 0011). Treat the API tokens as admin access then.
+    pub enable_sql: bool,
+    /// Longest run of one SQL query; it is interrupted after this.
+    #[serde(with = "duration")]
+    pub sql_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,7 +128,7 @@ impl Default for MaintenanceConfig {
 
 impl Default for QueryConfig {
     fn default() -> Self {
-        Self { readers: 4, max_window: 366 * DAY }
+        Self { readers: 4, max_window: 366 * DAY, enable_sql: false, sql_timeout: Duration::from_secs(30) }
     }
 }
 
@@ -145,6 +151,7 @@ impl Config {
             ("maintenance.flush_interval", m.flush_interval),
             ("maintenance.compact_interval", m.compact_interval),
             ("query.max_window", q.max_window),
+            ("query.sql_timeout", q.sql_timeout),
         ] {
             anyhow::ensure!(d <= MAX_DURATION, "{name} is longer than 100 years");
         }
@@ -152,6 +159,7 @@ impl Config {
             ("maintenance.flush_interval", m.flush_interval),
             ("maintenance.compact_interval", m.compact_interval),
             ("query.max_window", q.max_window),
+            ("query.sql_timeout", q.sql_timeout),
         ] {
             anyhow::ensure!(!d.is_zero(), "{name} must be greater than 0");
         }
@@ -247,6 +255,9 @@ mod tests {
         assert_eq!(c.sourcemaps.cache_size, ByteSize::mb(64));
         assert_eq!(c.ingest.max_body_bytes, ByteSize::mib(20), "defaults stay");
         assert_eq!(load("retention.events = \"0\"").unwrap().retention.events, Duration::ZERO);
+        let q = load("query = { enable_sql = true, sql_timeout = \"5s\" }").unwrap().query;
+        assert!(q.enable_sql && q.sql_timeout == Duration::from_secs(5));
+        assert!(!c.query.enable_sql, "SQL is off by default");
         c.validate().unwrap();
         for bad in ["retention_days = 90", "storage_url = \"x\"", "ingest.typo = 1", "public_url = \"http://x\""] {
             assert!(load(bad).is_err(), "{bad}");

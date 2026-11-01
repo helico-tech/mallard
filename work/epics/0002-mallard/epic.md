@@ -30,3 +30,5 @@ and telemetry now live in one app to build features neither side had alone.
 7. [07-split-server-and-cli](07-split-server-and-cli.md)
 8. [08-agent-cli](08-agent-cli.md)
 9. [09-readme-screenshots](09-readme-screenshots.md)
+10. [10-one-binary](10-one-binary.md)
+11. [11-crate-cleanup](11-crate-cleanup.md)

@@ -1,12 +1,12 @@
-// Test harness: start one sentry-ducklake server per test file on a free
-// port with its own temp dir, and talk to its /v1 API.
+// Test harness: start one mallard-server per test file on a free port with
+// its own temp dir and config file, and talk to its APIs.
 //
-// Binary: $SDL_BIN, else ../../target/debug/sentry-ducklake (built with
-// `cargo build -p sdl-server` if missing).
+// Binary: $MALLARD_SERVER_BIN, else ../../target/debug/mallard-server (built
+// with `cargo build -p mallard-server` if missing).
 
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -17,11 +17,11 @@ export const REPO_DIR = path.resolve(E2E_DIR, "../..");
 const TOKEN = "e2e-token";
 
 export function serverBinary() {
-  if (process.env.SDL_BIN) return path.resolve(process.env.SDL_BIN);
-  const bin = path.join(REPO_DIR, "target", "debug", "sentry-ducklake");
+  if (process.env.MALLARD_SERVER_BIN) return path.resolve(process.env.MALLARD_SERVER_BIN);
+  const bin = path.join(REPO_DIR, "target", "debug", "mallard-server");
   if (!existsSync(bin)) {
-    console.error(`[e2e] ${bin} missing, running cargo build -p sdl-server ...`);
-    execFileSync("cargo", ["build", "-p", "sdl-server"], { cwd: REPO_DIR, stdio: "inherit" });
+    console.error(`[e2e] ${bin} missing, running cargo build -p mallard-server ...`);
+    execFileSync("cargo", ["build", "-p", "mallard-server"], { cwd: REPO_DIR, stdio: "inherit" });
   }
   return bin;
 }
@@ -43,8 +43,8 @@ export async function freePort() {
 }
 
 export async function tempDir(prefix) {
-  const base = process.env.SDL_E2E_TMPDIR || os.tmpdir();
-  return mkdtemp(path.join(base, `sdl-e2e-${prefix}-`));
+  const base = process.env.MALLARD_E2E_TMPDIR || os.tmpdir();
+  return mkdtemp(path.join(base, `mallard-e2e-${prefix}-`));
 }
 
 /** Poll `fn` until it returns a truthy value or the timeout passes. */
@@ -65,45 +65,63 @@ export async function waitFor(fn, { timeout = 30_000, interval = 100, what = "co
   }
 }
 
+/** A TOML string (JSON string escapes are valid TOML basic strings). */
+const toml = (v) => JSON.stringify(v);
+
 export class TestServer {
-  constructor({ url, port, dir, proc, logs }) {
-    Object.assign(this, { url, port, dir, proc, logs, token: TOKEN });
+  constructor({ base, port, dir, proc, logs }) {
+    // `url` is the Sentry side (DSNs, `/v1` API, @sentry/vite-plugin's
+    // `url`); `base` is the server root (`/readyz`, `/otel/...`, OTLP/HTTP
+    // `/v1/traces`, and the Rust sentry-cli, which only takes a URL root).
+    Object.assign(this, { url: `${base}/sentry`, base, port, dir, proc, logs, token: TOKEN });
   }
 
-  /** Start a server. Remember to `await server.stop()` (use `after`). */
-  static async start(name = "test") {
+  /**
+   * Start a server. Remember to `await server.stop()` (use `after`).
+   * `bridge` sets `[bridge]` keys, e.g. `{ dedupe_window: "1s" }`.
+   */
+  static async start(name = "test", { bridge = {} } = {}) {
     const bin = serverBinary();
     const dir = await tempDir(name);
     const port = await freePort();
-    const url = `http://127.0.0.1:${port}`;
+    const base = `http://127.0.0.1:${port}`;
+    const config = path.join(dir, "mallard.toml");
+    const lines = [
+      "[server]",
+      `http_addr = ${toml(`127.0.0.1:${port}`)}`,
+      // OTLP is also served on http_addr; the standard ports stay free.
+      'otlp_http_addr = "127.0.0.1:0"',
+      'otlp_grpc_addr = "127.0.0.1:0"',
+      `public_url = ${toml(base)}`,
+      `api_tokens = [${toml(TOKEN)}]`,
+      "[storage]",
+      `catalog = ${toml(path.join(dir, "catalog.ducklake"))}`,
+      `data_path = ${toml(path.join(dir, "lake") + path.sep)}`,
+      `artifacts_path = ${toml(path.join(dir, "artifacts"))}`,
+      "[bridge]",
+      ...Object.entries(bridge).map(([k, v]) => `${k} = ${toml(v)}`),
+    ];
+    await writeFile(config, lines.join("\n") + "\n");
     const logs = [];
-    const proc = spawn(bin, [], {
-      env: {
-        ...process.env,
-        SDL_API_TOKEN: TOKEN,
-        SDL_STORAGE_URL: path.join(dir, "storage"),
-        SDL_CATALOG: path.join(dir, "catalog.ducklake"),
-        SDL_LISTEN: `127.0.0.1:${port}`,
-        SDL_PUBLIC_URL: url,
-        RUST_LOG: process.env.RUST_LOG || "info",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const env = { ...process.env, RUST_LOG: process.env.RUST_LOG || "info" };
+    // The config file is the whole config: no MALLARD_* overrides from the shell.
+    for (const k of Object.keys(env)) if (k.startsWith("MALLARD_")) delete env[k];
+    const proc = spawn(bin, ["-c", config, "serve"], { env, stdio: ["ignore", "pipe", "pipe"] });
     for (const s of [proc.stdout, proc.stderr]) {
       s.setEncoding("utf8");
       s.on("data", (d) => {
         logs.push(d);
-        if (process.env.SDL_E2E_VERBOSE) process.stderr.write(`[server ${port}] ${d}`);
+        if (process.env.MALLARD_E2E_VERBOSE) process.stderr.write(`[server ${port}] ${d}`);
       });
     }
     let exited = null;
     proc.on("exit", (code, signal) => (exited = { code, signal }));
-    const server = new TestServer({ url, port, dir, proc, logs });
+    const server = new TestServer({ base, port, dir, proc, logs });
     try {
       await waitFor(
         async () => {
           if (exited) throw new Error(`server exited early (${JSON.stringify(exited)}):\n${logs.join("")}`);
-          const r = await fetch(`${url}/readyz`);
+          const r = await fetch(`${base}/readyz`);
           return r.ok;
         },
         { timeout: 60_000, what: "GET /readyz" },
@@ -123,7 +141,7 @@ export class TestServer {
       await done;
       clearTimeout(timer);
     }
-    if (!process.env.SDL_E2E_KEEP) await rm(this.dir, { recursive: true, force: true });
+    if (!process.env.MALLARD_E2E_KEEP) await rm(this.dir, { recursive: true, force: true });
   }
 
   /** Server log output so far (useful in assertion messages). */
@@ -131,8 +149,19 @@ export class TestServer {
     return this.logs.join("");
   }
 
-  async api(method, p, body) {
-    const r = await fetch(`${this.url}${p}`, {
+  /** Call the Sentry API (`p` relative to `/sentry`). */
+  api(method, p, body) {
+    return this.request(method, `${this.url}${p}`, body);
+  }
+
+  /** Call the OTel query API (`p` relative to `/otel`, e.g. `/api/v1/traces/<id>`). */
+  otel(method, p, body) {
+    return this.request(method, `${this.base}/otel${p}`, body);
+  }
+
+  async request(method, url, body) {
+    const p = url.slice(this.base.length);
+    const r = await fetch(url, {
       method,
       headers: { authorization: `Bearer ${this.token}`, ...(body ? { "content-type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,

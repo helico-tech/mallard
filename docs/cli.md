@@ -13,16 +13,18 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 |---|---|
 | `mallard status` | health of both sides and what the server allows (SQL, windows, retention); exit 6 when a side is down |
 | `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project; print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
-| `mallard find <id>` | a trace or event id (32 hex) or an issue id (16 hex): what it is and the command to see more |
-| `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`; status changes take `--reason` |
-| `mallard events list\|show` | error events; `show --json` is concise, `--raw` adds the Sentry payload |
+| `mallard find <id>` | a trace or event id (32 hex) or an issue or span id (16 hex): what it is and the command to see more |
+| `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`, `--tag k=v` (repeat), `--cursor`; status changes take `--reason` |
+| `mallard events list\|show` | error events; `list --tag k=v`, `--release`, `--env`, `-q`, `--cursor`; `show --json` is concise, `--raw` adds the Sentry payload |
+| `mallard releases list` | releases seen in error events: first/last seen, events, issues, new issues (derived from events; releases made with `sentry-cli releases new` are not stored) |
 | `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs |
-| `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |
-| `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`), follow (`-f`, stops by itself with `--for 2m` or `--until-match <text>`), or `--around <time> --window 1m` |
+| `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace; `--cursor` for the next page); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |
+| `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`; `--cursor` for the next page), follow (`-f`, stops by itself with `--for 2m` or `--until-match <text>`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation; `ops --compare 1d` adds p95 and error rate of the same window a day earlier, and the change |
 | `mallard series spans\|logs\|errors` | counts per time bucket (`--step 5m`): spans with errors and p50/p95/p99, logs per severity band, Sentry events (errors, warnings, other) |
 | `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`; `--exemplars` adds trace ids of the highest samples) |
-| `mallard sql "<select>"` | read-only SQL over the telemetry tables (exit 7 when off) |
+| `mallard sql "<select>" [--errors]` | read-only SQL over the telemetry tables, or with `--errors` over `events`, `issues`, `issue_activity` (exit 7 when off; ADR 0011) |
+| `mallard schema [tables]`, `mallard schema attrs` | the telemetry tables and columns `sql` can query; attribute keys with counts, or the top values of `--key` (`--signal spans\|logs\|metrics`, `-S`, `--metric`; sampled) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
 | `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |
 
@@ -56,6 +58,7 @@ Per command, the same letter for the same thing on both sides:
 | `-q, --query text` | text search |
 | `-t, --trace id` | only this trace (`events list`, `logs`) |
 | `-S, --service name` | only this service (telemetry) |
+| `--cursor c` | the next page: the `next_cursor` of the previous one (`issues list`, `events list`, `traces list`, `logs`) |
 | `--wait 30s` | poll until there is a result (`events list`, `traces list`, `logs`, `trace`, `find`); none in time: the empty result and exit 8 |
 
 Default windows differ where the data does: issues 14d, events all (30d
@@ -69,8 +72,12 @@ with `--trace`), traces/logs/metrics 1h, `trace` and `find` 7d.
   spaces apart, no boxes, sparklines or colour.
 - JSON: pretty on a terminal, compact when piped. Lists are an envelope
   `{"items","count","limit","truncated","next_cursor","window"}`;
-  `ndjson` prints one item per line. `logs -f` prints NDJSON in both JSON
-  formats. `logs -f --for <dur>` exits 0 when the time is up;
+  `ndjson` prints one item per line. Where the server pages a list
+  (`issues list`, `events list`, `traces list`, `logs`), `next_cursor` is
+  set when more exist; pass it as `--cursor` with the same filters (for
+  traces and logs also the `window` of the envelope; an issue cursor keeps
+  its own window and sort). Text and ndjson print it in the note on stderr. `logs -f` prints NDJSON
+  in both JSON formats. `logs -f --for <dur>` exits 0 when the time is up;
   `--until-match <text>` exits 0 after the first record whose body contains
   the text (case-insensitive), and with `--for` exits 8 when none came.
 - Numbers: `1.2k`, `3.4M`, `2G`; sizes in decimal units (`1.5 MB`), as the

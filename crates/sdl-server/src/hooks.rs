@@ -1,8 +1,10 @@
 //! What an embedding application can plug into ingest, and the in-process
 //! entry points it can call. mallard uses them to turn Sentry transactions
-//! into traces and OTel exceptions into issues (docs/adr/0009-bridge.md).
+//! and span items into traces and OTel exceptions into issues
+//! (docs/adr/0009-bridge.md, 0013).
 
 use bytes::Bytes;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 /// A Sentry transaction item as received (envelope `transaction` item or a
@@ -20,6 +22,30 @@ pub struct Transaction {
 /// thread and drop what does not fit).
 pub trait TransactionSink: Send + Sync + 'static {
     fn transaction(&self, t: Transaction);
+}
+
+/// An envelope item of type `span` as received: span streaming
+/// (`content_type` `application/vnd.sentry.items.span.v2+json`, a container
+/// with several spans) or a single standalone span from older SDKs.
+/// Already authenticated.
+#[derive(Debug, Clone)]
+pub struct Spans<'a> {
+    pub project_id: u32,
+    pub project_slug: String,
+    /// The item's `content_type` header, if any.
+    pub content_type: Option<&'a str>,
+    /// The envelope's headers (`trace` holds the release and environment
+    /// of the trace, `sdk` the SDK), not checked. Borrowed: one envelope can
+    /// hold many items, and its headers can be large.
+    pub envelope_headers: &'a Map<String, Value>,
+    /// The item's JSON, not parsed or checked.
+    pub payload: &'a [u8],
+}
+
+/// Receives span items instead of dropping them. Same rules as
+/// [`TransactionSink`]: called on the request's task, never block.
+pub trait SpanSink: Send + Sync + 'static {
+    fn spans(&self, s: Spans<'_>);
 }
 
 /// Told about every event from a Sentry SDK once it is stored, with the

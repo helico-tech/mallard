@@ -1,5 +1,9 @@
 # Deployment
 
+> **Retired binary.** The `otel-ducklake` binary, its `ODL_*` settings and
+> its chart are gone (story 0002/06). Deploy mallard: `deploy/` and the
+> [repo README](../../README.md).
+
 Three reference setups, all tested:
 
 | setup | catalog | data | replicas | use when |

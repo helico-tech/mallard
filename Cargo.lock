@@ -2290,7 +2290,9 @@ dependencies = [
  "duckdb",
  "mallard-common",
  "serde",
+ "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "toml",
  "tracing",
 ]
@@ -2324,6 +2326,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "uuid",

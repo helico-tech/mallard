@@ -29,9 +29,10 @@ metric queries always filter on one metric name.
 
 ```sh
 # 1. backfill data into a lake (server on non-default ports, no inlining)
-ODL_STORAGE__CATALOG=$WORK/bench/catalog.ducklake ODL_STORAGE__DATA_PATH=$WORK/bench/lake/ \
-ODL_STORAGE__DATA_INLINING_ROW_LIMIT=0 ODL_MAINTENANCE__ENABLED=false \
-ODL_SERVER__OTLP_HTTP_ADDR=127.0.0.1:14318 otel-ducklake serve &
+MALLARD_STORAGE__CATALOG=$WORK/bench/catalog.ducklake MALLARD_STORAGE__DATA_PATH=$WORK/bench/lake/ \
+MALLARD_STORAGE__DATA_INLINING_ROW_LIMIT=0 MALLARD_OTEL__MAINTENANCE__ENABLED=false \
+MALLARD_SERVER__HTTP_ADDR=127.0.0.1:18080 MALLARD_SERVER__OTLP_GRPC_ADDR=127.0.0.1:14317 \
+MALLARD_SERVER__OTLP_HTTP_ADDR=127.0.0.1:14318 MALLARD_SERVER__API_TOKENS=bench mallard-server serve &
 odl-loadgen --endpoint http://127.0.0.1:14318 --backfill 2h --rate 50 --batch 200 --concurrency 8 --seed 7
 kill -INT %1
 # 2. build the three variants (replace ${WORK}), then time the queries

@@ -32,12 +32,12 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     ),
     (
         &["find"],
-        "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue\n  mallard find 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if nothing arrives",
+        "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue or span\n  mallard find 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if nothing arrives",
     ),
     (&["issues"], "mallard issues list --since 1h\n  mallard issues show 85fede14250ec6be"),
     (
         &["issues", "list"],
-        "mallard issues list --since 1h --sort count -n 10 --fields id,title,count,last_seen\n  mallard issues list --new --since 1d\n  mallard issues list --first-release web@1.4.0 --status all",
+        "mallard issues list --since 1h --sort count -n 10 --fields id,title,count,last_seen\n  mallard issues list --new --since 1d\n  mallard issues list --first-release web@1.4.0 --status all\n  mallard issues list --tag url=/checkout --env production\n  mallard issues list --cursor <next_cursor>   # the next page",
     ),
     (
         &["issues", "show"],
@@ -49,7 +49,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["events"], "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events show <event-id>"),
     (
         &["events", "list"],
-        "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events list --trace 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if none arrives\n  mallard events list --since 15m",
+        "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events list --trace 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if none arrives\n  mallard events list --since 1h --tag user=u-42 --release web@1.4.0\n  mallard events list --cursor <next_cursor>   # the next page",
     ),
     (
         &["events", "show"],
@@ -59,10 +59,12 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["projects", "list"], "mallard projects list --fields slug,dsn"),
     (&["projects", "create"], "mallard projects create web --platform node --if-not-exists"),
     (&["projects", "show"], "mallard projects show web"),
+    (&["releases"], "mallard releases list --since 30d"),
+    (&["releases", "list"], "mallard releases list --since 30d -n 10 --fields version,new_issues,last_seen"),
     (&["traces"], "mallard traces list -S checkout --errors --since 15m\n  mallard traces show <trace-id>"),
     (
         &["traces", "list"],
-        "mallard traces list -S checkout --errors --since 15m -n 10\n  mallard traces list -O \"POST /pay\" --min-ms 500 -a http.route=/pay\n  mallard traces list -S checkout --since 1m --wait 30s",
+        "mallard traces list -S checkout --errors --since 15m -n 10\n  mallard traces list -O \"POST /pay\" --min-ms 500 -a http.route=/pay\n  mallard traces list -S checkout --since 1m --wait 30s\n  mallard traces list --from <window.from> --to <window.to> --cursor <next_cursor>   # the next page",
     ),
     (&["traces", "show"], "mallard traces show 0af7651916cd43dd8448eb211c80319c --fields spans,errors"),
     (
@@ -71,7 +73,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     ),
     (
         &["logs"],
-        "mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id\n  mallard logs --around 2026-11-01T10:15:03Z --window 2m -S checkout\n  mallard logs -t 0af7651916cd43dd8448eb211c80319c --wait 30s\n  mallard logs -S checkout -f --for 2m\n  mallard logs -S checkout -f --until-match \"listening on\" --for 1m   # exit 8 if no match",
+        "mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id\n  mallard logs --around 2026-11-01T10:15:03Z --window 2m -S checkout\n  mallard logs -t 0af7651916cd43dd8448eb211c80319c --wait 30s\n  mallard logs -S checkout -f --for 2m\n  mallard logs -S checkout -f --until-match \"listening on\" --for 1m   # exit 8 if no match\n  mallard logs -S checkout --from <window.from> --to <window.to> --cursor <next_cursor>   # the next page",
     ),
     (&["services"], "mallard services --since 1h"),
     (
@@ -91,7 +93,16 @@ const EXAMPLES: &[(&[&str], &str)] = &[
         &["metrics", "show"],
         "mallard metrics show http.server.request.duration -g p95 -b http.route --since 6h --step 5m",
     ),
-    (&["sql"], "mallard sql \"SELECT service_name, count(*) FROM spans GROUP BY 1\"   # exit 7 when SQL is off"),
+    (
+        &["sql"],
+        "mallard sql \"SELECT service_name, count(*) FROM spans GROUP BY 1\"   # exit 7 when SQL is off\n  mallard sql --errors \"SELECT release, count(*) FROM events GROUP BY 1\"",
+    ),
+    (&["schema"], "mallard schema   # tables and columns for mallard sql\n  mallard schema attrs -S checkout"),
+    (&["schema", "tables"], "mallard schema tables --fields name,time_column"),
+    (
+        &["schema", "attrs"],
+        "mallard schema attrs --signal spans -S checkout            # keys with counts\n  mallard schema attrs --signal spans --key http.route        # top values\n  mallard schema attrs --signal metrics --metric http.server.request.duration",
+    ),
     (&["sourcemaps"], "mallard sourcemaps list"),
     (&["sourcemaps", "list"], "mallard sourcemaps list -p web"),
     (&["send-test"], "mallard send-test --dsn \"$SENTRY_DSN\""),

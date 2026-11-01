@@ -5,7 +5,7 @@ use crate::concise::ConciseEvent;
 use crate::event_view as ev;
 use crate::fmt;
 use crate::paint as p;
-use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SetStatusArgs};
+use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SetStatusArgs, SqlArgs};
 use anyhow::Result;
 use chrono::Utc;
 use comfy_table::{Attribute, Cell, Color, Table, presets};
@@ -183,6 +183,8 @@ fn issue_query(a: &IssueListArgs) -> IssueQuery {
         limit: a.limit,
         new: a.new.then_some(true),
         first_release: a.first_release.clone(),
+        tag: a.tag.clone(),
+        cursor: a.cursor.clone(),
     }
 }
 
@@ -211,10 +213,11 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
         IssuesCmd::List(a) => {
             let w = a.window.resolve(ISSUE_WINDOW)?;
             let list = ctx.client.issues_in(&project, &issue_query(&a), &range(&w)).await.map_err(|e| ctx.err(e))?;
+            let w = Window { from: list.window_start, to: list.window_end };
+            let limit = Some(a.limit.unwrap_or(50).clamp(1, 500));
+            let page = List::new(list.issues.clone()).limit(limit).cursor(list.next_cursor.clone()).window(w);
             if !ctx.output.text() {
-                let w = Window { from: list.window_start, to: list.window_end };
-                let limit = Some(a.limit.unwrap_or(50).clamp(1, 500));
-                return ctx.output.list(&List::new(list.issues).limit(limit).window(w));
+                return ctx.output.list(&page);
             }
             let list = fmt::sanitize(list, true)?;
             if list.issues.is_empty() {
@@ -254,6 +257,7 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
                 "{}",
                 p::dim(&format!("{} issues · window {} .. now", list.issues.len(), fmt::timestamp(list.window_start)))
             );
+            ctx.output.truncation_note(&page);
             Ok(())
         }
         IssuesCmd::Show { id, window } => {
@@ -396,7 +400,7 @@ async fn set_status(ctx: &Ctx, project: &str, a: SetStatusArgs, status: IssueSta
 pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
     let o = ctx.out;
     match cmd {
-        EventsCmd::List { issue, trace, limit, window, wait } => {
+        EventsCmd::List { issue, trace, limit, window, tag, release, env, query, cursor, wait } => {
             let by_trace = trace.is_some();
             let project = if by_trace { None } else { Some(ctx.resolve_project().await?) };
             // Resolved on every try: with --wait the window moves along.
@@ -414,7 +418,16 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                         ctx.client.events_by_trace_in(&q, &r).await
                     }
                     (None, project) => {
-                        let q = EventQuery { issue: issue.clone(), limit, ..Default::default() };
+                        let q = EventQuery {
+                            issue: issue.clone(),
+                            limit,
+                            tag: tag.clone(),
+                            release: release.clone(),
+                            environment: env.clone(),
+                            query: query.clone(),
+                            before: cursor.clone(),
+                            ..Default::default()
+                        };
                         ctx.client.events_in(project.as_deref().unwrap_or_default(), &q, &r).await
                     }
                 }
@@ -422,13 +435,14 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 anyhow::Ok((w, list))
             };
             let ((w, list), waited) = until(&ctx.output, &wait, fetch, |(_, l)| !l.events.is_empty()).await?.split();
+            let mut page = List::new(list.events.clone())
+                .limit(Some(limit.unwrap_or(50).clamp(1, 500)))
+                .cursor(list.next_cursor.clone());
+            if let Some(w) = w {
+                page = page.window(w);
+            }
             if !ctx.output.text() {
-                let mut l =
-                    List::new(list.events).limit(Some(limit.unwrap_or(50).clamp(1, 500))).cursor(list.next_cursor);
-                if let Some(w) = w {
-                    l = l.window(w);
-                }
-                ctx.output.list(&l)?;
+                ctx.output.list(&page)?;
                 return waited;
             }
             let list = fmt::sanitize(list, true)?;
@@ -460,9 +474,7 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 t.add_row(row);
             }
             out!(o, "{t}");
-            if list.next_cursor.is_some() {
-                out!(o, "{}", p::dim("more events available (use --limit)"));
-            }
+            ctx.output.truncation_note(&page);
             Ok(())
         }
         EventsCmd::Show { event_id, issue } => {
@@ -646,6 +658,65 @@ pub(super) async fn stats(ctx: &Ctx, window: WindowArgs, interval: Option<String
     }
     out!(o);
     out!(o, "  {} errors  {} warnings/other", p::red("█"), p::yellow("█"));
+    Ok(())
+}
+
+pub(super) async fn releases(ctx: &Ctx, window: WindowArgs, limit: Option<u32>) -> Result<()> {
+    let o = ctx.out;
+    let project = ctx.resolve_project().await?;
+    let w = window.resolve(ISSUE_WINDOW)?;
+    let list = ctx
+        .client
+        .releases(&project, &ReleaseQuery { since: None, limit }, &range(&w))
+        .await
+        .map_err(|e| ctx.err(e))?;
+    if !ctx.output.text() {
+        let w = Window { from: list.window_start, to: list.window_end };
+        let limit = Some(limit.unwrap_or(50).clamp(1, 500));
+        return ctx.output.list(&List::new(list.releases).limit(limit).window(w));
+    }
+    let list = fmt::sanitize(list, true)?;
+    if list.releases.is_empty() {
+        out!(o, "no releases in events (window {} .. now)", fmt::timestamp(list.window_start));
+        return Ok(());
+    }
+    let now = Utc::now();
+    let mut t = table(&["RELEASE", "EVENTS", "ISSUES", "NEW ISSUES", "FIRST SEEN", "LAST SEEN"]);
+    for r in &list.releases {
+        t.add_row(vec![
+            Cell::new(&r.version).add_attribute(Attribute::Bold),
+            right(fmt::compact(r.events)),
+            right(fmt::compact(r.issues)),
+            right(fmt::compact(r.new_issues)),
+            Cell::new(fmt::relative_time(r.first_seen, now)),
+            Cell::new(fmt::relative_time(r.last_seen, now)),
+        ]);
+    }
+    out!(o, "{t}");
+    Ok(())
+}
+
+pub(super) async fn sql(ctx: &Ctx, a: SqlArgs) -> Result<()> {
+    let o = ctx.out;
+    let r = ctx.client.sql(&a.query, Some(a.limit)).await.map_err(|e| ctx.err(e))?;
+    if !ctx.output.text() {
+        return ctx.print_json(&r);
+    }
+    let headers: Vec<String> = r.columns.iter().map(|c| fmt::clean(&c.name).into_owned()).collect();
+    let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let mut t = table(&headers);
+    for row in &r.rows {
+        t.add_row(row.iter().map(|v| match v {
+            serde_json::Value::String(s) => Cell::new(fmt::clean(s)),
+            serde_json::Value::Null => Cell::new("NULL").fg(Color::DarkGrey),
+            serde_json::Value::Number(n) => right(n),
+            // Nested values print as JSON: strings in it are escaped.
+            other => Cell::new(mallard_term::text::json_safe(&other.to_string())),
+        }));
+    }
+    out!(o, "{t}");
+    let more = if r.truncated { " (truncated; raise --limit)" } else { "" };
+    out!(o, "{}", p::dim(&format!("{} rows{more} in {:.1}ms", r.rows.len(), r.elapsed_ms)));
     Ok(())
 }
 

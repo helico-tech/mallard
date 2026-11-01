@@ -39,12 +39,15 @@ All endpoints except `/api/v1/health`, `/openapi.json` and `/docs` need
 | `GET /api/v1/services` | RED stats per service |
 | `GET /api/v1/operations?service=` | RED stats per (service, span name, kind) |
 | `GET /api/v1/spans/series?service=&operation=&step=` | count, errors, p50/p95/p99 per bucket |
-| `GET /api/v1/traces?service=&operation=&errors_only=&min_duration_ms=&max_duration_ms=&attributes=&limit=` | trace summaries, newest first |
+| `GET /api/v1/traces?service=&operation=&errors_only=&min_duration_ms=&max_duration_ms=&attributes=&limit=&cursor=` | trace summaries, newest first (paged) |
 | `GET /api/v1/traces/{trace_id}` | all spans of a trace, by start time |
-| `GET /api/v1/logs?service=&min_severity=&q=&trace_id=&attributes=&limit=&order=` | log records |
+| `GET /api/v1/spans/{span_id}` | one span (default window: 7 days) |
+| `GET /api/v1/logs?service=&min_severity=&q=&trace_id=&attributes=&limit=&order=&cursor=` | log records (paged) |
 | `GET /api/v1/logs/series?service=&q=&step=` | log counts per bucket by severity band |
 | `GET /api/v1/metrics?service=&q=` | metric catalog: name, type, unit, temporality, series/point counts |
 | `GET /api/v1/metrics/query?name=&agg=&group_by=&attributes=&service=&step=&exemplars=` | time series (and exemplars) |
+| `GET /api/v1/attributes?signal=&service=&metric=&key=&limit=` | attribute keys with counts, or the top values of `key` (sampled) |
+| `GET /api/v1/schema` | the tables and columns SQL can query |
 | `POST /api/v1/sql` | `{"query": "...", "limit": 1000}` → columns + rows (off by default) |
 
 ### RED stats (`/services`, `/operations`, `/spans/series`)
@@ -63,6 +66,22 @@ finds traces in which a `checkout` span failed. The summary is computed from
 the trace's spans inside the window: start, duration (earliest start to
 latest end), root service and name (when the root span was received), span
 and error counts, and the services involved.
+
+### Paging (`/traces`, `/logs`)
+
+When more items match than `limit`, the response has a header
+`x-next-cursor`. Send it back as `cursor=` with the same filters, window
+and order to get the next page; the last page has no header. The body stays
+a plain array. The cursor is opaque (today: the time of the last item and an
+id that breaks ties: the trace id, or DuckLake's row id for logs). Use an
+absolute window (`from`/`to`) for all pages: with `since` the window moves
+between requests.
+
+### Span by id (`/spans/{span_id}`)
+
+The span with this id (16 hex chars), with its trace id, in the window
+(default: the last 7 days). Span ids are unique in practice; if two spans
+share an id, the newest is returned. 404 when there is none.
 
 ### Logs (`/logs`)
 
@@ -88,6 +107,8 @@ and other sums, `p95` for histograms and summaries.
 | `p50`, `p95`, `p99.9`, … | – | – | percentile of the merged bucket increase within the time bucket (linear interpolation within a bucket) | average across series of the reported quantile closest to the requested one |
 
 - Delta temporality is supported: the increase is the sum of the values.
+  Temporality is taken per series, so one metric can mix delta and
+  cumulative series.
 - `group_by=route,service.name` splits series by attribute values
   (`service.name` maps to the service column). At most 5 keys, 500 series and
   200,000 points per response.
@@ -101,6 +122,24 @@ and other sums, `p95` for histograms and summaries.
   trace with `/traces/{trace_id}`: that is "from a latency spike to the
   request that caused it". Gauges, sums and histograms carry exemplars;
   summaries have none in OTLP.
+
+### Attributes (`/attributes`)
+
+What can I filter on? `signal=spans|logs|metrics` (required). Without
+`key`: the attribute keys of the matching rows, each with the number of
+rows that have it, most frequent first. With `key`: the most frequent
+values of that key. Span/log/point attributes and resource attributes are
+counted together, as the `attributes=` filters match either. `service`
+narrows to one service, `metric` (signal `metrics` only) to one metric.
+The counts come from a random sample of at most 10,000 matching rows:
+`total_rows` says how many rows matched, `sampled_rows` how many were
+counted. The window is the usual one (default 1 hour).
+
+### Schema (`/schema`)
+
+The tables the SQL endpoint can query, each with its time column (filter
+on it: tables are partitioned by day on it) and its columns as stored in
+the catalog. It needs no SQL access, so it works when SQL is off.
 
 ### SQL (`/sql`)
 
@@ -122,6 +161,8 @@ curl -s "$API/services?since=15m" | jq '.[] | {name, error_rate, p95_ms}'
 curl -s "$API/traces?since=1h&service=checkout&errors_only=true&limit=5" | jq
 curl -s "$API/traces/0af7651916cd43dd8448eb211c80319c" | jq '.spans | length'
 curl -s "$API/logs?since=10m&min_severity=17&q=timeout" | jq -r '.[].body'
+curl -s "$API/spans/00f067aa0ba902b7" | jq -r .trace_id
+curl -s "$API/attributes?signal=spans&service=checkout&key=http.route" | jq -r '.items[] | "\(.value) \(.count)"'
 curl -s "$API/metrics/query?name=http.server.request.duration&agg=p99&group_by=http.route&since=6h&step=5m" | jq
 curl -s "$API/metrics/query?name=http.server.request.duration&agg=p99&since=1h&exemplars=true" | jq '.exemplars[] | {time, value, trace_id}'
 curl -s -X POST "$API/sql" -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \

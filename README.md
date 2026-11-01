@@ -12,7 +12,7 @@ CLI and terminal UI that talks to it over HTTP (no DuckDB inside).
 - **Together**: errors and spans share the trace id. `mallard trace <id>`
   shows the span tree with each error and log under the span it happened
   in; in the TUI, `x` jumps from an error to its trace and back.
-- **Either SDK is enough**: Sentry transactions are stored as traces, and
+- **Either SDK is enough**: Sentry transactions and streamed spans are stored as traces, and
   exceptions recorded by OpenTelemetry SDKs become Sentry issues (with
   parsed stack traces for Python, Java, JS, Go, .NET and Rust). An error
   sent through both SDKs is stored once. Switches: `[bridge]` in the
@@ -88,7 +88,8 @@ folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
 
 | where | what |
 |---|---|
-| `:8080 /sentry/...` | Sentry ingest (DSN `http://KEY@host:8080/sentry/1`), Sentry API `/sentry/v1`, docs `/sentry/docs`, sentry-cli (`--url http://host:8080/sentry`) |
+| `:8080 /sentry/...` | Sentry ingest (DSN `http://KEY@host:8080/sentry/1`), Sentry API `/sentry/v1`, docs `/sentry/docs`, bundler plugins (`url: http://host:8080/sentry`) |
+| `:8080 /api/0/...` | sentry-cli's API (`--url http://host:8080`: the Rust `sentry-cli` only accepts a URL root; also under `/sentry/api/0`) |
 | `:8080 /otel/...` | telemetry query API `/otel/api/v1`, docs `/otel/docs` |
 | `:8080 /v1/traces\|logs\|metrics`, `:4318` | OTLP/HTTP |
 | `:4317` | OTLP/gRPC |

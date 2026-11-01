@@ -2,7 +2,8 @@
 
 ## Status
 accepted; amended by 0010 (spans sent both as Sentry transactions and
-over OTLP are stored once; transactions wait `dedupe_window`)
+over OTLP are stored once; transactions wait `dedupe_window`) and 0013
+(`span` items, SDK 11 span streaming, go the same way as transactions)
 
 ## Context
 mallard runs both sides in one process on one catalog (ADR 0001), but

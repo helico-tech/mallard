@@ -1,8 +1,8 @@
 {
-  "name": "sdl-e2e",
+  "name": "mallard-e2e-sentry",
   "private": true,
   "type": "module",
-  "description": "End-to-end tests for sentry-ducklake with real Sentry SDKs, a real browser and real sourcemap uploads.",
+  "description": "End-to-end tests for mallard with real Sentry SDKs, a real browser and real sourcemap uploads.",
   "engines": {
     "node": ">=22"
   },

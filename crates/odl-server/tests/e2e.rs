@@ -230,6 +230,34 @@ async fn harness(token: Option<&str>) -> Harness {
 }
 
 impl Harness {
+    /// GET a list and its `x-next-cursor` header.
+    async fn page<T: serde::de::DeserializeOwned>(&self, path: &str) -> (Vec<T>, Option<String>) {
+        let resp = self.api.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "GET {path}");
+        let cursor = resp.headers().get(NEXT_CURSOR_HEADER).map(|v| v.to_str().unwrap().to_string());
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (serde_json::from_slice(&body).unwrap(), cursor)
+    }
+
+    /// Every page of a list, following the cursor (`path` ends in a query).
+    async fn all_pages<T: serde::de::DeserializeOwned>(&self, path: &str) -> Vec<Vec<T>> {
+        let mut pages = vec![];
+        let mut cursor: Option<String> = None;
+        loop {
+            let p = match &cursor {
+                Some(c) => format!("{path}&cursor={}", c.replace(':', "%3A")),
+                None => path.to_string(),
+            };
+            let (items, next) = self.page(&p).await;
+            pages.push(items);
+            match next {
+                Some(c) => cursor = Some(c),
+                None => return pages,
+            }
+            assert!(pages.len() < 100, "cursor loop");
+        }
+    }
+
     async fn post(&self, path: &str, ct: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
         let req = Request::post(path).header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
         let resp = self.otlp.clone().oneshot(req).await.unwrap();
@@ -335,6 +363,17 @@ async fn traces_roundtrip() {
 
     let series: SpanSeries = h.get("/api/v1/spans/series?since=1h&service=checkout").await;
     assert_eq!(series.points.iter().map(|p| p.count).sum::<u64>(), 1);
+
+    // A span by its id; the high bit survives the round trip.
+    let span: odl_api::Span = h.get("/api/v1/spans/ff00000000000002?since=1h").await;
+    assert_eq!((span.trace_id.as_str(), span.name.as_str()), (TRACE_HEX, "SELECT orders"));
+    assert_eq!(span.parent_span_id.as_deref(), Some("0000000000000001"));
+    let span: odl_api::Span = h.get("/api/v1/spans/0000000000000003").await;
+    assert_eq!(span.service_name, "db", "default window: a week");
+    let (s, _) = h.get_raw("/api/v1/spans/00000000000000ab?since=1h", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = h.get_raw("/api/v1/spans/xyz?since=1h", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 
     let (s, _) = h.get_raw("/api/v1/traces/nothex?since=1h", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -755,6 +794,119 @@ async fn exemplars_link_metrics_to_traces() {
     h.stop().await;
 }
 
+/// Exemplars of delta and cumulative series in one metric: each series keeps
+/// its own, and the rates next to them still follow each series' temporality.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exemplars_in_a_metric_with_mixed_temporality() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    let minute = 60_000_000_000;
+    let ex = |value: f64, span: u64| Exemplar {
+        value: Some(exemplar::Value::AsDouble(value)),
+        trace_id: TRACE.to_vec(),
+        span_id: span.to_be_bytes().to_vec(),
+        ..Default::default()
+    };
+    let num = |src: &str, t: u64, v: i64, exemplars: Vec<Exemplar>| NumberDataPoint {
+        attributes: vec![kv("src", src)],
+        start_time_unix_nano: t0 - 10 * minute,
+        time_unix_nano: t,
+        value: Some(number_data_point::Value::AsInt(v)),
+        exemplars,
+        ..Default::default()
+    };
+    let hist = |src: &str, t: u64, n: u64, exemplars: Vec<Exemplar>| HistogramDataPoint {
+        attributes: vec![kv("src", src)],
+        start_time_unix_nano: t0 - 10 * minute,
+        time_unix_nano: t,
+        count: n,
+        bucket_counts: vec![n, 0],
+        explicit_bounds: vec![10.0],
+        exemplars,
+        ..Default::default()
+    };
+    let sum = |data_points, t: AggregationTemporality| {
+        Data::Sum(Sum { data_points, aggregation_temporality: t as i32, is_monotonic: true })
+    };
+    let histogram = |data_points, t: AggregationTemporality| {
+        Data::Histogram(Histogram { data_points, aggregation_temporality: t as i32 })
+    };
+    let metric = |name: &str, data: Data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+    use AggregationTemporality::{Cumulative, Delta};
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: resource("checkout"),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    // 30 per minute as deltas, 60 per minute cumulative.
+                    metric(
+                        "jobs",
+                        sum(vec![num("delta", t0 - minute, 30, vec![]), num("delta", t0, 30, vec![ex(2.0, 1)])], Delta),
+                    ),
+                    metric(
+                        "jobs",
+                        sum(
+                            vec![
+                                num("cumulative", t0 - minute, 60, vec![]),
+                                num("cumulative", t0, 120, vec![ex(7.0, 2)]),
+                            ],
+                            Cumulative,
+                        ),
+                    ),
+                    metric(
+                        "latency",
+                        histogram(
+                            vec![hist("delta", t0 - minute, 10, vec![]), hist("delta", t0, 10, vec![ex(3.0, 3)])],
+                            Delta,
+                        ),
+                    ),
+                    metric(
+                        "latency",
+                        histogram(
+                            vec![
+                                hist("cumulative", t0 - minute, 10, vec![]),
+                                hist("cumulative", t0, 20, vec![ex(8.0, 4)]),
+                            ],
+                            Cumulative,
+                        ),
+                    ),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", req.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        (v.len() == 2).then_some(())
+    })
+    .await;
+    for (name, agg, delta, cumulative, last_rate) in
+        [("jobs", "rate", 2.0, 7.0, (0.5, 1.0)), ("latency", "rate", 3.0, 8.0, (10.0 / 60.0, 10.0 / 60.0))]
+    {
+        let q = format!("/api/v1/metrics/query?name={name}&since=15m&step=1m&agg={agg}&exemplars=true");
+        let by: MetricQueryResult = h.get(&format!("{q}&group_by=src")).await;
+        let of = |src: &str| {
+            let e: Vec<_> = by.exemplars.iter().filter(|e| e.labels["src"] == src).map(|e| e.value).collect();
+            let series = by.series.iter().find(|s| s.labels["src"] == src).expect(src);
+            (e, series.points.last().unwrap().value)
+        };
+        let (e, rate) = of("delta");
+        assert_eq!(e, vec![delta], "{name}");
+        assert!((rate - last_rate.0).abs() < 1e-6, "{name} delta rate {rate}");
+        let (e, rate) = of("cumulative");
+        assert_eq!(e, vec![cumulative], "{name}");
+        assert!((rate - last_rate.1).abs() < 1e-6, "{name} cumulative rate {rate}");
+        // Not grouped: one series, so the highest of both in the bucket.
+        let all: MetricQueryResult = h.get(&q).await;
+        let got: Vec<f64> = all.exemplars.iter().map(|e| e.value).collect();
+        assert_eq!(got, vec![cumulative], "{name}");
+    }
+    h.stop().await;
+}
+
 /// A catalog created before exemplars were stored: start-up adds the
 /// column, old rows read as no exemplars, and new rows keep theirs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -987,7 +1139,7 @@ async fn every_documented_route_is_served() {
     let paths = spec["paths"].as_object().unwrap();
     assert!(paths.len() >= 12);
     for (path, ops) in paths {
-        let uri = path.replace("{trace_id}", TRACE_HEX);
+        let uri = path.replace("{trace_id}", TRACE_HEX).replace("{span_id}", "0000000000000001");
         for method in ops.as_object().unwrap().keys() {
             let req = Request::builder()
                 .method(method.to_uppercase().as_str())
@@ -1103,5 +1255,236 @@ async fn delta_sums_exp_histograms_and_summaries() {
     all_near(&h.get(&q("rpc.latency", "count")).await, 10.0);
     all_near(&h.get(&q("gc.pause", "p99")).await, 9.0);
     all_near(&h.get(&q("gc.pause", "avg")).await, 5.0);
+    h.stop().await;
+}
+
+/// Traces and logs page through a cursor: every item once, in order, also
+/// when many items share a timestamp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursors_page_through_traces_and_logs() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 5_000_000_000;
+    // 7 traces; traces 0-3 have the same start time (ties on the cursor time).
+    let mut req = traces_req(t0);
+    let template = req.resource_spans[0].scope_spans[0].spans[0].clone();
+    req.resource_spans.truncate(1);
+    req.resource_spans[0].scope_spans[0].spans = (0..7u8)
+        .map(|i| {
+            let mut s = template.clone();
+            s.trace_id = vec![i + 1; 16];
+            s.span_id = vec![0, 0, 0, 0, 0, 0, 0, i + 1];
+            let t = t0 + if i < 4 { 0 } else { i as u64 * 1_000_000 };
+            (s.start_time_unix_nano, s.end_time_unix_nano) = (t, t + 1_000_000);
+            s
+        })
+        .collect();
+    let (s, _) = h.post("/v1/traces", "application/x-protobuf", req.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    // 9 logs, all at the same time: only the row id orders them.
+    let mut logs = logs_req(t0);
+    let rec = logs.resource_logs[0].scope_logs[0].log_records[1].clone();
+    logs.resource_logs[0].scope_logs[0].log_records = (0..9)
+        .map(|i| {
+            let mut r = rec.clone();
+            r.body = Some(AnyValue { value: Some(any_value::Value::StringValue(format!("same time {i}"))) });
+            r
+        })
+        .collect();
+    let (s, _) = h.post("/v1/logs", "application/x-protobuf", logs.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    h.eventually(|| async {
+        let t: Vec<TraceSummary> = h.get("/api/v1/traces?since=1h").await;
+        let l: Vec<LogRecord> = h.get("/api/v1/logs?since=1h").await;
+        (t.len() == 7 && l.len() == 9).then_some(())
+    })
+    .await;
+
+    let pages: Vec<Vec<TraceSummary>> = h.all_pages("/api/v1/traces?since=1h&limit=2").await;
+    assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2, 2, 1], "the last page has no cursor");
+    let ids: Vec<String> = pages.iter().flatten().map(|t| t.trace_id.clone()).collect();
+    let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), 7, "each trace once: {ids:?}");
+    assert_eq!(ids[0], "07070707070707070707070707070707", "newest first");
+    let exact: Vec<Vec<TraceSummary>> = h.all_pages("/api/v1/traces?since=1h&limit=7").await;
+    assert_eq!(exact.len(), 1, "a full last page has no cursor");
+
+    for order in ["desc", "asc"] {
+        let pages: Vec<Vec<LogRecord>> = h.all_pages(&format!("/api/v1/logs?since=1h&limit=4&order={order}")).await;
+        assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), [4, 4, 1], "{order}");
+        let bodies: std::collections::BTreeSet<String> = pages.iter().flatten().map(|r| r.body.clone()).collect();
+        assert_eq!(bodies.len(), 9, "{order}: each record once: {bodies:?}");
+    }
+    // The cursor keeps the filters: only the 9 INFO records match.
+    let pages: Vec<Vec<LogRecord>> = h.all_pages("/api/v1/logs?since=1h&limit=5&q=same").await;
+    assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), 9);
+
+    for bad in ["nope", "1:", "1:zz", "x%3Aab"] {
+        let (s, _) = h.get_raw(&format!("/api/v1/logs?since=1h&cursor={bad}"), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (s, _) = h.get_raw("/api/v1/traces?since=1h&cursor=1%3Aab", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a trace cursor needs a trace id");
+    h.stop().await;
+}
+
+/// Attribute keys and values per signal, and the schema the SQL endpoint sees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attributes_and_schema() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    for (path, body) in [
+        ("/v1/traces", traces_req(t0).encode_to_vec()),
+        ("/v1/logs", logs_req(t0).encode_to_vec()),
+        ("/v1/metrics", metrics_req(t0, 3).encode_to_vec()),
+    ] {
+        assert_eq!(h.post(path, "application/x-protobuf", body).await.0, StatusCode::OK, "{path}");
+    }
+    let spans: AttributeStats = h
+        .eventually(|| async {
+            let a: AttributeStats = h.get("/api/v1/attributes?signal=spans&since=1h").await;
+            let l: AttributeStats = h.get("/api/v1/attributes?signal=logs&since=1h").await;
+            let m: AttributeStats = h.get("/api/v1/attributes?signal=metrics&since=1h").await;
+            (a.total_rows == 3 && l.total_rows == 2 && m.total_rows > 0).then_some(a)
+        })
+        .await;
+    assert_eq!(spans.sampled_rows, 3);
+    let count = |s: &AttributeStats, k: &str| s.items.iter().find(|a| a.key == k).map(|a| a.count);
+    // Resource attributes count too; most frequent first.
+    assert_eq!(count(&spans, "service.name"), Some(3));
+    assert_eq!(count(&spans, "host.name"), Some(3));
+    assert_eq!(count(&spans, "http.route"), Some(1));
+    assert!(spans.items.iter().all(|a| a.value.is_none()));
+    assert!(spans.items.windows(2).all(|w| w[0].count >= w[1].count), "{spans:?}");
+
+    let svc: AttributeStats = h.get("/api/v1/attributes?signal=spans&since=1h&service=db").await;
+    assert_eq!((svc.total_rows, count(&svc, "http.route")), (1, None));
+    let values: AttributeStats = h.get("/api/v1/attributes?signal=spans&since=1h&key=service.name").await;
+    let v: Vec<(Option<&str>, u64)> = values.items.iter().map(|a| (a.value.as_deref(), a.count)).collect();
+    assert_eq!(v, [(Some("checkout"), 2), (Some("db"), 1)]);
+    assert_eq!(values.total_rows, 3, "rows that have the key");
+    let one: AttributeStats = h.get("/api/v1/attributes?signal=spans&since=1h&key=service.name&limit=1").await;
+    assert_eq!(one.items.len(), 1);
+
+    let logs: AttributeStats = h.get("/api/v1/attributes?signal=logs&since=1h&key=order.id").await;
+    assert_eq!((logs.items[0].value.as_deref(), logs.total_rows), (Some("42"), 1));
+
+    // Metrics: all point tables, one metric.
+    let m: AttributeStats = h.get("/api/v1/attributes?signal=metrics&since=1h&metric=http.requests&key=route").await;
+    let v: Vec<(Option<&str>, u64)> = m.items.iter().map(|a| (a.value.as_deref(), a.count)).collect();
+    assert_eq!(v, [(Some("/a"), 3), (Some("/b"), 3)]);
+    let hist: AttributeStats = h.get("/api/v1/attributes?signal=metrics&since=1h&metric=http.duration").await;
+    assert_eq!((hist.total_rows, count(&hist, "route")), (3, Some(3)));
+
+    for bad in ["", "signal=events", "signal=spans&metric=x", "signal=spans&key=", "signal=spans&limit=0"] {
+        let (s, body) = h.get_raw(&format!("/api/v1/attributes?since=1h&{bad}"), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+
+    let schema: Schema = h.get("/api/v1/schema").await;
+    let names: Vec<&str> = schema.tables.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["spans", "logs", "metric_points", "metric_histograms", "metric_exp_histograms", "metric_summaries"]
+    );
+    let spans = &schema.tables[0];
+    assert_eq!(spans.time_column, "start_time");
+    assert_eq!((spans.columns[0].name.as_str(), spans.columns[0].data_type.as_str()), ("start_time", "TIMESTAMP"));
+    assert!(spans.columns.iter().any(|c| c.name == "attributes" && c.data_type.starts_with("MAP")), "{spans:?}");
+    h.stop().await;
+}
+
+/// One metric with a delta and a cumulative series: each series is handled
+/// by its own temporality (otel issue 0008).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mixed_temporality_in_one_metric() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    let start = t0 - 600_000_000_000;
+    let src = |s: &str| vec![kv("src", s)];
+    let (mut delta, mut cum, mut hdelta, mut hcum) = (vec![], vec![], vec![], vec![]);
+    for i in 0..10u64 {
+        let t = t0 - (9 - i) * 60_000_000_000;
+        // 30 per minute as deltas.
+        delta.push(NumberDataPoint {
+            attributes: src("delta"),
+            start_time_unix_nano: t - 60_000_000_000,
+            time_unix_nano: t,
+            value: Some(number_data_point::Value::AsInt(30)),
+            ..Default::default()
+        });
+        // 60 per minute, cumulative, restarting after the fifth minute.
+        let n = if i < 5 { i + 1 } else { i - 4 };
+        cum.push(NumberDataPoint {
+            attributes: src("cumulative"),
+            start_time_unix_nano: if i < 5 { start } else { t - 60_000_000_000 },
+            time_unix_nano: t,
+            value: Some(number_data_point::Value::AsInt(60 * n as i64)),
+            ..Default::default()
+        });
+        // Histograms: 10 observations per minute in each series.
+        hdelta.push(HistogramDataPoint {
+            attributes: src("delta"),
+            start_time_unix_nano: t - 60_000_000_000,
+            time_unix_nano: t,
+            count: 10,
+            bucket_counts: vec![10, 0],
+            explicit_bounds: vec![10.0],
+            ..Default::default()
+        });
+        hcum.push(HistogramDataPoint {
+            attributes: src("cumulative"),
+            start_time_unix_nano: start,
+            time_unix_nano: t,
+            count: 10 * (i + 1),
+            bucket_counts: vec![10 * (i + 1), 0],
+            explicit_bounds: vec![10.0],
+            ..Default::default()
+        });
+    }
+    let sum = |data_points, t: AggregationTemporality| {
+        Data::Sum(Sum { data_points, aggregation_temporality: t as i32, is_monotonic: true })
+    };
+    let hist = |data_points, t: AggregationTemporality| {
+        Data::Histogram(Histogram { data_points, aggregation_temporality: t as i32 })
+    };
+    let metric = |name: &str, data: Data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: resource("worker"),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    metric("jobs.mixed", sum(delta, AggregationTemporality::Delta)),
+                    metric("jobs.mixed", sum(cum, AggregationTemporality::Cumulative)),
+                    metric("latency.mixed", hist(hdelta, AggregationTemporality::Delta)),
+                    metric("latency.mixed", hist(hcum, AggregationTemporality::Cumulative)),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", req.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        (v.iter().map(|m| m.point_count).sum::<u64>() == 40).then_some(())
+    })
+    .await;
+
+    let per_src = |r: MetricQueryResult, want: [(&str, f64); 2]| {
+        assert_eq!(r.series.len(), 2, "{r:?}");
+        for (src, v) in want {
+            let s = r.series.iter().find(|s| s.labels["src"] == src).unwrap();
+            assert!(s.points.len() >= 9, "{} {src}: {:?}", r.name, s.points);
+            for p in &s.points {
+                assert!((p.value - v).abs() < 1e-6, "{} {} {src}: {} != {v}", r.name, r.agg, p.value);
+            }
+        }
+    };
+    let q =
+        |name: &str, agg: &str| format!("/api/v1/metrics/query?name={name}&since=15m&step=1m&agg={agg}&group_by=src");
+    per_src(h.get(&q("jobs.mixed", "increase")).await, [("delta", 30.0), ("cumulative", 60.0)]);
+    per_src(h.get(&q("jobs.mixed", "rate")).await, [("delta", 0.5), ("cumulative", 1.0)]);
+    per_src(h.get(&q("latency.mixed", "count")).await, [("delta", 10.0), ("cumulative", 10.0)]);
     h.stop().await;
 }

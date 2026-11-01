@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -33,3 +33,5 @@ npx sentry-cli --url "$SENTRY_URL/sentry" sourcemaps upload ./dist   # bad sentr
   `chunk-upload` `url` the server returns (from `public_url`) can stay as it is.
 - Then fix the README line and add a `mallard-server` test that calls
   `/api/0/organizations/x/chunk-upload/` at the root.
+
+Done 2026-11-01 in feat/e2e-mallard (8244369): mallard-server also serves `/api/0/...` on the root of the HTTP port (`nest_service`, prefix restored); `/sentry/api/0` still works. Test: `crates/mallard-server/tests/sentry_cli_root.rs`; the e2e sourcemap tests run sentry-cli 2.x and 3.x against the root URL.

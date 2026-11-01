@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 type: idea
 created: 2026-11-01
 ---
@@ -25,6 +25,28 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
 - `setup --sentry-cli` (prints `SENTRY_URL`, `SENTRY_ORG`, `SENTRY_PROJECT`,
   `SENTRY_AUTH_TOKEN`), `-q/--quiet`.
 
+## Progress
+- 2026-11-01, Sentry side (branch `feat/cli-p1-sentry`), done:
+  - S9: `issues?tag=k:v` (repeat, all must match, max 10) and
+    `events?tag=&release=&environment=&query=` (window flags already worked);
+    CLI `--tag k=v` on `issues list` and `events list`, plus `--release`,
+    `--env`, `-q` on `events list`. Text search is `query` (like `issues`),
+    not `q`.
+  - S10: `issues` pages: stable order (sort value, then id) and
+    `next_cursor`; the cursor carries the window and the sort. CLI
+    `--cursor` on `issues list` and `events list` (events already had one).
+  - S14: `GET /v1/projects/{p}/releases` (from events; `new_issues` = issues
+    with that `first_release`); CLI `releases list`. The sentry-cli release
+    endpoints are still stubs (noted in `docs/sentry/compatibility.md` and
+    the agent guide).
+  - S15: `POST /v1/sql` over `events`, `issues`, `issue_activity`, off by
+    default (`[sentry.query] enable_sql`, `sql_timeout`); the guard moved to
+    `mallard_duck::sql` and the otel side uses it too (ADR 0011). CLI
+    `mallard sql --errors "<select>"`.
+  - Sentry `issues list` / `events list` print `next page: --cursor …` in the
+    shared truncation note (stderr), like `traces list` and `logs`.
+  - Left over: [issue 0014](0014-agent-cli-p1-leftovers.md).
+
 ## Notes
 - `status` reports a side as up when its API answers; it does not call
   `/readyz` (a failing otel flush shows in `otel.info.ingest`, not in `ok`).
@@ -32,8 +54,9 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
   not the public host. `setup` uses the Sentry `public_url` (without
   `/sentry`), else the CLI's `--url`.
 - `maintenance` and `stats` are only under the hidden `mallard errors …`.
-- Spec side findings still open: breadcrumb order in `events show` text,
-  release endpoints are stubs.
+- Spec side findings still open: moved to [issue 0014](0014-agent-cli-p1-leftovers.md).
+- 2026-11-01: all P1 items are on main (client, Sentry and otel sides);
+  done. What is left is in [issue 0014](0014-agent-cli-p1-leftovers.md).
 
 ## Polish found in review (2026-11-01; done, see Progress)
 - Not-found errors repeat themselves: `not found: issue not found`
@@ -42,7 +65,7 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
 ## Progress
 - 2026-11-01, client-side items done (branch `feat/cli-p1-client`); the
   server-backed items (`schema`, `--tag`, span ids in `find`, cursors,
-  `releases list`, SQL over Sentry) are separate work:
+  `releases list`, SQL over Sentry) are separate work (otel side below):
   - `--wait <dur>` on `events list`, `traces list`, `logs`, `trace`/`traces
     show`, `find` (`mallard_term::wait`): polls every second, the window
     moves along; on timeout the empty result is printed and the exit code is
@@ -66,3 +89,22 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
   - Polish: a 404 with a server message prints the message alone
     (`issue not found`, not `not found: issue not found`), both sides.
 
+- 2026-11-01, otel side (branch `feat/cli-p1-otel`) — done:
+  - S8 span by id: `GET /otel/api/v1/spans/{span_id}` (default window 7d,
+    newest span on a collision); `mallard find <16 hex>` looks up the issue
+    and the span at the same time; a span match has `trace_id` and
+    `next: mallard trace <trace id>`.
+  - S11 cursors on `GET /api/v1/traces` and `/logs`: the body stays an
+    array; the next page's cursor is the `x-next-cursor` header, sent back
+    as `cursor=`. Traces page on the newest matching span + trace id, logs
+    on time + DuckLake row id. `traces list` and
+    `logs` take `--cursor`; `next_cursor` in the envelope, and in the stderr
+    note for text/ndjson. `truncated` there is now exact (from the server).
+  - S12 `GET /api/v1/attributes?signal=spans|logs|metrics&service=&metric=&key=&limit=`:
+    keys with row counts, or the top values of `key`, from a reservoir
+    sample of at most 10,000 matching rows (`total_rows`, `sampled_rows`);
+    attributes and resource attributes count together. `mallard schema attrs`.
+  - S13 `GET /api/v1/schema`: the SQL tables, their time column and their
+    columns from the catalog. `mallard schema` (= `schema tables`). When
+    Sentry SQL (S15) lands, the host's `schema` handler in
+    `crates/mallard/src/main.rs` can add that side's tables.

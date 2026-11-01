@@ -1,5 +1,5 @@
 // A small Node "app" using the real @sentry/node SDK. Only the DSN points
-// at sentry-ducklake. Usage: DSN=... node node-app.mjs <scenario> [tag]
+// at mallard. Usage: DSN=... node node-app.mjs <scenario> [tag]
 // Prints one JSON line `{"ids": {...}}` with the event ids it captured.
 
 import * as Sentry from "@sentry/node";
