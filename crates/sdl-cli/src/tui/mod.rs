@@ -11,10 +11,11 @@ mod fixtures;
 mod theme;
 mod ui;
 
-use crate::cli::{Hints, describe};
+use crate::cli::describe;
 use app::{App, FetchError, Kind, Req, Resp};
 use crossterm::event::{Event, KeyEventKind};
 use futures::FutureExt;
+use mallard_term::error::Hints;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use sdl_client::Client;
@@ -75,7 +76,7 @@ impl Embedded {
         Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false, tasks: vec![] }
     }
 
-    /// Name the host's command and env vars in hints (default [`Hints::SDL`]).
+    /// Name the host's command and env vars in hints (default [`crate::HINTS`]).
     pub fn with_hints(mut self, hints: Hints) -> Self {
         self.app.hints = hints;
         self

@@ -3,11 +3,11 @@
 //! tokio tasks and feeds the responses back, so the UI never blocks.
 
 use super::Outcome;
-use crate::cli::Hints;
 use crate::event_view::{self as ev, Breadcrumb, Exception, Frame};
 use crate::{SortBy, StatusFilter};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use mallard_term::error::Hints;
 use ratatui::widgets::TableState;
 use sdl_client::types::*;
 use std::collections::HashMap;
@@ -462,7 +462,7 @@ impl App {
             last_refresh: Instant::now(),
             last_info: Instant::now(),
             started_at: Instant::now(),
-            hints: Hints::SDL,
+            hints: crate::HINTS,
         }
     }
 

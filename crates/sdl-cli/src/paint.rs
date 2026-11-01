@@ -1,48 +1,9 @@
-//! Minimal ANSI styling for CLI output. Off when stdout is not a terminal
-//! or `NO_COLOR` is set.
+//! ANSI styling for CLI output: `mallard_term::color`, plus colours for
+//! levels and statuses. Styling is always added; `Out::line` strips it when
+//! colour is off.
 
-use std::io::IsTerminal;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static COLOR: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn init() {
-    let on = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-    COLOR.store(on, Ordering::Relaxed);
-}
-
-fn wrap(code: &str, s: &str) -> String {
-    if COLOR.load(Ordering::Relaxed) { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() }
-}
-
-pub(crate) fn bold(s: &str) -> String {
-    wrap("1", s)
-}
-pub(crate) fn dim(s: &str) -> String {
-    wrap("2", s)
-}
-pub(crate) fn red(s: &str) -> String {
-    wrap("31", s)
-}
-pub(crate) fn green(s: &str) -> String {
-    wrap("32", s)
-}
-pub(crate) fn yellow(s: &str) -> String {
-    wrap("33", s)
-}
-pub(crate) fn blue(s: &str) -> String {
-    wrap("34", s)
-}
-pub(crate) fn magenta(s: &str) -> String {
-    wrap("35", s)
-}
-pub(crate) fn cyan(s: &str) -> String {
-    wrap("36", s)
-}
-/// Highlighted line (bold yellow), used for the error line in source context.
-pub(crate) fn highlight(s: &str) -> String {
-    wrap("1;33", s)
-}
+use mallard_term::color::blue;
+pub(crate) use mallard_term::color::{bold, cyan, dim, green, highlight, magenta, red, yellow};
 
 /// The word in `[error]` or a padded `error   `, to pick a color by.
 fn word(s: &str) -> &str {
@@ -76,7 +37,6 @@ mod tests {
 
     #[test]
     fn colors_are_picked_by_the_bare_word() {
-        COLOR.store(true, Ordering::Relaxed);
         assert_eq!(level("[error]"), red("[error]"));
         assert_eq!(level("fatal   "), magenta("fatal   "));
         assert_eq!(status("resolved  "), green("resolved  "));

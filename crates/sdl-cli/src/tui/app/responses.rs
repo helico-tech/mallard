@@ -81,7 +81,7 @@ impl App {
     }
 
     fn on_panicked(&mut self, msg: &str) -> Vec<Req> {
-        let msg = clean(msg);
+        let msg = clean(msg).into_owned();
         self.toast(format!("internal error: {msg}"), true);
         self.fatal = Some(msg);
         vec![]
@@ -229,7 +229,11 @@ impl App {
             // JSON view from the raw payload (serde escapes control
             // characters in strings), cleaned per line for C1 codes.
             let r = r.and_then(|e| {
-                let json = serde_json::to_string_pretty(&e.payload).unwrap_or_default().lines().map(clean).collect();
+                let json = serde_json::to_string_pretty(&e.payload)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|l| clean(l).into_owned())
+                    .collect();
                 Ok((cleaned(e)?, json))
             });
             match r {

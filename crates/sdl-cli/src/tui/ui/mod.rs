@@ -314,7 +314,7 @@ mod tests {
         app.now = now();
         let s = draw(&mut app, 140, 40);
         assert!(!s.chars().any(|c| c.is_control() && c != '\n'), "control character in buffer:\n{s}");
-        assert!(s.contains("evil\u{FFFD}]52;c;cHduZWQ=\u{FFFD} \u{FFFD}[2Jtitle"), "{s}");
+        assert!(s.contains("evil\\u{1b}]52;c;cHduZWQ=\\u{7} \\u{1b}[2Jtitle"), "{s}");
         assert!(s.contains("cul prit    x"), "{s}");
     }
 

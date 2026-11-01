@@ -1,10 +1,11 @@
-//! Small formatting helpers shared by the CLI and the TUI.
+//! Formatting helpers of the CLI and the TUI. What both sides share comes
+//! from `mallard_term`; what is here is specific to error tracking.
 
-use chrono::{DateTime, Utc};
+pub(crate) use mallard_term::fmt::{age, bytes, relative_time, timestamp};
+pub(crate) use mallard_term::text::{clean, clean_text, pad, truncate, truncate_left, width};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -43,104 +44,9 @@ pub(crate) fn resample(values: &[u64], width: usize) -> Vec<u64> {
     out
 }
 
-/// "now", "42s ago", "3m ago", "5h ago", "2d ago", "3mo ago", "1y ago".
-pub(crate) fn relative_time(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let secs = (now - t).num_seconds();
-    if secs < 0 {
-        return "now".into();
-    }
-    match secs {
-        0..5 => "now".into(),
-        5..60 => format!("{secs}s ago"),
-        60..3600 => format!("{}m ago", secs / 60),
-        3600..86_400 => format!("{}h ago", secs / 3600),
-        86_400..2_592_000 => format!("{}d ago", secs / 86_400),
-        2_592_000..31_536_000 => format!("{}mo ago", secs / 2_592_000),
-        _ => format!("{}y ago", secs / 31_536_000),
-    }
-}
-
-/// Like [`relative_time`] but without "ago": "3m", "2d" (for "age" columns).
-pub(crate) fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let s = relative_time(t, now);
-    s.strip_suffix(" ago").map(str::to_string).unwrap_or(s)
-}
-
 /// 1234 -> "1.2k", 3_400_000 -> "3.4M". Small numbers stay exact.
 pub(crate) fn compact(n: u64) -> String {
-    match n {
-        0..1000 => n.to_string(),
-        1000..999_950 => trim_dot0(format!("{:.1}k", n as f64 / 1e3)),
-        999_950..999_950_000 => trim_dot0(format!("{:.1}M", n as f64 / 1e6)),
-        _ => trim_dot0(format!("{:.1}B", n as f64 / 1e9)),
-    }
-}
-
-fn trim_dot0(s: String) -> String {
-    s.replace(".0k", "k").replace(".0M", "M").replace(".0B", "B")
-}
-
-/// 1536 -> "1.5 KiB".
-pub(crate) fn bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[u]) }
-}
-
-/// Terminal columns `s` takes (CJK and emoji take two).
-pub(crate) fn width(s: &str) -> usize {
-    s.width()
-}
-
-/// The longest prefix of the chars of `it` that fits in `max` columns.
-fn take_columns(it: impl Iterator<Item = char>, max: usize) -> Vec<char> {
-    let mut used = 0;
-    it.take_while(|c| {
-        used += c.width().unwrap_or(0);
-        used <= max
-    })
-    .collect()
-}
-
-/// Cut `s` to at most `max` columns, ending with "…" when cut.
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = take_columns(s.chars(), max - 1).into_iter().collect();
-    out.push('…');
-    out
-}
-
-/// Cut `s` to at most `max` columns keeping the end: "…/src/app.js:10".
-pub(crate) fn truncate_left(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::from("…");
-    out.extend(take_columns(s.chars().rev(), max - 1).into_iter().rev());
-    out
-}
-
-/// `s` padded with spaces to `w` columns (`{:<w}` counts chars, not columns).
-pub(crate) fn pad(s: &str, w: usize) -> String {
-    format!("{s}{}", " ".repeat(w.saturating_sub(s.width())))
-}
-
-/// Short local-free timestamp for tables: "2026-10-31 20:59:13".
-pub(crate) fn timestamp(t: DateTime<Utc>) -> String {
-    t.format("%Y-%m-%d %H:%M:%S").to_string()
+    mallard_term::fmt::compact(n as f64)
 }
 
 /// Parse "90s", "5m", "24h", "14d", "2w" into seconds.
@@ -186,54 +92,26 @@ pub(crate) fn hbar(value: u64, max: u64, width: usize) -> String {
     s
 }
 
-/// Bidi overrides and marks: they can make text display in another order
-/// than it is stored.
-pub(crate) fn is_bidi_control(c: char) -> bool {
-    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-}
-
-/// Make untrusted text (event data, server messages) safe to print to a
-/// terminal: tabs become spaces, other control characters (C0, DEL, C1, so
-/// ESC, OSC, CSI, BEL, CR, ...) become U+FFFD, and bidi overrides are
-/// dropped. Newlines are kept when `keep_newlines`, else they become spaces.
-pub(crate) fn clean_text(s: &str, keep_newlines: bool) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\n' if keep_newlines => out.push('\n'),
-            '\n' => out.push(' '),
-            '\r' if keep_newlines => {}
-            '\r' => out.push(' '),
-            '\t' => out.push_str("    "),
-            c if is_bidi_control(c) => {}
-            c if c.is_control() => out.push('\u{FFFD}'),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// One-line [`clean_text`].
-pub(crate) fn clean(s: &str) -> String {
-    clean_text(s, false)
+fn clean_line_or_text(s: &str, keep_newlines: bool) -> String {
+    if keep_newlines { clean_text(s).into_owned() } else { clean(s).into_owned() }
 }
 
 fn clean_value(v: &mut Value, keep_newlines: bool) {
     match v {
-        Value::String(s) => *s = clean_text(s, keep_newlines),
+        Value::String(s) => *s = clean_line_or_text(s, keep_newlines),
         Value::Array(a) => a.iter_mut().for_each(|x| clean_value(x, keep_newlines)),
         Value::Object(o) => {
             let old = std::mem::take(o);
             for (k, mut x) in old {
                 clean_value(&mut x, keep_newlines);
-                o.insert(clean_text(&k, keep_newlines), x);
+                o.insert(clean_line_or_text(&k, keep_newlines), x);
             }
         }
         _ => {}
     }
 }
 
-/// [`clean_text`] every string (and object key) inside an API response, so
+/// [`clean_text`] (or [`clean`]) every string and object key inside an API response, so
 /// no field of it can carry terminal escape sequences. Used for all
 /// non-JSON output; `--json` output is escaped by serde instead. Fails
 /// closed: a value that does not survive the JSON round trip is an error,
@@ -247,7 +125,6 @@ pub(crate) fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
 
     #[test]
     fn sparkline_scales_and_keeps_small_values_visible() {
@@ -265,40 +142,6 @@ mod tests {
         assert_eq!(resample(&[], 3), vec![0, 0, 0]);
         let v: Vec<u64> = (0..24).collect();
         assert_eq!(resample(&v, 12).iter().sum::<u64>(), v.iter().sum::<u64>());
-    }
-
-    #[test]
-    fn relative_time_buckets() {
-        let now = Utc::now();
-        assert_eq!(relative_time(now, now), "now");
-        assert_eq!(relative_time(now + Duration::seconds(10), now), "now");
-        assert_eq!(relative_time(now - Duration::seconds(42), now), "42s ago");
-        assert_eq!(relative_time(now - Duration::minutes(3), now), "3m ago");
-        assert_eq!(relative_time(now - Duration::hours(5), now), "5h ago");
-        assert_eq!(relative_time(now - Duration::days(2), now), "2d ago");
-        assert_eq!(relative_time(now - Duration::days(65), now), "2mo ago");
-        assert_eq!(relative_time(now - Duration::days(800), now), "2y ago");
-        assert_eq!(age(now - Duration::minutes(3), now), "3m");
-    }
-
-    #[test]
-    fn compact_numbers() {
-        assert_eq!(compact(999), "999");
-        assert_eq!(compact(1000), "1k");
-        assert_eq!(compact(1234), "1.2k");
-        assert_eq!(compact(999_999), "1M");
-        assert_eq!(compact(3_400_000), "3.4M");
-        assert_eq!(compact(2_000_000_000), "2B");
-    }
-
-    #[test]
-    fn clean_strips_terminal_escapes() {
-        let evil = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\u{9b}31md\re\tf\u{202e}g";
-        let out = clean(evil);
-        assert!(!out.chars().any(|c| c.is_control()), "{out:?}");
-        assert_eq!(out, "a\u{FFFD}]52;c;ZXZpbA==\u{FFFD}b\u{FFFD}[2Jc\u{FFFD}31md e    fg");
-        assert_eq!(clean_text("l1\r\nl2", true), "l1\nl2");
-        assert_eq!(clean("l1\nl2"), "l1 l2");
     }
 
     #[test]
@@ -323,18 +166,7 @@ mod tests {
 
     #[test]
     fn misc_helpers() {
-        assert_eq!(bytes(512), "512 B");
-        assert_eq!(bytes(1536), "1.5 KiB");
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 6), "hello…");
-        assert_eq!(truncate_left("/a/b/c/app.js:10", 10), "…app.js:10");
-        assert_eq!(truncate_left("app.js", 10), "app.js");
-        // Wide characters count as two columns.
-        assert_eq!(truncate("日本語のテキスト", 7), "日本語…");
-        assert_eq!(width(&truncate("日本語のテキスト", 7)), 7);
-        assert_eq!(truncate_left("/パス/ファイル.js", 10), "…ァイル.js");
-        assert_eq!(pad("日本", 6), "日本  ");
-        assert_eq!(pad("toolong", 3), "toolong");
+        assert_eq!(compact(1234), "1.2k");
         assert_eq!(parse_duration("24h"), Some(86_400));
         assert_eq!(parse_duration("14d"), Some(14 * 86_400));
         assert_eq!(parse_duration("x"), None);

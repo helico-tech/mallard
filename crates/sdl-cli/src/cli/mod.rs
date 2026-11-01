@@ -6,100 +6,68 @@ use crate::fmt;
 use crate::paint as p;
 use crate::{Command, SourcemapsCmd};
 use anyhow::{Result, bail};
+use mallard_term::color::{ColorChoice, Out};
+use mallard_term::error::{Described, Failure, Hints};
+use mallard_term::text::json_safe;
 use sdl_client::Client;
 use serde::Serialize;
 
-/// `println!` to a locked stdout that returns the error instead of
-/// panicking; `run` treats a closed pipe (`sdl issues list | head`) as success.
+/// `println!` through [`Out`] (colour stripped when off) that returns the
+/// error instead of panicking; a closed pipe (`sdl issues list | head`) is
+/// then reported as success by the binary.
 macro_rules! out {
-    ($($arg:tt)*) => {{
-        use std::io::Write as _;
-        writeln!(std::io::stdout().lock(), $($arg)*)?
-    }};
+    ($o:expr) => {
+        $o.line("")?
+    };
+    ($o:expr, $($arg:tt)*) => {
+        $o.line(&format!($($arg)*))?
+    };
 }
 
 mod commands;
 
-/// How the host names the commands and its env vars, for the hints in
-/// messages ("create one with: sdl projects create <name>").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hints {
-    /// What runs these commands, e.g. `sdl` or `mallard errors`.
-    pub command: &'static str,
-    pub url_env: &'static str,
-    pub token_env: &'static str,
-    pub project_env: &'static str,
-}
-
-impl Hints {
-    /// The standalone `sdl` binary.
-    pub const SDL: Hints =
-        Hints { command: "sdl", url_env: "SDL_URL", token_env: "SDL_TOKEN", project_env: "SDL_PROJECT" };
-}
-
-impl Default for Hints {
-    fn default() -> Self {
-        Hints::SDL
-    }
-}
+/// Hints for the standalone `sdl` binary.
+pub const HINTS: Hints =
+    Hints { command: "sdl", url_env: "SDL_URL", token_env: "SDL_TOKEN", project_env: "SDL_PROJECT" };
 
 /// One-line, actionable message for a client error. Safe to print: server
-/// text in it is stripped of control characters.
+/// text in it is cleaned.
 pub fn describe(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
-    fmt::clean(&describe_raw(e, url, hints))
-}
-
-fn describe_raw(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
-    match e {
-        sdl_client::Error::Api { status: 401, .. } => format!("invalid token (set {} or --token)", hints.token_env),
-        sdl_client::Error::Api { status: 403, .. } => {
-            format!("token not allowed to do this (check {})", hints.token_env)
+    use sdl_client::Error as E;
+    let f = match e {
+        E::Api { status, message, .. } => Failure::Status { status: *status, message },
+        E::InvalidUrl(m) => Failure::InvalidUrl(m),
+        E::InvalidSegment(_) => {
+            return fmt::clean(&format!("{e}: ids and slugs can't be empty, '.' or '..'")).into_owned();
         }
-        sdl_client::Error::Api { status: 404, message, .. } => {
-            if message.is_empty() {
-                "not found".into()
-            } else {
-                format!("not found: {message}")
-            }
-        }
-        sdl_client::Error::Api { status, message, .. } if *status >= 500 => {
-            format!("server error ({status}): {message}")
-        }
-        sdl_client::Error::Api { status, message, .. } => {
-            format!("request rejected ({status}): {message}")
-        }
-        sdl_client::Error::InvalidSegment(_) => format!("{e}: ids and slugs can't be empty, '.' or '..'"),
-        sdl_client::Error::InvalidUrl(m) => {
-            format!("invalid server url {url:?}: {m} (set {} or --url)", hints.url_env)
-        }
-        sdl_client::Error::Http(h) if h.is_connect() => {
-            format!("cannot reach server at {url} (is it running? set {})", hints.url_env)
-        }
-        sdl_client::Error::Http(h) if h.is_timeout() => format!("request to {url} timed out"),
-        sdl_client::Error::Http(h) if h.is_decode() => {
-            format!("unexpected response from {url} (version mismatch?): {h}")
-        }
-        sdl_client::Error::Http(h) => format!("request to {url} failed: {h}"),
-        e => format!("request to {url} failed: {e}"),
-    }
+        E::Http(h) if h.is_connect() => Failure::Connect,
+        E::Http(h) if h.is_timeout() => Failure::Timeout,
+        E::Http(h) if h.is_decode() => Failure::Decode(h.to_string()),
+        E::Http(h) => Failure::Other(h.to_string()),
+        e => Failure::Other(e.to_string()),
+    };
+    mallard_term::error::describe(f, url, hints)
 }
 
 /// What the commands need besides their own arguments. A host that mounts
 /// [`Command`] builds this from its own global flags:
-/// `Ctx::new(client).with_project(p).with_json(true)`.
+/// `Ctx::new(client).with_project(p).with_json(true)`. `odl_cli::Ctx` has
+/// the same builder.
+#[derive(Debug)]
 pub struct Ctx {
     pub(crate) client: Client,
     /// Project id or slug; optional when the server has only one project.
     pub(crate) project: Option<String>,
     /// Print raw JSON instead of tables.
     pub(crate) json: bool,
+    pub(crate) out: Out,
     pub(crate) hints: Hints,
 }
 
 impl Ctx {
-    /// No project, table output, [`Hints::SDL`].
+    /// No project, table output, colour as `--color=auto` says, [`HINTS`].
     pub fn new(client: Client) -> Self {
-        Ctx { client, project: None, json: false, hints: Hints::SDL }
+        Ctx { client, project: None, json: false, out: Out::stdout(ColorChoice::Auto), hints: HINTS }
     }
 
     /// Project id or slug; optional when the server has only one project.
@@ -111,6 +79,12 @@ impl Ctx {
     /// Print raw JSON instead of tables.
     pub fn with_json(mut self, json: bool) -> Self {
         self.json = json;
+        self
+    }
+
+    /// The `--color` flag (for stdout).
+    pub fn with_color(mut self, color: ColorChoice) -> Self {
+        self.out = Out::stdout(color);
         self
     }
 
@@ -126,11 +100,11 @@ impl Ctx {
         let msg = describe(&e, self.url(), &self.hints);
         let e = match e {
             sdl_client::Error::Api { status, code, message } => {
-                sdl_client::Error::Api { status, code, message: fmt::clean(&message) }
+                sdl_client::Error::Api { status, code, message: fmt::clean(&message).into_owned() }
             }
             e => e,
         };
-        anyhow::Error::new(e).context(msg)
+        anyhow::Error::new(e).context(Described(msg))
     }
 
     fn url(&self) -> &str {
@@ -148,48 +122,25 @@ impl Ctx {
             [one] => Ok(one.slug.clone()),
             [] => bail!("no projects yet (create one: {} projects create <name>)", h.command),
             many => {
-                let slugs: Vec<String> = many.iter().map(|p| fmt::clean(&p.slug)).collect();
+                let slugs: Vec<String> = many.iter().map(|p| fmt::clean(&p.slug).into_owned()).collect();
                 bail!("several projects; pick one with -p or {} ({})", h.project_env, slugs.join(", "))
             }
         }
     }
 
     fn print_json<T: Serialize>(&self, v: &T) -> Result<()> {
-        out!("{}", json_safe(&serde_json::to_string_pretty(v)?));
+        out!(self.out, "{}", json_safe(&serde_json::to_string_pretty(v)?));
         Ok(())
     }
 }
 
-/// Run one command. Prints to stdout; errors are one-line, friendly messages.
-/// All text that comes from events or the server is stripped of terminal
-/// control characters before it is printed (except in `--json` output).
+/// Run one command. Prints to stdout; errors are one-line, friendly
+/// messages. Write errors are returned too: a closed pipe is a `BrokenPipe`
+/// in the chain, which `mallard_term::error::report` treats as success. All
+/// text that comes from events or the server is cleaned before it is
+/// printed (`--json` output is escaped instead).
 pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
-    p::init();
-    match run_inner(cmd, ctx).await {
-        Err(e) if is_broken_pipe(&e) => Ok(()),
-        r => r,
-    }
-}
-
-/// serde escapes C0 control characters in JSON strings but writes DEL, C1
-/// (e.g. U+009B, an 8-bit CSI) and bidi overrides as they are. Escape those
-/// too; `\uXXXX` is the same JSON value, so the output stays lossless.
-fn json_safe(json: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(json.len());
-    for c in json.chars() {
-        // Raw newlines are the pretty-printer's own; inside strings serde escapes them.
-        if (c.is_control() && c != '\n') || fmt::is_bidi_control(c) {
-            let _ = write!(out, "\\u{:04x}", c as u32);
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn is_broken_pipe(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
+    run_inner(cmd, ctx).await
 }
 
 async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
@@ -204,9 +155,9 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         Command::Maintenance => {
             ctx.client.maintenance().await.map_err(|e| ctx.err(e))?;
             if ctx.json {
-                out!("{{\"ok\":true}}");
+                out!(ctx.out, "{{\"ok\":true}}");
             } else {
-                out!("{} maintenance done (flushed, compacted, expired)", p::green("✓"));
+                out!(ctx.out, "{} maintenance done (flushed, compacted, expired)", p::green("✓"));
             }
             Ok(())
         }
@@ -228,7 +179,7 @@ mod tests {
     #[test]
     fn hints_name_the_host() {
         let e = sdl_client::Error::Api { status: 401, code: String::new(), message: String::new() };
-        assert_eq!(describe(&e, "http://x", &Hints::SDL), "invalid token (set SDL_TOKEN or --token)");
+        assert_eq!(describe(&e, "http://x", &HINTS), "invalid token (set SDL_TOKEN or --token)");
         assert_eq!(describe(&e, "http://x", &MALLARD), "invalid token (set MALLARD_TOKEN or --token)");
         let e = sdl_client::Client::new("nope", None).unwrap_err();
         assert!(describe(&e, "nope", &MALLARD).contains("set MALLARD_URL or --url"));
@@ -237,12 +188,12 @@ mod tests {
     #[test]
     fn describe_maps_every_kind_of_error() {
         let api = |status: u16, m: &str| sdl_client::Error::Api { status, code: String::new(), message: m.into() };
-        let d = |e: sdl_client::Error| describe(&e, "http://x", &Hints::SDL);
+        let d = |e: sdl_client::Error| describe(&e, "http://x", &HINTS);
         assert_eq!(d(api(403, "")), "token not allowed to do this (check SDL_TOKEN)");
         assert_eq!(d(api(404, "")), "not found");
         assert_eq!(d(api(404, "no issue")), "not found: no issue");
         assert_eq!(d(api(400, "bad since")), "request rejected (400): bad since");
-        assert_eq!(d(api(503, "down\x1b[2J")), "server error (503): down\u{FFFD}[2J");
+        assert_eq!(d(api(503, "down\x1b[2J")), "server error (503): down\\u{1b}[2J");
         let e = block_on(sdl_client::Client::new("http://x", None).unwrap().project("..")).unwrap_err();
         assert_eq!(d(e), "invalid path segment \"..\": ids and slugs can't be empty, '.' or '..'");
     }
@@ -252,7 +203,7 @@ mod tests {
         let ctx = Ctx::new(sdl_client::Client::new("http://x", None).unwrap()).with_hints(MALLARD);
         let e =
             ctx.err(sdl_client::Error::Api { status: 404, code: String::new(), message: "gone\x1b]0;x\x07".into() });
-        assert_eq!(e.to_string(), "not found: gone\u{FFFD}]0;x\u{FFFD}");
+        assert_eq!(e.to_string(), "not found: gone\\u{1b}]0;x\\u{7}");
         let src = e.downcast_ref::<sdl_client::Error>().expect("typed source");
         assert!(src.is_not_found());
         assert!(!format!("{e:#}").chars().any(char::is_control), "{e:#}");
@@ -273,7 +224,8 @@ mod tests {
     #[test]
     fn json_output_escapes_c1_and_bidi_but_stays_equal() {
         let v = serde_json::json!({"t": "a\u{9b}31m\u{202e}b\u{1b}c\nd"});
-        let out = json_safe(&serde_json::to_string_pretty(&v).unwrap());
+        let pretty = serde_json::to_string_pretty(&v).unwrap();
+        let out = json_safe(&pretty);
         assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
         assert!(out.contains("\\u009b") && out.contains("\\u202e"));
         assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), v);

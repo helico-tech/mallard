@@ -170,3 +170,31 @@ fn maintenance_errors_use_the_api_error_message() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("server error (500): disk full") && !err.contains('{'), "{err}");
 }
+
+#[test]
+fn color_flag_and_short_flags() {
+    let list = format!(
+        r#"{{"issues":[{}}}],"window_start":"2026-10-17T00:00:00Z","window_end":"2026-10-31T12:00:00Z"}}"#,
+        issue_json()
+    );
+    let url = serve(vec![("/v1/projects/web/issues", 200, list)], Duration::ZERO);
+    // Piped stdout: no colour by default, colour with --color always.
+    let plain = sdl(&url, &["issues", "list", "-s", "1h", "-n", "5"]);
+    assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
+    assert!(!plain.stdout.contains(&0x1b));
+    let colored = sdl(&url, &["issues", "list", "--color", "always"]);
+    let text = String::from_utf8_lossy(&colored.stdout);
+    assert!(text.contains("\u{1b}["), "{text}");
+    // The only escape sequences are our own styling.
+    let stripped = mallard_term::color::strip_ansi(&text);
+    assert!(!stripped.chars().any(|c| c.is_control() && c != '\n'), "{stripped}");
+}
+
+#[test]
+fn errors_print_one_friendly_line() {
+    let out = sdl("http://127.0.0.1:9", &["info", "--color", "never"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(err.lines().count(), 1, "{err}");
+    assert!(err.starts_with("error: cannot reach server at http://127.0.0.1:9 (is it running? set SDL_URL)"), "{err}");
+}
