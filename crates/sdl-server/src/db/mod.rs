@@ -227,8 +227,11 @@ impl Db {
             cfg.lake_alias,
             sql_str(&storage.lake_data_path())
         );
-        conn.execute_batch(&attach)
-            .with_context(|| format!("attaching DuckLake catalog {:?}", redact(&cfg.catalog)))?;
+        // DuckDB's catalog extensions echo the connection string (with the
+        // password) in their errors: redact the whole message.
+        conn.execute_batch(&attach).map_err(|e| {
+            anyhow!("attaching DuckLake catalog {:?}: {}", redact(&cfg.catalog), redact(&e.to_string()))
+        })?;
         Self::with_connection(conn, cfg, redact(&cfg.catalog))
     }
 
@@ -383,6 +386,13 @@ pub fn us_to_dt(us: i64) -> DateTime<Utc> {
 pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn redacts_passwords_in_error_text() {
+        let e = "IO Error: connect to \"host=db password=hunter2 dbname=lake\" failed";
+        assert!(!redact(e).contains("hunter2"), "{}", redact(e));
+        assert_eq!(redact("postgres:host=db PASSWORD=x"), "postgres:host=db password=***");
+    }
 
     #[test]
     fn bundle_caches_per_project() {
