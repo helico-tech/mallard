@@ -63,7 +63,8 @@ mallard tui
 ```
 
 The compose stack runs mallard with a Postgres catalog and an S3 bucket
-(RustFS). Its credentials are for local use only.
+(RustFS). Its credentials are for local use only. The Web UI is on
+http://localhost:8088: sign in with the API token (`dev-token`).
 
 ## Quick start (local)
 

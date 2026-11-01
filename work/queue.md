@@ -5,7 +5,6 @@
 3. [issue 0094 capture a real SDK 10 standalone span](issues/0094-capture-sdk-10-standalone-span.md)
 4. [issue 0120 Sentry compaction threads in mallard](issues/0120-sentry-compaction-threads-in-mallard.md)
 5. [issue 0121 standalone paths left in the side crates](issues/0121-standalone-paths-left-in-side-crates.md)
-6. [issue 0070 Web UI in compose and Helm](issues/0070-web-deploy-and-mallard-web-command.md)
 7. [issue 0122 SQL-off message names old keys](issues/0122-sql-off-message-names-old-keys.md)
 8. [issue 0123 chart memory defaults below the rule](issues/0123-chart-memory-defaults-below-the-rule.md)
 9. [issue 0124 no published image or chart](issues/0124-no-published-image-or-chart.md)
