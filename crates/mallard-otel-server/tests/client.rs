@@ -135,6 +135,7 @@ async fn client_against_server() {
             service: None,
             metric: None,
             key: None,
+            prefix: None,
             limit: None,
         })
         .await

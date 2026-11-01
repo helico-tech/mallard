@@ -25,15 +25,25 @@ mod stats;
 mod store;
 
 pub use otlp::{IngestError, IngestHook};
+pub use query::{Counted, attributes::MAX_SERVICE_NAMES};
 pub use store::SCHEMA;
 
-use std::{future::Future, sync::Arc, time::Instant};
+use std::{
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use axum::Router;
 use tracing::info;
 
-use mallard_common::auth::{AuthPolicy, Tokens};
+use mallard_common::{
+    auth::{AuthPolicy, Tokens},
+    http::ApiErr,
+    window::Window,
+};
+use mallard_otel_api::Span;
 
 use crate::{
     api::ApiState,
@@ -194,6 +204,36 @@ impl Server {
 
     pub fn openapi(&self) -> utoipa::openapi::OpenApi {
         api::openapi()
+    }
+
+    /// The longest window the query API accepts (`otel.query.max_window`).
+    pub fn max_window(&self) -> Duration {
+        self.cfg.query.max_window
+    }
+
+    /// The services with any span, log or metric in the window, sorted, at most
+    /// [`MAX_SERVICE_NAMES`]; `true` when there are more.
+    pub async fn service_names(&self, w: Window) -> std::result::Result<(Vec<String>, bool), ApiErr> {
+        Ok(self.api_state.reader.run(move |c| query::attributes::service_names(c, &w)).await?)
+    }
+
+    /// How many spans of this trace are in the window, and the first start time.
+    pub async fn trace_spans(&self, w: Window, trace_id: String) -> std::result::Result<Counted, ApiErr> {
+        Ok(self.api_state.reader.run(move |c| query::traces::count(c, &w, &trace_id)).await?)
+    }
+
+    /// How many log records of this trace are in the window, and the first time.
+    pub async fn trace_logs(&self, w: Window, trace_id: String) -> std::result::Result<Counted, ApiErr> {
+        Ok(self.api_state.reader.run(move |c| query::logs::count_of_trace(c, &w, &trace_id)).await?)
+    }
+
+    /// The span with this id in the window.
+    pub async fn find_span(&self, w: Window, span_id: String) -> std::result::Result<Option<Span>, ApiErr> {
+        match self.api_state.reader.run(move |c| query::traces::span(c, &w, &span_id)).await {
+            Ok(s) => Ok(Some(s)),
+            Err(query::QueryError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Ready to serve: the last flush (if any) succeeded and the catalog

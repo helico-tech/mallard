@@ -69,16 +69,14 @@ impl MetricTable {
     }
 }
 
-fn base_filter(w: &Window, service: Option<&str>) -> Filter {
+fn base_filter(w: &Window, service: &[String]) -> Filter {
     let mut f = Filter::default();
     f.window("time", w);
-    if let Some(s) = service {
-        f.add("service_name = ?", [Value::Text(s.into())]);
-    }
+    f.services(service);
     f
 }
 
-pub fn list(conn: &Connection, w: &Window, service: Option<&str>, q: Option<&str>) -> QResult<Vec<MetricInfo>> {
+pub fn list(conn: &Connection, w: &Window, service: &[String], q: Option<&str>) -> QResult<Vec<MetricInfo>> {
     let mut f = base_filter(w, service);
     if let Some(q) = q.filter(|q| !q.is_empty()) {
         f.add("contains(lower(metric_name), lower(?))", [Value::Text(q.into())]);
@@ -128,7 +126,7 @@ pub fn list(conn: &Connection, w: &Window, service: Option<&str>, q: Option<&str
 
 pub struct MetricRequest<'a> {
     pub name: &'a str,
-    pub service: Option<&'a str>,
+    pub service: &'a [String],
     pub agg: Option<&'a str>,
     pub group_by: Option<&'a str>,
     pub attributes: Option<&'a str>,

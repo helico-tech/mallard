@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+url.workspace = true
 mallard-otel-api.workspace = true
 mallard-common = { workspace = true, features = ["server"] }
 mallard-duck.workspace = true

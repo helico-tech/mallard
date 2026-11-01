@@ -57,10 +57,16 @@
           {
             "name": "service",
             "in": "query",
+            "description": "Only this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "metric",
@@ -75,6 +81,15 @@
             "name": "key",
             "in": "query",
             "description": "Top values of this key instead of the keys.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Only keys, or with `key` only values, that start with this (any case).",
             "required": false,
             "schema": {
               "type": "string"
@@ -179,10 +194,16 @@
           {
             "name": "service",
             "in": "query",
+            "description": "Only this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "min_severity",
@@ -329,10 +350,16 @@
           {
             "name": "service",
             "in": "query",
+            "description": "Only this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "q",
@@ -417,10 +444,16 @@
           {
             "name": "service",
             "in": "query",
+            "description": "Only this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "q",
@@ -510,10 +543,16 @@
           {
             "name": "service",
             "in": "query",
+            "description": "Only this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "agg",
@@ -636,11 +675,16 @@
           {
             "name": "service",
             "in": "query",
-            "description": "Only operations of this service.",
+            "description": "Only operations of this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "entry_only",
@@ -824,10 +868,16 @@
           {
             "name": "service",
             "in": "query",
+            "description": "Only this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "operation",
@@ -1091,11 +1141,16 @@
           {
             "name": "service",
             "in": "query",
-            "description": "Match traces with a span from this service.",
+            "description": "Match traces with a span from this service; repeat for several (at most 50).",
             "required": false,
             "schema": {
-              "type": "string"
-            }
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
           },
           {
             "name": "operation",
@@ -1339,9 +1394,15 @@
         "required": [
           "total_rows",
           "sampled_rows",
+          "counted_from",
           "items"
         ],
         "properties": {
+          "counted_from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The rows looked at start here: the newest part of the window with enough\nrows (at least 500,000), or the start of the window. A value seen only\nbefore this is not listed."
+          },
           "items": {
             "type": "array",
             "items": {
@@ -1358,7 +1419,7 @@
           "total_rows": {
             "type": "integer",
             "format": "int64",
-            "description": "Matching rows in the window.",
+            "description": "Matching rows since `counted_from`.",
             "minimum": 0
           }
         }

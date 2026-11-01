@@ -17,7 +17,7 @@ const TABLES: [TableId; 3] = [TableId::MetricPoints, TableId::MetricHistograms, 
 
 pub struct ExemplarRequest<'a> {
     pub name: &'a str,
-    pub service: Option<&'a str>,
+    pub service: &'a [String],
     pub group_by: Option<&'a str>,
     pub attributes: Option<&'a str>,
     /// Bucket width in seconds, as in the metric query.
@@ -31,9 +31,7 @@ pub fn query(conn: &Connection, w: &Window, req: &ExemplarRequest) -> QResult<Ve
         .unwrap_or_default();
     let mut f = Filter::default();
     f.window("time", w);
-    if let Some(s) = req.service {
-        f.add("service_name = ?", [Value::Text(s.into())]);
-    }
+    f.services(req.service);
     f.add("metric_name = ?", [Value::Text(req.name.into())]);
     f.attributes(req.attributes)?;
     let (labels, label_params) = super::metrics::labels_expr(&group_by);

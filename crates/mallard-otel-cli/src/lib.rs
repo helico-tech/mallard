@@ -529,6 +529,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     service: a.service,
                     metric: a.metric,
                     key: a.key,
+                    prefix: None,
                     limit: Some(a.limit),
                 })
                 .await?;
