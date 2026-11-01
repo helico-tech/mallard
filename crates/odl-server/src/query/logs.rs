@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use mallard_duck::duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{LogRecord, LogSeries, LogSeriesPoint};
 
-use super::{Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
+use super::{Cursor, Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
 
 pub struct LogSearch<'a> {
     pub service: Option<&'a str>,
@@ -15,6 +15,7 @@ pub struct LogSearch<'a> {
     pub attributes: Option<&'a str>,
     pub limit: u32,
     pub ascending: bool,
+    pub cursor: Option<&'a str>,
 }
 
 fn filter(w: &Window, service: Option<&str>, q: Option<&str>) -> Filter {
@@ -30,7 +31,10 @@ fn filter(w: &Window, service: Option<&str>, q: Option<&str>) -> Filter {
     f
 }
 
-pub fn search(conn: &Connection, w: &Window, s: &LogSearch) -> QResult<Vec<LogRecord>> {
+/// Log records in time order (newest first unless `ascending`), ties
+/// broken by DuckLake's row id. The cursor (the last record of the page)
+/// is returned only when another page exists.
+pub fn search(conn: &Connection, w: &Window, s: &LogSearch) -> QResult<(Vec<LogRecord>, Option<String>)> {
     let mut f = filter(w, s.service, s.q);
     if let Some(sev) = s.min_severity {
         if sev > 24 {
@@ -42,20 +46,27 @@ pub fn search(conn: &Connection, w: &Window, s: &LogSearch) -> QResult<Vec<LogRe
         f.add("trace_id = ?::UUID", [Value::Text(parse_trace_id(t)?)]);
     }
     f.attributes(s.attributes)?;
+    let cmp = if s.ascending { ">" } else { "<" };
+    if let Some(c) = s.cursor {
+        let c = Cursor::parse(c)?;
+        let row = i64::from_str_radix(&c.id, 16).map_err(|_| bad("invalid cursor for logs"))?;
+        f.add(format!("(time {cmp} ? OR (time = ? AND rowid {cmp} ?))"), [c.time(), c.time(), Value::BigInt(row)]);
+    }
+    // One more than asked for tells whether another page exists.
     let sql = format!(
         "SELECT epoch_us(time), epoch_us(observed_time), service_name, severity_number, severity_text, body, \
             CASE WHEN trace_id IS NULL THEN NULL ELSE {tid} END, CASE WHEN span_id IS NULL THEN NULL ELSE {sid} END, \
-            event_name, scope_name, to_json(attributes), to_json(resource_attributes) \
-         FROM logs WHERE {where_} ORDER BY time {dir} LIMIT {limit}",
+            event_name, scope_name, to_json(attributes), to_json(resource_attributes), rowid \
+         FROM logs WHERE {where_} ORDER BY time {dir}, rowid {dir} LIMIT {limit}",
         tid = trace_hex("trace_id"),
         sid = span_hex("span_id"),
         where_ = f.sql(),
         dir = if s.ascending { "ASC" } else { "DESC" },
-        limit = s.limit,
+        limit = s.limit as u64 + 1,
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(f.params), |r| {
-        Ok(LogRecord {
+        let rec = LogRecord {
             time: from_micros(r.get(0)?),
             observed_time: from_micros(r.get(1)?),
             service_name: r.get(2)?,
@@ -68,9 +79,17 @@ pub fn search(conn: &Connection, w: &Window, s: &LogSearch) -> QResult<Vec<LogRe
             scope_name: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
             attributes: json_col(r.get(10)?),
             resource_attributes: json_col(r.get(11)?),
-        })
+        };
+        Ok((rec, r.get::<_, i64>(12)?))
     })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut rows: Vec<(LogRecord, i64)> = rows.collect::<Result<_, _>>()?;
+    let more = rows.len() > s.limit as usize;
+    rows.truncate(s.limit as usize);
+    let cursor = more
+        .then(|| rows.last())
+        .flatten()
+        .map(|(r, row)| Cursor { us: r.time.timestamp_micros(), id: format!("{row:x}") }.to_string());
+    Ok((rows.into_iter().map(|(r, _)| r).collect(), cursor))
 }
 
 pub fn series(conn: &Connection, w: &Window, step: u64, service: Option<&str>, q: Option<&str>) -> QResult<LogSeries> {
