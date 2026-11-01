@@ -4,10 +4,10 @@
 
 ```
                 ┌──────────────────────── obs-ducklake (one process) ───────────────────────┐
- Sentry SDKs ──▶│ :8080 HTTP  /api/{project}/envelope|store   → sdl-server router            │
+ Sentry SDKs ──▶│ :8080 HTTP  /sentry/api/{project}/envelope  → sdl-server router            │
  OTel SDKs   ──▶│ :4318 HTTP  /v1/traces|logs|metrics         → odl-server OTLP/HTTP router   │
              ──▶│ :4317 gRPC  OTLP                            → odl-server gRPC services      │
- obs CLI/TUI ──▶│ :8080 HTTP  /sentry/...  sentry management API (nested)                    │
+ obs CLI/TUI ──▶│ :8080 HTTP  /sentry/v1/... sentry API, /sentry/api/0 sentry-cli            │
                 │             /otel/...    otel query API (nested)                           │
                 │             /v1/traces|logs|metrics   OTLP/HTTP (also on :4318)             │
                 │             /healthz /readyz /metrics                                       │
