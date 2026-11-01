@@ -28,9 +28,16 @@ pub const MAX_SECS_IN_FUTURE: i64 = 60;
 /// a fixed bound, so a window query on `timestamp` stays near `received_at`.
 pub const MAX_SECS_IN_PAST: i64 = 30 * 86_400;
 
+/// When the envelope's `sent_at` differs this much from the receive time, the
+/// client's clock is wrong and event timestamps are shifted by the difference
+/// (Relay's `MINIMUM_CLOCK_DRIFT`).
+pub const MIN_CLOCK_DRIFT_SECS: i64 = 55 * 60;
+
 #[derive(Debug, Clone)]
 pub struct NormalizeContext {
     pub received_at: DateTime<Utc>,
+    /// `sent_at` of the envelope header: when the SDK sent it, by its clock.
+    pub sent_at: Option<DateTime<Utc>>,
     /// IP of the client, used to fill `user.ip_address = "{{auto}}"`.
     pub client_ip: Option<String>,
     /// `event_id` from the envelope header, used when the payload has none.
@@ -40,8 +47,23 @@ pub struct NormalizeContext {
 
 impl NormalizeContext {
     pub fn new(received_at: DateTime<Utc>) -> Self {
-        Self { received_at, client_ip: None, event_id_hint: None, max_breadcrumbs: 100 }
+        Self { received_at, sent_at: None, client_ip: None, event_id_hint: None, max_breadcrumbs: 100 }
     }
+
+    /// How far the client's clock is off, when that is a real difference.
+    fn clock_drift(&self) -> Option<Duration> {
+        let drift = self.received_at.signed_duration_since(self.sent_at?);
+        (drift.num_seconds().abs() >= MIN_CLOCK_DRIFT_SECS).then_some(drift)
+    }
+}
+
+/// `t` corrected for the client's clock; unchanged on overflow.
+fn shifted(t: DateTime<Utc>, drift: Option<Duration>) -> DateTime<Utc> {
+    drift.and_then(|d| t.checked_add_signed(d)).unwrap_or(t)
+}
+
+fn rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// The typed view of a normalized event: the columns we store.
@@ -97,9 +119,10 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
     ev.insert("event_id".into(), Value::String(id.simple().to_string()));
 
     // timestamp: the event time drives first/last seen and trends, so keep
-    // it, but replace obviously wrong client clocks with the receive time
-    // like Relay does.
-    let ts = ev.get("timestamp").and_then(parse_timestamp).unwrap_or(ctx.received_at);
+    // it, but correct a client clock that is off (by `sent_at`) and replace
+    // what is still out of range with the receive time, like Relay does.
+    let drift = ctx.clock_drift();
+    let ts = ev.get("timestamp").and_then(parse_timestamp).map_or(ctx.received_at, |t| shifted(t, drift));
     let ts = if ts > ctx.received_at + Duration::seconds(MAX_SECS_IN_FUTURE)
         || ts < ctx.received_at - Duration::seconds(MAX_SECS_IN_PAST)
     {
@@ -107,8 +130,8 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
     } else {
         ts
     };
-    ev.insert("timestamp".into(), Value::String(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
-    ev.insert("received".into(), Value::String(ctx.received_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+    ev.insert("timestamp".into(), Value::String(rfc3339(ts)));
+    ev.insert("received".into(), Value::String(rfc3339(ctx.received_at)));
 
     // level / platform
     let level = ev.get("level").and_then(Value::as_str).map(normalize_level).unwrap_or("error");
@@ -164,6 +187,13 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
         let mut values = to_values(v);
         if values.len() > ctx.max_breadcrumbs {
             values.drain(..values.len() - ctx.max_breadcrumbs);
+        }
+        if drift.is_some() {
+            for crumb in values.iter_mut().filter_map(Value::as_object_mut) {
+                if let Some(t) = crumb.get("timestamp").and_then(parse_timestamp) {
+                    crumb.insert("timestamp".into(), Value::String(rfc3339(shifted(t, drift))));
+                }
+            }
         }
         ev.insert("breadcrumbs".into(), json!({ "values": values }));
     }
@@ -674,6 +704,41 @@ mod tests {
         assert_eq!(ev["level"], "error");
         assert_eq!(ev["platform"], "other");
         assert!(ev["event_id"].as_str().unwrap().len() == 32);
+    }
+
+    /// A client clock that is off by more than 55 minutes: `sent_at` tells by
+    /// how much. Event and breadcrumbs move together; a smaller difference is
+    /// not touched.
+    #[test]
+    fn clock_drift_shifts_event_and_breadcrumbs() {
+        let event = json!({
+            "timestamp": "2026-10-31T14:00:00Z",
+            "breadcrumbs": [{"timestamp": 1793458780.0, "message": "b"}, {"message": "no time"}],
+        });
+        let mut c = ctx(); // received at 12:00:00
+        c.sent_at = Some("2026-10-31T14:00:10Z".parse().unwrap());
+        let ev = normalize_event(event.clone(), &c);
+        assert_eq!(ev["timestamp"], "2026-10-31T11:59:50.000Z");
+        // 1793458780 is 14:59:40; two hours and ten seconds earlier.
+        assert_eq!(ev["breadcrumbs"]["values"][0]["timestamp"], "2026-10-31T12:59:30.000Z");
+        assert!(ev["breadcrumbs"]["values"][1].get("timestamp").is_none());
+
+        // Off by less than 55 minutes: no shift.
+        c.sent_at = Some("2026-10-31T12:54:00Z".parse().unwrap());
+        let ev = normalize_event(json!({"timestamp": "2026-10-31T11:50:00Z", "breadcrumbs": event["breadcrumbs"]}), &c);
+        assert_eq!(ev["timestamp"], "2026-10-31T11:50:00.000Z");
+        assert_eq!(ev["breadcrumbs"]["values"][0]["timestamp"], 1793458780.0);
+
+        // No timestamp: the receive time, not shifted.
+        c.sent_at = Some("2026-10-31T14:00:10Z".parse().unwrap());
+        assert_eq!(normalize_event(json!({}), &c)["timestamp"], "2026-10-31T12:00:00.000Z");
+
+        // A garbage sent_at far away must not overflow: left as it is.
+        c.sent_at = Some(DateTime::<Utc>::MIN_UTC);
+        assert_eq!(
+            normalize_event(json!({"timestamp": "2026-10-31T11:50:00Z"}), &c)["timestamp"],
+            "2026-10-31T11:50:00.000Z"
+        );
     }
 
     #[test]

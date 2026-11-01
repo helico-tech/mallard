@@ -914,3 +914,29 @@ async fn events_by_many_traces() {
     assert!(v["message"].as_str().unwrap().contains("at most 200"), "{v}");
     t.stop().await;
 }
+
+/// Issue 0007: the SDK's clock is two hours ahead. `sent_at` in the envelope
+/// tells, so the event lands at the right time, not at the receive time.
+#[tokio::test(flavor = "multi_thread")]
+async fn envelope_sent_at_corrects_the_client_clock() {
+    let t = TestServer::start().await;
+    let project = t.create_project("clock").await;
+    let (id, dsn) = (project["id"].as_u64().unwrap(), project["dsn"].as_str().unwrap().to_string());
+    let key = dsn.split("//").nth(1).unwrap().split('@').next().unwrap().to_string();
+    let now = chrono::Utc::now();
+    let client_now = now + chrono::Duration::hours(2);
+    // Happened ten minutes ago, by the client's clock.
+    let happened = client_now - chrono::Duration::minutes(10);
+    let body = format!(
+        "{}\n{{\"type\":\"event\"}}\n{}\n",
+        json!({"event_id": "fc6d8c0c43fc4630ad850ee518f1b9d0", "sent_at": client_now.to_rfc3339()}),
+        json!({"message": "drift", "timestamp": happened.to_rfc3339()}),
+    );
+    let r = t.http.post(format!("{}/api/{id}/envelope/?sentry_key={key}", t.base)).body(body).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let list = t.get(&format!("/v1/projects/{id}/issues?since=1h")).await;
+    let first_seen: chrono::DateTime<chrono::Utc> = list["issues"][0]["first_seen"].as_str().unwrap().parse().unwrap();
+    let off = (first_seen - (now - chrono::Duration::minutes(10))).num_seconds().abs();
+    assert!(off < 30, "first seen {first_seen} is {off} s off");
+    t.stop().await;
+}

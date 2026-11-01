@@ -47,9 +47,22 @@ pub struct Caches {
     /// Current status per (project, group) of recently seen issues; only the
     /// writer thread changes it. An issue that is not here may still exist
     /// ([`writer::Writer::load_issues`]).
-    pub issues: moka::sync::Cache<(u32, u64), IssueStatus>,
+    pub issues: moka::sync::Cache<(u32, u64), IssueState>,
     /// What is stored and indexed per project.
     bundles: RwLock<HashMap<u32, ProjectBundles>>,
+}
+
+/// An issue as the writer needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IssueState {
+    pub status: IssueStatus,
+    /// When that status was set, in microseconds. A resolved issue does not
+    /// reopen from an event older than this.
+    pub changed_us: i64,
+}
+
+impl IssueState {
+    pub const NEW: IssueState = IssueState { status: IssueStatus::Unresolved, changed_us: 0 };
 }
 
 #[derive(Default)]
@@ -556,13 +569,13 @@ pub(crate) mod tests {
     fn issue_cache_is_bounded() {
         let c = Caches::default();
         for g in 0..ISSUE_CACHE_CAPACITY + 1000 {
-            c.issues.insert((1, g), IssueStatus::Unresolved);
+            c.issues.insert((1, g), IssueState::NEW);
         }
         c.issues.run_pending_tasks();
         assert!(c.issues.entry_count() <= ISSUE_CACHE_CAPACITY);
 
         let c = Caches::new(Duration::from_millis(20));
-        c.issues.insert((1, 1), IssueStatus::Unresolved);
+        c.issues.insert((1, 1), IssueState::NEW);
         assert!(c.issues.get(&(1, 1)).is_some());
         std::thread::sleep(Duration::from_millis(100));
         assert!(c.issues.get(&(1, 1)).is_none());
@@ -919,7 +932,7 @@ pub(crate) mod tests {
         assert!(!set(IssueStatus::Resolved).await.unwrap(), "already resolved");
 
         db.caches.issues.invalidate_all();
-        store(&db, 1, body, now).await;
+        store(&db, 1, body, Utc::now()).await;
         assert_eq!(count_issue_rows(&db, 1).await, 1);
         let issue = &issues_of(&db, 1).await[0];
         assert_eq!((issue.count, issue.status), (2, IssueStatus::Unresolved));
@@ -1045,10 +1058,10 @@ pub(crate) mod tests {
         });
         assert!(set.await.unwrap());
         eventually("b learns of the resolve", async || {
-            b.caches.issues.get(&(1, group_hash)) == Some(IssueStatus::Resolved)
+            b.caches.issues.get(&(1, group_hash)).is_some_and(|i| i.status == IssueStatus::Resolved)
         })
         .await;
-        store(&b, 1, body, now).await;
+        store(&b, 1, body, Utc::now()).await;
         assert_eq!(issues_of(&a, 1).await[0].status, IssueStatus::Unresolved);
 
         // A bundle uploaded through one process is used by the other.
@@ -1083,6 +1096,98 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let libpq = std::env::var("SDL_TEST_POSTGRES").expect("SDL_TEST_POSTGRES");
         two_processes(&format!("postgres:{libpq}"), dir.path()).await;
+    }
+
+    /// Issue 0007: an event from before the resolve (a replay, an offline
+    /// client) does not reopen the issue; a newer one does, also when both are
+    /// in one batch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_events_after_the_resolve_reopen_an_issue() {
+        use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let at = |minutes_ago: i64| Utc::now() - chrono::Duration::minutes(minutes_ago);
+        let body = |t: DateTime<Utc>| serde_json::json!({"message": "m", "fingerprint": ["g"], "timestamp": t.timestamp() as f64});
+        store(&db, 1, body(at(30)), Utc::now()).await;
+        let group_hash = read::parse_group_id(&issues_of(&db, 1).await[0].id).unwrap();
+        let status = async || issues_of(&db, 1).await[0].status;
+        let set = db.call(move |reply| WriteCmd::SetStatus {
+            project_id: 1,
+            group_hash,
+            status: IssueStatus::Resolved,
+            reason: "user".into(),
+            reply,
+        });
+        assert!(set.await.unwrap());
+        store(&db, 1, body(at(10)), Utc::now()).await;
+        assert_eq!(status().await, IssueStatus::Resolved, "older than the resolve");
+        // Also when the cache has to read the resolve time back.
+        db.caches.issues.invalidate_all();
+        store(&db, 1, body(at(9)), Utc::now()).await;
+        assert_eq!(status().await, IssueStatus::Resolved, "older than the resolve, not cached");
+
+        // One batch, old event first: the newer one still reopens.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let now = Utc::now();
+        let ctx = NormalizeContext::new(now);
+        let mut replies = Vec::new();
+        for t in [at(8), now] {
+            let ev = normalize_event(body(t), &ctx);
+            let (tx, rx) = oneshot::channel();
+            let event = ProcessedEvent::from_normalized(&ev, now);
+            let w = EventWrite { project_id: 1, event, payload_json: ev.to_string(), reply: tx };
+            db.try_send(WriteCmd::Event(Box::new(w))).unwrap();
+            replies.push(rx);
+        }
+        for rx in replies {
+            rx.await.unwrap().unwrap();
+        }
+        assert_eq!(status().await, IssueStatus::Unresolved);
+        db.shutdown().await;
+    }
+
+    /// Issue 0007: an event older than the first one of the issue moves
+    /// first seen back in the issue list and detail, for every sort and filter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn older_events_lower_first_seen_when_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let later = DateTime::from_timestamp(Utc::now().timestamp() - 600, 0).unwrap();
+        let earlier = later - chrono::Duration::minutes(20);
+        let body = |t: DateTime<Utc>, g: &str| serde_json::json!({"message": g, "fingerprint": [g], "timestamp": t.timestamp() as f64});
+        store(&db, 1, body(later, "g"), Utc::now()).await;
+        store(&db, 1, body(later - chrono::Duration::minutes(5), "h"), Utc::now()).await;
+        store(&db, 1, body(earlier, "g"), Utc::now()).await; // a later batch
+
+        let list = issues_of(&db, 1).await;
+        let g = list.iter().find(|i| i.title == "g").unwrap();
+        assert_eq!(g.first_seen, earlier);
+        let group = read::parse_group_id(&g.id).unwrap();
+        let w = issue_window();
+        let detail = db.read(move |c, ns| read::issue_detail(c, ns, 1, group, &w)).await.unwrap().unwrap();
+        assert_eq!(detail.summary.first_seen, earlier);
+
+        // Sort by first seen, newest first: h (5 min before g's first row, but
+        // after g's older event) comes first.
+        let sorted = db
+            .read(move |c, ns| {
+                let q = sdl_types::IssueQuery::default();
+                read::list_issues(c, ns, 1, &q, &[], &w, read::StatusFilter::All, read::IssueSort::FirstSeen, None)
+            })
+            .await
+            .unwrap()
+            .issues;
+        assert_eq!(sorted[0].title, "h");
+
+        let new = db
+            .read(move |c, ns| {
+                let q = sdl_types::IssueQuery { new: Some(true), ..Default::default() };
+                read::list_issues(c, ns, 1, &q, &[], &w, read::StatusFilter::All, read::IssueSort::LastSeen, None)
+            })
+            .await
+            .unwrap();
+        assert_eq!(new.issues.len(), 2, "both start inside the window");
+        db.shutdown().await;
     }
 
     /// Issue 0001: a second `issues` row of a group (two processes wrote one)

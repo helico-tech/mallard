@@ -126,7 +126,9 @@ impl IssueSort {
     fn expr(self) -> &'static str {
         match self {
             Self::LastSeen => "agg.last_us",
-            Self::FirstSeen => "epoch_us(i.first_seen)",
+            // An older event in a later batch moves first seen back: `issues`
+            // is append-only, so this is worked out when reading.
+            Self::FirstSeen => "least(epoch_us(i.first_seen), agg.first_event_us)",
             Self::Count => "agg.cnt",
             Self::Users => "agg.users",
         }
@@ -239,7 +241,10 @@ pub fn list_issues(
     };
     // New issues: first seen inside the window.
     if q.new == Some(true) {
-        search.push_str(" AND i.first_seen >= make_timestamp(?) AND i.first_seen < make_timestamp(?)");
+        search.push_str(
+            " AND least(epoch_us(i.first_seen), agg.first_event_us) >= ?
+              AND least(epoch_us(i.first_seen), agg.first_event_us) < ?",
+        );
         p.push(&start_us);
         p.push(&end_us);
     }
@@ -257,7 +262,8 @@ pub fn list_issues(
     p.push(&limit);
     let sql = ns.sql(&format!(
         "WITH agg AS (
-            SELECT group_hash, count(*) AS cnt, epoch_us(max(timestamp)) AS last_us, CAST({users_expr} AS BIGINT) AS users
+            SELECT group_hash, count(*) AS cnt, epoch_us(max(timestamp)) AS last_us,
+                   epoch_us(min(timestamp)) AS first_event_us, CAST({users_expr} AS BIGINT) AS users
             FROM $S.events
             WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?){filters}
             GROUP BY group_hash
@@ -273,7 +279,7 @@ pub fn list_issues(
             FROM $S.issues WHERE project_id = ? GROUP BY group_hash
          )
          SELECT agg.group_hash, i.title, i.culprit, i.level, i.platform, i.exception_type,
-                coalesce(st.status, 'unresolved') AS status, epoch_us(i.first_seen) AS first_us,
+                coalesce(st.status, 'unresolved') AS status, least(epoch_us(i.first_seen), agg.first_event_us) AS first_us,
                 agg.cnt, agg.last_us, {sort} AS sort_value
          FROM agg
          JOIN i ON i.group_hash = agg.group_hash
@@ -386,7 +392,7 @@ pub fn issue_detail(
     };
     let agg = conn.query_row(
         &ns.sql(
-            "SELECT count(*), count(DISTINCT user_key), epoch_us(max(timestamp)),
+            "SELECT count(*), count(DISTINCT user_key), epoch_us(max(timestamp)), epoch_us(min(timestamp)),
                     arg_max(title, timestamp), arg_max(culprit, timestamp), arg_max(level, timestamp),
                     arg_max(release, timestamp), arg_max(event_id::VARCHAR, timestamp)
              FROM $S.events WHERE project_id = ? AND group_hash = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)",
@@ -397,15 +403,16 @@ pub fn issue_detail(
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, Option<i64>>(2)?,
-                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<i64>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         },
     )?;
-    let (cnt, users, last_us, l_title, l_culprit, l_level, last_release, latest_event) = agg;
+    let (cnt, users, last_us, first_event_us, l_title, l_culprit, l_level, last_release, latest_event) = agg;
     let latest_event_id = match latest_event {
         Some(e) => Some(e.replace('-', "")),
         // No events in the window: still point at the newest event.
@@ -437,7 +444,8 @@ pub fn issue_detail(
 
     let tags = tag_facets(conn, ns, project_id, group, w)?;
     let trend = trends(conn, ns, project_id, w, &[group])?.remove(&group).unwrap_or_default();
-    let first_seen = us_to_dt(first_us);
+    // An older event in a later batch moves first seen back (see `IssueSort`).
+    let first_seen = us_to_dt(first_event_us.map_or(first_us, |e| e.min(first_us)));
     // Events of the overflow issue each have their own title.
     let overflow = group == OVERFLOW_GROUP;
     Ok(Some(IssueDetail {

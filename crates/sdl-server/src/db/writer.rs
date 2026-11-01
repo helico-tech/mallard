@@ -15,7 +15,7 @@
 
 use super::maintenance::{MaintCmd, flush_inlined};
 use super::schema::{OVERFLOW_GROUP, OVERFLOW_TITLE};
-use super::{Caches, Ns, ProjectRow, Tick, us_to_dt};
+use super::{Caches, IssueState, Ns, ProjectRow, Tick, us_to_dt};
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
@@ -218,6 +218,12 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     Ok(())
 }
 
+/// A row of project, group, status, epoch microseconds of the change.
+fn issue_state_row(r: &mallard_duck::duckdb::Row<'_>) -> mallard_duck::duckdb::Result<((u32, u64), IssueState)> {
+    let status = r.get::<_, String>(2)?.parse().unwrap_or_default();
+    Ok(((r.get::<_, i32>(0)? as u32, r.get(1)?), IssueState { status, changed_us: r.get(3)? }))
+}
+
 /// Read all projects (a small table).
 pub fn load_projects(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -389,15 +395,13 @@ impl Writer {
         load_projects(&self.conn, &self.ns, &self.caches)?;
         load_bundles(&self.conn, &self.ns, &self.caches, since_us)?;
         let mut stmt = self.conn.prepare(&self.ns.sql(
-            "SELECT project_id, group_hash, arg_max(status, changed_at) FROM $S.issue_activity
-             WHERE changed_at >= make_timestamp(?) GROUP BY ALL",
+            "SELECT project_id, group_hash, arg_max(status, changed_at), epoch_us(max(changed_at))
+             FROM $S.issue_activity WHERE changed_at >= make_timestamp(?) GROUP BY ALL",
         ))?;
-        let rows = stmt
-            .query_map([since_us], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
-        for row in rows {
-            let (p, g, status) = row?;
-            if self.caches.issues.contains_key(&(p, g)) {
-                self.caches.issues.insert((p, g), status.parse().unwrap_or_default());
+        for row in stmt.query_map([since_us], issue_state_row)? {
+            let (key, state) = row?;
+            if self.caches.issues.contains_key(&key) {
+                self.caches.issues.insert(key, state);
             }
         }
         Ok(())
@@ -509,18 +513,17 @@ impl Writer {
                 SELECT DISTINCT project_id, group_hash FROM $S.issues
                 WHERE project_id IN ({projects}) AND group_hash IN ({groups})
              ), a AS (
-                SELECT project_id, group_hash, arg_max(status, changed_at) AS status FROM $S.issue_activity
+                SELECT project_id, group_hash, arg_max(status, changed_at) AS status, epoch_us(max(changed_at)) AS at
+                FROM $S.issue_activity
                 WHERE project_id IN ({projects}) AND group_hash IN ({groups}) GROUP BY ALL
              )
-             SELECT project_id, group_hash, coalesce(a.status, 'unresolved')
+             SELECT project_id, group_hash, coalesce(a.status, 'unresolved'), coalesce(a.at, 0)
              FROM i LEFT JOIN a USING (project_id, group_hash)"
         )))?;
-        let rows =
-            stmt.query_map([], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
-        for row in rows {
-            let (p, g, status) = row?;
-            if missing.contains(&(p, g)) {
-                self.caches.issues.insert((p, g), status.parse().unwrap_or_default());
+        for row in stmt.query_map([], issue_state_row)? {
+            let (key, state) = row?;
+            if missing.contains(&key) {
+                self.caches.issues.insert(key, state);
             }
         }
         Ok(())
@@ -569,34 +572,37 @@ impl Writer {
         let ns = &self.ns;
         // Decide new issues and regressions against the cache, but only
         // apply cache changes after the commit succeeded. A new issue starts
-        // at its earliest event (by event time) in the batch. Regressions are
-        // logged at commit time: the activity log is ordered by write time.
+        // at its earliest event (by event time) in the batch. A resolved issue
+        // reopens from an event at or after the resolve, not from an older one
+        // (a replay, an offline client). Regressions are logged at commit
+        // time: the activity log is ordered by write time.
         let mut new_issues: Vec<&EventWrite> = Vec::new();
         let mut activity: Vec<(u32, u64, IssueStatus, &'static str)> = Vec::new();
         // Group -> its index in `new_issues`, if it is new.
-        let mut seen_in_batch: HashMap<(u32, u64), Option<usize>> = HashMap::new();
+        let mut new_in_batch: HashMap<(u32, u64), usize> = HashMap::new();
+        let mut reopened: HashSet<(u32, u64)> = HashSet::new();
         for w in batch {
             let key = (w.project_id, w.event.group_hash);
-            if let Some(slot) = seen_in_batch.get(&key) {
-                if let Some(i) = *slot
-                    && w.event.timestamp < new_issues[i].event.timestamp
-                {
-                    new_issues[i] = w;
+            if let Some(i) = new_in_batch.get(&key) {
+                if w.event.timestamp < new_issues[*i].event.timestamp {
+                    new_issues[*i] = w;
                 }
                 continue;
             }
-            let slot = match self.caches.issues.get(&key) {
+            match self.caches.issues.get(&key) {
                 None => {
+                    new_in_batch.insert(key, new_issues.len());
                     new_issues.push(w);
-                    Some(new_issues.len() - 1)
                 }
-                Some(IssueStatus::Resolved) => {
+                Some(i)
+                    if i.status == IssueStatus::Resolved
+                        && w.event.timestamp.timestamp_micros() >= i.changed_us
+                        && reopened.insert(key) =>
+                {
                     activity.push((key.0, key.1, IssueStatus::Unresolved, "regression"));
-                    None
                 }
-                Some(_) => None,
-            };
-            seen_in_batch.insert(key, slot);
+                Some(_) => {}
+            }
         }
 
         // A failed append in an earlier batch may have left rows behind.
@@ -678,10 +684,10 @@ impl Writer {
         result?;
 
         for w in new_issues {
-            self.caches.issues.insert((w.project_id, w.event.group_hash), IssueStatus::Unresolved);
+            self.caches.issues.insert((w.project_id, w.event.group_hash), IssueState::NEW);
         }
-        for (p, g, s, _) in activity {
-            self.caches.issues.insert((p, g), s);
+        for (p, g, status, _) in activity {
+            self.caches.issues.insert((p, g), IssueState { status, changed_us: now_us });
         }
         for (project, n) in new_per_project {
             self.new_issues.add(project, hour, n);
@@ -739,17 +745,18 @@ impl Writer {
         match self.caches.issues.get(&(project_id, group_hash)) {
             None => return Err(WriteError::IssueNotFound),
             // Idempotent: the same status again writes nothing.
-            Some(s) if s == status => return Ok(false),
+            Some(i) if i.status == status => return Ok(false),
             Some(_) => {}
         }
+        let changed_us = Utc::now().timestamp_micros();
         self.in_tx(|c| {
             c.execute(
                 &ns.sql("INSERT INTO $S.issue_activity VALUES (?, ?, make_timestamp(?), ?, ?)"),
-                params![project_id as i32, group_hash, Utc::now().timestamp_micros(), status.as_str(), reason],
+                params![project_id as i32, group_hash, changed_us, status.as_str(), reason],
             )?;
             Ok(())
         })?;
-        self.caches.issues.insert((project_id, group_hash), status);
+        self.caches.issues.insert((project_id, group_hash), IssueState { status, changed_us });
         Ok(true)
     }
 

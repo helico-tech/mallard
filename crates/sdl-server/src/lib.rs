@@ -170,7 +170,7 @@ impl Server {
         if self.state.db.project_by_ref(&project_id.to_string()).await.is_none() {
             return Err(IngestError::UnknownProject);
         }
-        let source = ingest::Source { project_id, client_ip: None, from_sdk: false };
+        let source = ingest::Source { project_id, client_ip: None, from_sdk: false, sent_at: None };
         ingest::process_event(&self.state, &source, payload, None).await
     }
 

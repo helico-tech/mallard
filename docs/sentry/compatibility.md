@@ -59,9 +59,12 @@ bandwidth.
 
 What Sentry does that we also do:
 
-- normalization of all SDK shapes; an event `timestamp` outside
-  [received - 30d, received + 60s] is replaced by the receive time (Relay:
-  60 s future, retention past); first/last seen, trends and stats use it
+- normalization of all SDK shapes; when the envelope's `sent_at` is 55 minutes
+  or more off the receive time, the event and breadcrumb timestamps shift by that
+  difference (Relay's clock drift; spans are not shifted); an event `timestamp`
+  outside [received - 30d, received + 60s] is then replaced by the receive time
+  (Relay: 60 s future, retention past); first/last seen, trends and stats use it
+- an event older than the resolve does not reopen a resolved issue
 - grouping by fingerprint / exception type + in-app frames / masked values /
   message template, with `{{ default }}` support
 - derived tags: level, environment, release, dist, server_name, transaction,

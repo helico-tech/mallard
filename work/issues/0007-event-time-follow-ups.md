@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: idea
 created: 2026-11-01
 ---
@@ -32,3 +32,30 @@ event `timestamp`. Some related behaviour still differs from Sentry:
 Relay sources: `relay-event-normalization/src/validation.rs`
 (`normalize_timestamps`), `clock_drift.rs`; defaults in
 `relay-config/src/config.rs` (`max_secs_in_future: 60`, past = retention).
+
+### What changed (done)
+1. **Clock drift: done.** The envelope's `sent_at` differing 55 minutes or more
+   from the receive time shifts the event `timestamp` and breadcrumb timestamps
+   by that difference, before the range check (`sdl-protocol`:
+   `MIN_CLOCK_DRIFT_SECS`, `NormalizeContext::sent_at`). Not spans: errors rarely
+   have them, and transactions go to the bridge unchanged. Not `/store/`: it has
+   no `sent_at`.
+2. **Old events: done.** A resolved issue reopens only from an event whose
+   `timestamp` is not older than the resolve. The writer's cache holds the time
+   of the last status change (`IssueState`). The activity row stays at write
+   time. A client whose clock is off by under 55 minutes can miss a reopen for
+   that long after a resolve; accepted.
+3. **first_seen: done.** Issue list, detail, `sort=first_seen` and `new=true` read
+   `least(first_seen, min(timestamp))`, with the minimum of the queried window:
+   cheap, and an event outside the window does not move it. "New issues" in stats
+   and `new_issues` per release still read the `issues` row.
+4. **Event lists by event time: not changed, on purpose.** They stay ordered by
+   `received_at`, with their cursor on it. A late event gets a new `received_at`,
+   so it appears on top and never behind a cursor; by event time it would land
+   between pages already read, and pages would skip or repeat. The sort order of
+   the files also serves `received_at`. Each event still shows its `timestamp`.
+
+Tests: `event::tests::clock_drift_shifts_event_and_breadcrumbs`,
+`db::tests::only_events_after_the_resolve_reopen_an_issue`,
+`older_events_lower_first_seen_when_read`, integration test
+`envelope_sent_at_corrects_the_client_clock`.

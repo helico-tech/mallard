@@ -70,6 +70,8 @@ pub(crate) struct Source {
     pub client_ip: Option<String>,
     /// Sent by a Sentry SDK (reported to the event observer).
     pub from_sdk: bool,
+    /// `sent_at` of the envelope: corrects a wrong client clock.
+    pub sent_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// The ingest answer for an event that could not be stored.
@@ -103,7 +105,7 @@ struct Incoming {
 
 impl Incoming {
     fn source(&self) -> Source {
-        Source { project_id: self.project_id, client_ip: self.client_ip.clone(), from_sdk: true }
+        Source { project_id: self.project_id, client_ip: self.client_ip.clone(), from_sdk: true, sent_at: None }
     }
 }
 
@@ -235,6 +237,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
     if let Err(r) = authenticate(&state, &inc, env.dsn()).await {
         return r;
     }
+    let source = Source { sent_at: env.sent_at(), ..inc.source() };
     let mut stored_id: Option<String> = None;
     for item in &env.items {
         let ty = item.ty();
@@ -248,7 +251,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
                     Ok(v) => v,
                     Err(e) => return sentry_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")),
                 };
-                match process_event(&state, &inc.source(), raw, env.event_id()).await {
+                match process_event(&state, &source, raw, env.event_id()).await {
                     Ok(id) => stored_id = Some(id),
                     Err(e) => return ingest_error(e),
                 }
@@ -336,6 +339,7 @@ pub(crate) async fn process_event(
     let received_at = Utc::now();
     let mut ctx = NormalizeContext::new(received_at);
     ctx.client_ip = src.client_ip.clone();
+    ctx.sent_at = src.sent_at;
     ctx.event_id_hint = hint.map(str::to_string);
     // Normalizing, symbolicating and grouping are CPU work: keep them off
     // the async worker threads.

@@ -19,9 +19,11 @@ Design rules:
    layout is built for exactly that.
 4. **Event time for issues, receive time for storage.** First/last seen,
    trends, tag facets and stats use the event's `timestamp`, as Sentry does.
-   Ingest replaces a `timestamp` more than 60 s after or 30 days before the
-   receive time with the receive time (`MAX_SECS_IN_FUTURE` /
-   `MAX_SECS_IN_PAST` in `sdl-protocol`), so it stays close to
+   When an envelope's `sent_at` differs 55 minutes or more from the receive
+   time, the client's clock is off and the event and its breadcrumbs shift by
+   that difference. Ingest then replaces a `timestamp` more than 60 s after or
+   30 days before the receive time with the receive time (`MAX_SECS_IN_FUTURE`
+   / `MAX_SECS_IN_PAST` in `sdl-protocol`), so it stays close to
    `received_at`. Partitions, retention, event lists, trace lookups and the
    issue activity log use `received_at` / write time.
 
@@ -90,13 +92,15 @@ otel-ducklake's spans table, so `sentry.events JOIN otel.spans USING
 the earliest event `timestamp` in that batch, first release, first title).
 Two processes can each write one for a new group, so reads take one row per
 group (`arg_min(..., first_seen)`).
-It is not lowered when an older event arrives in a later batch (append-only).
-The current title, level and culprit come from the newest event in the
+An older event in a later batch does not change the row (append-only); issue
+list and detail read `least(first_seen, min(timestamp))`, so first seen moves
+back as soon as the window holds that event. "New issues" in stats and the
+`issues` row itself do not see it. The current title, level and culprit come from the newest event in the
 queried window (`arg_max(title, timestamp)`), as in Sentry.
 
 Status is `arg_max(status, changed_at)` over `issue_activity`. Reasons:
-`user` (API) and `regression` (a new event for a resolved issue reopens it;
-ignored issues stay ignored).
+`user` (API) and `regression` (an event of a resolved issue reopens it when its
+`timestamp` is not older than the resolve; ignored issues stay ignored).
 
 The writer keeps `(project, group) -> status` of recently seen issues in memory
 to decide "new issue" and "regression" without reading the lake on the hot
