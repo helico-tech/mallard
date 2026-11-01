@@ -84,7 +84,11 @@ async fn main() -> Result<()> {
             let conn = lake.connect()?;
             let settings = odl_server::store::maintenance::Settings::from_config(&cfg)?;
             let t0 = std::time::Instant::now();
-            let small = odl_server::store::maintenance::compact(&conn, &lake.schema, Some(settings.small_file_size))?;
+            let small = odl_server::store::maintenance::compact(
+                &conn,
+                &lake.schema,
+                Some(settings.small_file_size),
+            )?;
             info!(detail = %small, "compaction");
             if full {
                 let d = odl_server::store::maintenance::compact(&conn, &lake.schema, None)?;

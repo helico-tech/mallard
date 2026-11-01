@@ -54,7 +54,7 @@ impl TraceService for Otlp {
         self.check_auth(&request)?;
         let a = Otlp::export(self, Request::Traces(request.into_inner())).await?;
         Ok(Response::new(ExportTraceServiceResponse {
-            partial_success: (a.rejected > 0).then(|| ExportTracePartialSuccess {
+            partial_success: (a.rejected > 0).then_some(ExportTracePartialSuccess {
                 rejected_spans: a.rejected as i64,
                 error_message: a.message,
             }),
@@ -71,7 +71,7 @@ impl LogsService for Otlp {
         self.check_auth(&request)?;
         let a = Otlp::export(self, Request::Logs(request.into_inner())).await?;
         Ok(Response::new(ExportLogsServiceResponse {
-            partial_success: (a.rejected > 0).then(|| ExportLogsPartialSuccess {
+            partial_success: (a.rejected > 0).then_some(ExportLogsPartialSuccess {
                 rejected_log_records: a.rejected as i64,
                 error_message: a.message,
             }),
@@ -88,7 +88,7 @@ impl MetricsService for Otlp {
         self.check_auth(&request)?;
         let a = Otlp::export(self, Request::Metrics(request.into_inner())).await?;
         Ok(Response::new(ExportMetricsServiceResponse {
-            partial_success: (a.rejected > 0).then(|| ExportMetricsPartialSuccess {
+            partial_success: (a.rejected > 0).then_some(ExportMetricsPartialSuccess {
                 rejected_data_points: a.rejected as i64,
                 error_message: a.message,
             }),

@@ -59,7 +59,7 @@ fn error(status: StatusCode, fmt: Format, msg: String) -> Response {
     resp
 }
 
-fn format(headers: &HeaderMap) -> Result<Format, Response> {
+fn format(headers: &HeaderMap) -> Result<Format, String> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -73,11 +73,7 @@ fn format(headers: &HeaderMap) -> Result<Format, Response> {
     match base.as_str() {
         "application/x-protobuf" | "application/protobuf" => Ok(Format::Proto),
         "application/json" => Ok(Format::Json),
-        _ => Err(error(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Format::Json,
-            format!("unsupported content type {ct}"),
-        )),
+        _ => Err(format!("unsupported content type {ct}")),
     }
 }
 
@@ -125,7 +121,7 @@ fn ok_response<T: Message + serde::Serialize>(fmt: Format, msg: &T) -> Response 
 async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: Bytes) -> Response {
     let fmt = match format(&headers) {
         Ok(f) => f,
-        Err(r) => return r,
+        Err(m) => return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, Format::Json, m),
     };
     let auth = headers
         .get(header::AUTHORIZATION)
@@ -178,7 +174,7 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Traces => ok_response(
                 fmt,
                 &ExportTraceServiceResponse {
-                    partial_success: (a.rejected > 0).then(|| ExportTracePartialSuccess {
+                    partial_success: (a.rejected > 0).then_some(ExportTracePartialSuccess {
                         rejected_spans: a.rejected as i64,
                         error_message: a.message,
                     }),
@@ -187,7 +183,7 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Logs => ok_response(
                 fmt,
                 &ExportLogsServiceResponse {
-                    partial_success: (a.rejected > 0).then(|| ExportLogsPartialSuccess {
+                    partial_success: (a.rejected > 0).then_some(ExportLogsPartialSuccess {
                         rejected_log_records: a.rejected as i64,
                         error_message: a.message,
                     }),
@@ -196,7 +192,7 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Metrics => ok_response(
                 fmt,
                 &ExportMetricsServiceResponse {
-                    partial_success: (a.rejected > 0).then(|| ExportMetricsPartialSuccess {
+                    partial_success: (a.rejected > 0).then_some(ExportMetricsPartialSuccess {
                         rejected_data_points: a.rejected as i64,
                         error_message: a.message,
                     }),

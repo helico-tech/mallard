@@ -28,9 +28,7 @@ pub fn compact(v: f64) -> String {
         format!("{:.1}M", v / 1e6)
     } else if a >= 1e4 {
         format!("{:.1}k", v / 1e3)
-    } else if a == a.trunc() {
-        format!("{v:.0}")
-    } else if a >= 100.0 {
+    } else if a == a.trunc() || a >= 100.0 {
         format!("{v:.0}")
     } else if a >= 1.0 {
         format!("{v:.2}")

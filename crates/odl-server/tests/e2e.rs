@@ -233,19 +233,16 @@ fn metrics_req(t0: u64, n: u64) -> ExportMetricsServiceRequest {
 struct Harness {
     otlp: Router,
     api: Router,
-    server: Arc<Server>,
     shutdown: CancellationToken,
     bg: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
-    data_path: String,
 }
 
 async fn harness(token: Option<&str>) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = Config::default();
     cfg.storage.catalog = dir.path().join("catalog.ducklake").to_string_lossy().into();
-    let data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
-    cfg.storage.data_path = data_path.clone();
+    cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
     cfg.ingest.flush_interval = "100ms".into();
     cfg.maintenance.enabled = false;
@@ -265,11 +262,9 @@ async fn harness(token: Option<&str>) -> Harness {
     Harness {
         otlp: server.otlp_http_router(),
         api: server.api_router(),
-        server,
         shutdown,
         bg,
         _dir: dir,
-        data_path,
     }
 }
 

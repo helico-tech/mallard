@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
@@ -157,21 +158,6 @@ pub struct DuckDbConfig {
     /// Allow downloading extensions at start-up. Disable in air-gapped images
     /// that ship extensions pre-installed.
     pub autoinstall_extensions: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-            ingest: IngestConfig::default(),
-            retention: RetentionConfig::default(),
-            maintenance: MaintenanceConfig::default(),
-            query: QueryConfig::default(),
-            auth: AuthConfig::default(),
-            duckdb: DuckDbConfig::default(),
-        }
-    }
 }
 
 impl Default for ServerConfig {
