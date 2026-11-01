@@ -1,0 +1,168 @@
+{{- include "obs.validate" . -}}
+{{- $duckdb := eq .Values.catalog.type "duckdb" -}}
+{{- $storageSecret := include "obs.storageSecret" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "obs.fullname" . }}
+  labels:
+    {{- include "obs.labels" . | nindent 4 }}
+spec:
+  replicas: {{ include "obs.replicas" . }}
+  revisionHistoryLimit: 5
+  {{- if $duckdb }}
+  # One process owns the DuckDB catalog file: never run two pods at once.
+  strategy:
+    type: Recreate
+  {{- else }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "obs.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "obs.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "obs.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+          env:
+            - name: OBS_CONFIG
+              value: /etc/obs-ducklake/obs-ducklake.toml
+            - name: OBS_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "obs.tokenSecret" . }}
+                  key: {{ if .Values.existingSecret }}{{ .Values.existingSecretKey }}{{ else }}api-token{{ end }}
+            {{- if and .Values.existingSecret .Values.existingSecretIngestKey }}
+            - name: OBS_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.existingSecretIngestKey }}
+            {{- else if not .Values.existingSecret }}
+            - name: OBS_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "obs.fullname" . }}
+                  key: ingest-token
+            {{- else }}
+            - name: OBS_INGEST_TOKEN
+              value: ""
+            {{- end }}
+            {{- if $duckdb }}
+            - name: OBS_STORAGE__CATALOG
+              value: /data/catalog.ducklake
+            {{- else }}
+            - name: OBS_CATALOG_PG
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "obs.catalogSecret" . }}
+                  key: {{ if .Values.catalog.postgres.existingSecret }}{{ .Values.catalog.postgres.existingSecretKey }}{{ else }}catalog{{ end }}
+            - name: OBS_STORAGE__CATALOG
+              value: "postgres:$(OBS_CATALOG_PG)"
+            {{- end }}
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or $storageSecret .Values.extraEnvFrom }}
+          envFrom:
+            {{- if $storageSecret }}
+            - secretRef:
+                name: {{ $storageSecret }}
+            {{- end }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/obs-ducklake
+              readOnly: true
+            # Working directory: DuckDB catalog file (duckdb mode), local
+            # Parquet files (local dataPath) and DuckDB spill files.
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "obs.fullname" . }}
+        - name: data
+          {{- if $duckdb }}
+          persistentVolumeClaim:
+            claimName: {{ include "obs.pvcName" . }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.scratchSizeLimit }}
+          {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

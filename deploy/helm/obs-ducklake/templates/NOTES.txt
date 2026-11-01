@@ -1,0 +1,38 @@
+obs-ducklake is installed as {{ include "obs.fullname" . }} in namespace {{ .Release.Namespace }}.
+Catalog: {{ .Values.catalog.type }}{{ if eq .Values.catalog.type "duckdb" }} (one pod, PVC {{ include "obs.pvcName" . }}){{ end }}
+Data:    {{ .Values.storage.dataPath }}
+Public URL: {{ .Values.publicUrl }}
+
+1. Wait until the pod is ready:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "obs.fullname" . }}
+
+2. Reach it through the ingress ({{ .Values.publicUrl }}) or a port-forward:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "obs.fullname" . }} 8080:{{ .Values.service.port }} 4318:{{ .Values.service.otlpHttpPort }} 4317:{{ .Values.service.otlpGrpcPort }}
+   export OBS_URL=http://localhost:8080
+
+3. Read the API token:
+{{- if .Values.existingSecret }}
+   export OBS_TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.{{ .Values.existingSecretKey }}}' | base64 -d | cut -d, -f1)
+{{- else }}
+   export OBS_TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ include "obs.fullname" . }} -o jsonpath='{.data.api-token}' | base64 -d | cut -d, -f1)
+{{- end }}
+
+4. Errors: create a Sentry project; the answer holds the DSN for your SDK:
+
+   curl -s -XPOST "$OBS_URL/sentry/v1/projects" \
+     -H "Authorization: Bearer $OBS_TOKEN" -H 'content-type: application/json' -d '{"name":"web"}'
+
+5. Traces, logs, metrics: point OpenTelemetry SDKs at
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://{{ include "obs.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.service.otlpHttpPort }}   (OTLP/HTTP)
+   or {{ include "obs.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.service.otlpGrpcPort }}   (OTLP/gRPC)
+
+6. Look at it:  obs status   |   obs trace <trace-id>   |   obs tui
+   API docs: $OBS_URL/sentry/docs and $OBS_URL/otel/docs
+{{- if and (eq .Values.catalog.type "postgres") (gt (int .Values.replicaCount) 1) }}
+
+WARNING: replicaCount={{ .Values.replicaCount }}. Each pod runs its own background
+maintenance and the Sentry side keeps per-pod project caches. Read the
+"Running more than one pod" notes in sentry-ducklake's docs/deployment.md.
+{{- end }}

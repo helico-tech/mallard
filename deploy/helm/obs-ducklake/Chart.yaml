@@ -1,0 +1,18 @@
+apiVersion: v2
+name: obs-ducklake
+description: Errors (Sentry SDKs) plus traces, logs and metrics (OpenTelemetry) on one DuckLake (DuckDB + Parquet on object storage).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/helico-tech/obs-ducklake
+sources:
+  - https://github.com/helico-tech/obs-ducklake
+  - https://github.com/helico-tech/sentry-ducklake
+  - https://github.com/helico-tech/otel-ducklake
+keywords:
+  - observability
+  - sentry
+  - opentelemetry
+  - duckdb
+  - ducklake

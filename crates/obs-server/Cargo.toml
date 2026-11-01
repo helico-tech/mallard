@@ -28,5 +28,6 @@ figment.workspace = true
 metrics-exporter-prometheus.workspace = true
 
 [dev-dependencies]
+figment = { workspace = true, features = ["test"] }
 tempfile = "3"
 reqwest.workspace = true

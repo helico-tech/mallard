@@ -1,0 +1,200 @@
+# Default values for obs-ducklake.
+# Required: publicUrl, an API token (apiToken or existingSecret) and
+# storage.dataPath pointing at a bucket you own (or a local path with
+# catalog.type=duckdb).
+
+image:
+  repository: ghcr.io/helico-tech/obs-ducklake
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Number of pods. Only used with catalog.type=postgres; the DuckDB-file
+# catalog always runs exactly one pod.
+replicaCount: 1
+
+# Public base URL of the HTTP port, used to build Sentry DSNs
+# (<publicUrl>/sentry/<project>). Usually the ingress URL.
+publicUrl: ""
+
+# Bearer token(s) for the query APIs of both sides (comma separated).
+# Ignored when existingSecret is set.
+apiToken: ""
+# Bearer token(s) OTLP senders must present (comma separated); empty = open.
+ingestToken: ""
+# Existing Secret with the tokens under existingSecretKey (and optionally
+# existingSecretIngestKey).
+existingSecret: ""
+existingSecretKey: api-token
+existingSecretIngestKey: ""
+
+storage:
+  # Where the lake's Parquet files go: s3://bucket/prefix/ (AWS S3, R2, MinIO,
+  # RustFS, ...) or a local path (only with catalog.type=duckdb, on its PVC).
+  dataPath: s3://my-bucket/obs/lake/
+  # Where Sentry sourcemap bundles go (optional; empty disables sourcemap
+  # upload). Same forms as dataPath.
+  artifactsUrl: s3://my-bucket/obs/artifacts
+  s3:
+    # Custom endpoint including scheme, e.g. http://minio.storage:9000 or
+    # https://<account>.r2.cloudflarestorage.com. Empty = AWS.
+    endpoint: ""
+    region: us-east-1
+    # Path-style URLs; needed by most self-hosted S3 servers.
+    pathStyle: false
+  credentials:
+    # Existing Secret with AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY.
+    existingSecret: ""
+    # Or let the chart create that Secret from these values.
+    env: {}
+    #   AWS_ACCESS_KEY_ID: ...
+    #   AWS_SECRET_ACCESS_KEY: ...
+    # With neither set, the pod's cloud identity is used (IRSA, EKS Pod
+    # Identity) through serviceAccount.annotations.
+  # Extra DuckDB secrets as TOML tables (e.g. gcs, azure). Advanced.
+  extraSecrets: []
+  #  - type: azure
+  #    connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"
+
+catalog:
+  # duckdb: catalog in a DuckDB file on a PersistentVolume (ReadWriteOnce).
+  #         One pod only; the chart forces replicas=1 and strategy Recreate.
+  # postgres: catalog in PostgreSQL; pods keep no state.
+  type: duckdb
+  duckdb:
+    persistence:
+      existingClaim: ""
+      storageClass: ""
+      size: 10Gi
+      annotations: {}
+  postgres:
+    # Libpq connection string, stored in a chart-managed Secret:
+    #   host=pg.example.com port=5432 dbname=ducklake user=obs password=... sslmode=require
+    connectionString: ""
+    existingSecret: ""
+    existingSecretKey: catalog
+
+retention:
+  # Sentry events, in days (0 = keep forever).
+  errorsDays: 90
+  # OpenTelemetry data ("0" = keep forever).
+  traces: 7d
+  logs: 7d
+  metrics: 30d
+
+duckdb:
+  # Keep it well below resources.limits.memory.
+  memoryLimit: 1GB
+  # Worker threads; 0 = number of CPUs DuckDB sees.
+  threads: 0
+
+# Extra TOML appended to the config file (see config/obs-ducklake.example.toml).
+extraConfig: ""
+#  [otel.ingest]
+#  flush_interval = "10s"
+
+logJson: true
+# RUST_LOG filter.
+logLevel: info
+
+extraEnv: []
+extraEnvFrom: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/obs-ducklake
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 2Gi
+
+# Time for both sides to flush buffered data on stop.
+terminationGracePeriodSeconds: 90
+
+# Size limit of the scratch volume (DuckDB spill files) when /data is not a PVC.
+scratchSizeLimit: 2Gi
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 5
+  failureThreshold: 60
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 4
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+service:
+  type: ClusterIP
+  # Sentry ingest, both APIs, OTLP/HTTP on /v1/*, /metrics
+  port: 80
+  otlpHttpPort: 4318
+  otlpGrpcPort: 4317
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  # Routes to the HTTP port. Sentry browser SDKs and OTLP/HTTP both work
+  # through it. The server answers CORS itself; do not add CORS annotations.
+  # Raise the body size limit for sourcemap uploads, e.g.
+  #   nginx.ingress.kubernetes.io/proxy-body-size: 64m
+  annotations: {}
+  hosts:
+    - host: obs.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+podDisruptionBudget:
+  enabled: false
+  maxUnavailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

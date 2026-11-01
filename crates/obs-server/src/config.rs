@@ -76,9 +76,18 @@ impl Config {
             let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             fig = fig.merge(Toml::string(&expand_env(&text)?));
         }
-        let cfg: Config = fig.merge(Env::prefixed("OBS_").split("__")).extract().context("invalid configuration")?;
+        let mut cfg: Config = fig.merge(env_overrides()).extract().context("invalid configuration")?;
+        cfg.normalize();
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Tokens may be given comma separated (handy with `${ENV}` values);
+    /// empty entries are dropped.
+    pub fn normalize(&mut self) {
+        for list in [&mut self.server.api_tokens, &mut self.server.ingest_tokens] {
+            *list = list.iter().flat_map(|t| t.split(',')).map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect();
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -114,6 +123,12 @@ impl Config {
         c.catalog_wide_maintenance = false;
         c
     }
+}
+
+/// `OBS_<SECTION>__<KEY>` variables. Names without `__` (e.g. `OBS_CONFIG`,
+/// or `OBS_API_TOKEN` used through `${...}` in the file) are not overrides.
+fn env_overrides() -> Env {
+    Env::prefixed("OBS_").filter(|k| k.as_str().contains("__")).split("__")
 }
 
 /// Replace `${NAME}` with the value of environment variable NAME.
@@ -180,6 +195,30 @@ mod tests {
         assert_eq!(s.api_tokens(), vec!["a", "b"]);
         assert_eq!(s.retention_days, 30);
         assert!(!s.catalog_wide_maintenance);
+    }
+
+    #[test]
+    fn only_section_vars_override() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OBS_CONFIG", "/etc/x.toml");
+            jail.set_env("OBS_API_TOKEN", "t");
+            jail.set_env("OBS_SERVER__PUBLIC_URL", "https://x.example");
+            jail.set_env("OBS_OTEL__RETENTION__TRACES", "3d");
+            let cfg: Config = Figment::new().merge(env_overrides()).extract()?;
+            assert_eq!(cfg.server.public_url, "https://x.example");
+            assert_eq!(cfg.otel.retention.traces, "3d");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tokens_split_on_commas() {
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["a, b".into(), "".into()];
+        cfg.server.ingest_tokens = vec!["".into()];
+        cfg.normalize();
+        assert_eq!(cfg.server.api_tokens, vec!["a", "b"]);
+        assert!(cfg.server.ingest_tokens.is_empty());
     }
 
     #[test]

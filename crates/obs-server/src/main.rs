@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 use obs_server::{Config, Platform};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -11,22 +11,43 @@ use tracing_subscriber::EnvFilter;
 #[command(version)]
 struct Args {
     /// TOML config file. Every key is optional; `OBS_*` env vars override it.
-    #[arg(short, long, env = "OBS_CONFIG")]
+    #[arg(short, long, env = "OBS_CONFIG", global = true)]
     config: Option<PathBuf>,
-    /// Validate the config and exit.
-    #[arg(long)]
-    check: bool,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
 }
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the server (default).
+    Serve,
+    /// Validate the config and exit.
+    Check,
+    /// Download every DuckDB extension any config may need, so the server
+    /// runs without internet access (used when building the Docker image).
+    InstallExtensions {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+}
+
+const ALL_EXTENSIONS: &[&str] = &["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "mysql", "json", "parquet"];
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let cfg = Config::load(args.config.as_deref())?;
-    if args.check {
-        println!("config ok");
-        return Ok(());
+    match args.cmd.unwrap_or(Cmd::Serve) {
+        Cmd::InstallExtensions { dir } => install_extensions(&dir),
+        Cmd::Check => {
+            Config::load(args.config.as_deref())?;
+            println!("config ok");
+            Ok(())
+        }
+        Cmd::Serve => serve(Config::load(args.config.as_deref())?).await,
     }
+}
 
+async fn serve(cfg: Config) -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     if cfg.server.log_format == "json" {
         tracing_subscriber::fmt().json().with_env_filter(filter).init();
@@ -44,6 +65,18 @@ async fn main() -> Result<()> {
         sd.cancel();
     });
     platform.serve(shutdown).await
+}
+
+fn install_extensions(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let conn = duckdb::Connection::open_in_memory()?;
+    let d = dir.to_str().context("extension dir must be UTF-8")?.replace('\'', "''");
+    conn.execute_batch(&format!("SET extension_directory = '{d}'"))?;
+    for ext in ALL_EXTENSIONS {
+        conn.execute_batch(&format!("INSTALL {ext}")).with_context(|| format!("installing extension {ext}"))?;
+        println!("installed {ext}");
+    }
+    Ok(())
 }
 
 async fn wait_for_signal() {
