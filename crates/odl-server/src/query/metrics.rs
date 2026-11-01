@@ -14,7 +14,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
 };
 
 use duckdb::{Connection, params_from_iter, types::Value};
@@ -202,28 +202,47 @@ fn labels_expr(group_by: &[String]) -> (String, Vec<Value>) {
 
 type Key = String; // JSON label array
 
-struct Collector {
-    group_by: Vec<String>,
-    points: BTreeMap<Key, BTreeMap<i64, f64>>,
-    n_points: usize,
+/// Enforces [`MAX_SERIES`] and [`MAX_POINTS`] while rows stream in, so a
+/// too-large result fails early instead of being materialized first.
+#[derive(Default)]
+struct Caps {
+    series: HashSet<Key>,
+    points: usize,
 }
 
-impl Collector {
-    fn new(group_by: Vec<String>) -> Self {
-        Self { group_by, points: BTreeMap::new(), n_points: 0 }
-    }
-    /// Fails early when the result would exceed the series or point caps,
-    /// instead of materializing everything first.
-    fn put(&mut self, key: Key, bucket: i64, v: f64) -> QResult<()> {
-        if !self.points.contains_key(&key) && self.points.len() >= MAX_SERIES {
-            return Err(bad(format!("query produces more than {MAX_SERIES} series; narrow group_by or add filters")));
+impl Caps {
+    /// Count one more point of series `key`.
+    fn add(&mut self, key: &Key) -> QResult<()> {
+        if !self.series.contains(key) {
+            if self.series.len() >= MAX_SERIES {
+                return Err(bad(format!(
+                    "query produces more than {MAX_SERIES} series; narrow group_by or add filters"
+                )));
+            }
+            self.series.insert(key.clone());
         }
-        self.n_points += 1;
-        if self.n_points > MAX_POINTS {
+        self.points += 1;
+        if self.points > MAX_POINTS {
             return Err(bad(format!(
                 "query produces more than {MAX_POINTS} points; use a larger step or a shorter window"
             )));
         }
+        Ok(())
+    }
+}
+
+struct Collector {
+    group_by: Vec<String>,
+    points: BTreeMap<Key, BTreeMap<i64, f64>>,
+    caps: Caps,
+}
+
+impl Collector {
+    fn new(group_by: Vec<String>) -> Self {
+        Self { group_by, points: BTreeMap::new(), caps: Caps::default() }
+    }
+    fn put(&mut self, key: Key, bucket: i64, v: f64) -> QResult<()> {
+        self.caps.add(&key)?;
         if v.is_finite() {
             self.points.entry(key).or_default().insert(bucket, v);
         }
@@ -420,6 +439,8 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                 })
             })?;
             let mut merged: HashMap<(Key, i64), Merged> = HashMap::new();
+            // One merged entry becomes one output point: cap them as they appear.
+            let mut caps = Caps::default();
             let mut prev: Option<(u64, Hist)> = None;
             for row in rows {
                 let row = row?;
@@ -438,7 +459,13 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                 if row.bucket < first_bucket {
                     continue;
                 }
-                let m = merged.entry((row.key.clone(), row.bucket)).or_default();
+                let m = match merged.entry((row.key, row.bucket)) {
+                    Entry::Occupied(o) => o.into_mut(),
+                    Entry::Vacant(v) => {
+                        caps.add(&v.key().0)?;
+                        v.insert(Merged::default())
+                    }
+                };
                 m.series += 1;
                 if summary {
                     m.hist.count += inc.count;
@@ -707,6 +734,21 @@ mod tests {
         later.count *= 2.0;
         let d = later.minus(&h);
         assert!((d.quantile(0.5).unwrap() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn caps_stop_at_max_series_and_points() {
+        let mut caps = Caps::default();
+        for i in 0..MAX_SERIES {
+            caps.add(&i.to_string()).unwrap();
+        }
+        caps.add(&"0".to_string()).expect("known series");
+        assert!(caps.add(&"new".to_string()).is_err(), "series cap");
+        let mut caps = Caps::default();
+        for _ in 0..MAX_POINTS {
+            caps.add(&"k".to_string()).unwrap();
+        }
+        assert!(caps.add(&"k".to_string()).is_err(), "point cap");
     }
 
     #[test]
