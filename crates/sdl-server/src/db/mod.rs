@@ -37,12 +37,17 @@ pub struct ProjectRow {
     pub created_at: DateTime<Utc>,
 }
 
+/// Issues kept in memory. A miss asks the lake, so this bounds memory, not
+/// correctness. About 150 bytes per issue.
+const ISSUE_CACHE_CAPACITY: u64 = 200_000;
+
 /// In-memory caches shared by the writer and request handlers.
-#[derive(Default)]
 pub struct Caches {
     pub projects: RwLock<HashMap<u32, ProjectRow>>,
-    /// Current status per (project, group). Also the set of known issues.
-    pub issues: RwLock<HashMap<(u32, u64), IssueStatus>>,
+    /// Current status per (project, group) of recently seen issues; only the
+    /// writer thread changes it. An issue that is not here may still exist
+    /// ([`writer::Writer::load_issues`]).
+    pub issues: moka::sync::Cache<(u32, u64), IssueStatus>,
     /// What is stored and indexed per project.
     bundles: RwLock<HashMap<u32, ProjectBundles>>,
 }
@@ -57,7 +62,21 @@ struct ProjectBundles {
     debug_ids: HashSet<uuid::Uuid>,
 }
 
+impl Default for Caches {
+    fn default() -> Self {
+        Self::new(Duration::ZERO)
+    }
+}
+
 impl Caches {
+    /// `retention` of the events: an issue without events for that long
+    /// leaves the cache (0: only the capacity bounds it).
+    pub fn new(retention: Duration) -> Self {
+        let issues = moka::sync::Cache::builder().max_capacity(ISSUE_CACHE_CAPACITY);
+        let issues = if retention.is_zero() { issues } else { issues.time_to_idle(retention) };
+        Caches { projects: Default::default(), issues: issues.build(), bundles: Default::default() }
+    }
+
     pub fn project(&self, id: u32) -> Option<ProjectRow> {
         self.projects.read().expect("lock").get(&id).cloned()
     }
@@ -220,7 +239,7 @@ impl Db {
         }
         writer::record_schema_version(&conn, &ns)?;
 
-        let caches = Arc::new(Caches::default());
+        let caches = Arc::new(Caches::new(cfg.retention.events));
         writer::load_caches(&conn, &ns, &caches)?;
 
         let n = cfg.query.readers.max(1);
@@ -477,6 +496,24 @@ pub(crate) mod tests {
         assert_eq!(c.bundle_count(), 2);
     }
 
+    /// Issue 0002: the issue cache has a size limit, and an issue without
+    /// events for the retention period leaves it.
+    #[test]
+    fn issue_cache_is_bounded() {
+        let c = Caches::default();
+        for g in 0..ISSUE_CACHE_CAPACITY + 1000 {
+            c.issues.insert((1, g), IssueStatus::Unresolved);
+        }
+        c.issues.run_pending_tasks();
+        assert!(c.issues.entry_count() <= ISSUE_CACHE_CAPACITY);
+
+        let c = Caches::new(Duration::from_millis(20));
+        c.issues.insert((1, 1), IssueStatus::Unresolved);
+        assert!(c.issues.get(&(1, 1)).is_some());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(c.issues.get(&(1, 1)).is_none());
+    }
+
     /// A Db on a local lake in `dir`.
     pub(crate) fn open_db(dir: &std::path::Path, readers: usize) -> Db {
         let mut cfg = Config::default();
@@ -713,6 +750,130 @@ pub(crate) mod tests {
         let _ = rx.await;
         assert!(!db.writer_alive());
         // Idempotent, also for the maintenance thread.
+        db.shutdown().await;
+    }
+
+    /// Queue a raw event body for `project` and wait until it is stored.
+    async fn store(db: &Db, project: u32, body: serde_json::Value, received_at: DateTime<Utc>) {
+        use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let ev = normalize_event(body, &NormalizeContext::new(received_at));
+        let (tx, rx) = oneshot::channel();
+        let event = ProcessedEvent::from_normalized(&ev, received_at);
+        let w = EventWrite { project_id: project, event, payload_json: ev.to_string(), reply: tx };
+        db.try_send(WriteCmd::Event(Box::new(w))).unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    fn issue_window() -> read::Window {
+        read::Window { from: Utc::now() - chrono::Duration::hours(1), to: Utc::now() + chrono::Duration::minutes(1) }
+    }
+
+    async fn issues_of(db: &Db, project: u32) -> Vec<sdl_types::IssueSummary> {
+        let w = issue_window();
+        db.read(move |c, ns| {
+            let q = sdl_types::IssueQuery { limit: Some(500), ..Default::default() };
+            read::list_issues(c, ns, project, &q, &[], &w, read::StatusFilter::All, read::IssueSort::Count, None)
+        })
+        .await
+        .unwrap()
+        .issues
+    }
+
+    async fn count_issue_rows(db: &Db, project: u32) -> i64 {
+        db.read(move |c, ns| {
+            Ok(c.query_row(&ns.sql("SELECT count(*) FROM $S.issues WHERE project_id = ?"), [project as i32], |r| {
+                r.get(0)
+            })?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Issue 0002: after the limit, new groups of that project share one
+    /// issue. Existing groups and other projects go on as usual.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_issues_over_the_limit_share_one_issue() {
+        use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let now = Utc::now();
+        let ctx = NormalizeContext::new(now);
+        let extra = 20;
+        // One batch over the limit; two events for a group over it.
+        let mut replies = Vec::new();
+        for i in 0..writer::MAX_NEW_ISSUES_PER_HOUR as usize + extra {
+            let ev = normalize_event(
+                serde_json::json!({"message": format!("m{i}"), "fingerprint": [format!("group-{i}")]}),
+                &ctx,
+            );
+            let (tx, rx) = oneshot::channel();
+            let event = ProcessedEvent::from_normalized(&ev, now);
+            let w = EventWrite { project_id: 1, event, payload_json: ev.to_string(), reply: tx };
+            db.try_send(WriteCmd::Event(Box::new(w))).unwrap();
+            replies.push(rx);
+        }
+        for rx in replies {
+            rx.await.unwrap().unwrap();
+        }
+        let group = |name: &str| serde_json::json!({"message": name, "fingerprint": [name]});
+        store(&db, 1, group("group-0"), now).await; // known: stays its own issue
+        store(&db, 1, group("group-new-after-the-limit"), now).await;
+        store(&db, 2, group("other-project"), now).await;
+
+        let issues = issues_of(&db, 1).await;
+        // The limit plus the overflow issue.
+        assert_eq!(count_issue_rows(&db, 1).await, writer::MAX_NEW_ISSUES_PER_HOUR as i64 + 1);
+        let top = &issues[0];
+        assert_eq!(top.id, read::group_id(schema::OVERFLOW_GROUP));
+        assert_eq!(top.title, schema::OVERFLOW_TITLE, "not the title of its latest event");
+        assert_eq!(top.count, extra as u64 + 1);
+        assert_eq!(issues[1].count, 2, "a known group is not affected by the limit");
+        assert_eq!(issues_of(&db, 2).await.len(), 1);
+        db.shutdown().await;
+    }
+
+    /// Issue 0002: an issue that left the cache is found in the lake: no
+    /// second row, and a resolved one reopens.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_outside_the_cache_is_found_in_the_lake() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let now = Utc::now();
+        let body = serde_json::json!({"message": "m", "fingerprint": ["g"]});
+        store(&db, 1, body.clone(), now).await;
+        let id = issues_of(&db, 1).await[0].id.clone();
+        let group_hash = read::parse_group_id(&id).unwrap();
+
+        db.caches.issues.invalidate_all();
+        let set = |status| {
+            db.call(move |reply| WriteCmd::SetStatus {
+                project_id: 1,
+                group_hash,
+                status,
+                reason: "user".into(),
+                reply,
+            })
+        };
+        assert!(set(IssueStatus::Resolved).await.unwrap(), "known although not cached");
+        db.caches.issues.invalidate_all();
+        assert!(!set(IssueStatus::Resolved).await.unwrap(), "already resolved");
+
+        db.caches.issues.invalidate_all();
+        store(&db, 1, body, now).await;
+        assert_eq!(count_issue_rows(&db, 1).await, 1);
+        let issue = &issues_of(&db, 1).await[0];
+        assert_eq!((issue.count, issue.status), (2, IssueStatus::Unresolved));
+
+        let missing = db
+            .call(move |reply| WriteCmd::SetStatus {
+                project_id: 1,
+                group_hash: group_hash ^ 1,
+                status: IssueStatus::Resolved,
+                reason: "user".into(),
+                reply,
+            })
+            .await;
+        assert!(matches!(missing, Err(WriteError::IssueNotFound)));
         db.shutdown().await;
     }
 

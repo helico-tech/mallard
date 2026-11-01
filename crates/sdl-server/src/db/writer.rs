@@ -14,6 +14,7 @@
 //! A commit that conflicts with another process is tried again.
 
 use super::maintenance::{MaintCmd, flush_inlined};
+use super::schema::{OVERFLOW_GROUP, OVERFLOW_TITLE};
 use super::{Caches, Ns, ProjectRow, us_to_dt};
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
@@ -22,7 +23,7 @@ use crossbeam_channel::{Receiver, Sender};
 use mallard_duck::duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -112,11 +113,32 @@ pub struct Writer {
     maintainer: Sender<MaintCmd>,
     /// Rows inlined since the last flush; the maintenance thread reads it.
     inlined: Arc<AtomicUsize>,
+    new_issues: NewIssueCount,
+}
+
+/// New issues per project in the current hour, of this process.
+#[derive(Default)]
+struct NewIssueCount(HashMap<u32, (i64, u32)>);
+
+impl NewIssueCount {
+    fn get(&self, project: u32, hour: i64) -> u32 {
+        self.0.get(&project).filter(|(h, _)| *h == hour).map_or(0, |(_, n)| *n)
+    }
+    fn add(&mut self, project: u32, hour: i64, n: u32) {
+        let total = self.get(project, hour) + n;
+        self.0.insert(project, (hour, total));
+    }
 }
 
 /// A drained queue with at least this many events commits without waiting
 /// for the batch window.
 const EARLY_COMMIT_EVENTS: usize = 200;
+
+/// New issues per project, per hour and process. Events of further new groups
+/// go into one "too many issues" issue ([`OVERFLOW_GROUP`]). Far above any
+/// real release; a limit for grouping gone wrong (ids in a message or a
+/// fingerprint).
+pub const MAX_NEW_ISSUES_PER_HOUR: u32 = 1000;
 
 /// Commits tried again after a conflict with another process. Doubling from
 /// 20 ms, this waits at most about 2.5 s; then the batch fails and the SDK
@@ -179,20 +201,6 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     }
     drop(projects);
 
-    let mut stmt = conn.prepare(&ns.sql(
-        "SELECT i.project_id, i.group_hash, coalesce(a.status, 'unresolved')
-         FROM $S.issues i
-         LEFT JOIN (SELECT project_id, group_hash, arg_max(status, changed_at) AS status
-                    FROM $S.issue_activity GROUP BY ALL) a USING (project_id, group_hash)",
-    ))?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
-    let mut issues = caches.issues.write().expect("lock");
-    for row in rows {
-        let (p, g, s) = row?;
-        issues.insert((p, g), s.parse().unwrap_or_default());
-    }
-    let n_issues = issues.len();
-    drop(issues);
     let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?)))?;
@@ -212,7 +220,6 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     }
     tracing::info!(
         projects = caches.projects.read().expect("lock").len(),
-        issues = n_issues,
         bundles = caches.bundle_count(),
         "loaded caches"
     );
@@ -241,6 +248,7 @@ impl Writer {
             retention: cfg.retention.events,
             maintainer,
             inlined,
+            new_issues: NewIssueCount::default(),
         })
     }
 
@@ -379,10 +387,10 @@ impl Writer {
         }
     }
 
-    fn write_events(&mut self, batch: Vec<EventWrite>) {
+    fn write_events(&mut self, mut batch: Vec<EventWrite>) {
         let started = Instant::now();
         let n = batch.len();
-        let result = self.try_write_events(&batch);
+        let result = self.try_write_events(&mut batch);
         let elapsed = started.elapsed();
         metrics::histogram!("sdl_write_batch_seconds").record(elapsed.as_secs_f64());
         metrics::histogram!("sdl_write_batch_events").record(n as f64);
@@ -405,7 +413,79 @@ impl Writer {
         }
     }
 
-    fn try_write_events(&self, batch: &[EventWrite]) -> Result<()> {
+    /// Put issues among `keys` that are not cached but exist in the lake into
+    /// the cache. The cache is bounded, and other processes create issues.
+    fn load_issues(&self, keys: impl IntoIterator<Item = (u32, u64)>) -> Result<()> {
+        let missing: HashSet<(u32, u64)> = keys.into_iter().filter(|k| !self.caches.issues.contains_key(k)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        // Numbers only, so building the IN lists is injection-safe.
+        let list = |items: HashSet<String>| items.into_iter().collect::<Vec<_>>().join(",");
+        let projects = list(missing.iter().map(|k| k.0.to_string()).collect());
+        let groups = list(missing.iter().map(|k| k.1.to_string()).collect());
+        let mut stmt = self.conn.prepare(&self.ns.sql(&format!(
+            "WITH i AS (
+                SELECT DISTINCT project_id, group_hash FROM $S.issues
+                WHERE project_id IN ({projects}) AND group_hash IN ({groups})
+             ), a AS (
+                SELECT project_id, group_hash, arg_max(status, changed_at) AS status FROM $S.issue_activity
+                WHERE project_id IN ({projects}) AND group_hash IN ({groups}) GROUP BY ALL
+             )
+             SELECT project_id, group_hash, coalesce(a.status, 'unresolved')
+             FROM i LEFT JOIN a USING (project_id, group_hash)"
+        )))?;
+        let rows =
+            stmt.query_map([], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
+        for row in rows {
+            let (p, g, status) = row?;
+            if missing.contains(&(p, g)) {
+                self.caches.issues.insert((p, g), status.parse().unwrap_or_default());
+            }
+        }
+        Ok(())
+    }
+
+    /// Move events of new groups over the limit into the project's overflow
+    /// group. Returns how many new issues each project gets (without the
+    /// overflow issue itself). Their rows exist only after the commit, so the
+    /// count is added then.
+    fn apply_issue_limit(&self, batch: &mut [EventWrite], hour: i64) -> HashMap<u32, u32> {
+        let mut new_per_project: HashMap<u32, u32> = HashMap::new();
+        let mut new: HashSet<(u32, u64)> = HashSet::new();
+        let mut over: HashSet<(u32, u64)> = HashSet::new();
+        for w in batch.iter_mut() {
+            let key = (w.project_id, w.event.group_hash);
+            if key.1 == OVERFLOW_GROUP || new.contains(&key) || self.caches.issues.contains_key(&key) {
+                continue;
+            }
+            if !over.contains(&key) {
+                let count = new_per_project.entry(key.0).or_default();
+                if self.new_issues.get(key.0, hour) + *count < MAX_NEW_ISSUES_PER_HOUR {
+                    *count += 1;
+                    new.insert(key);
+                    continue;
+                }
+                over.insert(key);
+            }
+            w.event.group_hash = OVERFLOW_GROUP;
+            metrics::counter!("sdl_issue_overflow_events_total").increment(1);
+        }
+        if !over.is_empty() {
+            let projects: HashSet<u32> = over.iter().map(|k| k.0).collect();
+            tracing::warn!(?projects, groups = over.len(), "too many new issues this hour; events go to one issue");
+        }
+        new_per_project
+    }
+
+    fn try_write_events(&mut self, batch: &mut [EventWrite]) -> Result<()> {
+        let hour = Utc::now().timestamp() / 3600;
+        self.load_issues(batch.iter().map(|w| (w.project_id, w.event.group_hash)))?;
+        let new_per_project = self.apply_issue_limit(batch, hour);
+        self.load_issues(
+            batch.iter().filter(|w| w.event.group_hash == OVERFLOW_GROUP).map(|w| (w.project_id, OVERFLOW_GROUP)),
+        )?;
+        let batch = &*batch;
         let ns = &self.ns;
         // Decide new issues and regressions against the cache, but only
         // apply cache changes after the commit succeeded. A new issue starts
@@ -415,31 +495,28 @@ impl Writer {
         let mut activity: Vec<(u32, u64, IssueStatus, &'static str)> = Vec::new();
         // Group -> its index in `new_issues`, if it is new.
         let mut seen_in_batch: HashMap<(u32, u64), Option<usize>> = HashMap::new();
-        {
-            let issues = self.caches.issues.read().expect("lock");
-            for w in batch {
-                let key = (w.project_id, w.event.group_hash);
-                if let Some(slot) = seen_in_batch.get(&key) {
-                    if let Some(i) = *slot
-                        && w.event.timestamp < new_issues[i].event.timestamp
-                    {
-                        new_issues[i] = w;
-                    }
-                    continue;
+        for w in batch {
+            let key = (w.project_id, w.event.group_hash);
+            if let Some(slot) = seen_in_batch.get(&key) {
+                if let Some(i) = *slot
+                    && w.event.timestamp < new_issues[i].event.timestamp
+                {
+                    new_issues[i] = w;
                 }
-                let slot = match issues.get(&key) {
-                    None => {
-                        new_issues.push(w);
-                        Some(new_issues.len() - 1)
-                    }
-                    Some(IssueStatus::Resolved) => {
-                        activity.push((key.0, key.1, IssueStatus::Unresolved, "regression"));
-                        None
-                    }
-                    Some(_) => None,
-                };
-                seen_in_batch.insert(key, slot);
+                continue;
             }
+            let slot = match self.caches.issues.get(&key) {
+                None => {
+                    new_issues.push(w);
+                    Some(new_issues.len() - 1)
+                }
+                Some(IssueStatus::Resolved) => {
+                    activity.push((key.0, key.1, IssueStatus::Unresolved, "regression"));
+                    None
+                }
+                Some(_) => None,
+            };
+            seen_in_batch.insert(key, slot);
         }
 
         // A failed append in an earlier batch may have left rows behind.
@@ -492,17 +569,19 @@ impl Writer {
                 )?;
                 for w in &new_issues {
                     let e = &w.event;
+                    // The overflow issue does not take after its first event.
+                    let overflow = e.group_hash == OVERFLOW_GROUP;
                     stmt.execute(params![
                         w.project_id as i32,
                         e.group_hash,
                         e.timestamp.timestamp_micros(),
                         e.event_id.to_string(),
                         e.release,
-                        e.title,
-                        e.culprit,
-                        e.level,
+                        if overflow { OVERFLOW_TITLE } else { e.title.as_str() },
+                        if overflow { None } else { e.culprit.as_deref() },
+                        if overflow { "warning" } else { e.level.as_str() },
                         e.platform,
-                        e.exception_type,
+                        if overflow { None } else { e.exception_type.as_deref() },
                     ])?;
                 }
             }
@@ -518,12 +597,14 @@ impl Writer {
         self.conn.execute_batch(&ns.sql("DELETE FROM $T.staging_events"))?;
         result?;
 
-        let mut issues = self.caches.issues.write().expect("lock");
         for w in new_issues {
-            issues.insert((w.project_id, w.event.group_hash), IssueStatus::Unresolved);
+            self.caches.issues.insert((w.project_id, w.event.group_hash), IssueStatus::Unresolved);
         }
         for (p, g, s, _) in activity {
-            issues.insert((p, g), s);
+            self.caches.issues.insert((p, g), s);
+        }
+        for (project, n) in new_per_project {
+            self.new_issues.add(project, hour, n);
         }
         Ok(())
     }
@@ -566,10 +647,11 @@ impl Writer {
         reason: &str,
     ) -> Result<bool, WriteError> {
         let ns = &self.ns;
-        match self.caches.issues.read().expect("lock").get(&(project_id, group_hash)) {
+        self.load_issues([(project_id, group_hash)])?;
+        match self.caches.issues.get(&(project_id, group_hash)) {
             None => return Err(WriteError::IssueNotFound),
             // Idempotent: the same status again writes nothing.
-            Some(s) if *s == status => return Ok(false),
+            Some(s) if s == status => return Ok(false),
             Some(_) => {}
         }
         self.in_tx(|c| {
@@ -579,7 +661,7 @@ impl Writer {
             )?;
             Ok(())
         })?;
-        self.caches.issues.write().expect("lock").insert((project_id, group_hash), status);
+        self.caches.issues.insert((project_id, group_hash), status);
         Ok(true)
     }
 
@@ -650,5 +732,23 @@ impl Writer {
             tracing::info!(deleted, "retention removed old events");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_issue_count_is_per_project_and_hour() {
+        let mut c = NewIssueCount::default();
+        c.add(1, 100, 2);
+        c.add(1, 100, 3);
+        assert_eq!(c.get(1, 100), 5);
+        assert_eq!(c.get(2, 100), 0);
+        assert_eq!(c.get(1, 101), 0, "a new hour starts at zero");
+        c.add(1, 101, 1);
+        assert_eq!(c.get(1, 101), 1);
+        assert_eq!(c.get(1, 100), 0, "only the current hour is kept");
     }
 }

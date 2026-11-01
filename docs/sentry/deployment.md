@@ -327,7 +327,8 @@ about half the container memory (DuckDB uses some memory outside its limit).
 | bigger / error storms | 1M+ | 2 | 4-8 GiB | 2-4GB |
 
 Watch `/metrics` (`sdl_write_batch_seconds`, `sdl_ingest_rejected_total`,
-`sdl_write_errors_total`, `sdl_maintenance_errors_total`) and `/v1/info`
+`sdl_write_errors_total`, `sdl_maintenance_errors_total`,
+`sdl_issue_overflow_events_total`) and `/v1/info`
 (queue depth). Do not set a CPU limit below 1 core or compaction throttles.
 
 ## Health and monitoring

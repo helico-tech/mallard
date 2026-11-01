@@ -95,9 +95,23 @@ Status is `arg_max(status, changed_at)` over `issue_activity`. Reasons:
 `user` (API) and `regression` (a new event for a resolved issue reopens it;
 ignored issues stay ignored).
 
-The writer keeps `(project, group) -> status` in memory to decide "new issue"
-and "regression" without reading the lake on the hot path. It is loaded at
-startup and updated only after a commit succeeds.
+The writer keeps `(project, group) -> status` of recently seen issues in memory
+to decide "new issue" and "regression" without reading the lake on the hot
+path. The cache holds at most 200,000 issues and forgets an issue without
+events for the retention period; it is not loaded at startup. On a miss the
+writer asks the lake, once per batch for all missing groups, so an issue that
+left the cache keeps its one `issues` row and its status. The cache changes only
+after a commit succeeds.
+
+**Limit on new issues.** A project gets at most 1000 new issues per hour
+(`MAX_NEW_ISSUES_PER_HOUR`, per process; not configurable). Events of further
+new groups go into one issue per project, "Too many new issues"
+(`OVERFLOW_GROUP`, `6d616c6c61726421`), and are counted in
+`sdl_issue_overflow_events_total`. Each event keeps its own title and payload,
+so nothing is lost but the grouping; the next hour those groups get their own
+issue from their next event on. Known groups are never affected.
+`issues` and `issue_activity` rows stay after their events are past retention;
+an issue that comes back keeps its history.
 
 ### Sourcemap tables
 

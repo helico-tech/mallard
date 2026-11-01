@@ -8,6 +8,7 @@
 //! `received_at`, so DuckLake's per-file min/max still skips other days.
 //! Event lists, trace lookups and retention stay on `received_at`.
 
+use super::schema::OVERFLOW_GROUP;
 use super::{Ns, us_to_dt};
 use anyhow::Result;
 use mallard_duck::duckdb::types::ToSql;
@@ -332,9 +333,12 @@ pub fn list_issues(
         let Some(g) = parse_group_id(&i.id) else { continue };
         if let Some((users, title, culprit, level)) = latest.remove(&g) {
             i.user_count = users;
-            i.title = title;
-            i.culprit = culprit.or(i.culprit.take());
-            i.level = level;
+            // Events of the overflow issue each have their own title.
+            if g != OVERFLOW_GROUP {
+                i.title = title;
+                i.culprit = culprit.or(i.culprit.take());
+                i.level = level;
+            }
         }
         if let Some(v) = t.remove(&g) {
             i.trend = v;
@@ -427,13 +431,15 @@ pub fn issue_detail(
     let tags = tag_facets(conn, ns, project_id, group, w)?;
     let trend = trends(conn, ns, project_id, w, &[group])?.remove(&group).unwrap_or_default();
     let first_seen = us_to_dt(first_us);
+    // Events of the overflow issue each have their own title.
+    let overflow = group == OVERFLOW_GROUP;
     Ok(Some(IssueDetail {
         summary: IssueSummary {
             id: group_id(group),
             project_id,
-            title: l_title.unwrap_or(title),
-            culprit: l_culprit.or(culprit),
-            level: l_level.unwrap_or(level),
+            title: if overflow { title } else { l_title.unwrap_or(title) },
+            culprit: if overflow { culprit } else { l_culprit.or(culprit) },
+            level: if overflow { level } else { l_level.unwrap_or(level) },
             platform,
             exception_type,
             status,

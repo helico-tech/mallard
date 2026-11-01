@@ -9,6 +9,11 @@
 /// no migrations yet.
 pub const SCHEMA_VERSION: i32 = 1;
 
+/// The group of events over the limit of new issues per hour ("too many
+/// issues"), one per project. A fixed value; a real group hash is an xxh3.
+pub const OVERFLOW_GROUP: u64 = 0x6d61_6c6c_6172_6421;
+pub const OVERFLOW_TITLE: &str = "Too many new issues";
+
 pub const CREATE: &[&str] = &[
     "CREATE SCHEMA IF NOT EXISTS $S",
     "CREATE TABLE IF NOT EXISTS $S.meta (key VARCHAR NOT NULL, value VARCHAR NOT NULL, updated_at TIMESTAMP NOT NULL)",
