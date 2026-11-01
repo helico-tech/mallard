@@ -225,7 +225,12 @@ impl Config {
                 && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
             anyhow::ensure!(ok, "{name} must match [a-z_][a-z0-9_]*, got {v:?}");
         }
-        anyhow::ensure!(url::Url::parse(&self.public_url).is_ok(), "public_url must be an absolute URL");
+        let public_url = url::Url::parse(&self.public_url).ok();
+        anyhow::ensure!(
+            public_url.is_some_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host()),
+            "public_url must be an http(s) URL with a host, got {:?}",
+            self.public_url
+        );
         anyhow::ensure!(self.batch_max > 0 && self.queue_capacity > 0, "batch_max and queue_capacity must be > 0");
         Ok(())
     }
@@ -264,5 +269,9 @@ mod tests {
         let c = Config { schema: "bad;drop".into(), ..Config::default() };
         assert!(c.validate().is_err());
         assert!(Config::default().validate().is_ok());
+        for bad in ["data:x", "localhost:8000", "/sentry"] {
+            let c = Config { public_url: bad.into(), ..Config::default() };
+            assert!(c.validate().is_err(), "{bad}");
+        }
     }
 }

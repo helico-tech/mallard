@@ -160,16 +160,18 @@ async fn readyz(State(state): S) -> Response {
     }
 }
 
-fn to_project(state: &AppState, p: ProjectRow) -> Project {
-    Project {
-        dsn: Dsn::format(&state.cfg.public_url, &p.public_key, p.id),
+fn to_project(state: &AppState, p: ProjectRow) -> Result<Project, ApiErr> {
+    // Config::validate guarantees a public_url that can carry the key.
+    let dsn = Dsn::build(&state.cfg.public_url, &p.public_key, p.id).map_err(anyhow::Error::from)?;
+    Ok(Project {
+        dsn,
         id: p.id,
         slug: p.slug,
         name: p.name,
         platform: p.platform,
         public_key: p.public_key,
         created_at: p.created_at,
-    }
+    })
 }
 
 fn project(state: &AppState, r: &str) -> Result<ProjectRow, ApiErr> {
@@ -193,8 +195,8 @@ async fn info(State(state): S) -> Json<ServerInfo> {
 }
 
 #[utoipa::path(get, path = "/v1/projects", responses((status = 200, body = Vec<Project>)))]
-async fn list_projects(State(state): S) -> Json<Vec<Project>> {
-    Json(state.db.caches.projects().into_iter().map(|p| to_project(&state, p)).collect())
+async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
+    Ok(Json(state.db.caches.projects().into_iter().map(|p| to_project(&state, p)).collect::<Result<_, _>>()?))
 }
 
 fn slugify(name: &str) -> String {
@@ -231,13 +233,13 @@ async fn create_project(
         return Err(bad("name is required"));
     }
     let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await?;
-    Ok((StatusCode::CREATED, Json(to_project(&state, row))))
+    Ok((StatusCode::CREATED, Json(to_project(&state, row)?)))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}", params(("project" = String, Path, description = "Project id or slug")),
     responses((status = 200, body = Project), (status = 404, body = ApiError)))]
 async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Project> {
-    Ok(Json(to_project(&state, project(&state, &p)?)))
+    Ok(Json(to_project(&state, project(&state, &p)?)?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues",

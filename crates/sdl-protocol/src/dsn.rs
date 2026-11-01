@@ -39,16 +39,13 @@ impl Dsn {
 
     /// Build a DSN string for a project on a public base url such as
     /// `https://errors.example.com` or `http://localhost:8000/prefix`.
-    pub fn format(base_url: &str, public_key: &str, project_id: u32) -> String {
-        match url::Url::parse(base_url) {
-            Ok(mut u) => {
-                let _ = u.set_username(public_key);
-                let path = u.path().trim_end_matches('/').to_string();
-                u.set_path(&format!("{path}/{project_id}"));
-                u.to_string()
-            }
-            Err(_) => format!("{base_url}/{project_id}"),
-        }
+    /// Fails when the url cannot carry a key (no host, e.g. `data:x`).
+    pub fn build(base_url: &str, public_key: &str, project_id: u32) -> Result<String, DsnError> {
+        let mut u = url::Url::parse(base_url).map_err(|_| DsnError::InvalidUrl)?;
+        u.set_username(public_key).map_err(|()| DsnError::InvalidUrl)?;
+        let path = u.path().trim_end_matches('/').to_string();
+        u.set_path(&format!("{path}/{project_id}"));
+        Ok(u.to_string())
     }
 }
 
@@ -81,8 +78,10 @@ mod tests {
     }
 
     #[test]
-    fn formats_dsn() {
-        assert_eq!(Dsn::format("http://localhost:8000", "k", 3), "http://k@localhost:8000/3");
-        assert_eq!(Dsn::format("https://e.example.com/x/", "k", 3), "https://k@e.example.com/x/3");
+    fn builds_dsn() {
+        assert_eq!(Dsn::build("http://localhost:8000", "k", 3).unwrap(), "http://k@localhost:8000/3");
+        assert_eq!(Dsn::build("https://e.example.com/x/", "k", 3).unwrap(), "https://k@e.example.com/x/3");
+        assert_eq!(Dsn::build("data:x", "k", 3), Err(DsnError::InvalidUrl), "a DSN without its key");
+        assert_eq!(Dsn::build("nope", "k", 3), Err(DsnError::InvalidUrl));
     }
 }
