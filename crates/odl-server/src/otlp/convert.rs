@@ -606,6 +606,8 @@ struct MetricCtx<'a> {
     description: &'a str,
     unit: &'a str,
     temporality: &'static str,
+    /// Data point kind, part of the series identity.
+    kind: &'static str,
 }
 
 impl MetricBase {
@@ -650,7 +652,13 @@ impl MetricBase {
         self.description.append_value(m.description);
         self.unit.append_value(m.unit);
         self.temporality.append_value(m.temporality);
-        self.series.append_value(series_id(m.res_hash, m.name, &a));
+        self.series.append_value(series_id(
+            m.res_hash,
+            (m.scope_name, m.scope_version),
+            m.name,
+            m.kind,
+            &a,
+        ));
         self.flags.append_value(flags);
         self.scope_name.append_value(m.scope_name);
         self.scope_version.append_value(m.scope_version);
@@ -719,11 +727,24 @@ fn resource_hash(res: &ResourceCtx) -> u64 {
     h.digest()
 }
 
-/// Stable id of a time series: metric name + resource attributes + point attributes.
-fn series_id(res_hash: u64, name: &str, a: &[(String, String)]) -> u64 {
+/// Stable id of a time series: resource attributes + instrumentation scope +
+/// metric name + data point kind + point attributes (the OTel stream identity).
+fn series_id(
+    res_hash: u64,
+    scope: (&str, &str),
+    name: &str,
+    kind: &str,
+    a: &[(String, String)],
+) -> u64 {
     let mut h = Xxh3::new();
     h.update(&res_hash.to_le_bytes());
+    h.update(scope.0.as_bytes());
+    h.update(&[3]);
+    h.update(scope.1.as_bytes());
+    h.update(&[3]);
     h.update(name.as_bytes());
+    h.update(&[2]);
+    h.update(kind.as_bytes());
     h.update(&[2]);
     hash_attrs(&mut h, a);
     h.digest()
@@ -808,9 +829,11 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     description: &m.description,
                     unit: &m.unit,
                     temporality: "",
+                    kind: "",
                 };
                 match &m.data {
                     Some(Data::Gauge(g)) => {
+                        ctx.kind = "gauge";
                         for p in &g.data_points {
                             np.append(
                                 &ctx,
@@ -826,6 +849,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         }
                     }
                     Some(Data::Sum(sum)) => {
+                        ctx.kind = "sum";
                         ctx.temporality = temporality(sum.aggregation_temporality);
                         for p in &sum.data_points {
                             np.append(
@@ -842,6 +866,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         }
                     }
                     Some(Data::Histogram(hist)) => {
+                        ctx.kind = "histogram";
                         ctx.temporality = temporality(hist.aggregation_temporality);
                         for p in &hist.data_points {
                             h.append(
@@ -861,6 +886,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         }
                     }
                     Some(Data::ExponentialHistogram(hist)) => {
+                        ctx.kind = "exp_histogram";
                         ctx.temporality = temporality(hist.aggregation_temporality);
                         for p in &hist.data_points {
                             e.append(
@@ -887,6 +913,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         }
                     }
                     Some(Data::Summary(sum)) => {
+                        ctx.kind = "summary";
                         for p in &sum.data_points {
                             s.append(
                                 &ctx,
@@ -1100,8 +1127,26 @@ mod tests {
         };
         let rh = resource_hash(&res);
         let a = vec![("k".to_string(), "v".to_string())];
-        assert_eq!(series_id(rh, "m", &a), series_id(rh, "m", &a));
-        assert_ne!(series_id(rh, "m", &a), series_id(rh, "m2", &a));
-        assert_ne!(series_id(rh, "m", &a), series_id(rh, "m", &[]));
+        let sc = ("lib", "1.0");
+        assert_eq!(
+            series_id(rh, sc, "m", "sum", &a),
+            series_id(rh, sc, "m", "sum", &a)
+        );
+        assert_ne!(
+            series_id(rh, sc, "m", "sum", &a),
+            series_id(rh, sc, "m2", "sum", &a)
+        );
+        assert_ne!(
+            series_id(rh, sc, "m", "sum", &a),
+            series_id(rh, sc, "m", "sum", &[])
+        );
+        assert_ne!(
+            series_id(rh, sc, "m", "sum", &a),
+            series_id(rh, ("other", "1.0"), "m", "sum", &a)
+        );
+        assert_ne!(
+            series_id(rh, sc, "m", "sum", &a),
+            series_id(rh, sc, "m", "gauge", &a)
+        );
     }
 }

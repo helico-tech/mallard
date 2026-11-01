@@ -23,6 +23,7 @@ use odl_api::{MetricInfo, MetricPoint, MetricQueryResult, MetricSeries};
 use super::{Filter, QResult, QueryError, Window, bad, from_micros, json_col};
 
 const MAX_SERIES: usize = 500;
+const MAX_POINTS: usize = 200_000;
 
 // ---------------------------------------------------------------------------
 // Listing
@@ -226,6 +227,7 @@ type Key = String; // JSON label array
 struct Collector {
     group_by: Vec<String>,
     points: BTreeMap<Key, BTreeMap<i64, f64>>,
+    n_points: usize,
 }
 
 impl Collector {
@@ -233,12 +235,27 @@ impl Collector {
         Self {
             group_by,
             points: BTreeMap::new(),
+            n_points: 0,
         }
     }
-    fn put(&mut self, key: Key, bucket: i64, v: f64) {
+    /// Fails early when the result would exceed the series or point caps,
+    /// instead of materializing everything first.
+    fn put(&mut self, key: Key, bucket: i64, v: f64) -> QResult<()> {
+        if !self.points.contains_key(&key) && self.points.len() >= MAX_SERIES {
+            return Err(bad(format!(
+                "query produces more than {MAX_SERIES} series; narrow group_by or add filters"
+            )));
+        }
+        self.n_points += 1;
+        if self.n_points > MAX_POINTS {
+            return Err(bad(format!(
+                "query produces more than {MAX_POINTS} points; use a larger step or a shorter window"
+            )));
+        }
         if v.is_finite() {
             self.points.entry(key).or_default().insert(bucket, v);
         }
+        Ok(())
     }
     fn finish(self) -> QResult<Vec<MetricSeries>> {
         if self.points.len() > MAX_SERIES {
@@ -311,8 +328,10 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                 Agg::Quantile(_) => {
                     return Err(bad("percentiles need a histogram or summary metric"));
                 }
-                Agg::Rate | Agg::Increase if kind.metric_type != "sum" => {
-                    return Err(bad("rate/increase need a sum (counter) metric"));
+                Agg::Rate | Agg::Increase if !is_counter => {
+                    return Err(bad(
+                        "rate/increase need a monotonic sum (counter); use avg/min/max for gauges and up-down counters",
+                    ));
                 }
                 _ => {}
             }
@@ -371,7 +390,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                 let (k, b, v) = row?;
                 let v = v.unwrap_or(f64::NAN);
                 let v = if agg == Agg::Rate { v / step as f64 } else { v };
-                col.put(k, b, v);
+                col.put(k, b, v)?;
             }
         }
         table => {
@@ -509,7 +528,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                     Agg::Rate => m.hist.count / step as f64,
                     _ => unreachable!(),
                 };
-                col.put(k, b, v);
+                col.put(k, b, v)?;
             }
         }
     }
@@ -594,10 +613,16 @@ impl Hist {
                 if at_or_below_zero > 0.0 {
                     h.buckets.insert(Bound(0.0), at_or_below_zero);
                 }
+                // Bucket i covers (base^i, base^(i+1)]. An empty bucket at the
+                // lower edge of the first one gives interpolation its real
+                // lower bound (not 0), and empty buckets are kept so gaps
+                // don't stretch the next bucket's range.
+                if !pos.is_empty() {
+                    h.buckets
+                        .entry(Bound(base.powf(r.offset as f64)))
+                        .or_insert(0.0);
+                }
                 for (k, c) in pos.iter().enumerate() {
-                    if *c == 0 {
-                        continue;
-                    }
                     let idx = r.offset as f64 + k as f64;
                     *h.buckets.entry(Bound(base.powf(idx + 1.0))).or_default() += *c as f64;
                 }
@@ -622,9 +647,8 @@ impl Hist {
             if d < 0.0 {
                 return self.clone();
             }
-            if d > 0.0 {
-                out.buckets.insert(*b, d);
-            }
+            // Keep empty buckets: they carry bucket edges for interpolation.
+            out.buckets.insert(*b, d);
         }
         out
     }
@@ -720,6 +744,39 @@ mod tests {
         assert_eq!(d.buckets[&Bound(10.0)], 3.0);
         let reset = a.minus(&b);
         assert_eq!(reset.count, a.count);
+    }
+
+    #[test]
+    fn exp_histogram_percentile_uses_bucket_lower_bound() {
+        // scale 20: tiny buckets; every value is 100.0
+        let scale = 20;
+        let base = 2f64.powf(2f64.powi(-scale));
+        let idx = (100f64.ln() / base.ln()).ceil() as i32 - 1; // bucket containing 100
+        let r = Row {
+            key: String::new(),
+            series: 1,
+            bucket: 0,
+            count: 10.0,
+            sum: 1000.0,
+            a: Some("[10]".into()),
+            b: Some("[]".into()),
+            scale: Some(scale),
+            zero: 0,
+            offset: idx,
+        };
+        let h = Hist::from_row("metric_exp_histograms", &r);
+        for q in [0.5, 0.99] {
+            let v = h.quantile(q).unwrap();
+            assert!((v - 100.0).abs() < 0.01, "p{q} = {v}");
+        }
+        // Still right after a cumulative difference.
+        let mut later = h.clone();
+        for c in later.buckets.values_mut() {
+            *c *= 2.0;
+        }
+        later.count *= 2.0;
+        let d = later.minus(&h);
+        assert!((d.quantile(0.5).unwrap() - 100.0).abs() < 0.01);
     }
 
     #[test]

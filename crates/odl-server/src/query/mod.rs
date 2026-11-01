@@ -8,12 +8,16 @@ pub mod sql;
 pub mod storage;
 pub mod traces;
 
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
+use duckdb::InterruptHandle;
 use duckdb::{Connection, types::Value};
 use odl_api::TimeWindow;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::parse_duration;
 
@@ -44,58 +48,149 @@ pub fn bad(msg: impl Into<String>) -> QueryError {
 }
 
 /// Fixed-size pool of read connections.
+///
+/// A connection and its semaphore permit always travel together inside the
+/// blocking task and are returned by a drop guard, so neither a panic in the
+/// query code nor a cancelled request (client disconnect) can shrink the pool.
 pub struct Reader {
-    conns: Mutex<Vec<Connection>>,
-    sem: Semaphore,
+    conns: Arc<Mutex<Vec<Connection>>>,
+    sem: Arc<Semaphore>,
     timeout: Duration,
     pub max_window: Duration,
+}
+
+/// Returns the connection to the pool when dropped (also during unwinding).
+struct Pooled {
+    conn: Option<Connection>,
+    pool: Arc<Mutex<Vec<Connection>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for Pooled {
+    fn drop(&mut self) {
+        if let Some(c) = self.conn.take() {
+            self.pool.lock().unwrap_or_else(|p| p.into_inner()).push(c);
+        }
+    }
+}
+
+/// Keeps interrupting a running query until it finishes. Started when the
+/// request times out or is cancelled: DuckDB only interrupts the statement
+/// that is running, so a multi-statement query function needs repeated
+/// interrupts.
+/// `done` and the interrupt share one lock, so an interrupt can never hit
+/// the next query that reuses the connection.
+fn keep_interrupting(handle: Arc<InterruptHandle>, done: Arc<Mutex<bool>>) {
+    tokio::spawn(async move {
+        loop {
+            {
+                let d = done.lock().unwrap_or_else(|p| p.into_inner());
+                if *d {
+                    return;
+                }
+                handle.interrupt();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+}
+
+fn mark_done(done: &Mutex<bool>) {
+    *done.lock().unwrap_or_else(|p| p.into_inner()) = true;
+}
+
+fn is_done(done: &Mutex<bool>) -> bool {
+    *done.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Interrupts the query if the request future is dropped before it finished.
+struct CancelGuard {
+    handle: Arc<InterruptHandle>,
+    done: Arc<Mutex<bool>>,
+    armed: bool,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.armed && !is_done(&self.done) {
+            keep_interrupting(self.handle.clone(), self.done.clone());
+        }
+    }
 }
 
 impl Reader {
     pub fn new(conns: Vec<Connection>, timeout: Duration, max_window: Duration) -> Self {
         let n = conns.len();
         Self {
-            conns: Mutex::new(conns),
-            sem: Semaphore::new(n),
+            conns: Arc::new(Mutex::new(conns)),
+            sem: Arc::new(Semaphore::new(n)),
             timeout,
             max_window,
         }
     }
 
     /// Run `f` on a pooled connection in a blocking thread, with a timeout.
-    /// On timeout the query is interrupted and the connection returned.
+    /// On timeout or cancellation the query is interrupted; the connection
+    /// returns to the pool when the blocking work has actually stopped.
     pub async fn run<T, F>(&self, f: F) -> QResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> QResult<T> + Send + 'static,
     {
-        let _permit = tokio::time::timeout(self.timeout, self.sem.acquire())
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let permit = tokio::time::timeout_at(deadline, self.sem.clone().acquire_owned())
             .await
             .map_err(|_| QueryError::Busy)?
-            .expect("semaphore never closed");
+            .map_err(|_| QueryError::Busy)?;
         let conn = self
             .conns
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .pop()
-            .expect("permit implies a free connection");
-        let interrupt = conn.interrupt_handle();
+            .ok_or(QueryError::Busy)?;
+        let handle = conn.interrupt_handle();
+        let done = Arc::new(Mutex::new(false));
+        let mut guard = CancelGuard {
+            handle: handle.clone(),
+            done: done.clone(),
+            armed: true,
+        };
+        let pooled = Pooled {
+            conn: Some(conn),
+            pool: self.conns.clone(),
+            _permit: permit,
+        };
+        let done2 = done.clone();
         let mut task = tokio::task::spawn_blocking(move || {
-            let r = f(&conn);
-            (conn, r)
+            let pooled = pooled;
+            // Mark done even if `f` panics, before the connection goes back.
+            struct Done(Arc<Mutex<bool>>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    mark_done(&self.0);
+                }
+            }
+            let r = {
+                let _d = Done(done2);
+                f(pooled.conn.as_ref().expect("connection present"))
+            };
+            drop(pooled);
+            r
         });
-        let (conn, res) = match tokio::time::timeout(self.timeout, &mut task).await {
-            Ok(joined) => joined
-                .map_err(|e| QueryError::Internal(anyhow::anyhow!("query task failed: {e}")))?,
+        let res = match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "query task failed");
+                Err(QueryError::Internal(anyhow::anyhow!("query task failed")))
+            }
             Err(_) => {
-                interrupt.interrupt();
-                let (conn, _) = task
-                    .await
-                    .map_err(|e| QueryError::Internal(anyhow::anyhow!("query task failed: {e}")))?;
-                (conn, Err(QueryError::Timeout(self.timeout)))
+                // The task keeps the connection until it stops; it is
+                // returned to the pool then.
+                keep_interrupting(handle, done.clone());
+                Err(QueryError::Timeout(self.timeout))
             }
         };
-        self.conns.lock().unwrap().push(conn);
+        guard.armed = false;
         res
     }
 }
@@ -148,7 +243,10 @@ impl Window {
         let s = match step {
             Some(s) => {
                 let d = parse_duration(s).map_err(|e| bad(format!("invalid step={s:?}: {e}")))?;
-                d.as_secs().max(1)
+                // At most one bucket for the whole window (also bounds all
+                // arithmetic on the step below).
+                d.as_secs()
+                    .clamp(1, (secs.ceil() as u64).clamp(1, 366 * 86400))
             }
             None => {
                 const NICE: [u64; 17] = [
