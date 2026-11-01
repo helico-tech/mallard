@@ -45,6 +45,12 @@ After stories 1 and 2. Regenerate API types from `docs/openapi.json`.
   - Cmd-K lands on an id at once when it has one match, and lists several. It looks over
     the longest preset (30d by default), not `find`'s 7d.
   - Removed: remembering the last project in `localStorage`, since the address holds it.
+- 2026-11-01: CI failed two new browser tests: keys pressed before the screen had
+  loaded were lost. That is the tests: 4 of them did not wait for data, as the others do.
+  A key in that moment does nothing harmful, so the app stays as it is. Running everything
+  at 6x CPU throttle then found a real bug, in the app: address writes started from the
+  render's parameters, which can lag behind the address, so a quick `c` could be undone.
+  They now start from the address itself (`writeParams`), with a test at that throttle.
 
 ## Follow-ups
 - [issue 0142](../../issues/0142-project-slugs-with-underscore-split-apps.md) shows here

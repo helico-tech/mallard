@@ -3,13 +3,13 @@ import { Badge, Button, Link as KumoLink, Switch, Table, Tabs, Tooltip, useKumoT
 import { ArrowCounterClockwiseIcon, CaretLeftIcon, CaretRightIcon, CheckIcon, EyeSlashIcon, GraphIcon } from "@phosphor-icons/react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "@/api/client";
 import { sentry } from "@/api/sentry";
 import type { EventDetail, EventSummary, IssueDetail } from "@/api/types";
 import { useKeys } from "@/app/keys";
 import { useInterval } from "@/app/settings";
-import { useParam, useWindow } from "@/app/window";
+import { useParam, useWindow, writeParams } from "@/app/window";
 import { Sparkline } from "@/components/charts";
 import { useListNav } from "@/components/list";
 import { useBack, Ago, CopyId, DataTable, DetailHeader, EmptyState, ErrorState, Facts, KeyHint, Level, Pad, Page, Section, StaleNote, Status, TableSkeleton } from "@/components/ui-bits";
@@ -338,7 +338,6 @@ export function IssuePage() {
   const { w } = useWindow();
   const [section, setSection] = useParam("section", "overview");
   const [eventParam, setEventParam] = useParam("event");
-  const [, setParams] = useSearchParams();
   const [inAppOnly, setInAppOnly] = useState(false);
   const [raw, setRaw] = useState(false);
   const outerScroller = useRef<HTMLDivElement>(null);
@@ -401,14 +400,10 @@ export function IssuePage() {
     else toasts.add({ title: "This event has no trace id" });
   };
   const show = (id: string) => {
-    setParams(
-      (p) => {
-        p.set("event", id);
-        p.set("section", "stack");
-        return p;
-      },
-      { replace: true },
-    );
+    writeParams(navigate, (p) => {
+      p.set("event", id);
+      p.set("section", "stack");
+    }, true);
   };
 
   useKeys({
