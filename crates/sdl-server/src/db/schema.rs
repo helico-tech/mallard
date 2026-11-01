@@ -1,7 +1,7 @@
 //! DuckLake schema. `$S` is replaced by `<lake_alias>.<schema>`. See `docs/data-model.md` for the reasoning.
 //!
 //! All tables are append-only, except retention deletes on `events` and the
-//! coordination rows in `meta` (ADR 0015).
+//! coordination rows in `meta` (ADR 0021).
 //! Mutable state (issue status) is an append-only activity log where the
 //! latest row wins. That keeps writes cheap in a lakehouse, where an
 //! UPDATE means writing delete files.

@@ -142,7 +142,7 @@ const EARLY_COMMIT_EVENTS: usize = 200;
 pub const MAX_NEW_ISSUES_PER_HOUR: u32 = 1000;
 
 /// How often to pick up what other processes on this catalog wrote (projects,
-/// status changes, bundles; ADR 0015).
+/// status changes, bundles; ADR 0021).
 const SYNC_INTERVAL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(30) };
 
 /// A sync reads rows this much older than the last one: writes of another
@@ -388,7 +388,7 @@ impl Writer {
         self.sync.done();
     }
 
-    /// Pick up what other processes wrote (ADR 0015). New issues are found on
+    /// Pick up what other processes wrote (ADR 0021). New issues are found on
     /// a cache miss. All cache changes of status happen on this thread, so a
     /// sync cannot overwrite a newer status with an older one.
     fn sync_catalog(&self, since_us: i64) -> Result<()> {
@@ -697,7 +697,7 @@ impl Writer {
 
     /// Ids count up. Writing the `project_seq` row in the same transaction
     /// makes two concurrent calls conflict, also across processes (a
-    /// `DELETE` conflicts with concurrent writes, ADR 0015); the loser tries
+    /// `DELETE` conflicts with concurrent writes, ADR 0021); the loser tries
     /// again and sees the other's project, its id and its slug.
     fn create_project(&self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow, WriteError> {
         let ns = &self.ns;

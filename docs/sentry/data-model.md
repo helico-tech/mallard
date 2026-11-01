@@ -10,11 +10,11 @@ Design rules:
 1. **Append-only.** Rows are never updated. Mutable state (issue status) is an
    append-only log where the newest row wins. In a lakehouse an `UPDATE`
    rewrites data or writes delete files; an `INSERT` is cheap. The exceptions
-   are retention and two coordination rows in `meta` (ADR 0015).
+   are retention and two coordination rows in `meta` (ADR 0021).
 2. **One writer per process.** All row writes go through one thread, in
    batches. One batch is one DuckLake transaction and one snapshot. Maintenance
    runs next to it and only rewrites files (ADR 0014). Several processes can
-   share a catalog (ADR 0015).
+   share a catalog (ADR 0021).
 3. **Prune by time, then by issue.** Almost every query filters on
    `project_id`, a time window and often `group_hash`. The physical
    layout is built for exactly that.
@@ -38,7 +38,7 @@ Design rules:
 | `projects` | one per project | on create | slug, DSN public key |
 | `artifact_bundles` | one per (bundle, project) | sourcemap upload | bundle object + release |
 | `artifact_files` | one per file in a bundle | sourcemap upload | debug-id / url lookup |
-| `meta` | a few | startup, project creation, maintenance | schema version; `project_seq` and `maintenance_lease` are replaced (ADR 0015) |
+| `meta` | a few | startup, project creation, maintenance | schema version; `project_seq` and `maintenance_lease` are replaced (ADR 0021) |
 
 ### `events`
 

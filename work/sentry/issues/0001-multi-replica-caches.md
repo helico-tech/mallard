@@ -33,7 +33,7 @@ concurrent flushes of one table conflict.
   one), and rely on DuckLake conflict retries for concurrent commits.
 
 ### What changed (done)
-Decisions and reasons: [ADR 0015](../../../docs/adr/0015-sentry-several-processes.md).
+Decisions and reasons: [ADR 0021](../../../docs/adr/0021-sentry-several-processes.md).
 - Maintenance: one process, by a lease row in `meta` (a transaction that deletes
   and inserts it, so the second commit conflicts). No config flag: pods of one
   Deployment share their config. Safety does not rely on the lease.

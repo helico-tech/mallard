@@ -268,7 +268,7 @@ few hundred MB). Give the PVC 5-10 GiB; most of it is DuckDB spill space.
 ### Running more than one pod
 
 With the PostgreSQL catalog several pods can share one catalog
-([ADR 0015](../adr/0015-sentry-several-processes.md)). Ingest and API work on
+([ADR 0021](../adr/0021-sentry-several-processes.md)). Ingest and API work on
 every pod. Maintenance runs on one of them: the holder of a lease in the catalog
 (valid for 3 flush intervals, so a replacement takes over within about 15
 minutes by default).

@@ -7,7 +7,7 @@ created: 2026-11-01
 
 ## Problem
 The Sentry side runs maintenance in one process, by a lease in its `meta` table
-(ADR 0015). The otel side still runs it on every replica, with jitter. It is safe
+(ADR 0021). The otel side still runs it on every replica, with jitter. It is safe
 but wasteful: flushes and merges conflict and roll back, and two concurrent
 `ducklake_cleanup_old_files` fail with "Failed to delete scheduled cleanup files"
 (seen on Postgres, 2026-11-01). In mallard, otel owns catalog-wide expiry and

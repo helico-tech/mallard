@@ -1,4 +1,4 @@
-# 0015 — Several Sentry processes on one catalog
+# 0021 — Several Sentry processes on one catalog
 
 ## Status
 accepted (amends `docs/sentry/adr/0001`: "one process per catalog")

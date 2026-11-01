@@ -35,7 +35,7 @@ No acknowledged row was lost or duplicated in any run. A merge and flush of
 - Every lake write of the writer is tried again on a conflict (7 times, 20 ms
   doubling, then the batch fails). Inside one process only retention could
   cause one and it runs on the same thread; the retries are for other
-  processes (ADR 0015).
+  processes (ADR 0021).
 - `POST /v1/maintenance` still goes through the writer's queue, so what was
   queued before it is committed first; the writer only hands it on.
 - On shutdown maintenance stops first, interrupting a running merge (rolled

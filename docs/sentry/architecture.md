@@ -90,7 +90,7 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
   updated by the writer after a commit. Several processes can share a Postgres
   catalog: a cache miss reads the catalog, the writer reads what others wrote
   every 30 s, and one process runs maintenance
-  ([ADR 0015](../adr/0015-sentry-several-processes.md)).
+  ([ADR 0021](../adr/0021-sentry-several-processes.md)).
 
 ## Embedding
 

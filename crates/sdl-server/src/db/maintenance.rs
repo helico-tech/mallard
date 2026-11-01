@@ -8,7 +8,7 @@
 //! one step that stays on the writer thread ([`WriteCmd::Retention`]).
 //!
 //! With several processes on one catalog, the holder of a lease in `meta` runs
-//! maintenance (ADR 0015). Overlapping runs are safe, only wasteful: losers of
+//! maintenance (ADR 0021). Overlapping runs are safe, only wasteful: losers of
 //! a conflict roll back.
 
 use super::writer::WriteCmd;
