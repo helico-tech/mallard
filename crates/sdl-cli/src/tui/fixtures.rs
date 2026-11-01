@@ -163,7 +163,7 @@ pub fn loaded_app() -> App {
 pub fn detail_app() -> App {
     let mut app = loaded_app();
     app.issues_state.select(Some(1));
-    app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
+    let _ = app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
     app.on_response(Resp::Issue { id: "b2".into(), result: Ok(issue_detail()) });
     app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
     app.on_response(Resp::Event { event_id: "e1".into(), result: Ok(event_detail()) });

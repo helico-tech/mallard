@@ -54,6 +54,7 @@ impl Pane for Errors {
             sdl_cli::Outcome::Ignored => None,
             sdl_cli::Outcome::Quit => Some(Ask::Quit),
             sdl_cli::Outcome::OpenTrace(t) => Some(Ask::Trace(t)),
+            _ => Some(Ask::Nothing),
         }
     }
     fn tick(&mut self) {

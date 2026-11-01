@@ -28,6 +28,8 @@ use tokio::sync::mpsc;
 
 /// What the host should do after [`Embedded::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use]
 pub enum Outcome {
     /// The key was used.
     Consumed,
@@ -80,16 +82,9 @@ impl Embedded {
         if k.kind == KeyEventKind::Release {
             return Outcome::Ignored;
         }
-        let reqs = self.app.on_key(*k);
+        let (reqs, outcome) = self.app.on_key(*k);
         self.dispatch(reqs);
-        if self.app.quit {
-            self.app.quit = false;
-            return Outcome::Quit;
-        }
-        if let Some(t) = self.app.open_trace.take() {
-            return Outcome::OpenTrace(t);
-        }
-        if self.app.ignored { Outcome::Ignored } else { Outcome::Consumed }
+        outcome
     }
 
     /// Call a few times per second. Never blocks: applies finished loads and

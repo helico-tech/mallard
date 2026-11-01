@@ -27,13 +27,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(area);
     render_header(f, header, app);
-    match app.view {
+    match app.view() {
         View::Issues => render_issues(f, body, app),
         View::Detail => render_detail(f, body, app),
         View::Trace => render_trace(f, body, app),
     }
     render_footer(f, footer, app);
-    match app.overlay.clone() {
+    match app.overlay {
         Overlay::None => {}
         Overlay::Help => render_help(f, area),
         Overlay::Projects { selected } => render_projects(f, area, app, selected),
@@ -102,7 +102,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         }
         None => left.push(Span::styled(app.project.clone().unwrap_or_else(|| "no project".into()), th::dim())),
     }
-    let view = match app.view {
+    let view = match app.view() {
         View::Issues => "",
         View::Detail => "  ›  issue",
         View::Trace => "  ›  trace",
@@ -175,7 +175,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("   R retry", th::dim()),
         ])
     } else {
-        let pairs: &[(&str, &str)] = match app.view {
+        let pairs: &[(&str, &str)] = match app.view() {
             View::Issues => &[
                 ("↑↓", "move"),
                 ("⏎", "open"),
@@ -443,7 +443,8 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let now = app.now;
     let window = app.window.since();
-    let Some(d) = app.detail.as_mut() else { return };
+    let spin = spinner(app);
+    let Screen::Detail(d) = &mut app.screen else { return };
     let [title, tabs, content] =
         Layout::vertical([Constraint::Length(4), Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
@@ -470,7 +471,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(e) = &d.error {
         l1.push(Span::styled(format!("  ✗ {e}"), Style::new().fg(th::RED)));
     } else if s.is_none() {
-        l1.push(Span::styled(format!("  {}", spinner_static(now)), th::dim()));
+        l1.push(Span::styled(format!("  {spin}"), th::dim()));
     }
     let mut l2 = vec![Span::raw(" ")];
     if let Some(s) = &s {
@@ -540,10 +541,6 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         Tab::Events => render_events(f, content, d, now),
         Tab::Json => render_json(f, content, d),
     }
-}
-
-fn spinner_static(now: chrono::DateTime<chrono::Utc>) -> &'static str {
-    SPINNER[(now.timestamp_subsec_millis() / 100) as usize % SPINNER.len()]
 }
 
 fn kv_line(key: &str, value: Span<'static>) -> Line<'static> {
@@ -969,10 +966,10 @@ fn render_json(f: &mut Frame, area: Rect, d: &mut Detail) {
 // ---------------------------------------------------------------- trace view
 
 fn render_trace(f: &mut Frame, area: Rect, app: &mut App) {
-    let now = app.now;
-    let projects = app.projects.clone();
     let spin = spinner(app);
-    let Some(t) = app.trace.as_mut() else { return };
+    let App { projects, screen, now, .. } = app;
+    let now = *now;
+    let Screen::Trace(t) = screen else { return };
     let block = rounded(vec![
         title_span("Trace"),
         Span::styled(format!("{} ", t.trace_id), Style::new().fg(th::ACCENT2)),
@@ -1143,7 +1140,7 @@ mod tests {
     }
 
     fn press(app: &mut App, c: KeyCode) {
-        app.on_key(KeyEvent::from(c));
+        let _ = app.on_key(KeyEvent::from(c));
     }
 
     #[test]

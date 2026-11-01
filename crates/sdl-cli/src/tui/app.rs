@@ -2,6 +2,7 @@
 //! go in, data requests ([`Req`]) come out. `mod.rs` runs the requests on
 //! tokio tasks and feeds the responses back, so the UI never blocks.
 
+use super::Outcome;
 use crate::cli::Hints;
 use crate::event_view::{self as ev, Breadcrumb, Exception, Frame};
 use crate::{SortBy, StatusFilter};
@@ -57,6 +58,8 @@ pub const REFRESH_EVERY: Duration = Duration::from_secs(5);
 pub const INFO_EVERY: Duration = Duration::from_secs(2);
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const PAGE: usize = 10;
+/// Screens kept behind the front one (oldest dropped first).
+const MAX_BACK: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuesKey {
@@ -265,18 +268,28 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Help,
     Projects { selected: usize },
 }
 
+/// The screen in front, with its data. Esc returns to the screen behind
+/// it (`App::back`); the issue list is always at the bottom.
+#[derive(Debug)]
+pub enum Screen {
+    Issues,
+    Detail(Box<Detail>),
+    /// Error events of one trace (all projects).
+    Trace(TraceView),
+}
+
+/// Which kind of screen is in front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Issues,
     Detail,
-    /// Error events of one trace (all projects).
     Trace,
 }
 
@@ -287,9 +300,18 @@ pub struct TraceView {
     pub events: Vec<EventSummary>,
     pub loaded: bool,
     pub state: TableState,
-    /// View to return to on Esc.
-    pub back: Option<View>,
     pub error: Option<String>,
+}
+
+/// What a key press did: requests to send, and what the host should do.
+type Step = (Vec<Req>, Outcome);
+
+fn done(reqs: Vec<Req>) -> Step {
+    (reqs, Outcome::Consumed)
+}
+
+fn ignored() -> Step {
+    (vec![], Outcome::Ignored)
 }
 
 /// One frame of the stack trace view, flattened over the exception chain.
@@ -310,8 +332,6 @@ pub struct Detail {
     pub event_idx: usize,
     /// Id of the shown (or requested) event.
     pub event_id: Option<String>,
-    /// Opened from the trace view: Esc goes back there.
-    pub from_trace: bool,
     pub events_state: TableState,
     pub event: Option<EventDetail>,
     pub exceptions: Vec<Exception>,
@@ -385,8 +405,19 @@ impl Detail {
         }
     }
 
-    pub fn current_event_id(&self) -> Option<&str> {
-        self.event_id.as_deref()
+    /// Show event `idx` of the list: the request that loads it.
+    fn show(&mut self, idx: usize, project: String) -> Option<Req> {
+        let e = self.events.get(idx)?;
+        self.event_idx = idx;
+        self.event_id = Some(e.event_id.clone());
+        self.events_state.select(Some(idx));
+        Some(Req::Event { project, issue: self.id.clone(), event_id: e.event_id.clone() })
+    }
+
+    /// The request for the next older page of events.
+    fn older_page(&self, project: String) -> Option<Req> {
+        let cursor = self.next_cursor.clone()?;
+        Some(Req::Events { project, issue: self.id.clone(), before: Some(cursor) })
     }
 
     /// Trace id of the shown event.
@@ -417,9 +448,9 @@ pub struct App {
     pub issues_loaded: bool,
     pub issues_state: TableState,
     pub stats: Option<ProjectStats>,
-    pub view: View,
-    pub detail: Option<Detail>,
-    pub trace: Option<TraceView>,
+    pub screen: Screen,
+    /// Screens behind `screen`, the last one is shown on Esc.
+    pub back: Vec<Screen>,
     pub overlay: Overlay,
     pub toast: Option<Toast>,
     /// Server unreachable (network error of any load); cleared by any success.
@@ -438,11 +469,6 @@ pub struct App {
     pub now: DateTime<Utc>,
     pub last_refresh: Instant,
     pub last_info: Instant,
-    pub quit: bool,
-    /// Set by `on_key` when the key was not used (the host may use it).
-    pub ignored: bool,
-    /// Set by `on_key` when the user asked to open the shown event's trace.
-    pub open_trace: Option<String>,
     pub started_at: Instant,
     /// The host's command name, for hints.
     pub hints: Hints,
@@ -465,9 +491,8 @@ impl App {
             issues_loaded: false,
             issues_state: TableState::default(),
             stats: None,
-            view: View::Issues,
-            detail: None,
-            trace: None,
+            screen: Screen::Issues,
+            back: vec![],
             overlay: Overlay::None,
             toast: None,
             offline: None,
@@ -480,9 +505,6 @@ impl App {
             now: Utc::now(),
             last_refresh: Instant::now(),
             last_info: Instant::now(),
-            quit: false,
-            ignored: false,
-            open_trace: None,
             started_at: Instant::now(),
             hints: Hints::SDL,
         }
@@ -510,6 +532,74 @@ impl App {
         !self.pending.is_empty()
     }
 
+    pub fn view(&self) -> View {
+        match self.screen {
+            Screen::Issues => View::Issues,
+            Screen::Detail(_) => View::Detail,
+            Screen::Trace(_) => View::Trace,
+        }
+    }
+
+    /// The issue detail, when it is in front.
+    pub fn detail(&self) -> Option<&Detail> {
+        match &self.screen {
+            Screen::Detail(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    pub fn detail_mut(&mut self) -> Option<&mut Detail> {
+        match &mut self.screen {
+            Screen::Detail(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The trace view, when it is in front.
+    pub fn trace(&self) -> Option<&TraceView> {
+        match &self.screen {
+            Screen::Trace(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Every open screen, front first. Loads apply to the screens behind
+    /// the front one too, so going back shows their data.
+    fn screens_mut(&mut self) -> impl Iterator<Item = &mut Screen> {
+        std::iter::once(&mut self.screen).chain(self.back.iter_mut().rev())
+    }
+
+    fn details_mut(&mut self) -> impl Iterator<Item = &mut Detail> {
+        self.screens_mut().filter_map(|s| match s {
+            Screen::Detail(d) => Some(&mut **d),
+            _ => None,
+        })
+    }
+
+    /// Bring `s` to the front; the current screen goes behind it.
+    fn push(&mut self, s: Screen) {
+        let old = std::mem::replace(&mut self.screen, s);
+        if !matches!(old, Screen::Issues) {
+            if self.back.len() == MAX_BACK {
+                self.back.remove(0);
+            }
+            self.back.push(old);
+        }
+    }
+
+    /// Esc: back to the screen behind the front one.
+    fn pop(&mut self) {
+        self.screen = self.back.pop().unwrap_or(Screen::Issues);
+    }
+
+    /// Another project: forget its list, stats and open screens.
+    fn switch_project(&mut self, slug: String) {
+        self.project = Some(slug);
+        self.issues.clear();
+        self.issues_loaded = false;
+        self.stats = None;
+    }
+
     pub fn current_project(&self) -> Option<&Project> {
         let p = self.project.as_deref()?;
         self.projects.iter().find(|x| x.slug == p || x.id.to_string() == p)
@@ -533,7 +623,7 @@ impl App {
     }
 
     fn detail_requests(&self) -> Vec<Req> {
-        match (&self.detail, &self.project) {
+        match (self.detail(), &self.project) {
             (Some(d), Some(p)) => vec![Req::Issue { project: p.clone(), id: d.id.clone(), window: self.window }],
             _ => vec![],
         }
@@ -577,7 +667,7 @@ impl App {
         let mut r = vec![Req::Info, Req::Projects];
         r.extend(self.list_requests());
         r.extend(self.detail_requests());
-        if let (Some(d), Some(project)) = (&self.detail, &self.project) {
+        if let (Some(d), Some(project)) = (self.detail(), &self.project) {
             if !d.events_loaded || d.events_error.is_some() {
                 r.push(Req::Events { project: project.clone(), issue: d.id.clone(), before: None });
             }
@@ -585,7 +675,7 @@ impl App {
                 r.push(Req::Event { project: project.clone(), issue: d.id.clone(), event_id });
             }
         }
-        if let Some(t) = self.trace.as_ref().filter(|t| self.view == View::Trace && (!t.loaded || t.error.is_some())) {
+        if let Some(t) = self.trace().filter(|t| !t.loaded || t.error.is_some()) {
             r.push(Req::Trace { trace_id: t.trace_id.clone() });
         }
         r
@@ -598,93 +688,90 @@ impl App {
         self.list_requests()
     }
 
-    /// Handle a key press. Sets `ignored` when the key was not used and
-    /// `quit` / `open_trace` when the user asked for that.
-    pub fn on_key(&mut self, k: KeyEvent) -> Vec<Req> {
-        let reqs = self.key(k);
-        self.track(reqs)
+    /// Handle a key press: the requests it starts (already tracked) and
+    /// what the host should do.
+    pub fn on_key(&mut self, k: KeyEvent) -> Step {
+        let (reqs, outcome) = self.key(k);
+        (self.track(reqs), outcome)
     }
 
-    fn key(&mut self, k: KeyEvent) -> Vec<Req> {
-        self.ignored = false;
+    fn key(&mut self, k: KeyEvent) -> Step {
         if matches!(k.code, KeyCode::F(1) | KeyCode::F(2)) {
             // Reserved for an embedding host.
-            self.ignored = true;
-            return vec![];
+            return ignored();
         }
         if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('q')) {
-            self.quit = true;
-            return vec![];
+            return (vec![], Outcome::Quit);
         }
-        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        // AltGr arrives as ctrl+alt on Windows: let it type `@`, `{`, `\` in the search box.
+        let altgr = k.modifiers == KeyModifiers::CONTROL | KeyModifiers::ALT && matches!(k.code, KeyCode::Char(_));
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !(altgr && self.input.is_some()) {
             // Only plain keys run actions; ctrl-r must not resolve an issue.
-            match self.input.as_mut() {
-                Some(input) if k.modifiers == KeyModifiers::CONTROL && k.code == KeyCode::Char('u') => input.clear(),
-                _ => self.ignored = true,
-            }
-            return vec![];
+            return match self.input.as_mut() {
+                Some(input) if k.modifiers == KeyModifiers::CONTROL && k.code == KeyCode::Char('u') => {
+                    input.clear();
+                    done(vec![])
+                }
+                _ => ignored(),
+            };
         }
-        match self.overlay.clone() {
+        match self.overlay {
             Overlay::Help => {
                 self.overlay = Overlay::None;
-                return vec![];
+                return done(vec![]);
             }
-            Overlay::Projects { selected } => return self.on_key_projects(k, selected),
+            Overlay::Projects { selected } => return done(self.on_key_projects(k, selected)),
             Overlay::None => {}
         }
         if self.input.is_some() {
-            return self.on_key_search(k);
+            return done(self.on_key_search(k));
         }
         match k.code {
             KeyCode::Char('?') => {
                 self.overlay = Overlay::Help;
-                return vec![];
+                return done(vec![]);
             }
-            KeyCode::Char('R') => return self.refresh_all(),
+            KeyCode::Char('R') => return done(self.refresh_all()),
             _ => {}
         }
-        match self.view {
+        match self.view() {
             View::Issues => self.on_key_issues(k),
             View::Detail => self.on_key_detail(k),
             View::Trace => self.on_key_trace(k),
         }
     }
 
-    /// Show the error events of a trace (searches all projects).
+    /// Show the error events of a trace (searches all projects). Replaces a
+    /// trace view in front; Esc returns to the screen before it.
     pub fn show_trace(&mut self, trace_id: &str) -> Vec<Req> {
-        let back = match self.view {
-            View::Trace => self.trace.as_ref().and_then(|t| t.back),
-            v => Some(v),
-        };
-        self.trace = Some(TraceView { trace_id: trace_id.to_string(), back, ..Default::default() });
-        self.view = View::Trace;
+        let t = Screen::Trace(TraceView { trace_id: trace_id.to_string(), ..Default::default() });
+        if self.view() == View::Trace {
+            self.screen = t;
+        } else {
+            self.push(t);
+        }
         self.overlay = Overlay::None;
         self.input = None;
         self.track(vec![Req::Trace { trace_id: trace_id.to_string() }])
     }
 
-    fn on_key_trace(&mut self, k: KeyEvent) -> Vec<Req> {
-        let Some(t) = self.trace.as_mut() else {
-            self.view = View::Issues;
-            return vec![];
+    fn on_key_trace(&mut self, k: KeyEvent) -> Step {
+        let Screen::Trace(t) = &mut self.screen else {
+            return ignored();
         };
         if Self::move_selection(&mut t.state, t.events.len(), k.code) {
-            return vec![];
+            return done(vec![]);
         }
         match k.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => {
-                let back = t.back.unwrap_or(View::Issues);
-                self.view = if back == View::Detail && self.detail.is_none() { View::Issues } else { back };
-                self.trace = None;
-            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.pop(),
             KeyCode::Enter => {
                 if let Some(e) = t.state.selected().and_then(|i| t.events.get(i)).cloned() {
-                    return self.open_event(&e);
+                    return done(self.open_event(&e));
                 }
             }
-            _ => self.ignored = true,
+            _ => return ignored(),
         }
-        vec![]
+        done(vec![])
     }
 
     /// Open the issue detail of `e` (switching project if needed) showing `e`.
@@ -698,21 +785,16 @@ impl App {
             .unwrap_or_else(|| e.project_id.to_string());
         if self.project.as_deref() != Some(slug.as_str()) && self.project.as_deref() != Some(&e.project_id.to_string())
         {
-            self.project = Some(slug.clone());
-            self.issues.clear();
-            self.issues_loaded = false;
-            self.stats = None;
+            self.switch_project(slug.clone());
             reqs.extend(self.list_requests());
         }
         let project = self.project.clone().unwrap_or(slug);
-        self.detail = Some(Detail {
+        self.push(Screen::Detail(Box::new(Detail {
             id: e.issue_id.clone(),
             event_id: Some(e.event_id.clone()),
-            from_trace: true,
             tab: Some(Tab::Stack),
             ..Default::default()
-        });
-        self.view = View::Detail;
+        })));
         reqs.extend([
             Req::Issue { project: project.clone(), id: e.issue_id.clone(), window: self.window },
             Req::Events { project: project.clone(), issue: e.issue_id.clone(), before: None },
@@ -737,12 +819,9 @@ impl App {
                     let slug = p.slug.clone();
                     if self.project.as_deref() != Some(slug.as_str()) {
                         self.toast(format!("switched to {}", p.name), false);
-                        self.project = Some(slug);
-                        self.issues.clear();
-                        self.issues_loaded = false;
-                        self.stats = None;
-                        self.detail = None;
-                        self.view = View::Issues;
+                        self.switch_project(slug);
+                        self.screen = Screen::Issues;
+                        self.back.clear();
                         return self.reload_list();
                     }
                 }
@@ -790,62 +869,67 @@ impl App {
         true
     }
 
-    fn on_key_issues(&mut self, k: KeyEvent) -> Vec<Req> {
+    fn on_key_issues(&mut self, k: KeyEvent) -> Step {
         if Self::move_selection(&mut self.issues_state, self.issues.len(), k.code) {
-            return vec![];
+            return done(vec![]);
         }
-        match k.code {
-            KeyCode::Char('q') => self.quit = true,
+        done(match k.code {
+            KeyCode::Char('q') => return (vec![], Outcome::Quit),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
-                return self.reload_list();
+                self.reload_list()
             }
-            KeyCode::Enter => return self.open_selected(),
+            KeyCode::Enter => self.open_selected(),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 self.status = cycle(&StatusFilter::ALL, self.status, 1);
-                return self.reload_list();
+                self.reload_list()
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.status = cycle(&StatusFilter::ALL, self.status, -1);
-                return self.reload_list();
+                self.reload_list()
             }
             KeyCode::Char(c @ '1'..='4') => {
                 self.status = StatusFilter::ALL[c as usize - '1' as usize];
-                return self.reload_list();
+                self.reload_list()
             }
-            KeyCode::Char('/') => self.input = Some(self.query.clone()),
+            KeyCode::Char('/') => {
+                self.input = Some(self.query.clone());
+                vec![]
+            }
             KeyCode::Char('s') => {
                 self.sort = cycle(&SortBy::ALL, self.sort, 1);
-                return self.reload_list();
+                self.reload_list()
             }
             KeyCode::Char('t') => {
                 self.window = cycle(&Window::ALL, self.window, 1);
-                return self.reload_list();
+                self.reload_list()
             }
             KeyCode::Char('T') => {
                 self.window = cycle(&Window::ALL, self.window, -1);
-                return self.reload_list();
+                self.reload_list()
             }
             KeyCode::Char('p') => {
                 let selected =
                     self.current_project().and_then(|c| self.projects.iter().position(|p| p.id == c.id)).unwrap_or(0);
                 self.overlay = Overlay::Projects { selected };
-                return vec![Req::Projects];
+                vec![Req::Projects]
             }
-            KeyCode::Char('r') => return self.set_selected_status(IssueStatus::Resolved),
-            KeyCode::Char('i') => return self.set_selected_status(IssueStatus::Ignored),
-            KeyCode::Char('u') => return self.set_selected_status(IssueStatus::Unresolved),
-            _ => self.ignored = true,
-        }
-        vec![]
+            KeyCode::Char('r') => self.set_selected_status(IssueStatus::Resolved),
+            KeyCode::Char('i') => self.set_selected_status(IssueStatus::Ignored),
+            KeyCode::Char('u') => self.set_selected_status(IssueStatus::Unresolved),
+            _ => return ignored(),
+        })
     }
 
     fn open_selected(&mut self) -> Vec<Req> {
         let (Some(issue), Some(project)) = (self.selected_issue().cloned(), self.project.clone()) else {
             return vec![];
         };
-        self.detail = Some(Detail { id: issue.id.clone(), summary: Some(issue.clone()), ..Default::default() });
-        self.view = View::Detail;
+        self.push(Screen::Detail(Box::new(Detail {
+            id: issue.id.clone(),
+            summary: Some(issue.clone()),
+            ..Default::default()
+        })));
         vec![
             Req::Issue { project: project.clone(), id: issue.id.clone(), window: self.window },
             Req::Events { project, issue: issue.id, before: None },
@@ -867,7 +951,7 @@ impl App {
         for i in self.issues.iter_mut().filter(|i| i.id == id) {
             i.status = status;
         }
-        if let Some(d) = self.detail.as_mut().filter(|d| d.id == id) {
+        for d in self.details_mut().filter(|d| d.id == id) {
             if let Some(s) = d.summary.as_mut() {
                 s.status = status;
             }
@@ -878,22 +962,18 @@ impl App {
         vec![Req::SetStatus { project, id, status }]
     }
 
-    fn on_key_detail(&mut self, k: KeyEvent) -> Vec<Req> {
-        let Some(d) = self.detail.as_mut() else {
-            self.view = View::Issues;
-            return vec![];
+    fn on_key_detail(&mut self, k: KeyEvent) -> Step {
+        let Screen::Detail(d) = &mut self.screen else {
+            return ignored();
         };
         let tab = d.tab();
-        let id = d.id.clone();
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => {
-                let from_trace = d.from_trace && self.trace.is_some();
-                self.detail = None;
-                self.view = if from_trace { View::Trace } else { View::Issues };
-                return self.list_requests();
+                self.pop();
+                return done(self.list_requests());
             }
             KeyCode::Char('t') => match d.trace_id() {
-                Some(t) => self.open_trace = Some(t.to_string()),
+                Some(t) => return (vec![], Outcome::OpenTrace(t.to_string())),
                 None => self.toast("this event has no trace id", false),
             },
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
@@ -903,8 +983,8 @@ impl App {
                 d.tab = Some(Tab::ALL[(tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len()])
             }
             KeyCode::Char(c @ '1'..='5') => d.tab = Some(Tab::ALL[c as usize - '1' as usize]),
-            KeyCode::Char('[') => return self.step_event(1),
-            KeyCode::Char(']') => return self.step_event(-1),
+            KeyCode::Char('[') => return done(self.step_event(1)),
+            KeyCode::Char(']') => return done(self.step_event(-1)),
             KeyCode::Char('a') => {
                 d.in_app_only = !d.in_app_only;
                 d.frame = d.default_frame();
@@ -917,25 +997,31 @@ impl App {
                     self.toast("this event has no raw (unsymbolicated) frames", false);
                 }
             }
-            KeyCode::Char('r') => return self.set_status(id, IssueStatus::Resolved),
-            KeyCode::Char('i') => return self.set_status(id, IssueStatus::Ignored),
-            KeyCode::Char('u') => return self.set_status(id, IssueStatus::Unresolved),
+            KeyCode::Char(c @ ('r' | 'i' | 'u')) => {
+                let status = match c {
+                    'r' => IssueStatus::Resolved,
+                    'i' => IssueStatus::Ignored,
+                    _ => IssueStatus::Unresolved,
+                };
+                let id = d.id.clone();
+                return done(self.set_status(id, status));
+            }
             KeyCode::Enter if tab == Tab::Events => {
-                if let Some(i) = d.events_state.selected() {
+                if let (Some(i), Some(project)) = (d.events_state.selected(), self.project.clone()) {
                     d.tab = Some(Tab::Stack);
-                    return self.show_event(i);
+                    return done(d.show(i, project).into_iter().collect());
                 }
             }
-            code if is_nav(code) => return self.move_in_tab(code),
-            _ => self.ignored = true,
+            code if is_nav(code) => return done(self.move_in_tab(code)),
+            _ => return ignored(),
         }
-        vec![]
+        done(vec![])
     }
 
     fn move_in_tab(&mut self, code: KeyCode) -> Vec<Req> {
         let project = self.project.clone();
         let events_busy = self.in_flight(Kind::Events);
-        let Some(d) = self.detail.as_mut() else {
+        let Some(d) = self.detail_mut() else {
             return vec![];
         };
         match d.tab() {
@@ -975,9 +1061,9 @@ impl App {
                 if n > 0
                     && d.events_state.selected() == Some(n - 1)
                     && !events_busy
-                    && let (Some(cursor), Some(project)) = (d.next_cursor.clone(), project)
+                    && let Some(project) = project
                 {
-                    return vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
+                    return d.older_page(project).into_iter().collect();
                 }
             }
         }
@@ -986,9 +1072,11 @@ impl App {
 
     /// `delta` 1 = older, -1 = newer.
     fn step_event(&mut self, delta: isize) -> Vec<Req> {
-        let project = self.project.clone();
+        let Some(project) = self.project.clone() else {
+            return vec![];
+        };
         let events_busy = self.in_flight(Kind::Events);
-        let Some(d) = self.detail.as_mut() else {
+        let Some(d) = self.detail_mut() else {
             return vec![];
         };
         let target = d.event_idx as isize + delta;
@@ -1002,30 +1090,14 @@ impl App {
                 // The older page is already on its way.
                 return vec![];
             }
-            if let (Some(cursor), Some(project)) = (d.next_cursor.clone(), project) {
+            if let Some(r) = d.older_page(project) {
                 d.want_older = true;
-                return vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
+                return vec![r];
             }
             self.toast("already at the oldest event", false);
             return vec![];
         }
-        self.show_event(target)
-    }
-
-    fn show_event(&mut self, idx: usize) -> Vec<Req> {
-        let Some(project) = self.project.clone() else {
-            return vec![];
-        };
-        let Some(d) = self.detail.as_mut() else {
-            return vec![];
-        };
-        let Some(e) = d.events.get(idx) else {
-            return vec![];
-        };
-        d.event_idx = idx;
-        d.event_id = Some(e.event_id.clone());
-        d.events_state.select(Some(idx));
-        vec![Req::Event { project, issue: d.id.clone(), event_id: e.event_id.clone() }]
+        d.show(target, project).into_iter().collect()
     }
 
     /// Remember a network failure (shown as "offline").
@@ -1149,7 +1221,7 @@ impl App {
                 if let Err(e) = &result {
                     self.note(e);
                 }
-                if let Some(d) = self.detail.as_mut().filter(|d| d.id == id) {
+                if let Some(d) = self.details_mut().find(|d| d.id == id) {
                     match result {
                         Ok(detail) => {
                             d.detail = Some(detail);
@@ -1168,7 +1240,7 @@ impl App {
                 // the page this detail asked for (not one of an earlier
                 // detail of the same issue).
                 let Some(d) =
-                    self.detail.as_mut().filter(|d| d.id == issue && (cursor.is_none() || cursor == d.next_cursor))
+                    self.details_mut().find(|d| d.id == issue && (cursor.is_none() || cursor == d.next_cursor))
                 else {
                     return vec![];
                 };
@@ -1189,19 +1261,16 @@ impl App {
                         }
                         if d.want_older {
                             d.want_older = false;
-                            if d.events.len() > before {
-                                out.extend(self.show_event(before));
-                                return self.track(out);
+                            if let Some(project) = project.filter(|_| d.events.len() > before) {
+                                out.extend(d.show(before, project));
                             }
                         } else if let Some(id) = d.event_id.clone() {
                             if let Some(i) = d.events.iter().position(|e| e.event_id == id) {
                                 d.event_idx = i;
                                 d.events_state.select(Some(i));
                             }
-                        } else if let (Some(e), Some(project)) = (d.events.first(), project) {
-                            d.event_idx = 0;
-                            d.event_id = Some(e.event_id.clone());
-                            out.push(Req::Event { project, issue: d.id.clone(), event_id: e.event_id.clone() });
+                        } else if let Some(project) = project {
+                            out.extend(d.show(0, project));
                         }
                     }
                     Err(e) => {
@@ -1214,7 +1283,7 @@ impl App {
                 if let Err(e) = &result {
                     self.note(e);
                 }
-                if let Some(d) = self.detail.as_mut().filter(|d| d.current_event_id() == Some(event_id.as_str())) {
+                if let Some(d) = self.details_mut().find(|d| d.event_id.as_deref() == Some(event_id.as_str())) {
                     // JSON view from the raw payload (serde escapes control
                     // characters in strings), cleaned per line for C1 codes.
                     let result = result.and_then(|e| {
@@ -1232,7 +1301,11 @@ impl App {
                 if let Err(e) = &result {
                     self.note(e);
                 }
-                if let Some(t) = self.trace.as_mut().filter(|t| t.trace_id == trace_id) {
+                let trace = self.screens_mut().find_map(|s| match s {
+                    Screen::Trace(t) if t.trace_id == trace_id => Some(t),
+                    _ => None,
+                });
+                if let Some(t) = trace {
                     match result {
                         Ok(list) => {
                             t.events = list.events;
@@ -1249,7 +1322,7 @@ impl App {
                     Ok(d) => {
                         let verb = status.as_str();
                         self.toast(format!("✓ {verb}: {}", crate::fmt::truncate(&d.summary.title, 60)), false);
-                        if let Some(det) = self.detail.as_mut().filter(|x| x.id == id) {
+                        if let Some(det) = self.details_mut().find(|x| x.id == id) {
                             det.detail = Some(d);
                         }
                     }
@@ -1274,6 +1347,11 @@ mod tests {
         KeyEvent::from(KeyCode::Char(c))
     }
 
+    /// The requests of a key press.
+    fn press(app: &mut App, k: KeyEvent) -> Vec<Req> {
+        app.on_key(k).0
+    }
+
     #[test]
     fn startup_picks_first_project_and_loads_list() {
         let mut app = App::new("http://x", None);
@@ -1288,7 +1366,7 @@ mod tests {
     fn stale_issue_lists_are_dropped() {
         let mut app = loaded_app();
         let old = app.issues_key().unwrap();
-        app.on_key(key('s'));
+        press(&mut app, key('s'));
         app.on_response(Resp::Issues(old, Ok(IssueList { issues: vec![], window_start: now(), window_end: now() })));
         assert_eq!(app.issues.len(), 3, "stale response must not replace the list");
     }
@@ -1296,55 +1374,55 @@ mod tests {
     #[test]
     fn filters_and_search_produce_requests() {
         let mut app = loaded_app();
-        let r = app.on_key(KeyEvent::from(KeyCode::Tab));
+        let r = press(&mut app, KeyEvent::from(KeyCode::Tab));
         assert!(matches!(&r[1], Req::Issues(k) if k.status == StatusFilter::Resolved));
-        app.on_key(key('/'));
+        press(&mut app, key('/'));
         for c in "boom".chars() {
-            assert!(app.on_key(key(c)).is_empty());
+            assert!(press(&mut app, key(c)).is_empty());
         }
-        let r = app.on_key(KeyEvent::from(KeyCode::Enter));
+        let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.query, "boom");
         assert!(matches!(&r[1], Req::Issues(k) if k.query == "boom" && k.query().query.as_deref() == Some("boom")));
-        let r = app.on_key(key('t'));
+        let r = press(&mut app, key('t'));
         assert!(matches!(&r[0], Req::Stats { window: Window::Week, .. }));
-        let r = app.on_key(key('T'));
+        let r = press(&mut app, key('T'));
         assert!(matches!(&r[0], Req::Stats { window: Window::Day, .. }));
-        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        press(&mut app, KeyEvent::from(KeyCode::BackTab));
         assert_eq!(app.status, StatusFilter::Unresolved);
-        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        press(&mut app, KeyEvent::from(KeyCode::BackTab));
         assert_eq!(app.status, StatusFilter::All, "wraps around");
-        app.on_key(key('3'));
+        press(&mut app, key('3'));
         assert_eq!(app.status, StatusFilter::Ignored);
     }
 
     #[test]
     fn enter_opens_detail_and_loads_latest_event() {
         let mut app = loaded_app();
-        app.on_key(key('j'));
-        let r = app.on_key(KeyEvent::from(KeyCode::Enter));
-        assert_eq!(app.view, View::Detail);
+        press(&mut app, key('j'));
+        let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.view(), View::Detail);
         assert!(matches!(&r[0], Req::Issue { id, .. } if id == "b2"));
         let r = app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
         assert!(matches!(&r[0], Req::Event { event_id, .. } if event_id == "e1"));
         app.on_response(Resp::Event { event_id: "e1".into(), result: Ok(event_detail()) });
-        let d = app.detail.as_ref().unwrap();
+        let d = app.detail().unwrap();
         assert_eq!(d.exceptions.len(), 2);
         // Cursor starts on the first in-app frame.
         assert!(d.stack_frames()[d.frame].frame.in_app);
         // Older event.
-        let r = app.on_key(key('['));
+        let r = press(&mut app, key('['));
         assert!(matches!(&r[0], Req::Event { event_id, .. } if event_id == "e2"));
-        let r = app.on_key(key(']'));
+        let r = press(&mut app, key(']'));
         assert!(matches!(&r[0], Req::Event { event_id, .. } if event_id == "e1"));
-        assert!(app.on_key(key(']')).is_empty());
-        app.on_key(KeyEvent::from(KeyCode::Esc));
-        assert_eq!(app.view, View::Issues);
+        assert!(press(&mut app, key(']')).is_empty());
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.view(), View::Issues);
     }
 
     #[test]
     fn resolve_is_optimistic_and_refreshes() {
         let mut app = loaded_app();
-        let r = app.on_key(key('r'));
+        let r = press(&mut app, key('r'));
         assert!(matches!(&r[0], Req::SetStatus { status: IssueStatus::Resolved, .. }));
         assert_eq!(app.issues[0].status, IssueStatus::Resolved);
         let mut d = issue_detail();
@@ -1357,49 +1435,85 @@ mod tests {
     #[test]
     fn unknown_and_reserved_keys_are_ignored() {
         let mut app = loaded_app();
-        app.on_key(KeyEvent::from(KeyCode::F(1)));
-        assert!(app.ignored);
-        app.on_key(key('z'));
-        assert!(app.ignored);
-        app.on_key(key('j'));
-        assert!(!app.ignored);
+        assert_eq!(app.on_key(KeyEvent::from(KeyCode::F(1))).1, Outcome::Ignored);
+        assert_eq!(app.on_key(key('z')).1, Outcome::Ignored);
+        assert_eq!(app.on_key(key('j')).1, Outcome::Consumed);
+        assert_eq!(app.on_key(key('q')).1, Outcome::Quit);
+        let mut app = detail_app();
+        assert_eq!(app.on_key(key('z')).1, Outcome::Ignored);
+        app.show_trace("t1");
+        assert_eq!(app.on_key(key('z')).1, Outcome::Ignored);
     }
 
     #[test]
     fn trace_view_opens_event_detail() {
         let mut app = detail_app();
-        app.on_key(key('t'));
-        let t = app.open_trace.take().unwrap();
+        let Outcome::OpenTrace(t) = app.on_key(key('t')).1 else { panic!("t opens the trace") };
         assert_eq!(t, "b7644661850f40e69380d8c9ea253e84");
         let r = app.show_trace(&t);
         assert_eq!(r, vec![Req::Trace { trace_id: t.clone() }]);
-        assert_eq!(app.view, View::Trace);
+        assert_eq!(app.view(), View::Trace);
         app.on_response(Resp::Trace { trace_id: t.clone(), result: Ok(event_list()) });
-        app.on_key(key('j'));
-        let r = app.on_key(KeyEvent::from(KeyCode::Enter));
+        press(&mut app, key('j'));
+        let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
         assert!(r.iter().any(|r| matches!(r, Req::Event { event_id, .. } if event_id == "e2")));
-        assert_eq!(app.view, View::Detail);
-        app.on_key(KeyEvent::from(KeyCode::Esc));
-        assert_eq!(app.view, View::Trace);
-        app.on_key(KeyEvent::from(KeyCode::Esc));
-        assert_eq!(app.view, View::Issues);
+        assert_eq!(app.view(), View::Detail);
+        // Esc walks back: trace, the detail it was opened from, the list.
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.view(), View::Trace);
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.detail().map(|d| d.id.as_str()), Some("b2"));
+        assert_eq!(app.detail().unwrap().event_id.as_deref(), Some("e1"));
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.view(), View::Issues);
+    }
+
+    #[test]
+    fn loads_reach_screens_behind_the_front_one() {
+        let mut app = loaded_app();
+        app.issues_state.select(Some(1));
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
+        let t = "b7644661850f40e69380d8c9ea253e84";
+        app.show_trace(t);
+        // The detail's loads arrive while the trace view is in front.
+        app.on_response(Resp::Issue { id: "b2".into(), result: Ok(issue_detail()) });
+        app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
+        app.on_response(Resp::Event { event_id: "e1".into(), result: Ok(event_detail()) });
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        let d = app.detail().expect("back on the detail");
+        assert!(d.detail.is_some() && d.events_loaded && d.event.is_some());
+    }
+
+    #[test]
+    fn the_back_stack_is_bounded() {
+        let mut app = detail_app();
+        for i in 0..3 * MAX_BACK {
+            app.show_trace(&format!("t{i}"));
+            app.on_response(Resp::Trace { trace_id: format!("t{i}"), result: Ok(event_list()) });
+            press(&mut app, KeyEvent::from(KeyCode::Enter));
+        }
+        assert_eq!(app.back.len(), MAX_BACK);
     }
 
     #[test]
     fn ctrl_and_alt_keys_do_not_run_actions() {
         let mut app = loaded_app();
         let r = app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        assert!(r.is_empty() && app.ignored);
+        assert_eq!(r, (vec![], Outcome::Ignored));
         assert_eq!(app.issues[0].status, IssueStatus::Unresolved);
-        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT));
-        assert!(app.ignored && app.sort == SortBy::LastSeen);
-        app.on_key(key('/'));
-        app.on_key(key('x'));
-        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)).1, Outcome::Ignored);
+        assert_eq!(app.sort, SortBy::LastSeen);
+        press(&mut app, key('/'));
+        press(&mut app, key('x'));
+        press(&mut app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(app.input.as_deref(), Some(""));
-        app.on_key(KeyEvent::from(KeyCode::Esc));
-        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.quit);
+        // AltGr (ctrl+alt on Windows) types in the search box, and only there.
+        press(&mut app, KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        assert_eq!(app.input.as_deref(), Some("@"));
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        let r = app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        assert_eq!(r, (vec![], Outcome::Ignored));
+        assert_eq!(app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)).1, Outcome::Quit);
     }
 
     #[test]
@@ -1425,21 +1539,21 @@ mod tests {
     #[test]
     fn older_page_is_requested_once() {
         let mut app = detail_app();
-        let d = app.detail.as_mut().unwrap();
+        let d = app.detail_mut().unwrap();
         d.next_cursor = Some("cursor-1".into());
         d.event_idx = 1;
-        let r = app.on_key(key('['));
+        let r = press(&mut app, key('['));
         assert!(matches!(&r[..], [Req::Events { before: Some(c), .. }] if c == "cursor-1"));
-        assert!(app.on_key(key('[')).is_empty(), "second press must not load the same page again");
+        assert!(press(&mut app, key('[')).is_empty(), "second press must not load the same page again");
     }
 
     #[test]
     fn view_errors_are_kept_per_view() {
         let mut app = detail_app();
         app.on_response(Resp::Event { event_id: "e1".into(), result: Err(FetchError::api("boom")) });
-        assert_eq!(app.detail.as_ref().unwrap().event_error.as_deref(), Some("boom"));
+        assert_eq!(app.detail().unwrap().event_error.as_deref(), Some("boom"));
         app.on_response(Resp::Info(Ok(info())));
-        assert_eq!(app.detail.as_ref().unwrap().event_error.as_deref(), Some("boom"));
+        assert_eq!(app.detail().unwrap().event_error.as_deref(), Some("boom"));
         assert!(app.offline.is_none());
     }
 
@@ -1461,8 +1575,8 @@ mod tests {
     fn a_stale_response_does_not_end_a_newer_load() {
         let mut app = loaded_app();
         assert!(!app.loading());
-        let first = app.on_key(key('s'));
-        app.on_key(key('s'));
+        let first = press(&mut app, key('s'));
+        press(&mut app, key('s'));
         let Req::Issues(old) = &first[1] else { panic!("{first:?}") };
         let list = IssueList { issues: issues(), window_start: now(), window_end: now() };
         app.on_response(Resp::Issues(old.clone(), Ok(list.clone())));
@@ -1478,57 +1592,57 @@ mod tests {
     fn r_retries_failed_trace_events_and_event_loads() {
         let mut app = detail_app();
         app.on_response(Resp::Event { event_id: "e1".into(), result: Err(FetchError::api("boom")) });
-        let r = app.on_key(key('R'));
+        let r = press(&mut app, key('R'));
         assert!(r.iter().any(|r| matches!(r, Req::Event { event_id, .. } if event_id == "e1")), "{r:?}");
         assert!(!r.iter().any(|r| matches!(r, Req::Events { .. })), "events are loaded: {r:?}");
 
         let mut app = loaded_app();
-        app.on_key(KeyEvent::from(KeyCode::Enter));
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
         app.on_response(Resp::Events { issue: "a1".into(), before: None, result: Err(FetchError::api("boom")) });
-        let r = app.on_key(key('R'));
+        let r = press(&mut app, key('R'));
         assert!(r.iter().any(|r| matches!(r, Req::Events { issue, before: None, .. } if issue == "a1")), "{r:?}");
 
         let mut app = loaded_app();
         let t = "b7644661850f40e69380d8c9ea253e84";
         app.show_trace(t);
         app.on_response(Resp::Trace { trace_id: t.into(), result: Err(FetchError::offline("down")) });
-        let r = app.on_key(key('R'));
+        let r = press(&mut app, key('R'));
         assert!(r.contains(&Req::Trace { trace_id: t.into() }), "{r:?}");
     }
 
     #[test]
     fn an_older_page_of_an_earlier_detail_is_dropped() {
         let mut app = detail_app();
-        app.detail.as_mut().unwrap().next_cursor = Some("c1".into());
-        app.on_key(key('4'));
+        app.detail_mut().unwrap().next_cursor = Some("c1".into());
+        press(&mut app, key('4'));
         // Moving to the last event loads the next (older) page.
-        let r = app.on_key(key('G'));
+        let r = press(&mut app, key('G'));
         assert!(matches!(&r[..], [Req::Events { before: Some(c), .. }] if c == "c1"), "{r:?}");
         // Esc and open the same issue again while the older page is on its way.
-        app.on_key(KeyEvent::from(KeyCode::Esc));
-        app.on_key(KeyEvent::from(KeyCode::Enter));
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
         let older = EventList { events: event_list().events[1..].to_vec(), next_cursor: None };
         app.on_response(Resp::Events { issue: "b2".into(), before: Some("c1".into()), result: Ok(older) });
-        let d = app.detail.as_ref().unwrap();
+        let d = app.detail().unwrap();
         assert!(!d.events_loaded && d.events.is_empty(), "stale page appended: {:?}", d.events);
         // The first page arrives and is shown from its first event.
         let r = app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
         assert!(matches!(&r[..], [Req::Event { event_id, .. }] if event_id == "e1"), "{r:?}");
-        let d = app.detail.as_ref().unwrap();
+        let d = app.detail().unwrap();
         assert_eq!((d.events.len(), d.event_idx), (2, 0));
     }
 
     #[test]
     fn show_trace_closes_the_search_box() {
         let mut app = loaded_app();
-        app.on_key(key('/'));
-        app.on_key(key('x'));
+        press(&mut app, key('/'));
+        press(&mut app, key('x'));
         let t = "b7644661850f40e69380d8c9ea253e84";
         app.show_trace(t);
         assert_eq!(app.input, None);
         app.on_response(Resp::Trace { trace_id: t.into(), result: Ok(event_list()) });
-        let r = app.on_key(KeyEvent::from(KeyCode::Enter));
-        assert_eq!(app.view, View::Detail, "Enter opens the event, not a search");
+        let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.view(), View::Detail, "Enter opens the event, not a search");
         assert!(!r.iter().any(|r| matches!(r, Req::Issues(_))), "{r:?}");
     }
 
@@ -1548,10 +1662,10 @@ mod tests {
     #[test]
     fn project_switcher() {
         let mut app = loaded_app();
-        app.on_key(key('p'));
+        press(&mut app, key('p'));
         assert_eq!(app.overlay, Overlay::Projects { selected: 0 });
-        app.on_key(key('j'));
-        let r = app.on_key(KeyEvent::from(KeyCode::Enter));
+        press(&mut app, key('j'));
+        let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.project.as_deref(), Some("api"));
         assert!(matches!(&r[1], Req::Issues(k) if k.project == "api"));
     }
