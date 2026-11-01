@@ -135,19 +135,15 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             (Signal::Traces, Format::Proto) => {
                 Request::Traces(ExportTraceServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
-            (Signal::Traces, Format::Json) => {
-                Request::Traces(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
-            }
+            (Signal::Traces, Format::Json) => Request::Traces(super::json::decode(&raw).map_err(|e| decode_err(&e))?),
             (Signal::Logs, Format::Proto) => {
                 Request::Logs(ExportLogsServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
-            (Signal::Logs, Format::Json) => Request::Logs(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?),
+            (Signal::Logs, Format::Json) => Request::Logs(super::json::decode(&raw).map_err(|e| decode_err(&e))?),
             (Signal::Metrics, Format::Proto) => {
                 Request::Metrics(ExportMetricsServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
-            (Signal::Metrics, Format::Json) => {
-                Request::Metrics(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
-            }
+            (Signal::Metrics, Format::Json) => Request::Metrics(super::json::decode(&raw).map_err(|e| decode_err(&e))?),
         })
     })
     .await;

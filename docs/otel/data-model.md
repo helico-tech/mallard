@@ -105,9 +105,12 @@ success.
 | AnyValue | stored as |
 |---|---|
 | string | as is |
-| int, double, bool | `Display` form (`42`, `1.5`, `true`) |
+| int, double, bool | `Display` form (`42`, `1.5`, `true`); non-finite doubles as `NaN`, `Infinity`, `-Infinity` |
 | bytes | base64 |
-| array, key-value list | JSON (`[1,"a"]`, `{"k":"v"}`) |
+| array, key-value list | JSON (`[1,"a"]`, `{"k":"v"}`); non-finite doubles as the strings `"NaN"`, `"Infinity"`, `"-Infinity"` |
+
+A log `body` is stringified the same way. The non-finite spellings are the
+OTLP/JSON (protojson) ones, and `TRY_CAST(... AS DOUBLE)` reads them back.
 
 Duplicate keys keep the last value, and keys are stored sorted. Query with
 `attributes['http.route']` (it returns `NULL` when the key is missing); use
@@ -229,6 +232,9 @@ read in ad-hoc SQL.
   per bucket for cumulative (a drop counts as a counter reset), and sum of
   values for delta.
 - Integer values are stored as `DOUBLE`, which is exact up to 2^53.
+- Non-finite values (`NaN`, `±Infinity`; in OTLP/JSON the strings `"NaN"`,
+  `"Infinity"`, `"-Infinity"`) are stored as the DOUBLE values `nan` and
+  `±inf`. JSON has no such numbers: the query API returns them as `null`.
 - **Not stored:** exemplars, and metric `metadata`. Exponential histogram
   negative buckets are kept as stored, but folded into one "≤ 0" bucket when
   computing percentiles.

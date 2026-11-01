@@ -51,6 +51,11 @@ that talks HTTP only.
 - **HTTP** (`axum`): `POST /v1/traces`, `/v1/logs`, `/v1/metrics` with
   `application/x-protobuf` or `application/json` (OTLP/JSON encoding), and
   `Content-Encoding: gzip | deflate | zstd`. Decompressed size is capped.
+  OTLP/JSON doubles may be strings (`"NaN"`, `"Infinity"`, `"-Infinity"`,
+  `"1.5"`), as protojson allows. opentelemetry-proto takes them in only a
+  few fields, so a body that contains `NaN"`/`Infinity"`, or that it
+  refuses, is decoded again by a lenient decoder (`otlp/json.rs`) that
+  accepts them in every double field.
 - Both convert the request to Arrow record batches (`otlp/convert.rs`) on a
   blocking thread, then push them into the write buffer. Invalid spans are
   reported as OTLP *partial success*.

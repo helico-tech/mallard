@@ -3,6 +3,7 @@
 pub mod convert;
 pub mod grpc;
 pub mod http;
+pub mod json;
 
 use std::sync::{Arc, OnceLock};
 

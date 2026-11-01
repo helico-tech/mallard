@@ -392,6 +392,45 @@ async fn json_logs_and_rejections() {
     h.stop().await;
 }
 
+/// Protojson writes NaN and infinities as strings; they used to fail the
+/// whole request with 400 (otel issue 0004).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn json_non_finite_doubles_are_accepted() {
+    let h = harness(None).await;
+    let t = now_ns() - 1_000_000_000;
+    let logs = format!(
+        r#"{{"resourceLogs":[{{"resource":{{"attributes":[{{"key":"service.name","value":{{"stringValue":"nan"}}}}]}},
+          "scopeLogs":[{{"logRecords":[{{"timeUnixNano":"{t}","body":{{"doubleValue":"NaN"}},
+            "attributes":[{{"key":"inf","value":{{"doubleValue":"Infinity"}}}},
+              {{"key":"arr","value":{{"arrayValue":{{"values":[{{"doubleValue":"-Infinity"}},{{"doubleValue":1.5}}]}}}}}}]}}]}}]}}]}}"#
+    );
+    let (s, body) = h.post("/v1/logs", "application/json", logs.into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let metrics = format!(
+        r#"{{"resourceMetrics":[{{"scopeMetrics":[{{"metrics":[{{"name":"nan.gauge",
+          "gauge":{{"dataPoints":[{{"timeUnixNano":"{t}","asDouble":"NaN",
+            "attributes":[{{"key":"k","value":{{"doubleValue":"Infinity"}}}}]}}]}}}}]}}]}}]}}"#
+    );
+    let (s, body) = h.post("/v1/metrics", "application/json", metrics.into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let logs: Vec<LogRecord> = h
+        .eventually(|| async {
+            let v: Vec<LogRecord> = h.get("/api/v1/logs?since=1h&service=nan").await;
+            (v.len() == 1).then_some(v)
+        })
+        .await;
+    assert_eq!(logs[0].body, "NaN");
+    assert_eq!(logs[0].attributes["inf"], "Infinity");
+    assert_eq!(logs[0].attributes["arr"], r#"["-Infinity",1.5]"#);
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        v.iter().any(|m| m.name == "nan.gauge").then_some(())
+    })
+    .await;
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn metrics_queries() {
     let h = harness(None).await;
