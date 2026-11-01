@@ -1,6 +1,6 @@
 [package]
 name = "mallard"
-description = "mallard: the server, CLI and terminal UI for errors, traces, logs and metrics on one DuckLake"
+description = "mallard: the server, CLI, terminal UI and Web UI for errors, traces, logs and metrics on one DuckLake"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -24,6 +24,7 @@ mallard-server = { workspace = true, optional = true }
 mallard-client.workspace = true
 mallard-otel-cli.workspace = true
 mallard-sentry-cli.workspace = true
+mallard-web.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

@@ -3,7 +3,7 @@
 One observability app: Sentry-compatible error tracking plus an
 OpenTelemetry collector (traces, logs, metrics), stored together in one
 DuckLake catalog (DuckDB 2.0 + Parquet on disk or object storage). One
-binary, `mallard`: `mallard serve` runs it, the rest is the CLI and TUI. Built
+binary, `mallard`: `mallard serve` runs it, `mallard web` is the Web UI (ADR 0016), the rest is the CLI and TUI. Built
 with `--no-default-features` it has the CLI and TUI only, no DuckDB (ADR 0023).
 
 ## Build and test
@@ -19,6 +19,7 @@ cargo test -p mallard --no-default-features   # the slim build: no DuckDB, no se
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
+Web UI: `crates/mallard-web/README.md` (`npm run dev|test|e2e` in `crates/mallard-web/ui`).
 JS end-to-end tests with real Sentry SDKs against `mallard serve`: `e2e/sentry/README.md`.
 After API changes: `UPDATE_OPENAPI=1 cargo test -p mallard-otel-server -p mallard-sentry-server --test openapi`
 rewrites `docs/otel/openapi.json` and `docs/sentry/openapi.json` (tests check them).
@@ -30,7 +31,8 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 
 | path | what |
 |---|---|
-| `crates/mallard` | the `mallard` binary: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases; feature `server` (default) adds `serve`, `check`, `maintenance`, `install-extensions` (ADR 0023) |
+| `crates/mallard` | the `mallard` binary: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, `web`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases; feature `server` (default) adds `serve`, `check`, `maintenance`, `install-extensions` (ADR 0023) |
+| `crates/mallard-web` | the Web UI behind `mallard web`: React + Kumo in `ui/`, compiled in, with a same-origin proxy to the server (ADR 0016) |
 | `crates/mallard-server` | library behind `mallard serve`: embeds both sides on one DuckLake connection; config, routes, readiness, shutdown, `commands` (what the server commands run); `src/bridge/`: Sentry transactions and streamed spans → OTel spans, OTel exceptions → issues (ADR 0009, 0013, 0021) |
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction, maintenance lease |
@@ -42,7 +44,7 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
 | `bench/otel/` | reproducible experiments and capacity runs |
-| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
+| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/), [Web UI guidelines and parity](docs/web/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 Only `mallard` is built as a product binary (plus the load generators
@@ -90,6 +92,10 @@ Only `mallard` is built as a product binary (plus the load generators
   `Output::object`/`Output::list` for JSON (envelope, `--fields`), errors as
   `error::Described` with a `Kind` (exit code). `docs/agents.md` is built
   into the binary; keep it in step with the commands.
+
+- The Web UI follows the same rules as the TUI through its own one-place modules
+  (`lib/clean.ts`, `lib/format.ts`, `app/keys.tsx`), built from Kumo components only
+  (`.claude/skills/kumo-design`); see `crates/mallard-web/README.md`.
 
 ## Work
 

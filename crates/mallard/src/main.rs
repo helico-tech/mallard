@@ -133,6 +133,13 @@ enum Cmd {
     },
     /// Terminal UI: F1 errors, F2 telemetry.
     Tui,
+    /// Web UI: the same screens and keys as `tui`, in a browser. With a token it
+    /// only listens on this machine; without one, people sign in with an API token.
+    Web {
+        /// Address to listen on.
+        #[arg(long, env = "MALLARD_WEB_ADDR", default_value = "127.0.0.1:8088")]
+        addr: String,
+    },
     #[command(flatten)]
     Server(server::ServerCmd),
     /// Help for a command, or `mallard help agents`: the guide for AI agents.
@@ -333,6 +340,7 @@ async fn run(cli: Cli) -> Result<()> {
             mallard_otel_cli::run(mallard_otel_cli::Command::Attrs(a), &r.otel()).await
         }
         Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
+        Cmd::Web { addr } => mallard_web::run(r.client.base_url(), r.client.token(), &addr).await,
         Cmd::Help { topic } => help::run(&topic, &r.output),
         Cmd::Errors { cmd } => mallard_sentry_cli::run(cmd, &r.sentry()).await,
         Cmd::Telemetry { cmd } => mallard_otel_cli::run(cmd, &r.otel()).await,
@@ -419,6 +427,7 @@ mod tests {
             &["sourcemaps", "list"],
             &["send-test", "--dsn", "http://k@h/1"],
             &["tui"],
+            &["web", "--addr", "127.0.0.1:9000"],
             &["help", "agents"],
             &["help", "issues", "list"],
             &["events", "list", "--trace", "0af7651916cd43dd8448eb211c80319c", "--wait", "30s"],

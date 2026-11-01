@@ -1,5 +1,8 @@
 # mallard CLI and TUI
 
+`mallard web` is the Web UI, with the same screens and keys: see
+[crates/mallard-web/README.md](../crates/mallard-web/README.md).
+
 The `mallard` binary: server, CLI and TUI (ADR 0023). The CLI and TUI have two
 sides that look and behave alike (ADR 0006). The shared
 pieces live in `crates/mallard-term`.
@@ -27,6 +30,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard schema [tables]`, `mallard schema attrs` | the tables and columns `sql` can query, per `side` (`errors` tables need `sql --errors`); attribute keys with counts, or the top values of `--key` (`--signal spans\|logs\|metrics`, `-S`, `--metric`; sampled) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
 | `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |
+| `mallard web [--addr a]` | the Web UI on `127.0.0.1:8088`: the same screens and keys in a browser |
 
 The server commands read the config from `-c/--config` or `MALLARD_CONFIG`, put
 after the command (`mallard serve -c mallard.toml`); `--url` and `--token` do

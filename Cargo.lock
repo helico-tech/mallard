@@ -2242,6 +2242,7 @@ dependencies = [
  "mallard-sentry-cli",
  "mallard-server",
  "mallard-term",
+ "mallard-web",
  "metrics-exporter-prometheus",
  "ratatui",
  "reqwest",
@@ -2577,6 +2578,24 @@ dependencies = [
  "serde_json",
  "tokio",
  "unicode-width",
+]
+
+[[package]]
+name = "mallard-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.1",
+ "mallard-common",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
 ]
 
 [[package]]

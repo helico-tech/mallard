@@ -107,6 +107,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["sourcemaps", "list"], "mallard sourcemaps list -p web"),
     (&["send-test"], "mallard send-test --dsn \"$SENTRY_DSN\""),
     (&["tui"], "mallard tui -p web"),
+    (&["web"], "mallard web\n  mallard web --addr 0.0.0.0:8088   # without a token: people sign in"),
     (&["help"], "mallard help agents\n  mallard help issues list"),
     (&["serve"], "mallard serve -c mallard.toml\n  MALLARD_CONFIG=mallard.toml mallard serve"),
     (&["check"], "mallard check -c mallard.toml\n  mallard check -c mallard.toml --connect --json"),
