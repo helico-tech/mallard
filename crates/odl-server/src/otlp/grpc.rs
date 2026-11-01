@@ -25,8 +25,15 @@ pub struct Otlp(pub Arc<Ingest>);
 
 impl Otlp {
     fn check_auth<T>(&self, req: &TReq<T>) -> Result<(), Status> {
-        let header = req.metadata().get("authorization").and_then(|v| v.to_str().ok());
-        if self.0.tokens.allows(header) { Ok(()) } else { Err(Status::unauthenticated("invalid or missing bearer token")) }
+        let header = req
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok());
+        if self.0.tokens.allows(header) {
+            Ok(())
+        } else {
+            Err(Status::unauthenticated("invalid or missing bearer token"))
+        }
     }
 
     async fn export(&self, req: Request) -> Result<Accepted, Status> {

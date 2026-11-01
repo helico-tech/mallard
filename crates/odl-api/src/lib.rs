@@ -533,7 +533,15 @@ macro_rules! has_window {
 }
 
 has_window!(
-    ServiceQuery, OperationQuery, SpanSeriesQuery, TraceQuery, TraceGetQuery, LogQuery, LogSeriesQuery, MetricListQuery, MetricQuery
+    ServiceQuery,
+    OperationQuery,
+    SpanSeriesQuery,
+    TraceQuery,
+    TraceGetQuery,
+    LogQuery,
+    LogSeriesQuery,
+    MetricListQuery,
+    MetricQuery
 );
 
 /// Parse `k=v,k2=v2` attribute filters. Values may not contain commas.
@@ -561,7 +569,10 @@ mod tests {
     #[test]
     fn attribute_filter_parses() {
         let f = parse_attribute_filter("http.route=/a, k = v ,").unwrap();
-        assert_eq!(f, vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]);
+        assert_eq!(
+            f,
+            vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]
+        );
         assert!(parse_attribute_filter("novalue").is_err());
         assert!(parse_attribute_filter("=x").is_err());
     }

@@ -82,7 +82,10 @@ impl Maintenance {
         let handle = std::thread::Builder::new()
             .name("odl-maintenance".into())
             .spawn(move || run(conn, schema, settings, stats, stop2))?;
-        Ok(Self { stop, handle: Some(handle) })
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
     }
 
     pub fn stop(mut self) {
@@ -118,7 +121,9 @@ fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: A
             next_full = Instant::now() + s.full_compact_interval;
             next_compact = Instant::now() + s.compact_interval;
         } else if now >= next_compact {
-            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size)));
+            task(&stats, "compaction", || {
+                compact(&conn, &schema, Some(s.small_file_size))
+            });
             next_compact = Instant::now() + s.compact_interval;
         } else {
             std::thread::sleep(Duration::from_millis(500));
@@ -142,7 +147,13 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
             (false, format!("{e:#}"))
         }
     };
-    stats.maintenance(MaintenanceInfo { task: name.to_string(), at: Utc::now(), duration_ms: ms, ok, detail });
+    stats.maintenance(MaintenanceInfo {
+        task: name.to_string(),
+        at: Utc::now(),
+        duration_ms: ms,
+        ok,
+        detail,
+    });
 }
 
 /// Flush inlined data and merge adjacent files. `max_file_size = None` merges
@@ -165,7 +176,9 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
     let mut merged = 0i64;
     let mut created = 0i64;
     for t in TABLES {
-        let size = max_file_size.map(|b| format!(", max_file_size => {b}")).unwrap_or_default();
+        let size = max_file_size
+            .map(|b| format!(", max_file_size => {b}"))
+            .unwrap_or_default();
         let sql = format!(
             "SELECT coalesce(sum(files_processed), 0)::BIGINT, coalesce(sum(files_created), 0)::BIGINT \
              FROM ducklake_merge_adjacent_files({}, {}, schema => {}{size})",
@@ -177,7 +190,9 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
         merged += p;
         created += c;
     }
-    Ok(format!("flushed {flushed} inlined rows; merged {merged} files into {created}"))
+    Ok(format!(
+        "flushed {flushed} inlined rows; merged {merged} files into {created}"
+    ))
 }
 
 /// Cut-off for a retention: aligned to the UTC day when retention >= 1 day.
@@ -194,13 +209,22 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
     let now = Utc::now();
     let mut deleted = 0usize;
     for t in TABLES {
-        let Some((_, keep)) = s.retention.iter().find(|(sig, _)| *sig == t.signal.as_str()) else { continue };
+        let Some((_, keep)) = s
+            .retention
+            .iter()
+            .find(|(sig, _)| *sig == t.signal.as_str())
+        else {
+            continue;
+        };
         if keep.is_zero() {
             continue;
         }
         let cutoff = retention_cutoff(now, *keep).naive_utc();
         let n = conn.execute(
-            &format!("DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?", t.name, t.time_column),
+            &format!(
+                "DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?",
+                t.name, t.time_column
+            ),
             [cutoff],
         )?;
         deleted += n;

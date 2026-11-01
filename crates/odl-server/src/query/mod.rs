@@ -54,7 +54,12 @@ pub struct Reader {
 impl Reader {
     pub fn new(conns: Vec<Connection>, timeout: Duration, max_window: Duration) -> Self {
         let n = conns.len();
-        Self { conns: Mutex::new(conns), sem: Semaphore::new(n), timeout, max_window }
+        Self {
+            conns: Mutex::new(conns),
+            sem: Semaphore::new(n),
+            timeout,
+            max_window,
+        }
     }
 
     /// Run `f` on a pooled connection in a blocking thread, with a timeout.
@@ -68,18 +73,25 @@ impl Reader {
             .await
             .map_err(|_| QueryError::Busy)?
             .expect("semaphore never closed");
-        let conn = self.conns.lock().unwrap().pop().expect("permit implies a free connection");
+        let conn = self
+            .conns
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("permit implies a free connection");
         let interrupt = conn.interrupt_handle();
         let mut task = tokio::task::spawn_blocking(move || {
             let r = f(&conn);
             (conn, r)
         });
         let (conn, res) = match tokio::time::timeout(self.timeout, &mut task).await {
-            Ok(joined) => joined.map_err(|e| QueryError::Internal(anyhow::anyhow!("query task failed: {e}")))?,
+            Ok(joined) => joined
+                .map_err(|e| QueryError::Internal(anyhow::anyhow!("query task failed: {e}")))?,
             Err(_) => {
                 interrupt.interrupt();
-                let (conn, _) =
-                    task.await.map_err(|e| QueryError::Internal(anyhow::anyhow!("query task failed: {e}")))?;
+                let (conn, _) = task
+                    .await
+                    .map_err(|e| QueryError::Internal(anyhow::anyhow!("query task failed: {e}")))?;
                 (conn, Err(QueryError::Timeout(self.timeout)))
             }
         };
@@ -110,7 +122,10 @@ impl Window {
             return Err(bad("`from` must be before `to`"));
         }
         if (to - from).to_std().unwrap_or(Duration::MAX) > max {
-            return Err(bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max))));
+            return Err(bad(format!(
+                "time window larger than query.max_window ({})",
+                humantime::format_duration(max)
+            )));
         }
         Ok(Self { from, to })
     }
@@ -136,8 +151,10 @@ impl Window {
                 d.as_secs().max(1)
             }
             None => {
-                const NICE: [u64; 17] =
-                    [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 86400];
+                const NICE: [u64; 17] = [
+                    1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600,
+                    86400,
+                ];
                 let raw = (secs / 60.0).ceil() as u64;
                 *NICE.iter().find(|n| **n >= raw).unwrap_or(&86400)
             }
@@ -153,12 +170,17 @@ impl Window {
         let step = step as i64;
         let first = self.from.timestamp().div_euclid(step) * step;
         let last = (self.to.timestamp() - 1).div_euclid(step) * step;
-        (0..=((last - first) / step).max(0)).map(|i| first + i * step).collect()
+        (0..=((last - first) / step).max(0))
+            .map(|i| first + i * step)
+            .collect()
     }
 }
 
 pub fn ts_value(t: NaiveDateTime) -> Value {
-    Value::Timestamp(duckdb::types::TimeUnit::Microsecond, t.and_utc().timestamp_micros())
+    Value::Timestamp(
+        duckdb::types::TimeUnit::Microsecond,
+        t.and_utc().timestamp_micros(),
+    )
 }
 
 pub fn from_micros(us: i64) -> DateTime<Utc> {
@@ -198,7 +220,10 @@ impl Filter {
     }
 
     pub fn window(&mut self, col: &str, w: &Window) {
-        self.add(format!("{col} >= ? AND {col} < ?"), [w.from_param(), w.to_param()]);
+        self.add(
+            format!("{col} >= ? AND {col} < ?"),
+            [w.from_param(), w.to_param()],
+        );
     }
 
     /// `key=value` filters on span/log/metric attributes or resource attributes.
@@ -207,7 +232,12 @@ impl Filter {
             for (k, v) in odl_api::parse_attribute_filter(spec).map_err(bad)? {
                 self.add(
                     "(attributes[?] = ? OR resource_attributes[?] = ?)",
-                    [Value::Text(k.clone()), Value::Text(v.clone()), Value::Text(k), Value::Text(v)],
+                    [
+                        Value::Text(k.clone()),
+                        Value::Text(v.clone()),
+                        Value::Text(k),
+                        Value::Text(v),
+                    ],
                 );
             }
         }
@@ -215,13 +245,18 @@ impl Filter {
     }
 
     pub fn sql(&self) -> String {
-        if self.clauses.is_empty() { "TRUE".into() } else { self.clauses.join(" AND ") }
+        if self.clauses.is_empty() {
+            "TRUE".into()
+        } else {
+            self.clauses.join(" AND ")
+        }
     }
 }
 
 /// Parse a JSON column produced by `to_json(...)` into a value.
 pub fn json_col<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
-    s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    s.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -231,12 +266,20 @@ mod tests {
 
     #[test]
     fn windows() {
-        let w = TimeWindow { since: Some("1h".into()), ..Default::default() };
+        let w = TimeWindow {
+            since: Some("1h".into()),
+            ..Default::default()
+        };
         let r = Window::resolve(&w, Duration::from_secs(60), Duration::from_secs(7200)).unwrap();
         assert!((r.secs() - 3600.0).abs() < 1.0);
         assert_eq!(r.step(None).unwrap(), 60);
-        let too_big = TimeWindow { since: Some("3h".into()), ..Default::default() };
-        assert!(Window::resolve(&too_big, Duration::from_secs(60), Duration::from_secs(7200)).is_err());
+        let too_big = TimeWindow {
+            since: Some("3h".into()),
+            ..Default::default()
+        };
+        assert!(
+            Window::resolve(&too_big, Duration::from_secs(60), Duration::from_secs(7200)).is_err()
+        );
         assert!(r.step(Some("100ms")).is_ok());
         assert!(r.step(Some("0s")).is_ok());
     }

@@ -57,7 +57,9 @@ pub fn any_value_to_string(v: &AnyValue) -> String {
         Some(any_value::Value::BoolValue(b)) => b.to_string(),
         Some(any_value::Value::IntValue(i)) => i.to_string(),
         Some(any_value::Value::DoubleValue(d)) => d.to_string(),
-        Some(any_value::Value::BytesValue(b)) => base64::engine::general_purpose::STANDARD.encode(b),
+        Some(any_value::Value::BytesValue(b)) => {
+            base64::engine::general_purpose::STANDARD.encode(b)
+        }
         Some(_) => any_value_to_json(v).to_string(),
     }
 }
@@ -69,17 +71,24 @@ fn any_value_to_json(v: &AnyValue) -> serde_json::Value {
         Some(any_value::Value::StringValue(s)) => J::String(s.clone()),
         Some(any_value::Value::BoolValue(b)) => J::Bool(*b),
         Some(any_value::Value::IntValue(i)) => J::from(*i),
-        Some(any_value::Value::DoubleValue(d)) => {
-            serde_json::Number::from_f64(*d).map(J::Number).unwrap_or(J::Null)
-        }
+        Some(any_value::Value::DoubleValue(d)) => serde_json::Number::from_f64(*d)
+            .map(J::Number)
+            .unwrap_or(J::Null),
         Some(any_value::Value::BytesValue(b)) => {
             J::String(base64::engine::general_purpose::STANDARD.encode(b))
         }
-        Some(any_value::Value::ArrayValue(a)) => J::Array(a.values.iter().map(any_value_to_json).collect()),
+        Some(any_value::Value::ArrayValue(a)) => {
+            J::Array(a.values.iter().map(any_value_to_json).collect())
+        }
         Some(any_value::Value::KvlistValue(kv)) => J::Object(
             kv.values
                 .iter()
-                .map(|e| (e.key.clone(), e.value.as_ref().map(any_value_to_json).unwrap_or(J::Null)))
+                .map(|e| {
+                    (
+                        e.key.clone(),
+                        e.value.as_ref().map(any_value_to_json).unwrap_or(J::Null),
+                    )
+                })
                 .collect(),
         ),
         // Newer proto versions may add variants; render them as null.
@@ -95,7 +104,13 @@ fn attrs(kvs: &[KeyValue]) -> Attrs {
     }
     let mut m: BTreeMap<&str, String> = BTreeMap::new();
     for kv in kvs {
-        m.insert(kv.key.as_str(), kv.value.as_ref().map(any_value_to_string).unwrap_or_default());
+        m.insert(
+            kv.key.as_str(),
+            kv.value
+                .as_ref()
+                .map(any_value_to_string)
+                .unwrap_or_default(),
+        );
     }
     m.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
@@ -138,7 +153,8 @@ impl ResourceCtx {
 }
 
 fn scope_parts(s: Option<&InstrumentationScope>) -> (&str, &str) {
-    s.map(|s| (s.name.as_str(), s.version.as_str())).unwrap_or(("", ""))
+    s.map(|s| (s.name.as_str(), s.version.as_str()))
+        .unwrap_or(("", ""))
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +176,11 @@ struct AttrCol(MapBuilder<StringBuilder, StringBuilder>);
 
 impl AttrCol {
     fn new() -> Self {
-        Self(MapBuilder::new(None, StringBuilder::new(), StringBuilder::new()))
+        Self(MapBuilder::new(
+            None,
+            StringBuilder::new(),
+            StringBuilder::new(),
+        ))
     }
     fn append(&mut self, a: &[(String, String)]) {
         for (k, v) in a {
@@ -189,7 +209,12 @@ impl ListOffsets {
         let offsets = std::mem::replace(&mut self.0, vec![0]);
         let st = StructArray::new(struct_fields.clone(), children, None);
         let item = Arc::new(Field::new("item", DataType::Struct(struct_fields), true));
-        Arc::new(ListArray::new(item, OffsetBuffer::new(offsets.into()), Arc::new(st), None))
+        Arc::new(ListArray::new(
+            item,
+            OffsetBuffer::new(offsets.into()),
+            Arc::new(st),
+            None,
+        ))
     }
 }
 
@@ -259,9 +284,11 @@ fn status_code(c: i32) -> &'static str {
 }
 
 fn fsb(vals: &[[u8; 16]]) -> ArrayRef {
-    Arc::new(FixedSizeBinaryArray::try_from_iter(vals.iter()).unwrap_or_else(|_| {
-        FixedSizeBinaryArray::new_null(16, 0) // only reachable for empty input
-    }))
+    Arc::new(
+        FixedSizeBinaryArray::try_from_iter(vals.iter()).unwrap_or_else(|_| {
+            FixedSizeBinaryArray::new_null(16, 0) // only reachable for empty input
+        }),
+    )
 }
 
 fn fsb_opt(vals: &[Option<[u8; 16]>]) -> ArrayRef {
@@ -299,8 +326,14 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
                     continue;
                 };
                 accepted += 1;
-                let start = if s.start_time_unix_nano == 0 { recv } else { nanos_to_micros(s.start_time_unix_nano) };
-                let dur = if s.end_time_unix_nano >= s.start_time_unix_nano && s.start_time_unix_nano != 0 {
+                let start = if s.start_time_unix_nano == 0 {
+                    recv
+                } else {
+                    nanos_to_micros(s.start_time_unix_nano)
+                };
+                let dur = if s.end_time_unix_nano >= s.start_time_unix_nano
+                    && s.start_time_unix_nano != 0
+                {
                     (s.end_time_unix_nano - s.start_time_unix_nano).min(i64::MAX as u64) as i64
                 } else {
                     0
@@ -313,7 +346,11 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
                 c.service.append_value(&res.service);
                 c.name.append_value(&s.name);
                 c.kind.append_value(span_kind(s.kind));
-                let (code, msg) = s.status.as_ref().map(|st| (st.code, st.message.as_str())).unwrap_or((0, ""));
+                let (code, msg) = s
+                    .status
+                    .as_ref()
+                    .map(|st| (st.code, st.message.as_str()))
+                    .unwrap_or((0, ""));
                 c.status_code.append_value(status_code(code));
                 c.status_message.append_value(msg);
                 c.trace_state.append_value(&s.trace_state);
@@ -323,7 +360,11 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
                 c.res_attrs.as_mut().unwrap().append(&res.attrs);
                 c.attrs.as_mut().unwrap().append(&attrs(&s.attributes));
                 for e in &s.events {
-                    c.ev_time.append_value(if e.time_unix_nano == 0 { start } else { nanos_to_micros(e.time_unix_nano) });
+                    c.ev_time.append_value(if e.time_unix_nano == 0 {
+                        start
+                    } else {
+                        nanos_to_micros(e.time_unix_nano)
+                    });
                     c.ev_name.append_value(&e.name);
                     c.ev_attrs.as_mut().unwrap().append(&attrs(&e.attributes));
                 }
@@ -338,9 +379,15 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
             }
         }
     }
-    let mut out = Converted { accepted, rejected, ..Default::default() };
+    let mut out = Converted {
+        accepted,
+        rejected,
+        ..Default::default()
+    };
     if rejected > 0 {
-        out.reject_reason = Some(format!("{rejected} spans had an invalid trace_id or span_id"));
+        out.reject_reason = Some(format!(
+            "{rejected} spans had an invalid trace_id or span_id"
+        ));
     }
     if accepted == 0 {
         return out;
@@ -355,7 +402,11 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
     ]);
     let events = c.ev_offsets.as_mut().unwrap().finish(
         ev_fields,
-        vec![Arc::new(c.ev_time.finish()), Arc::new(c.ev_name.finish()), ev_attrs],
+        vec![
+            Arc::new(c.ev_time.finish()),
+            Arc::new(c.ev_name.finish()),
+            ev_attrs,
+        ],
     );
     let ln_attrs = c.ln_attrs.as_mut().unwrap().finish();
     let ln_fields = Fields::from(vec![
@@ -366,23 +417,52 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
     ]);
     let links = c.ln_offsets.as_mut().unwrap().finish(
         ln_fields,
-        vec![fsb_opt(&c.ln_trace), Arc::new(c.ln_span.finish()), Arc::new(c.ln_state.finish()), ln_attrs],
+        vec![
+            fsb_opt(&c.ln_trace),
+            Arc::new(c.ln_span.finish()),
+            Arc::new(c.ln_state.finish()),
+            ln_attrs,
+        ],
     );
     let b = batch(vec![
         (f("start_time", ts_type()), Arc::new(c.start.finish())),
-        (f("duration_ns", DataType::Int64), Arc::new(c.duration.finish())),
+        (
+            f("duration_ns", DataType::Int64),
+            Arc::new(c.duration.finish()),
+        ),
         (uuid_field("trace_id"), fsb(&c.trace_id)),
         (f("span_id", DataType::UInt64), Arc::new(c.span_id.finish())),
-        (f("parent_span_id", DataType::UInt64), Arc::new(c.parent.finish())),
-        (f("service_name", DataType::Utf8), Arc::new(c.service.finish())),
+        (
+            f("parent_span_id", DataType::UInt64),
+            Arc::new(c.parent.finish()),
+        ),
+        (
+            f("service_name", DataType::Utf8),
+            Arc::new(c.service.finish()),
+        ),
         (f("name", DataType::Utf8), Arc::new(c.name.finish())),
         (f("kind", DataType::Utf8), Arc::new(c.kind.finish())),
-        (f("status_code", DataType::Utf8), Arc::new(c.status_code.finish())),
-        (f("status_message", DataType::Utf8), Arc::new(c.status_message.finish())),
-        (f("trace_state", DataType::Utf8), Arc::new(c.trace_state.finish())),
+        (
+            f("status_code", DataType::Utf8),
+            Arc::new(c.status_code.finish()),
+        ),
+        (
+            f("status_message", DataType::Utf8),
+            Arc::new(c.status_message.finish()),
+        ),
+        (
+            f("trace_state", DataType::Utf8),
+            Arc::new(c.trace_state.finish()),
+        ),
         (f("flags", DataType::UInt32), Arc::new(c.flags.finish())),
-        (f("scope_name", DataType::Utf8), Arc::new(c.scope_name.finish())),
-        (f("scope_version", DataType::Utf8), Arc::new(c.scope_version.finish())),
+        (
+            f("scope_name", DataType::Utf8),
+            Arc::new(c.scope_name.finish()),
+        ),
+        (
+            f("scope_version", DataType::Utf8),
+            Arc::new(c.scope_version.finish()),
+        ),
         (map_field("resource_attributes", &res_attrs), res_attrs),
         (map_field("attributes", &span_attrs), span_attrs),
         (f("events", events.data_type().clone()), events),
@@ -419,8 +499,16 @@ pub fn convert_logs(req: &ExportLogsServiceRequest) -> Converted {
             let (sn, sv) = scope_parts(sl.scope.as_ref());
             for r in &sl.log_records {
                 n += 1;
-                let obs = if r.observed_time_unix_nano == 0 { recv } else { nanos_to_micros(r.observed_time_unix_nano) };
-                let t = if r.time_unix_nano == 0 { obs } else { nanos_to_micros(r.time_unix_nano) };
+                let obs = if r.observed_time_unix_nano == 0 {
+                    recv
+                } else {
+                    nanos_to_micros(r.observed_time_unix_nano)
+                };
+                let t = if r.time_unix_nano == 0 {
+                    obs
+                } else {
+                    nanos_to_micros(r.time_unix_nano)
+                };
                 time.append_value(t);
                 observed.append_value(obs);
                 tids.push(trace_id(&r.trace_id));
@@ -438,7 +526,10 @@ pub fn convert_logs(req: &ExportLogsServiceRequest) -> Converted {
             }
         }
     }
-    let mut out = Converted { accepted: n, ..Default::default() };
+    let mut out = Converted {
+        accepted: n,
+        ..Default::default()
+    };
     if n == 0 {
         return out;
     }
@@ -451,14 +542,32 @@ pub fn convert_logs(req: &ExportLogsServiceRequest) -> Converted {
             (f("observed_time", ts_type()), Arc::new(observed.finish())),
             (uuid_field("trace_id"), fsb_opt(&tids)),
             (f("span_id", DataType::UInt64), Arc::new(sids.finish())),
-            (f("service_name", DataType::Utf8), Arc::new(service.finish())),
-            (f("severity_number", DataType::UInt8), Arc::new(sev_num.finish())),
-            (f("severity_text", DataType::Utf8), Arc::new(sev_text.finish())),
+            (
+                f("service_name", DataType::Utf8),
+                Arc::new(service.finish()),
+            ),
+            (
+                f("severity_number", DataType::UInt8),
+                Arc::new(sev_num.finish()),
+            ),
+            (
+                f("severity_text", DataType::Utf8),
+                Arc::new(sev_text.finish()),
+            ),
             (f("body", DataType::Utf8), Arc::new(body.finish())),
-            (f("event_name", DataType::Utf8), Arc::new(event_name.finish())),
+            (
+                f("event_name", DataType::Utf8),
+                Arc::new(event_name.finish()),
+            ),
             (f("flags", DataType::UInt32), Arc::new(flags.finish())),
-            (f("scope_name", DataType::Utf8), Arc::new(scope_name.finish())),
-            (f("scope_version", DataType::Utf8), Arc::new(scope_version.finish())),
+            (
+                f("scope_name", DataType::Utf8),
+                Arc::new(scope_name.finish()),
+            ),
+            (
+                f("scope_version", DataType::Utf8),
+                Arc::new(scope_version.finish()),
+            ),
             (map_field("resource_attributes", &ra), ra),
             (map_field("attributes", &la), la),
         ]),
@@ -519,10 +628,23 @@ impl MetricBase {
         }
     }
 
-    fn append(&mut self, m: &MetricCtx, time_ns: u64, start_ns: u64, flags: u32, kvs: &[KeyValue], recv: i64) {
+    fn append(
+        &mut self,
+        m: &MetricCtx,
+        time_ns: u64,
+        start_ns: u64,
+        flags: u32,
+        kvs: &[KeyValue],
+        recv: i64,
+    ) {
         let a = attrs(kvs);
-        self.time.append_value(if time_ns == 0 { recv } else { nanos_to_micros(time_ns) });
-        self.start.append_option((start_ns != 0).then(|| nanos_to_micros(start_ns)));
+        self.time.append_value(if time_ns == 0 {
+            recv
+        } else {
+            nanos_to_micros(time_ns)
+        });
+        self.start
+            .append_option((start_ns != 0).then(|| nanos_to_micros(start_ns)));
         self.service.append_value(&m.res.service);
         self.name.append_value(m.name);
         self.description.append_value(m.description);
@@ -543,15 +665,39 @@ impl MetricBase {
         vec![
             (f("time", ts_type()), Arc::new(self.time.finish())),
             (f("start_time", ts_type()), Arc::new(self.start.finish())),
-            (f("service_name", DataType::Utf8), Arc::new(self.service.finish())),
-            (f("metric_name", DataType::Utf8), Arc::new(self.name.finish())),
-            (f("metric_description", DataType::Utf8), Arc::new(self.description.finish())),
-            (f("metric_unit", DataType::Utf8), Arc::new(self.unit.finish())),
-            (f("temporality", DataType::Utf8), Arc::new(self.temporality.finish())),
-            (f("series_id", DataType::UInt64), Arc::new(self.series.finish())),
+            (
+                f("service_name", DataType::Utf8),
+                Arc::new(self.service.finish()),
+            ),
+            (
+                f("metric_name", DataType::Utf8),
+                Arc::new(self.name.finish()),
+            ),
+            (
+                f("metric_description", DataType::Utf8),
+                Arc::new(self.description.finish()),
+            ),
+            (
+                f("metric_unit", DataType::Utf8),
+                Arc::new(self.unit.finish()),
+            ),
+            (
+                f("temporality", DataType::Utf8),
+                Arc::new(self.temporality.finish()),
+            ),
+            (
+                f("series_id", DataType::UInt64),
+                Arc::new(self.series.finish()),
+            ),
             (f("flags", DataType::UInt32), Arc::new(self.flags.finish())),
-            (f("scope_name", DataType::Utf8), Arc::new(self.scope_name.finish())),
-            (f("scope_version", DataType::Utf8), Arc::new(self.scope_version.finish())),
+            (
+                f("scope_name", DataType::Utf8),
+                Arc::new(self.scope_name.finish()),
+            ),
+            (
+                f("scope_version", DataType::Utf8),
+                Arc::new(self.scope_version.finish()),
+            ),
             (map_field("resource_attributes", &ra), ra),
             (map_field("attributes", &a), a),
         ]
@@ -618,14 +764,26 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
     let mut np_value = Float64Builder::new();
     // histograms
     let mut h = MetricBase::new();
-    let (mut h_count, mut h_sum, mut h_min, mut h_max) =
-        (UInt64Builder::new(), Float64Builder::new(), Float64Builder::new(), Float64Builder::new());
+    let (mut h_count, mut h_sum, mut h_min, mut h_max) = (
+        UInt64Builder::new(),
+        Float64Builder::new(),
+        Float64Builder::new(),
+        Float64Builder::new(),
+    );
     let (mut h_buckets, mut h_bounds): (Vec<Vec<u64>>, Vec<Vec<f64>>) = (vec![], vec![]);
     // exponential histograms
     let mut e = MetricBase::new();
-    let (mut e_count, mut e_sum, mut e_min, mut e_max) =
-        (UInt64Builder::new(), Float64Builder::new(), Float64Builder::new(), Float64Builder::new());
-    let (mut e_scale, mut e_zero, mut e_zt) = (Int32Builder::new(), UInt64Builder::new(), Float64Builder::new());
+    let (mut e_count, mut e_sum, mut e_min, mut e_max) = (
+        UInt64Builder::new(),
+        Float64Builder::new(),
+        Float64Builder::new(),
+        Float64Builder::new(),
+    );
+    let (mut e_scale, mut e_zero, mut e_zt) = (
+        Int32Builder::new(),
+        UInt64Builder::new(),
+        Float64Builder::new(),
+    );
     let (mut e_poff, mut e_noff) = (Int32Builder::new(), Int32Builder::new());
     let (mut e_pos, mut e_neg): (Vec<Vec<u64>>, Vec<Vec<u64>>) = (vec![], vec![]);
     // summaries
@@ -654,7 +812,14 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                 match &m.data {
                     Some(Data::Gauge(g)) => {
                         for p in &g.data_points {
-                            np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            np.append(
+                                &ctx,
+                                p.time_unix_nano,
+                                p.start_time_unix_nano,
+                                p.flags,
+                                &p.attributes,
+                                recv,
+                            );
                             np_type.append_value("gauge");
                             np_mono.append_value(false);
                             np_value.append_option(number_value(p.value.as_ref()));
@@ -663,7 +828,14 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     Some(Data::Sum(sum)) => {
                         ctx.temporality = temporality(sum.aggregation_temporality);
                         for p in &sum.data_points {
-                            np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            np.append(
+                                &ctx,
+                                p.time_unix_nano,
+                                p.start_time_unix_nano,
+                                p.flags,
+                                &p.attributes,
+                                recv,
+                            );
                             np_type.append_value("sum");
                             np_mono.append_value(sum.is_monotonic);
                             np_value.append_option(number_value(p.value.as_ref()));
@@ -672,7 +844,14 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     Some(Data::Histogram(hist)) => {
                         ctx.temporality = temporality(hist.aggregation_temporality);
                         for p in &hist.data_points {
-                            h.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            h.append(
+                                &ctx,
+                                p.time_unix_nano,
+                                p.start_time_unix_nano,
+                                p.flags,
+                                &p.attributes,
+                                recv,
+                            );
                             h_count.append_value(p.count);
                             h_sum.append_option(p.sum);
                             h_min.append_option(p.min);
@@ -684,7 +863,14 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     Some(Data::ExponentialHistogram(hist)) => {
                         ctx.temporality = temporality(hist.aggregation_temporality);
                         for p in &hist.data_points {
-                            e.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            e.append(
+                                &ctx,
+                                p.time_unix_nano,
+                                p.start_time_unix_nano,
+                                p.flags,
+                                &p.attributes,
+                                recv,
+                            );
                             e_count.append_value(p.count);
                             e_sum.append_option(p.sum);
                             e_min.append_option(p.min);
@@ -702,7 +888,14 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     }
                     Some(Data::Summary(sum)) => {
                         for p in &sum.data_points {
-                            s.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            s.append(
+                                &ctx,
+                                p.time_unix_nano,
+                                p.start_time_unix_nano,
+                                p.flags,
+                                &p.attributes,
+                                recv,
+                            );
                             s_count.append_value(p.count);
                             s_sum.append_value(p.sum);
                             for q in &p.quantile_values {
@@ -718,7 +911,10 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         }
     }
 
-    let mut out = Converted { rejected, ..Default::default() };
+    let mut out = Converted {
+        rejected,
+        ..Default::default()
+    };
     if rejected > 0 {
         out.reject_reason = Some(format!("{rejected} metrics had no data"));
     }
@@ -726,7 +922,10 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         out.accepted += np.rows as u64;
         let mut cols = np.finish();
         cols.push((f("metric_type", DataType::Utf8), Arc::new(np_type.finish())));
-        cols.push((f("is_monotonic", DataType::Boolean), Arc::new(np_mono.finish())));
+        cols.push((
+            f("is_monotonic", DataType::Boolean),
+            Arc::new(np_mono.finish()),
+        ));
         cols.push((f("value", DataType::Float64), Arc::new(np_value.finish())));
         out.batches.push((TableId::MetricPoints, batch(cols)));
     }
@@ -752,21 +951,34 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         cols.push((f("max", DataType::Float64), Arc::new(e_max.finish())));
         cols.push((f("scale", DataType::Int32), Arc::new(e_scale.finish())));
         cols.push((f("zero_count", DataType::UInt64), Arc::new(e_zero.finish())));
-        cols.push((f("zero_threshold", DataType::Float64), Arc::new(e_zt.finish())));
-        cols.push((f("positive_offset", DataType::Int32), Arc::new(e_poff.finish())));
+        cols.push((
+            f("zero_threshold", DataType::Float64),
+            Arc::new(e_zt.finish()),
+        ));
+        cols.push((
+            f("positive_offset", DataType::Int32),
+            Arc::new(e_poff.finish()),
+        ));
         let b = u64_list(&e_pos);
         cols.push((f("positive_bucket_counts", b.data_type().clone()), b));
-        cols.push((f("negative_offset", DataType::Int32), Arc::new(e_noff.finish())));
+        cols.push((
+            f("negative_offset", DataType::Int32),
+            Arc::new(e_noff.finish()),
+        ));
         let b = u64_list(&e_neg);
         cols.push((f("negative_bucket_counts", b.data_type().clone()), b));
-        out.batches.push((TableId::MetricExpHistograms, batch(cols)));
+        out.batches
+            .push((TableId::MetricExpHistograms, batch(cols)));
     }
     if s.rows > 0 {
         out.accepted += s.rows as u64;
         let mut cols = s.finish();
         cols.push((f("count", DataType::UInt64), Arc::new(s_count.finish())));
         cols.push((f("sum", DataType::Float64), Arc::new(s_sum.finish())));
-        let qf = Fields::from(vec![f("quantile", DataType::Float64), f("value", DataType::Float64)]);
+        let qf = Fields::from(vec![
+            f("quantile", DataType::Float64),
+            f("value", DataType::Float64),
+        ]);
         let q = s_q_off.finish(qf, vec![Arc::new(s_q.finish()), Arc::new(s_v.finish())]);
         cols.push((f("quantiles", q.data_type().clone()), q));
         out.batches.push((TableId::MetricSummaries, batch(cols)));
@@ -790,7 +1002,11 @@ mod tests {
     };
 
     fn kv(k: &str, v: any_value::Value) -> KeyValue {
-        KeyValue { key: k.into(), value: Some(AnyValue { value: Some(v) }), ..Default::default() }
+        KeyValue {
+            key: k.into(),
+            value: Some(AnyValue { value: Some(v) }),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -798,13 +1014,22 @@ mod tests {
         let arr = AnyValue {
             value: Some(any_value::Value::ArrayValue(ArrayValue {
                 values: vec![
-                    AnyValue { value: Some(any_value::Value::IntValue(1)) },
-                    AnyValue { value: Some(any_value::Value::StringValue("a".into())) },
+                    AnyValue {
+                        value: Some(any_value::Value::IntValue(1)),
+                    },
+                    AnyValue {
+                        value: Some(any_value::Value::StringValue("a".into())),
+                    },
                 ],
             })),
         };
         assert_eq!(any_value_to_string(&arr), r#"[1,"a"]"#);
-        assert_eq!(any_value_to_string(&AnyValue { value: Some(any_value::Value::DoubleValue(1.5)) }), "1.5");
+        assert_eq!(
+            any_value_to_string(&AnyValue {
+                value: Some(any_value::Value::DoubleValue(1.5))
+            }),
+            "1.5"
+        );
         assert_eq!(any_value_to_string(&AnyValue { value: None }), "");
     }
 
@@ -827,17 +1052,31 @@ mod tests {
             kind: 2,
             start_time_unix_nano: 1_700_000_000_000_000_000,
             end_time_unix_nano: 1_700_000_000_005_000_000,
-            events: vec![Event { time_unix_nano: 0, name: "e".into(), ..Default::default() }],
+            events: vec![Event {
+                time_unix_nano: 0,
+                name: "e".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        let bad = Span { trace_id: vec![0; 16], span_id: vec![2; 8], ..Default::default() };
+        let bad = Span {
+            trace_id: vec![0; 16],
+            span_id: vec![2; 8],
+            ..Default::default()
+        };
         let req = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 resource: Some(Resource {
-                    attributes: vec![kv("service.name", any_value::Value::StringValue("api".into()))],
+                    attributes: vec![kv(
+                        "service.name",
+                        any_value::Value::StringValue("api".into()),
+                    )],
                     ..Default::default()
                 }),
-                scope_spans: vec![ScopeSpans { spans: vec![good, bad], ..Default::default() }],
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![good, bad],
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
@@ -846,13 +1085,19 @@ mod tests {
         let b = &c.batches[0].1;
         assert_eq!(b.num_rows(), 1);
         assert_eq!(b.num_columns(), crate::store::schema::SPANS.columns.len());
-        let dur = b.column(1).as_primitive::<arrow::datatypes::Int64Type>().value(0);
+        let dur = b
+            .column(1)
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0);
         assert_eq!(dur, 5_000_000);
     }
 
     #[test]
     fn series_id_is_stable_and_distinct() {
-        let res = ResourceCtx { service: "s".into(), attrs: vec![("service.name".into(), "s".into())] };
+        let res = ResourceCtx {
+            service: "s".into(),
+            attrs: vec![("service.name".into(), "s".into())],
+        };
         let rh = resource_hash(&res);
         let a = vec![("k".to_string(), "v".to_string())];
         assert_eq!(series_id(rh, "m", &a), series_id(rh, "m", &a));

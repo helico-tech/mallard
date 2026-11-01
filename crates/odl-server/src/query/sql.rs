@@ -20,7 +20,13 @@ use serde_json::Value as J;
 use super::{QResult, bad};
 use crate::store::{CATALOG, schema::TABLES};
 
-const ALLOWED_TABLE_FUNCTIONS: &[&str] = &["range", "generate_series", "unnest", "json_each", "json_tree"];
+const ALLOWED_TABLE_FUNCTIONS: &[&str] = &[
+    "range",
+    "generate_series",
+    "unnest",
+    "json_each",
+    "json_tree",
+];
 
 const DENIED_SCALAR_PREFIXES: &[&str] = &[
     "getenv",
@@ -50,11 +56,17 @@ const DENIED_SCALAR_PREFIXES: &[&str] = &[
 ];
 
 pub fn validate(conn: &Connection, schema: &str, query: &str) -> QResult<()> {
-    let ast: String = conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", params![query], |r| r.get(0))?;
+    let ast: String = conn.query_row(
+        "SELECT json_serialize_sql(?::VARCHAR)",
+        params![query],
+        |r| r.get(0),
+    )?;
     let ast: J = serde_json::from_str(&ast).map_err(|e| bad(format!("cannot parse query: {e}")))?;
     if ast["error"].as_bool().unwrap_or(true) {
         let msg = ast["error_message"].as_str().unwrap_or("invalid query");
-        return Err(bad(format!("only a single read-only SELECT is allowed: {msg}")));
+        return Err(bad(format!(
+            "only a single read-only SELECT is allowed: {msg}"
+        )));
     }
     let stmts = ast["statements"].as_array().map(Vec::len).unwrap_or(0);
     if stmts != 1 {
@@ -90,7 +102,10 @@ fn check(n: &J, schema: &str, tables: &HashSet<&str>, ctes: &HashSet<String>) ->
                 Some("BASE_TABLE") => {
                     let name = m["table_name"].as_str().unwrap_or("").to_ascii_lowercase();
                     let sch = m["schema_name"].as_str().unwrap_or("").to_ascii_lowercase();
-                    let cat = m["catalog_name"].as_str().unwrap_or("").to_ascii_lowercase();
+                    let cat = m["catalog_name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
                     let is_cte = cat.is_empty() && sch.is_empty() && ctes.contains(&name);
                     let is_lake = tables.contains(name.as_str())
                         && (cat.is_empty() || cat == CATALOG)
@@ -103,7 +118,10 @@ fn check(n: &J, schema: &str, tables: &HashSet<&str>, ctes: &HashSet<String>) ->
                     }
                 }
                 Some("TABLE_FUNCTION") => {
-                    let f = m["function"]["function_name"].as_str().unwrap_or("").to_ascii_lowercase();
+                    let f = m["function"]["function_name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
                     if !ALLOWED_TABLE_FUNCTIONS.contains(&f.as_str()) {
                         return Err(bad(format!("table function {f:?} is not allowed")));
                     }
@@ -138,12 +156,20 @@ pub fn run(conn: &Connection, schema: &str, query: &str, limit: u32) -> QResult<
     let mut columns = Vec::new();
     {
         let mut stmt = conn.prepare(&format!("DESCRIBE ({query})"))?;
-        let rows = stmt.query_map([], |r| Ok(SqlColumn { name: r.get(0)?, data_type: r.get(1)? }))?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SqlColumn {
+                name: r.get(0)?,
+                data_type: r.get(1)?,
+            })
+        })?;
         for c in rows {
             columns.push(c?);
         }
     }
-    let sql = format!("SELECT json_array(*COLUMNS(*))::VARCHAR FROM ({query}) LIMIT {}", limit as u64 + 1);
+    let sql = format!(
+        "SELECT json_array(*COLUMNS(*))::VARCHAR FROM ({query}) LIMIT {}",
+        limit as u64 + 1
+    );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = Vec::new();
     let mut truncated = false;
@@ -158,7 +184,12 @@ pub fn run(conn: &Connection, schema: &str, query: &str, limit: u32) -> QResult<
             .map_err(|e| bad(format!("cannot encode row as JSON: {e}")))?;
         rows.push(v.as_array().cloned().unwrap_or_default());
     }
-    Ok(SqlResponse { columns, rows, truncated, elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0 })
+    Ok(SqlResponse {
+        columns,
+        rows,
+        truncated,
+        elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
+    })
 }
 
 /// DuckDB writes NaN/Infinity as bare tokens; JSON has no such values.
@@ -206,7 +237,10 @@ mod tests {
 
     #[test]
     fn nan_tokens() {
-        assert_eq!(non_finite_to_null(r#"[NaN,"NaN",1,-Infinity]"#), r#"[null,"NaN",1,null]"#);
+        assert_eq!(
+            non_finite_to_null(r#"[NaN,"NaN",1,-Infinity]"#),
+            r#"[null,"NaN",1,null]"#
+        );
     }
 
     #[test]

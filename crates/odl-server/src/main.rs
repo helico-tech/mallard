@@ -9,7 +9,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "otel-ducklake", version, about = "OpenTelemetry collector backed by DuckLake")]
+#[command(
+    name = "otel-ducklake",
+    version,
+    about = "OpenTelemetry collector backed by DuckLake"
+)]
 struct Cli {
     /// Config file (TOML). Environment variables ODL_<SECTION>__<KEY> override it.
     #[arg(short, long, env = "ODL_CONFIG", global = true)]
@@ -28,13 +32,24 @@ enum Cmd {
     Config,
     /// Load the config, attach storage, create tables, then exit.
     Check,
+    /// Download DuckDB extensions into `duckdb.extension_directory` (used when
+    /// building container images, so they can run without internet access).
+    InstallExtensions {
+        /// Extensions to install.
+        #[arg(default_values_t = ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "json", "parquet", "icu"].map(String::from))]
+        names: Vec<String>,
+    },
 }
 
 fn init_tracing(format: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,tower_http=warn,h2=warn,tonic=warn".into());
     let b = tracing_subscriber::fmt().with_env_filter(filter);
-    if format == "json" { b.json().init() } else { b.init() }
+    if format == "json" {
+        b.json().init()
+    } else {
+        b.init()
+    }
 }
 
 #[tokio::main]
@@ -49,6 +64,12 @@ async fn main() -> Result<()> {
             print!("{}", Config::example_toml());
             Ok(())
         }
+        Cmd::InstallExtensions { names } => {
+            let cfg = Config::load(cli.config.as_deref())?;
+            init_tracing(&cfg.server.log_format);
+            odl_server::store::install_extensions(&cfg, &names)?;
+            Ok(())
+        }
         Cmd::Check => {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(&cfg.server.log_format);
@@ -59,7 +80,10 @@ async fn main() -> Result<()> {
         Cmd::Serve => {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(&cfg.server.log_format);
-            info!(version = env!("CARGO_PKG_VERSION"), "starting otel-ducklake");
+            info!(
+                version = env!("CARGO_PKG_VERSION"),
+                "starting otel-ducklake"
+            );
             let server = Server::new(cfg).await?;
             let shutdown = CancellationToken::new();
             let sd = shutdown.clone();

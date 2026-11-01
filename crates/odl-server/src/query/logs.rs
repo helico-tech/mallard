@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{LogRecord, LogSeries, LogSeriesPoint};
 
-use super::{Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
+use super::{
+    Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex,
+};
 
 pub struct LogSearch<'a> {
     pub service: Option<&'a str>,
@@ -73,7 +75,13 @@ pub fn search(conn: &Connection, w: &Window, s: &LogSearch) -> QResult<Vec<LogRe
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-pub fn series(conn: &Connection, w: &Window, step: u64, service: Option<&str>, q: Option<&str>) -> QResult<LogSeries> {
+pub fn series(
+    conn: &Connection,
+    w: &Window,
+    step: u64,
+    service: Option<&str>,
+    q: Option<&str>,
+) -> QResult<LogSeries> {
     let f = filter(w, service, q);
     let step_us = step as i64 * 1_000_000;
     let sql = format!(
@@ -88,7 +96,10 @@ pub fn series(conn: &Connection, w: &Window, step: u64, service: Option<&str>, q
     let mut stmt = conn.prepare(&sql)?;
     let mut by: HashMap<i64, [i64; 5]> = HashMap::new();
     for row in stmt.query_map(params_from_iter(f.params), |r| {
-        Ok((r.get::<_, i64>(0)?, [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?]))
+        Ok((
+            r.get::<_, i64>(0)?,
+            [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?],
+        ))
     })? {
         let (b, c) = row?;
         by.insert(b, c);
@@ -108,5 +119,8 @@ pub fn series(conn: &Connection, w: &Window, step: u64, service: Option<&str>, q
             }
         })
         .collect();
-    Ok(LogSeries { step_secs: step, points })
+    Ok(LogSeries {
+        step_secs: step,
+        points,
+    })
 }

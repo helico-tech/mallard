@@ -8,7 +8,13 @@ pub struct Tokens(Arc<Vec<Vec<u8>>>);
 
 impl Tokens {
     pub fn new(tokens: &[String]) -> Self {
-        Self(Arc::new(tokens.iter().filter(|t| !t.is_empty()).map(|t| t.as_bytes().to_vec()).collect()))
+        Self(Arc::new(
+            tokens
+                .iter()
+                .filter(|t| !t.is_empty())
+                .map(|t| t.as_bytes().to_vec())
+                .collect(),
+        ))
     }
 
     pub fn enabled(&self) -> bool {
@@ -21,12 +27,17 @@ impl Tokens {
             return true;
         }
         let Some(h) = header else { return false };
-        let Some(token) = h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")) else {
+        let Some(token) = h
+            .strip_prefix("Bearer ")
+            .or_else(|| h.strip_prefix("bearer "))
+        else {
             return false;
         };
         let token = token.trim().as_bytes();
         // Compare against every token without early exit to avoid timing leaks.
-        self.0.iter().fold(false, |acc, t| acc | constant_time_eq(t, token))
+        self.0
+            .iter()
+            .fold(false, |acc, t| acc | constant_time_eq(t, token))
     }
 }
 

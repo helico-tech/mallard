@@ -79,15 +79,20 @@ impl Server {
 
     fn build(cfg: Config, lake: Lake) -> Result<Self> {
         let stats = Arc::new(Stats::default());
-        let buffer = Arc::new(WriteBuffer::new(cfg.max_buffer_bytes(), cfg.ingest.flush_rows, stats.clone()));
+        let buffer = Arc::new(WriteBuffer::new(
+            cfg.max_buffer_bytes(),
+            cfg.ingest.flush_rows,
+            stats.clone(),
+        ));
         let ingest = Arc::new(Ingest {
             buffer: buffer.clone(),
             stats: stats.clone(),
             tokens: Tokens::new(&cfg.auth.ingest_tokens),
             max_request_bytes: cfg.max_request_bytes(),
         });
-        let conns =
-            (0..cfg.query.max_concurrent).map(|_| lake.connect()).collect::<Result<Vec<_>>>()?;
+        let conns = (0..cfg.query.max_concurrent)
+            .map(|_| lake.connect())
+            .collect::<Result<Vec<_>>>()?;
         let reader = Arc::new(Reader::new(conns, cfg.query_timeout(), cfg.max_window()));
         let api_state = Arc::new(ApiState {
             reader,
@@ -100,7 +105,14 @@ impl Server {
             enable_sql: cfg.query.enable_sql,
             started: Instant::now(),
         });
-        Ok(Self { cfg: Arc::new(cfg), lake: Arc::new(lake), stats, buffer, ingest, api_state })
+        Ok(Self {
+            cfg: Arc::new(cfg),
+            lake: Arc::new(lake),
+            stats,
+            buffer,
+            ingest,
+            api_state,
+        })
     }
 
     pub fn config(&self) -> &Config {
@@ -131,9 +143,18 @@ impl Server {
     /// completes, then flush remaining buffered data. Stop the receivers
     /// before the shutdown future resolves so nothing arrives afterwards.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        let flusher = Flusher::start(&self.lake, self.buffer.clone(), self.cfg.flush_interval(), self.stats.clone())?;
+        let flusher = Flusher::start(
+            &self.lake,
+            self.buffer.clone(),
+            self.cfg.flush_interval(),
+            self.stats.clone(),
+        )?;
         let maintenance = if self.cfg.maintenance.enabled {
-            Some(Maintenance::start(&self.lake, Settings::from_config(&self.cfg)?, self.stats.clone())?)
+            Some(Maintenance::start(
+                &self.lake,
+                Settings::from_config(&self.cfg)?,
+                self.stats.clone(),
+            )?)
         } else {
             None
         };
@@ -153,31 +174,48 @@ impl Server {
     /// query API until `shutdown` is cancelled.
     pub async fn serve(self, shutdown: CancellationToken) -> Result<()> {
         let s = &self.cfg.server;
-        let http_l = TcpListener::bind(&s.otlp_http_addr).await.with_context(|| format!("binding {}", s.otlp_http_addr))?;
-        let api_l = TcpListener::bind(&s.api_addr).await.with_context(|| format!("binding {}", s.api_addr))?;
-        let grpc_addr = s.otlp_grpc_addr.parse().with_context(|| format!("parsing {}", s.otlp_grpc_addr))?;
+        let http_l = TcpListener::bind(&s.otlp_http_addr)
+            .await
+            .with_context(|| format!("binding {}", s.otlp_http_addr))?;
+        let api_l = TcpListener::bind(&s.api_addr)
+            .await
+            .with_context(|| format!("binding {}", s.api_addr))?;
+        let grpc_addr = s
+            .otlp_grpc_addr
+            .parse()
+            .with_context(|| format!("parsing {}", s.otlp_grpc_addr))?;
         info!(grpc = %s.otlp_grpc_addr, http = %s.otlp_http_addr, api = %s.api_addr, "listening");
 
         let receivers_down = CancellationToken::new();
         let otlp_http = self.otlp_http_router().layer(TraceLayer::new_for_http());
-        let api = self.api_router().layer(CompressionLayer::new()).layer(TraceLayer::new_for_http());
+        let api = self
+            .api_router()
+            .layer(CompressionLayer::new())
+            .layer(TraceLayer::new_for_http());
         let grpc = tonic::transport::Server::builder().add_routes(self.grpc_routes());
 
         let t1 = {
             let sd = shutdown.clone();
             tokio::spawn(async move {
-                axum::serve(http_l, otlp_http).with_graceful_shutdown(async move { sd.cancelled().await }).await
+                axum::serve(http_l, otlp_http)
+                    .with_graceful_shutdown(async move { sd.cancelled().await })
+                    .await
             })
         };
         let t2 = {
             let sd = shutdown.clone();
-            tokio::spawn(
-                async move { axum::serve(api_l, api).with_graceful_shutdown(async move { sd.cancelled().await }).await },
-            )
+            tokio::spawn(async move {
+                axum::serve(api_l, api)
+                    .with_graceful_shutdown(async move { sd.cancelled().await })
+                    .await
+            })
         };
         let t3 = {
             let sd = shutdown.clone();
-            tokio::spawn(async move { grpc.serve_with_shutdown(grpc_addr, async move { sd.cancelled().await }).await })
+            tokio::spawn(async move {
+                grpc.serve_with_shutdown(grpc_addr, async move { sd.cancelled().await })
+                    .await
+            })
         };
         let rd = receivers_down.clone();
         let background = self.run_background(async move { rd.cancelled().await });

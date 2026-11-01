@@ -80,6 +80,9 @@ impl Ingest {
             return Err(IngestError::Backpressure(e.to_string()));
         }
         self.stats.record_request(signal, accepted, rejected);
-        Ok(Accepted { rejected, message: c.reject_reason.unwrap_or_default() })
+        Ok(Accepted {
+            rejected,
+            message: c.reject_reason.unwrap_or_default(),
+        })
     }
 }
