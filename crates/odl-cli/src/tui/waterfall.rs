@@ -27,7 +27,7 @@ pub fn layout(spans: &[Span]) -> (Vec<Row>, i64) {
     let off = |s: &Span| (s.start_time - start).num_nanoseconds().unwrap_or(0);
     let total = spans
         .iter()
-        .map(|s| off(s) + s.duration_ns.max(0))
+        .map(|s| off(s).saturating_add(s.duration_ns.max(0)))
         .max()
         .unwrap_or(1)
         .max(1);

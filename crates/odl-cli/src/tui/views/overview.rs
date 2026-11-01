@@ -95,8 +95,9 @@ impl Embedded {
             since: since.clone(),
             ..Default::default()
         };
-        if !self.loader.spawn(
+        if !self.loader.load(
             Kind::Services,
+            force,
             async move { c.services(&q).await },
             Data::Services,
         ) {
@@ -108,8 +109,9 @@ impl Embedded {
             since: since.clone(),
             ..Default::default()
         };
-        self.loader.spawn(
+        self.loader.load(
             Kind::SpanSeries,
+            force,
             async move { c.span_series(&q).await },
             Data::SpanSeries,
         );
@@ -118,8 +120,9 @@ impl Embedded {
             since: since.clone(),
             ..Default::default()
         };
-        self.loader.spawn(
+        self.loader.load(
             Kind::LogSeries,
+            force,
             async move { c.log_series(&q).await },
             Data::LogSeries,
         );
@@ -130,8 +133,9 @@ impl Embedded {
                 service: Some(svc.clone()),
                 ..Default::default()
             };
-            self.loader.spawn(
+            self.loader.load(
                 Kind::Operations,
+                force,
                 async move { c.operations(&q).await },
                 Data::Operations,
             );
@@ -296,7 +300,7 @@ impl Embedded {
             label: "p95 latency",
             value: dash(ms(p95)),
             color: theme::WARN,
-            sub: "entry spans".into(),
+            sub: "avg of per-bucket p95".into(),
             spark: &lat_spark,
         }
         .render(f, areas[2]);
@@ -373,7 +377,7 @@ impl Embedded {
             widgets::panel_with("Throughput", widgets::legend(&throughput), false),
             &throughput,
             bounds,
-            compact,
+            &compact,
         );
         let latency = [
             Series {
@@ -398,7 +402,7 @@ impl Embedded {
             widgets::panel_with("Latency", widgets::legend(&latency), false),
             &latency,
             bounds,
-            ms,
+            &ms,
         );
     }
 

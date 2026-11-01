@@ -3,6 +3,15 @@
 //! - [`Cmd`] + [`run`]: mount the commands in another CLI.
 //! - [`tui::Embedded`]: the TUI as a component without terminal setup.
 
+/// Print a line to stdout: colors are stripped when stdout is not a
+/// terminal or `NO_COLOR` is set, and a closed pipe (`odl logs | head`)
+/// ends the process quietly instead of panicking.
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        $crate::fmt::emit(&format!($($arg)*))
+    };
+}
+
 pub mod fmt;
 pub mod tui;
 
@@ -11,7 +20,6 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clap::{Subcommand, ValueEnum};
 use odl_client::{Client, LogTail, api::*};
-use owo_colors::OwoColorize;
 
 use crate::fmt::*;
 
@@ -157,6 +165,11 @@ pub enum Cmd {
 }
 
 impl Win {
+    /// `--since` in seconds, if it parses.
+    pub fn since_secs(&self) -> Option<f64> {
+        tui::humantime_secs(&self.since)
+    }
+
     fn parts(
         &self,
     ) -> (
@@ -196,7 +209,7 @@ fn severity(level: &str) -> Result<u8> {
 }
 
 fn json<T: serde::Serialize>(v: &T) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(v)?);
+    outln!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
 }
 
@@ -216,7 +229,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             if out == Output::Json {
                 json(&h)
             } else {
-                println!("{} {}", h.status, h.version);
+                outln!("{} {}", h.status, h.version);
                 Ok(())
             }
         }
@@ -305,15 +318,30 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             since,
             attributes,
         } => {
-            let t = c
-                .trace(
-                    &trace_id,
-                    &TraceGetQuery {
-                        since: Some(since),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+            let get = |since: String| {
+                let c = c.clone();
+                let id = trace_id.clone();
+                async move {
+                    c.trace(
+                        &id,
+                        &TraceGetQuery {
+                            since: Some(since),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                }
+            };
+            let t = match get(since.clone()).await {
+                // The server's query.max_window is smaller than the window
+                // asked for: fall back to one day.
+                Err(odl_client::Error::Api {
+                    status: 400,
+                    message,
+                    ..
+                }) if message.contains("max_window") && since != "24h" => get("24h".into()).await?,
+                r => r?,
+            };
             if out == Output::Json {
                 json(&t)
             } else {
@@ -355,24 +383,36 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     Ok(())
                 };
             }
-            let start = chrono::Utc::now() - chrono::TimeDelta::minutes(1);
+            // Start where --from/--since say; the first poll shows the newest
+            // `--limit` records of that window, like `tail -n N -f`.
+            let start = from.unwrap_or_else(|| {
+                let secs = w.since_secs().unwrap_or(60.0);
+                chrono::Utc::now() - chrono::TimeDelta::milliseconds((secs * 1000.0) as i64)
+            });
             let mut tail = LogTail::new(c.clone(), q, start);
+            // One Ctrl-C future for the whole loop, so a signal that arrives
+            // while a request is in flight is not lost.
+            let ctrl_c = tokio::signal::ctrl_c();
+            tokio::pin!(ctrl_c);
             loop {
-                match tail.poll().await {
-                    Ok(v) => {
-                        for r in &v {
-                            if out == Output::Json {
-                                println!("{}", serde_json::to_string(r)?)
-                            } else {
-                                print_log(r)
+                tokio::select! {
+                    res = tail.poll() => match res {
+                        Ok(v) => {
+                            for r in &v {
+                                if out == Output::Json {
+                                    outln!("{}", serde_json::to_string(r)?)
+                                } else {
+                                    print_log(r)
+                                }
                             }
                         }
-                    }
-                    Err(e) => eprintln!("{} {e}", "poll failed:".yellow()),
+                        Err(e) => eprintln!("{} {e}", paint_err("poll failed:")),
+                    },
+                    _ = &mut ctrl_c => return Ok(()),
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                    _ = &mut ctrl_c => return Ok(()),
                 }
             }
         }

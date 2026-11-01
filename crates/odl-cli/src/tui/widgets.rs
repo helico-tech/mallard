@@ -69,23 +69,34 @@ pub fn local(t: DateTime<Utc>, fmt: &str) -> String {
     t.with_timezone(&Local).format(fmt).to_string()
 }
 
-/// Truncate to `width` chars with an ellipsis.
+/// Terminal display width of a string (wide CJK/emoji count as 2).
+pub fn width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Truncate to `width` terminal columns with an ellipsis; control characters
+/// become spaces.
 pub fn trunc(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
     if width == 0 {
         return String::new();
     }
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i + 1 == width && s.chars().count() > width {
-            out.push('…');
-            return out;
-        }
-        if c == '\n' || c == '\r' || c == '\t' {
-            out.push(' ');
-        } else {
-            out.push(c);
-        }
+    let clean = |c: char| if c.is_control() { ' ' } else { c };
+    let total: usize = s.chars().map(|c| clean(c).width().unwrap_or(0)).sum();
+    if total <= width {
+        return s.chars().map(clean).collect();
     }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars().map(clean) {
+        let w = c.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
     out
 }
 
@@ -192,7 +203,7 @@ pub fn time_chart(
     block: Block<'static>,
     series: &[Series],
     x_bounds: Option<[f64; 2]>,
-    fmt_y: fn(f64) -> String,
+    fmt_y: &dyn Fn(f64) -> String,
 ) {
     let all = series.iter().flat_map(|s| s.points.iter());
     let (mut x0, mut x1, mut y1) = (f64::MAX, f64::MIN, 0.0f64);
