@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -24,3 +24,5 @@ with an exemplar. The loop should wait until both points are there too.
 
 The API can therefore show an exemplar for a point it does not list yet. That is
 harmless for a moment and gone at the next refresh, so only the test needs a change.
+
+Done 2026-11-01: the wait loop now also waits for both points, which confirms the cause above. 0 failures in 60 runs, against 4-6 in 40 before. The API can still show an exemplar a moment before its point, which is harmless, as noted above.

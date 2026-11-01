@@ -953,8 +953,11 @@ async fn upgrade_adds_exemplars_to_an_old_catalog() {
     for _ in 0..50 {
         let resp = api.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        // Points and exemplars are separate reads, so a flush between them can
+        // give the new exemplar without the new point: wait for both.
         if let Ok(r) = serde_json::from_slice::<MetricQueryResult>(&body)
             && !r.exemplars.is_empty()
+            && r.series.first().is_some_and(|s| s.points.len() >= 2)
         {
             result = Some(r);
             break;
