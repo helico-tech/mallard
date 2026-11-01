@@ -112,7 +112,7 @@ without rewriting files.
 | `max_concurrent` | `4` | Concurrent queries (DuckDB connections). Each query uses all `duckdb.threads`. |
 | `timeout` | `30s` | Queries are interrupted after this. Also the max wait for a free connection. |
 | `max_window` | `31d` | Largest allowed time window per request. |
-| `enable_sql` | `false` | Enable `POST /api/v1/sql`. Requires `auth.api_tokens`. See [ADR 0005](adr/0005-sql-endpoint.md). |
+| `enable_sql` | `false` | Enable `POST /api/v1/sql`. Requires `auth.api_tokens`. Treat these tokens as admin access: queries are read-only and limited to the lake tables, but their memory and CPU use is bounded only by `timeout` and `duckdb.memory_limit`, not fully. See [ADR 0005](adr/0005-sql-endpoint.md). |
 
 ## `[auth]`
 

@@ -151,6 +151,8 @@ pub struct QueryConfig {
     #[serde(with = "duration")]
     pub timeout: Duration,
     /// Enable `POST /api/v1/sql` (read-only ad-hoc SQL). Requires `auth.api_tokens`.
+    /// Treat those tokens as admin access: a query's memory and CPU use is
+    /// bounded only by `timeout` and `duckdb.memory_limit`, not fully.
     pub enable_sql: bool,
     /// Max time span a single query may cover, e.g. `31d`.
     #[serde(with = "duration")]
@@ -555,7 +557,9 @@ fn merge(base: &mut toml::Value, over: toml::Value) {
 }
 
 /// Apply `ODL_SECTION__KEY=value` overrides. The value is parsed as TOML when
-/// possible (numbers, booleans, arrays) and as a string otherwise.
+/// possible (numbers, booleans, arrays) and as a string otherwise. For a
+/// list setting, a value that is not a TOML array is split on commas, so
+/// `ODL_AUTH__API_TOKENS=abc` works.
 fn apply_env(root: &mut toml::Value, prefix: &str, vars: impl Iterator<Item = (String, String)>) -> Result<()> {
     for (k, v) in vars {
         let Some(rest) = k.strip_prefix(prefix) else {
@@ -567,15 +571,21 @@ fn apply_env(root: &mut toml::Value, prefix: &str, vars: impl Iterator<Item = (S
         }
         // Keep the raw text for string settings (e.g. retention "0"); parse
         // numbers, booleans and arrays as TOML otherwise.
-        let existing_is_string =
-            path.iter().try_fold(&*root, |cur, seg| cur.get(seg.as_str())).is_some_and(|v| v.is_str());
-        let value = if existing_is_string {
-            toml::Value::String(v.clone())
-        } else {
-            match toml::from_str::<toml::Table>(&format!("v = {v}")) {
-                Ok(mut t) => t.remove("v").unwrap(),
-                Err(_) => toml::Value::String(v.clone()),
-            }
+        let existing = path.iter().try_fold(&*root, |cur, seg| cur.get(seg.as_str()));
+        let parsed = || toml::from_str::<toml::Table>(&format!("v = {v}")).ok().and_then(|mut t| t.remove("v"));
+        let value = match existing {
+            Some(toml::Value::String(_)) => toml::Value::String(v.clone()),
+            Some(toml::Value::Array(_)) => match parsed() {
+                Some(a @ toml::Value::Array(_)) => a,
+                _ => toml::Value::Array(
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(|p| toml::Value::String(p.into()))
+                        .collect(),
+                ),
+            },
+            _ => parsed().unwrap_or_else(|| toml::Value::String(v.clone())),
         };
         let mut cur = &mut *root;
         for (i, seg) in path.iter().enumerate() {
@@ -690,6 +700,16 @@ mod tests {
         assert_eq!(cfg.query.max_concurrent, 8);
         assert_eq!(cfg.auth.api_tokens, vec!["secret".to_string()]);
         assert_eq!(cfg.retention.traces, Duration::ZERO);
+    }
+
+    #[test]
+    fn env_list_override_without_toml_syntax() {
+        let mut root = toml::Value::try_from(Config::default()).unwrap();
+        let vars = [("ODL_AUTH__API_TOKENS", "abc"), ("ODL_AUTH__INGEST_TOKENS", "a, b")];
+        apply_env(&mut root, "ODL_", vars.iter().map(|(k, v)| (k.to_string(), v.to_string()))).unwrap();
+        let cfg: Config = root.try_into().unwrap();
+        assert_eq!(cfg.auth.api_tokens, vec!["abc"]);
+        assert_eq!(cfg.auth.ingest_tokens, vec!["a", "b"]);
     }
 
     #[test]

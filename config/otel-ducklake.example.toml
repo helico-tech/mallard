@@ -73,7 +73,7 @@ catalog_wide = true                # snapshot expiry + file cleanup (catalog-wid
 max_concurrent = 4
 timeout = "30s"
 max_window = "31d"
-enable_sql = false                 # POST /api/v1/sql; requires auth.api_tokens
+enable_sql = false                 # POST /api/v1/sql; requires auth.api_tokens (= admin access)
 
 [auth]
 api_tokens = []                    # e.g. ["${ODL_API_TOKEN}"]; empty = open
