@@ -2971,6 +2971,7 @@ dependencies = [
  "humantime",
  "mallard-common",
  "mallard-duck",
+ "memchr",
  "metrics",
  "metrics-exporter-prometheus",
  "odl-api",

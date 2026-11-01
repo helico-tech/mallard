@@ -218,8 +218,8 @@ pub struct IngestStats {
     pub max_buffer_bytes: u64,
     pub flushes: u64,
     pub flush_errors: u64,
-    /// Rows dropped because they could not be written while other data
-    /// could (details in the server log).
+    /// Rows dropped because their table refused them with a permanent
+    /// error, e.g. a column changed by hand (details in the server log).
     #[serde(default)]
     pub dropped_rows: u64,
     pub last_flush: Option<FlushInfo>,
@@ -232,8 +232,15 @@ pub struct SignalIngestStats {
     pub requests: u64,
     /// Spans, log records or metric data points accepted.
     pub accepted: u64,
-    /// Items refused because of back-pressure or invalid payloads.
-    pub rejected: u64,
+    /// Items refused because the write buffer was full (HTTP 429 / gRPC
+    /// UNAVAILABLE). Exporters retry them, so they usually arrive later.
+    #[serde(default)]
+    pub throttled: u64,
+    /// Items refused for good: invalid (e.g. a span without a valid trace
+    /// or span id, reported as OTLP partial success) or in a request too
+    /// large for the buffer.
+    #[serde(default)]
+    pub invalid: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

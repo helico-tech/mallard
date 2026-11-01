@@ -3,14 +3,15 @@
 ## Health and monitoring
 
 - `GET /api/v1/health`: liveness/readiness (no auth).
-- `odl status` / `GET /api/v1/stats`: requests, accepted and rejected items
-  per signal; buffer fill; flush count, errors and duration; rows, files,
+- `odl status` / `GET /api/v1/stats`: requests, accepted, throttled and
+  invalid items per signal; buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
 - Prometheus (mallard's `/metrics`): `odl_ingest_requests_total`,
-  `odl_ingest_items_total`, `odl_ingest_rejected_items_total` (label
-  `signal`), `odl_buffered_rows`, `odl_buffered_bytes`, `odl_flushes_total`,
+  `odl_ingest_items_total` (label `signal`),
+  `odl_ingest_rejected_items_total` (labels `signal`, `reason` =
+  `throttled` | `invalid`), `odl_buffered_rows`, `odl_buffered_bytes`, `odl_flushes_total`,
   `odl_flush_seconds`, `odl_flush_rows`, `odl_flush_errors_total`,
-  `odl_dropped_rows_total`, `odl_maintenance_seconds` and
+  `odl_dropped_rows_total` (label `table`), `odl_maintenance_seconds` and
   `odl_maintenance_errors_total` (label `task`).
 - mallard's `/readyz` fails while the last flush failed or the catalog does
   not answer.
@@ -22,9 +23,10 @@ What to watch:
 
 | signal | meaning | action |
 |---|---|---|
-| `rejected` grows, 429s at exporters | buffer full: storage slower than ingest, or a burst | check `last_flush_error`; raise `max_buffer_bytes`; check object store / catalog latency |
+| `throttled` grows, 429s at exporters | buffer full: storage slower than ingest, or a burst. Exporters retry, so data arrives late, not lost | check `last_flush_error`; raise `max_buffer_bytes`; check object store / catalog latency |
+| `invalid` grows | items refused for good: spans without a valid trace/span id (OTLP partial success), or a request too large for `max_buffer_bytes` | fix the sender; see the partial-success message it gets back |
 | `flush_errors` grows | catalog or object store unreachable / credentials | see logs; data is retried, not dropped |
-| `dropped_rows` grows | a batch could not be written while other data could | see the `error` log line "dropping a batch"; report it as a bug |
+| `dropped_rows` grows | a table refuses our rows (permanent error, e.g. a column changed by hand); other tables are still written | see the `error` log line "dropping a batch" and `odl_dropped_rows_total{table}`; restore the table's columns (the server adds missing ones at start-up), or report it as a bug |
 | many `files` per table | compaction not keeping up or disabled | check `last_maintenance`; lower `compact_interval` |
 | `inlined_rows` keeps growing | compaction not running | `maintenance.enabled` |
 | queries return 503 | all `query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |
