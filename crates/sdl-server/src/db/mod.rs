@@ -12,10 +12,9 @@ pub mod schema;
 pub mod writer;
 
 use crate::config::Config;
-use crate::storage::{Storage, sql_str};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use duckdb::Connection;
+use mallard_duck::duckdb::Connection;
 use sdl_types::IssueStatus;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -127,53 +126,6 @@ pub enum EnqueueError {
     Stopped,
 }
 
-/// Prepare a fresh connection: settings and extensions.
-fn configure(conn: &Connection, cfg: &Config) -> Result<()> {
-    // We never rely on insertion order (sorted tables sort explicitly); this
-    // lets flushes and compaction stream within a memory limit.
-    conn.execute_batch("SET preserve_insertion_order = false")?;
-    if let Some(dir) = &cfg.extension_dir {
-        conn.execute_batch(&format!("SET extension_directory = {}", sql_str(&dir.display().to_string())))?;
-    }
-    if let Some(t) = cfg.duckdb_threads {
-        conn.execute_batch(&format!("SET threads = {t}"))?;
-    }
-    if let Some(d) = &cfg.duckdb_temp_dir {
-        conn.execute_batch(&format!("SET temp_directory = {}", sql_str(&d.display().to_string())))?;
-    }
-    if let Some(m) = &cfg.duckdb_memory_limit {
-        conn.execute_batch(&format!("SET memory_limit = {}", sql_str(m)))?;
-    }
-    Ok(())
-}
-
-/// Extensions needed for a catalog string.
-fn catalog_extensions(catalog: &str) -> &'static [&'static str] {
-    if catalog.starts_with("postgres:") {
-        &["postgres"]
-    } else if catalog.starts_with("sqlite:") {
-        &["sqlite"]
-    } else if catalog.starts_with("mysql:") {
-        &["mysql"]
-    } else {
-        &[]
-    }
-}
-
-/// Install (download) every extension any configuration may need. Used at
-/// Docker build time so the image works without internet access.
-pub fn install_all_extensions(cfg: &Config) -> Result<()> {
-    let conn = Connection::open_in_memory()?;
-    configure(&conn, cfg)?;
-    // json and parquet are linked in; mysql is not pre-installed (DuckLake
-    // advises against it as a catalog) and is downloaded on first use.
-    for ext in ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite"] {
-        conn.execute_batch(&format!("INSTALL {ext}")).with_context(|| format!("installing extension {ext}"))?;
-        tracing::info!(ext, "installed");
-    }
-    Ok(())
-}
-
 /// Table namespace: `$S` -> `<alias>.<schema>`, `$C` -> `'<alias>'`,
 /// `$N` -> `'<schema>'`, `$T` -> this writer's in-memory staging database.
 #[derive(Debug, Clone)]
@@ -196,49 +148,15 @@ impl Ns {
 }
 
 impl Db {
-    /// Standalone: open DuckDB, load extensions, attach the catalog.
-    pub fn open(cfg: &Config, storage: &Storage) -> Result<Db> {
-        let conn = Connection::open_in_memory()?;
-        configure(&conn, cfg)?;
-
-        let mut exts: Vec<&str> = vec!["ducklake"];
-        exts.extend(catalog_extensions(&cfg.catalog));
-        exts.extend(storage.duckdb_extensions());
-        if storage.duckdb_secret_sql().is_some_and(|s| s.contains("credential_chain")) {
-            exts.push(if storage.kind == crate::storage::Kind::Azure { "azure" } else { "aws" });
-        }
-        for ext in exts {
-            conn.execute_batch(&format!("INSTALL {ext}; LOAD {ext};"))
-                .with_context(|| format!("loading DuckDB extension {ext}"))?;
-        }
-        if let Some(secret) = storage.duckdb_secret_sql() {
-            conn.execute_batch(&secret).context("creating storage secret")?;
-        }
-
-        if catalog_extensions(&cfg.catalog).is_empty()
-            && let Some(parent) = std::path::Path::new(&cfg.catalog).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        let attach = format!(
-            "ATTACH {} AS {} (DATA_PATH {})",
-            sql_str(&format!("ducklake:{}", cfg.catalog)),
-            cfg.lake_alias,
-            sql_str(&storage.lake_data_path())
-        );
-        // DuckDB's catalog extensions echo the connection string (with the
-        // password) in their errors: redact the whole message.
-        conn.execute_batch(&attach).map_err(|e| {
-            anyhow!("attaching DuckLake catalog {:?}: {}", redact(&cfg.catalog), redact(&e.to_string()))
-        })?;
-        Self::with_connection(conn, cfg, redact(&cfg.catalog))
-    }
-
-    /// Embedded: `conn` already has the DuckLake catalog attached as
-    /// `cfg.lake_alias` (and any secrets set). We only create our schema.
-    pub fn with_connection(conn: Connection, cfg: &Config, catalog_desc: String) -> Result<Db> {
-        let ns = Ns::new(&cfg.lake_alias, &cfg.schema);
+    /// `conn` has the DuckLake catalog attached as `lake` (and any secrets
+    /// set). We only create our schema. `catalog_desc` is shown by `/v1/info`.
+    pub fn with_connection(
+        conn: Connection,
+        cfg: &Config,
+        maintenance: writer::Maintenance,
+        catalog_desc: String,
+    ) -> Result<Db> {
+        let ns = Ns::new(mallard_duck::CATALOG, crate::SCHEMA);
         let duckdb_version: String = conn.query_row("SELECT version()", [], |r| r.get(0))?;
         for stmt in schema::CREATE {
             conn.execute_batch(&ns.sql(stmt)).with_context(|| format!("creating schema: {stmt}"))?;
@@ -251,7 +169,7 @@ impl Db {
         let caches = Arc::new(Caches::default());
         writer::load_caches(&conn, &ns, &caches)?;
 
-        let n = cfg.readers.max(1);
+        let n = cfg.query.readers.max(1);
         let mut readers = Vec::with_capacity(n);
         for _ in 0..n {
             readers.push(conn.try_clone()?);
@@ -259,8 +177,8 @@ impl Db {
         let writer_conn = conn.try_clone()?;
         drop(conn);
 
-        let (tx, rx) = crossbeam_channel::bounded(cfg.queue_capacity.max(1));
-        let w = writer::Writer::new(writer_conn, ns.clone(), rx, caches.clone(), cfg)?;
+        let (tx, rx) = crossbeam_channel::bounded(cfg.ingest.queue_capacity.max(1));
+        let w = writer::Writer::new(writer_conn, ns.clone(), rx, caches.clone(), cfg, maintenance)?;
         let handle = std::thread::Builder::new().name("ducklake-writer".into()).spawn(move || w.run())?;
 
         Ok(Db {
@@ -271,7 +189,7 @@ impl Db {
             ns,
             duckdb_version,
             catalog: catalog_desc,
-            queue_capacity: cfg.queue_capacity,
+            queue_capacity: cfg.ingest.queue_capacity,
             writer_thread: Mutex::new(Some(handle)),
         })
     }
@@ -370,15 +288,6 @@ impl Drop for Db {
     }
 }
 
-/// Hide passwords in catalog strings for logs and /v1/info.
-pub fn redact(catalog: &str) -> String {
-    catalog
-        .split_whitespace()
-        .map(|part| if part.to_ascii_lowercase().starts_with("password=") { "password=***" } else { part })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub fn us_to_dt(us: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_micros(us).unwrap_or_else(|| {
         tracing::warn!(us, "stored timestamp is out of range");
@@ -390,13 +299,6 @@ pub fn us_to_dt(us: i64) -> DateTime<Utc> {
 pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
-
-    #[test]
-    fn redacts_passwords_in_error_text() {
-        let e = "IO Error: connect to \"host=db password=hunter2 dbname=lake\" failed";
-        assert!(!redact(e).contains("hunter2"), "{}", redact(e));
-        assert_eq!(redact("postgres:host=db PASSWORD=x"), "postgres:host=db password=***");
-    }
 
     #[test]
     fn bundle_caches_per_project() {
@@ -412,16 +314,19 @@ pub(crate) mod tests {
         assert_eq!(c.bundle_count(), 2);
     }
 
-    /// A standalone Db on local storage in `dir`.
+    /// A Db on a local lake in `dir`.
     pub(crate) fn open_db(dir: &std::path::Path, readers: usize) -> Db {
-        let cfg = Config {
+        let mut cfg = Config::default();
+        cfg.query.readers = readers;
+        cfg.ingest.batch_window = Duration::from_millis(10);
+        let st = mallard_duck::StorageConfig {
             catalog: dir.join("catalog.ducklake").display().to_string(),
-            readers,
-            batch_window: Duration::from_millis(10),
-            ..Config::default()
+            data_path: dir.join("lake").display().to_string(),
+            ..Default::default()
         };
-        let storage = Storage::new(&dir.join("storage").display().to_string(), &cfg).unwrap();
-        Db::open(&cfg, &storage).unwrap()
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let maintenance = writer::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
+        Db::with_connection(conn, &cfg, maintenance, "test".into()).unwrap()
     }
 
     async fn select_one(db: &Db) -> Result<i32> {

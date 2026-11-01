@@ -18,14 +18,13 @@
 //! recorder); that is left to the binary or the embedding application.
 
 mod api;
-mod auth;
 pub mod config;
 mod otlp;
 mod query;
 mod stats;
 mod store;
 
-pub use store::{CATALOG, install_extensions, open_connection};
+pub use store::SCHEMA;
 
 use std::{future::Future, sync::Arc, time::Instant};
 
@@ -36,9 +35,10 @@ use tokio_util::sync::CancellationToken;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::info;
 
+use mallard_common::auth::{AuthPolicy, Tokens};
+
 use crate::{
     api::ApiState,
-    auth::Tokens,
     config::Config,
     otlp::Ingest,
     query::Reader,
@@ -74,6 +74,17 @@ pub fn __convert_traces(
     otlp::convert::convert_traces(req).batches.into_iter().map(|(_, b)| b).collect()
 }
 
+fn catalog_type(k: mallard_duck::CatalogKind) -> odl_api::CatalogType {
+    use mallard_duck::CatalogKind as K;
+    use odl_api::CatalogType as T;
+    match k {
+        K::DuckDb => T::DuckDb,
+        K::Sqlite => T::Sqlite,
+        K::Postgres => T::Postgres,
+        K::MySql => T::MySql,
+    }
+}
+
 /// A configured collector: storage attached, ready to serve.
 pub struct Server {
     cfg: Config,
@@ -96,7 +107,7 @@ impl Server {
     /// Use a DuckDB connection owned by the embedding application. The
     /// DuckLake catalog must already be attached as `lake`. Only `try_clone()`
     /// of this connection is used, and no global DuckDB settings are changed.
-    pub async fn with_connection(cfg: Config, conn: duckdb::Connection) -> Result<Self> {
+    pub async fn with_connection(cfg: Config, conn: mallard_duck::duckdb::Connection) -> Result<Self> {
         cfg.validate()?;
         let c = cfg.clone();
         let lake = tokio::task::spawn_blocking(move || Lake::with_connection(conn, &c)).await??;
@@ -110,7 +121,7 @@ impl Server {
         let ingest = Arc::new(Ingest::new(
             buffer.clone(),
             stats.clone(),
-            Tokens::new(&cfg.auth.ingest_tokens),
+            Tokens::new(&cfg.auth.ingest_tokens, AuthPolicy::OpenIfEmpty),
             usize::try_from(cfg.ingest.max_request_bytes.0).unwrap_or(usize::MAX),
             max_buffer_bytes,
         ));
@@ -119,9 +130,11 @@ impl Server {
         let api_state = Arc::new(ApiState {
             reader,
             stats: stats.clone(),
-            tokens: Tokens::new(&cfg.auth.api_tokens),
+            // Standalone, an empty list leaves the API open (documented);
+            // mallard always configures tokens.
+            tokens: Tokens::new(&cfg.auth.api_tokens, AuthPolicy::OpenIfEmpty),
             schema: lake.schema.clone(),
-            catalog_type: lake.catalog_kind,
+            catalog_type: catalog_type(lake.catalog_kind),
             data_path: lake.data_path.clone(),
             max_buffer_bytes,
             enable_sql: cfg.query.enable_sql,
@@ -152,6 +165,26 @@ impl Server {
 
     pub fn openapi(&self) -> utoipa::openapi::OpenApi {
         api::openapi()
+    }
+
+    /// Ready to serve: the last flush (if any) succeeded and the catalog
+    /// answers. The error is a short reason (details are logged).
+    pub async fn ready(&self) -> std::result::Result<(), String> {
+        if let Some(e) = self.stats.last_flush_error() {
+            tracing::warn!(error = %e, "readiness: the last flush failed");
+            return Err("otel flush failing".into());
+        }
+        let probe = async {
+            let conn = self.lake.connect()?;
+            let sql = format!("SELECT id FROM {}.current_snapshot()", store::CATALOG);
+            tokio::task::spawn_blocking(move || conn.query_row(&sql, [], |r| r.get::<_, i64>(0))).await??;
+            anyhow::Ok(())
+        };
+        let res = probe.await;
+        res.map(|_| ()).map_err(|e| {
+            tracing::warn!(error = %store::redact(&format!("{e:#}")), "readiness check failed");
+            "otel catalog not ready".to_string()
+        })
     }
 
     /// Run the flusher and (if enabled) maintenance until `shutdown`

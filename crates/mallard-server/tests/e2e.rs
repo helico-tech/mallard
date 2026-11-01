@@ -13,16 +13,22 @@ use tokio_util::sync::CancellationToken;
 const TOKEN: &str = "test-token";
 const TRACES: usize = 40;
 
-/// Bind all three on port 0 first, so parallel tests never race for ports.
+/// Bind all listeners on port 0 first, so parallel tests never race for ports.
 async fn listeners() -> Listeners {
     let l = || tokio::net::TcpListener::bind("127.0.0.1:0");
-    Listeners { http: l().await.unwrap(), otlp_http: l().await.unwrap(), otlp_grpc: l().await.unwrap() }
+    Listeners {
+        http: l().await.unwrap(),
+        otlp_http: l().await.unwrap(),
+        otlp_grpc: l().await.unwrap(),
+        metrics: Some(l().await.unwrap()),
+    }
 }
 
 fn config(dir: &std::path::Path, l: &Listeners) -> Config {
     let mut c = Config::default();
     c.server.public_url = format!("http://{}", l.http.local_addr().unwrap());
     c.server.otlp_http_addr = l.otlp_http.local_addr().unwrap().to_string();
+    c.server.metrics_addr = l.metrics.as_ref().unwrap().local_addr().unwrap().to_string();
     c.server.api_tokens = vec![TOKEN.into()];
     c.storage.catalog = dir.join("catalog.ducklake").display().to_string();
     c.storage.data_path = format!("{}/lake/", dir.display());
@@ -32,6 +38,7 @@ fn config(dir: &std::path::Path, l: &Listeners) -> Config {
 
 struct Running {
     url: String,
+    metrics_url: String,
     otlp_url: String,
     stop: CancellationToken,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -42,7 +49,10 @@ async fn start(dir: &std::path::Path) -> Running {
     let cfg = config(dir, &l);
     let url = cfg.server.public_url.clone();
     let otlp_url = format!("http://{}", cfg.server.otlp_http_addr);
-    let platform = Platform::new(cfg).await.expect("platform starts");
+    let metrics_url = format!("http://{}/metrics", cfg.server.metrics_addr);
+    // A recorder that is not installed globally: tests must not share one.
+    let metrics = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle();
+    let platform = Platform::new(cfg).await.expect("platform starts").with_metrics(metrics);
     let stop = CancellationToken::new();
     let task = tokio::spawn(platform.serve_on(l, stop.clone()));
     let http = reqwest::Client::new();
@@ -51,7 +61,7 @@ async fn start(dir: &std::path::Path) -> Running {
         assert!(Instant::now() < deadline, "server did not come up");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Running { url, otlp_url, stop, task }
+    Running { url, metrics_url, otlp_url, stop, task }
 }
 
 impl Running {
@@ -158,6 +168,18 @@ async fn errors_and_telemetry_share_one_lake() {
 
     let ready = reqwest::get(format!("{}/readyz", srv.url)).await.unwrap();
     assert_eq!(ready.status(), 200);
+    // server.metrics_addr: /metrics there, not on the public port.
+    assert_eq!(reqwest::get(&srv.metrics_url).await.unwrap().status(), 200);
+    assert_eq!(reqwest::get(format!("{}/metrics", srv.url)).await.unwrap().status(), 404);
+    // CORS preflight for browser OTLP exporters.
+    let preflight = http
+        .request(reqwest::Method::OPTIONS, format!("{}/v1/traces", srv.otlp_url))
+        .header("origin", "https://app.example")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.headers()["access-control-allow-origin"], "https://app.example");
 
     // Unknown trace: empty, not an error.
     let none = client.trace_overview(&"f".repeat(32), None).await.unwrap();

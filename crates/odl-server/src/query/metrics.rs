@@ -17,7 +17,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
 };
 
-use duckdb::{Connection, params_from_iter, types::Value};
+use mallard_duck::duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{MetricInfo, MetricPoint, MetricQueryResult, MetricSeries, MetricType, Temporality};
 
 use super::{Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, json_str};
@@ -379,7 +379,7 @@ impl Plan<'_> {
         let mut p = self.label_params.clone();
         p.extend(self.filter.params.iter().cloned());
         if from_window {
-            p.push(self.w.start_param());
+            p.push(super::ts(self.w.from));
         }
         p
     }

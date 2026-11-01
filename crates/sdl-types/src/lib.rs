@@ -244,11 +244,9 @@ pub struct ServerInfo {
     pub queue_capacity: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct ApiError {
-    pub error: String,
-}
+/// Error body of every non-2xx `/v1` response: `error` is a code such as
+/// `not_found`, `message` the text for people (shared with the OTel API).
+pub use mallard_common::ApiError;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(IntoParams))]
@@ -291,6 +289,20 @@ pub struct TraceQuery {
     pub since: Option<String>,
     /// Max events (default 50, max 500).
     pub limit: Option<u32>,
+}
+
+/// Absolute window bounds and the bucket step, accepted next to `since` by
+/// every endpoint with a window (same names as the OTel API). `from` wins
+/// over `since`; `to` defaults to now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct WindowRange {
+    /// Start of the window (inclusive, RFC 3339).
+    pub from: Option<DateTime<Utc>>,
+    /// End of the window (exclusive, RFC 3339). Defaults to now.
+    pub to: Option<DateTime<Utc>>,
+    /// Bucket size for time series, e.g. `1h` (same as `interval`).
+    pub step: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

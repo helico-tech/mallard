@@ -88,13 +88,17 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
 
 ## Embedding
 
-`sdl_server::Server` is a library: `Server::new(cfg)` (opens its own DuckDB)
-or `Server::with_connection(cfg, conn)` (shares a connection that already has
-the catalog attached; only creates its schema), then mount `router()` /
+`sdl_server::Server` is a library: `Server::with_connection(config, host,
+conn)` shares a connection that already has the catalog attached as `lake`
+(`mallard_duck::open_connection`) and only creates the `sentry` schema.
+`Config` is the library's own settings (mallard's `[sentry]` section);
+`Host` is what the application decides (public URL, API tokens, sourcemap
+storage, catalog-wide maintenance). `Server::new(&Standalone)` is the
+`sentry-ducklake` binary's path (flags / `SDL_*`). Mount `router()` /
 `ingest_router()` / `api_router()` anywhere (paths are relative; DSNs follow
 `public_url`, which may include a prefix). The library installs no global
 tracing subscriber or metrics recorder. `shutdown()` drains the queue and
-flushes. obs-ducklake uses this to run Sentry ingest next to OTLP on one
+flushes. mallard uses this to run Sentry ingest next to OTLP on one
 catalog.
 
 ## Decisions

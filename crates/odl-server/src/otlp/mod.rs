@@ -12,8 +12,9 @@ use opentelemetry_proto::tonic::collector::{
     logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest, trace::v1::ExportTraceServiceRequest,
 };
 
+use mallard_common::auth::Tokens;
+
 use crate::{
-    auth::Tokens,
     stats::Stats,
     store::{
         schema::Signal,
@@ -212,7 +213,13 @@ mod tests {
     fn inflight_budget_bounds_concurrent_requests() {
         let stats = Arc::new(Stats::default());
         let buffer = Arc::new(WriteBuffer::new(1 << 20, 1000, stats.clone()));
-        let ingest = Ingest::new(buffer, stats, Tokens::default(), 32 * 1024, 64 * 1024);
+        let ingest = Ingest::new(
+            buffer,
+            stats,
+            Tokens::new([""], mallard_common::auth::AuthPolicy::OpenIfEmpty),
+            32 * 1024,
+            64 * 1024,
+        );
         let a = ingest.admit(None).expect("first request fits");
         let _b = ingest.admit(Some(40 * 1024)).expect("sizes are capped at max_request_bytes");
         assert!(ingest.admit(Some(1)).is_none(), "budget used up");

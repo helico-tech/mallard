@@ -13,7 +13,7 @@
 //! day longer.
 //!
 //! Merges and deletes are scoped to this schema's tables. Snapshot expiry and
-//! file cleanup are catalog-wide and only run when `catalog_wide = true`.
+//! file cleanup are catalog-wide: otel owns them on a shared catalog (ADR 0001).
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -27,7 +27,7 @@ use std::{
 
 use anyhow::Result;
 use chrono::{DateTime, DurationRound, TimeDelta, Utc};
-use duckdb::Connection;
+use mallard_duck::duckdb::Connection;
 use odl_api::MaintenanceInfo;
 use tracing::{info, warn};
 
@@ -227,49 +227,46 @@ pub fn retention(conn: &Connection, schema: &str, s: &MaintenanceConfig, r: &Ret
         deleted += n;
     }
     let mut detail = format!("deleted {deleted} expired rows");
-    if s.catalog_wide {
-        // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
-        // time zone can't shift the cut-off. A delay reaching back before the
-        // earliest representable time keeps everything (cut-off 1970).
-        let epoch =
-            |d: Duration| -> f64 { before(now, d).unwrap_or(DateTime::UNIX_EPOCH).timestamp_micros() as f64 / 1e6 };
-        let snap_cut = epoch(s.snapshot_retention);
-        let expired: i64 = conn.query_row(
+    // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
+    // time zone can't shift the cut-off. A delay reaching back before the
+    // earliest representable time keeps everything (cut-off 1970).
+    let epoch = |d: Duration| -> f64 { before(now, d).unwrap_or(DateTime::UNIX_EPOCH).timestamp_micros() as f64 / 1e6 };
+    let snap_cut = epoch(s.snapshot_retention);
+    let expired: i64 = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM ducklake_expire_snapshots({}, older_than => to_timestamp(?::DOUBLE))",
+            sql_str(CATALOG)
+        ),
+        [snap_cut],
+        |r| r.get(0),
+    )?;
+    let file_cut = epoch(s.file_cleanup_delay);
+    let cleaned: i64 = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM ducklake_cleanup_old_files({}, older_than => to_timestamp(?::DOUBLE))",
+            sql_str(CATALOG)
+        ),
+        [file_cut],
+        |r| r.get(0),
+    )?;
+    // Files no snapshot references, e.g. from a flush that failed after
+    // writing Parquet. Only older than a day, so files that another
+    // replica is writing right now (not yet committed) are never touched.
+    let orphan_cut = epoch(Duration::from_secs(86_400).max(s.file_cleanup_delay));
+    let orphans: i64 = conn
+        .query_row(
             &format!(
-                "SELECT count(*) FROM ducklake_expire_snapshots({}, older_than => to_timestamp(?::DOUBLE))",
+                "SELECT count(*) FROM ducklake_delete_orphaned_files({}, older_than => to_timestamp(?::DOUBLE))",
                 sql_str(CATALOG)
             ),
-            [snap_cut],
+            [orphan_cut],
             |r| r.get(0),
-        )?;
-        let file_cut = epoch(s.file_cleanup_delay);
-        let cleaned: i64 = conn.query_row(
-            &format!(
-                "SELECT count(*) FROM ducklake_cleanup_old_files({}, older_than => to_timestamp(?::DOUBLE))",
-                sql_str(CATALOG)
-            ),
-            [file_cut],
-            |r| r.get(0),
-        )?;
-        // Files no snapshot references, e.g. from a flush that failed after
-        // writing Parquet. Only older than a day, so files that another
-        // replica is writing right now (not yet committed) are never touched.
-        let orphan_cut = epoch(Duration::from_secs(86_400).max(s.file_cleanup_delay));
-        let orphans: i64 = conn
-            .query_row(
-                &format!(
-                    "SELECT count(*) FROM ducklake_delete_orphaned_files({}, older_than => to_timestamp(?::DOUBLE))",
-                    sql_str(CATALOG)
-                ),
-                [orphan_cut],
-                |r| r.get(0),
-            )
-            .unwrap_or_else(|e| {
-                warn!(error = %super::redact(&e.to_string()), "deleting orphaned files failed");
-                0
-            });
-        detail += &format!("; expired {expired} snapshots; removed {cleaned} old and {orphans} orphaned files");
-    }
+        )
+        .unwrap_or_else(|e| {
+            warn!(error = %super::redact(&e.to_string()), "deleting orphaned files failed");
+            0
+        });
+    detail += &format!("; expired {expired} snapshots; removed {cleaned} old and {orphans} orphaned files");
     Ok(detail)
 }
 

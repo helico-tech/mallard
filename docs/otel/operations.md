@@ -6,6 +6,14 @@
 - `odl status` / `GET /api/v1/stats`: requests, accepted and rejected items
   per signal; buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
+- Prometheus (mallard's `/metrics`): `odl_ingest_requests_total`,
+  `odl_ingest_items_total`, `odl_ingest_rejected_items_total` (label
+  `signal`), `odl_buffered_rows`, `odl_buffered_bytes`, `odl_flushes_total`,
+  `odl_flush_seconds`, `odl_flush_rows`, `odl_flush_errors_total`,
+  `odl_dropped_rows_total`, `odl_maintenance_seconds` and
+  `odl_maintenance_errors_total` (label `task`).
+- mallard's `/readyz` fails while the last flush failed or the catalog does
+  not answer.
 - Logs: `RUST_LOG=info` (default). Flush failures are logged at `error`,
   maintenance failures at `warn`. Use `server.log_format = "json"` in
   clusters.

@@ -131,11 +131,10 @@ impl Client {
         Ok(self.checked(req).await?.json().await?)
     }
 
-    /// `Error::Api` from a non-success response. Reads both error bodies:
-    /// `{"error": message}` (this API) and `{"error": code, "message": …}`
-    /// (the otel API's shape). Else the message is the start of a
-    /// plain-text body, else the status reason (so a proxy's HTML error page
-    /// becomes "Bad Gateway").
+    /// `Error::Api` from a non-success response. Reads the shared error body
+    /// `{"error": code, "message": text}` and the older `{"error": text}`.
+    /// Else the message is the start of a plain-text body, else the status
+    /// reason (so a proxy's HTML error page becomes "Bad Gateway").
     async fn api_error(resp: reqwest::Response) -> Error {
         let status = resp.status();
         let plain = resp
@@ -144,6 +143,8 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.starts_with("text/plain"));
         let text = resp.text().await.unwrap_or_default();
+        // `{"error": code, "message": text}`; older servers sent only
+        // `{"error": text}`.
         #[derive(serde::Deserialize)]
         struct Body {
             error: String,

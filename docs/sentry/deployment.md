@@ -115,7 +115,9 @@ Ingress notes:
   `SDL_MAX_BODY_BYTES` (50 MiB). Raise the proxy body limit, e.g.
   `nginx.ingress.kubernetes.io/proxy-body-size: 64m`.
 - `/metrics`, `/docs` and `/openapi.json` are on the same port and need no
-  token. Block `/metrics` at the ingress if it must not be public.
+  token. Block `/metrics` at the ingress if it must not be public, or serve
+  it elsewhere (`SDL_METRICS_LISTEN`; mallard: `server.metrics_addr`, which
+  the Helm chart sets to port 9090).
 - If the ingress sets `X-Forwarded-For`, set `SDL_TRUST_FORWARDED_FOR=true`
   (via `extraEnv`) so client IPs are recorded correctly. The server uses the
   last address in the header (the one the ingress adds), so this is right
@@ -136,11 +138,11 @@ Every flag has an environment variable. The most used:
 | `SDL_S3_ENDPOINT` | (AWS) | Custom S3 endpoint with scheme. |
 | `SDL_S3_REGION` | `us-east-1` | S3 region. |
 | `SDL_S3_PATH_STYLE` | `false` | Path-style URLs. |
-| `SDL_RETENTION_DAYS` | `90` | 0 = keep forever. |
+| `SDL_RETENTION_DAYS` | `90` | 0 = keep forever. (mallard: `[sentry.retention] events = "90d"`) |
 | `SDL_FLUSH_INTERVAL` | `5m` | How often inlined data becomes Parquet. |
 | `SDL_COMPACT_INTERVAL` | `1h` | Compaction, retention, snapshot expiry. |
 | `SDL_CATALOG_WIDE_MAINTENANCE` | `true` | Snapshot expiry and file cleanup; only one service per catalog should do it. |
-| `SDL_DUCKDB_MEMORY_LIMIT` | 80% of RAM | e.g. `1GB`. |
+| `SDL_DUCKDB_MEMORY_LIMIT` | 80% of RAM | e.g. `1GB` (`1GiB` = powers of 1024). |
 | `SDL_DUCKDB_THREADS` | CPUs | DuckDB threads. |
 | `SDL_READERS` | `4` | Read connections for the query API. |
 | `SDL_BATCH_MAX` / `SDL_BATCH_WINDOW` | `2000` / `500ms` | Max events per commit / how long a quiet server collects before committing (200+ queued events commit at once). |
@@ -148,16 +150,20 @@ Every flag has an environment variable. The most used:
 | `SDL_MAINTENANCE_THREADS` | `1` | DuckDB threads during compaction (sorted merges need memory per thread); 0 = unchanged. |
 | `SDL_FLUSH_ROWS` | `50000` | Also flush inlined rows to Parquet after this many (bounds catalog size). |
 | `SDL_SNAPSHOT_RETENTION` | `1h` | Keep snapshots and replaced files this long; set above your catalog backup age. |
-| `SDL_DUCKDB_TEMP_DIR` | `./.tmp` | DuckDB spill directory. |
+| `SDL_DUCKDB_TEMP_DIR` | DuckDB default | DuckDB spill directory. |
 | `SDL_METRICS_LISTEN` | (main port) | Serve `/metrics` on a separate address, e.g. `0.0.0.0:9090`. |
 | `SDL_QUEUE_CAPACITY` | `20000` | Queued events before ingest answers 429. |
-| `SDL_MAX_EVENT_BYTES` / `SDL_MAX_BODY_BYTES` | 1 MiB / 20 MiB | Size limits (after decompression). Requests with the key only inside the envelope are limited to 2 MiB. |
+| `SDL_MAX_EVENT_BYTES` / `SDL_MAX_BODY_BYTES` | 1 MiB / 20 MiB | Size limits (after decompression), e.g. `2MiB` or a number of bytes. Requests with the key only inside the envelope are limited to 2 MiB. |
 | `SDL_SOURCEMAP_CACHE_MB` | `256` | Sourcemap cache. |
 | `SDL_TRUST_FORWARDED_FOR` | `false` | Use the last `X-Forwarded-For` address as client IP. |
 | `SDL_LISTEN` | `0.0.0.0:8000` | Listen address. |
 | `SDL_LOG_JSON`, `RUST_LOG` | | Logging. |
 
-`sentry-ducklake --help` lists all of them.
+`sentry-ducklake --help` lists all of them. The tables live in the DuckLake
+schema `sentry` of the catalog attached as `lake` (both fixed). In mallard,
+the same library settings are the `[sentry.*]` sections of
+`config/mallard.example.toml`; the host settings (URL, tokens, storage,
+DuckDB) come from `[server]`, `[storage]` and `[duckdb]`.
 
 ## Storage
 

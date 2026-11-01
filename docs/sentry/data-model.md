@@ -128,7 +128,7 @@ writer thread: take everything queued (group commit)
 
 Every `SDL_COMPACT_INTERVAL` (1 h) the writer runs, scoped to its schema:
 
-1. retention: `DELETE FROM events WHERE received_at < midnight - SDL_RETENTION_DAYS`
+1. retention: `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
    (day-aligned, so whole daily files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
    (target file size 64 MB for `events`; DuckDB threads lowered to

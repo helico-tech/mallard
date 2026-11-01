@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/helico-tech/mallard"
-rust-version = "1.90"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # In-tree crates: sdl-* = Sentry side, odl-* = OpenTelemetry side,
@@ -21,48 +21,61 @@ odl-api = { path = "crates/odl-api" }
 odl-client = { path = "crates/odl-client" }
 odl-server = { path = "crates/odl-server" }
 odl-cli = { path = "crates/odl-cli" }
+mallard-common = { path = "crates/mallard-common" }
+mallard-duck = { path = "crates/mallard-duck" }
 mallard-server = { path = "crates/mallard-server" }
 mallard-client = { path = "crates/mallard-client" }
 mallard-term = { path = "crates/mallard-term" }
-# DuckDB is bundled and linked once; all crates must use this exact version.
+# DuckDB is bundled and linked once. Only mallard-duck depends on it; every
+# other crate uses `mallard_duck::duckdb`.
 duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono", "json", "parquet"] }
 anyhow = "1"
 arrow = { version = "60", default-features = false }
 axum = { version = "0.8", features = ["macros"] }
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 comfy-table = "8"
 crossterm = { version = "0.29", features = ["event-stream"] }
-figment = { version = "0.10", features = ["toml", "env"] }
 flate2 = "1"
 futures = "0.3"
 humantime = "2"
+metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "trace", "logs", "metrics", "with-serde"] }
 prost = "0.14"
-rand = "0.9"
+rand = "0.10"
 # The CLIs and TUIs of both sides and the mallard host must share one
 # ratatui/crossterm (ADR 0002): declare them only here.
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
+toml = "0.9"
 tonic = { version = "0.14", features = ["gzip", "zstd"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["trace", "cors", "decompression-gzip", "compression-gzip", "catch-panic"] }
+url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 unicode-width = "0.2"
-url = "2"
 utoipa = { version = "6", features = ["chrono", "uuid", "axum_extras"] }
 utoipa-axum = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
 
 # DuckDB's C++ is always built optimized: downloaded extensions are release
 # builds and trip debug-only allocator assertions otherwise.

@@ -1171,15 +1171,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "envy"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f47e0157f2cb54f5ae1bd371b30a2ae4311e1c028f575cd4e81de7353215965"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1262,22 +1253,6 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-
-[[package]]
-name = "figment"
-version = "0.10.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cb01cd46b0cf372153850f4c6c272d9cbea2da513e07538405148f95bd789f3"
-dependencies = [
- "atomic",
- "parking_lot",
- "pear",
- "serde",
- "tempfile",
- "toml 0.8.23",
- "uncased",
- "version_check",
-]
 
 [[package]]
 name = "filedescriptor"
@@ -1690,16 +1665,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
-name = "humantime-serde"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
-dependencies = [
- "humantime",
- "serde",
-]
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1942,12 +1907,6 @@ checksum = "a37b2691796cffeb8a8cd305ac66e65841559f147f4e63231d0eafa4db5384d1"
 dependencies = [
  "rustversion",
 ]
-
-[[package]]
-name = "inlinable_string"
-version = "0.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8fae54786f62fb2918dcfae3d568594e50eb9b5c25bf04371af6fe7516452fb"
 
 [[package]]
 name = "instability"
@@ -2276,12 +2235,12 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
- "duckdb",
  "futures",
  "mallard-client",
+ "mallard-common",
+ "mallard-duck",
  "mallard-server",
  "mallard-term",
- "metrics-exporter-prometheus",
  "odl-cli",
  "ratatui",
  "sdl-cli",
@@ -2289,8 +2248,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2305,16 +2262,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "mallard-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "humantime",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+]
+
+[[package]]
+name = "mallard-duck"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "duckdb",
+ "mallard-common",
+ "serde",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "mallard-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
- "duckdb",
- "figment",
  "futures",
  "mallard-client",
+ "mallard-common",
+ "mallard-duck",
  "metrics-exporter-prometheus",
  "odl-server",
  "reqwest",
@@ -2325,10 +2318,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
- "tower",
  "tower-http 0.7.1",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -2897,6 +2888,7 @@ name = "odl-api"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mallard-common",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2948,7 +2940,7 @@ dependencies = [
  "humantime",
  "opentelemetry-proto",
  "prost",
- "rand 0.9.5",
+ "rand 0.10.3",
  "reqwest",
  "tokio",
 ]
@@ -2960,13 +2952,16 @@ dependencies = [
  "anyhow",
  "arrow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
- "duckdb",
  "flate2",
  "futures",
  "humantime",
+ "mallard-common",
+ "mallard-duck",
+ "metrics",
+ "metrics-exporter-prometheus",
  "odl-api",
  "odl-client",
  "opentelemetry-proto",
@@ -2974,18 +2969,14 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "toml 0.9.12+spec-1.1.0",
  "tonic",
  "tower",
  "tower-http 0.7.1",
  "tracing",
- "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
  "xxhash-rust",
@@ -3153,29 +3144,6 @@ name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
-name = "pear"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdeeaa00ce488657faba8ebf44ab9361f9365a97bd39ffb8a60663f57ff4b467"
-dependencies = [
- "inlinable_string",
- "pear_codegen",
- "yansi",
-]
-
-[[package]]
-name = "pear_codegen"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bab5b985dc082b345f812b7df84e1bef27e7207b39e448439ba8bd69c93f147"
-dependencies = [
- "proc-macro2",
- "proc-macro2-diagnostics",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "percent-encoding"
@@ -3357,19 +3325,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "proc-macro2-diagnostics"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af066a9c399a26e020ada66a034357a868728e72cd426f3adcd35f80d88d88c8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "version_check",
- "yansi",
 ]
 
 [[package]]
@@ -4030,6 +3985,7 @@ dependencies = [
  "clap",
  "flate2",
  "hdrhistogram",
+ "mallard-common",
  "rand 0.10.3",
  "reqwest",
  "sdl-client",
@@ -4066,16 +4022,13 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
- "duckdb",
- "envy",
  "flate2",
  "futures",
  "hex",
  "http-body-util",
- "humantime",
- "humantime-serde",
+ "mallard-common",
+ "mallard-duck",
  "metrics",
- "metrics-exporter-prometheus",
  "moka",
  "object_store",
  "rand 0.10.3",
@@ -4090,13 +4043,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
  "tower",
  "tower-http 0.7.1",
  "tracing",
- "tracing-subscriber",
  "url",
  "utoipa",
- "utoipa-scalar",
+ "utoipa-axum",
  "uuid",
  "xxhash-rust",
  "zip",
@@ -4107,6 +4060,7 @@ name = "sdl-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mallard-common",
  "serde",
  "serde_json",
  "utoipa",
@@ -4290,15 +4244,6 @@ dependencies = [
  "itoa",
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "serde_spanned"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -4902,38 +4847,17 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
-dependencies = [
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_edit",
-]
-
-[[package]]
-name = "toml"
 version = "0.9.12+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned 1.1.2",
- "toml_datetime 0.7.5+spec-1.1.0",
+ "serde_spanned",
+ "toml_datetime",
  "toml_parser",
  "toml_writer",
  "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.6.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -4946,20 +4870,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml_edit"
-version = "0.22.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
-dependencies = [
- "indexmap",
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_write",
- "winnow 0.7.15",
-]
-
-[[package]]
 name = "toml_parser"
 version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4967,12 +4877,6 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow 1.0.4",
 ]
-
-[[package]]
-name = "toml_write"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
@@ -5215,15 +5119,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
-name = "uncased"
-version = "0.9.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1b88fcfe09e89d3866a5c11019378088af2d24c3fbd4f0543f96b479ec90697"
-dependencies = [
- "version_check",
-]
-
-[[package]]
 name = "unicase"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5374,18 +5269,6 @@ dependencies = [
  "regex",
  "syn 3.0.9",
  "uuid",
-]
-
-[[package]]
-name = "utoipa-scalar"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eb5bc76936ceb2bb790a62bec7fb99e22b8ecffca739e3d5a5afec0081ea7f3"
-dependencies = [
- "axum",
- "serde",
- "serde_json",
- "utoipa",
 ]
 
 [[package]]
@@ -5823,9 +5706,6 @@ name = "winnow"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "winnow"
@@ -5869,12 +5749,6 @@ name = "xxhash-rust"
 version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
-
-[[package]]
-name = "yansi"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yoke"

@@ -519,7 +519,7 @@ async fn compaction_and_retention() {
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
-    let files = |c: &duckdb::Connection| -> i64 {
+    let files = |c: &mallard_duck::duckdb::Connection| -> i64 {
         c.query_row(
             "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file WHERE end_snapshot IS NULL",
             [],
@@ -528,7 +528,7 @@ async fn compaction_and_retention() {
         .unwrap()
     };
     {
-        let conn = odl_server::open_connection(&cfg).unwrap();
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
         // Creates the tables.
         drop(Server::with_connection(cfg.clone(), conn.try_clone().unwrap()).await.unwrap());
         // Write 6 small batches directly: ten days ago and now.
@@ -558,7 +558,7 @@ async fn compaction_and_retention() {
     let done = tokio::task::spawn_blocking(move || odl_server::run_maintenance(&c, false)).await.unwrap().unwrap();
     assert!(done[0].contains("merged"), "{done:?}");
     assert!(done[1].contains("deleted 6 expired rows"), "{done:?}");
-    let conn = odl_server::open_connection(&cfg).unwrap();
+    let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
     assert_eq!(files(&conn), 1, "one file per day partition after merge; the old day is gone");
     let n: i64 = conn.query_row("SELECT count(*) FROM lake.otel.spans", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 12);
@@ -578,7 +578,7 @@ async fn tolerates_columns_added_by_newer_version() {
     cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     {
-        let conn = odl_server::open_connection(&cfg).unwrap();
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
         drop(Server::with_connection(cfg.clone(), conn.try_clone().unwrap()).await.unwrap());
         conn.execute_batch("ALTER TABLE lake.otel.spans ADD COLUMN future_column VARCHAR").unwrap();
     }
@@ -645,7 +645,7 @@ async fn serve_stops_when_background_fails_to_start() {
     cfg.server.otlp_grpc_addr = "127.0.0.1:0".into();
     cfg.server.otlp_http_addr = "127.0.0.1:0".into();
     cfg.server.api_addr = "127.0.0.1:0".into();
-    let conn = odl_server::open_connection(&cfg).unwrap();
+    let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
     let server = Server::with_connection(cfg, conn.try_clone().unwrap()).await.unwrap();
     // New connections can no longer select the lake schema, so the flusher fails to start.
     conn.execute_batch("DETACH lake").unwrap();
@@ -683,6 +683,33 @@ async fn http_ingest_checks_the_token_before_reading_the_body() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Browser exporters send a CORS preflight without a token; it is answered
+/// before the token check, and the real request still needs the token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn otlp_http_answers_cors_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = lake_config(dir.path());
+    cfg.auth.ingest_tokens = vec!["in".into()];
+    let server = Server::new(cfg).await.unwrap();
+    let preflight = Request::options("/v1/traces")
+        .header(header::ORIGIN, "https://app.example")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type,authorization")
+        .body(Body::empty())
+        .unwrap();
+    let resp = server.otlp_http_router().oneshot(preflight).await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://app.example");
+    let post = Request::post("/v1/traces")
+        .header(header::ORIGIN, "https://app.example")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = server.otlp_http_router().oneshot(post).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://app.example");
+}
+
 /// OTLP/gRPC through a real tonic client: the token is checked before the
 /// message is decoded, and an accepted export is queryable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -692,7 +719,7 @@ async fn grpc_roundtrip_and_auth_before_decoding() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = lake_config(dir.path());
     cfg.auth.ingest_tokens = vec!["in".into()];
-    cfg.ingest.max_request_bytes = odl_server::config::ByteSize(64 * 1024);
+    cfg.ingest.max_request_bytes = mallard_common::ByteSize(64 * 1024);
     let server = Arc::new(Server::new(cfg).await.unwrap());
     let shutdown = CancellationToken::new();
     let (s2, sd) = (server.clone(), shutdown.clone());

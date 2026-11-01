@@ -37,7 +37,8 @@ storage:
   # RustFS, ...) or a local path (only with catalog.type=duckdb, on its PVC).
   dataPath: s3://my-bucket/mallard/lake/
   # Where Sentry sourcemap bundles go (optional; empty disables sourcemap
-  # upload). Same forms as dataPath.
+  # upload). Same forms as dataPath, not inside it. Uses the same
+  # credentials as the lake.
   artifactsUrl: s3://my-bucket/mallard/artifacts
   s3:
     # Custom endpoint including scheme, e.g. http://minio.storage:9000 or
@@ -79,9 +80,9 @@ catalog:
     existingSecretKey: catalog
 
 retention:
-  # Sentry events, in days (0 = keep forever).
-  errorsDays: 90
-  # OpenTelemetry data ("0" = keep forever).
+  # "0" keeps data forever. Sentry events:
+  errors: 90d
+  # OpenTelemetry data:
   traces: 7d
   logs: 7d
   metrics: 30d
@@ -93,6 +94,8 @@ duckdb:
   threads: 0
 
 # Extra TOML appended to the config file (see config/mallard.example.toml).
+# It must start with a table header such as [otel.ingest]; unknown keys
+# make the server refuse to start.
 extraConfig: ""
 #  [otel.ingest]
 #  flush_interval = "10s"
@@ -164,8 +167,10 @@ readinessProbe:
 
 service:
   type: ClusterIP
-  # Sentry ingest, both APIs, OTLP/HTTP on /v1/*, /metrics
+  # Sentry ingest, both APIs, OTLP/HTTP on /v1/*
   port: 80
+  # Prometheus /metrics (never routed by the ingress)
+  metricsPort: 9090
   otlpHttpPort: 4318
   otlpGrpcPort: 4317
   annotations: {}

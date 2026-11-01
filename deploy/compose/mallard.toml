@@ -6,6 +6,8 @@ api_tokens = ["${MALLARD_API_TOKEN}"]
 [storage]
 catalog = "${MALLARD_CATALOG}"
 data_path = "s3://mallard/lake/"
+# Sentry sourcemap bundles, next to the lake in the same bucket (same secret).
+artifacts_path = "s3://mallard/artifacts"
 
 [[storage.secrets]]
 type = "s3"
@@ -15,10 +17,3 @@ region = "us-east-1"
 endpoint = "rustfs:9000"
 url_style = "path"
 use_ssl = false
-
-[sentry]
-# Sourcemap bundles, next to the lake in the same bucket.
-storage_url = "s3://mallard/artifacts"
-s3_endpoint = "http://rustfs:9000"
-s3_region = "us-east-1"
-s3_path_style = true

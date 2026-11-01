@@ -69,5 +69,5 @@ they arrive, and stored events are not reprocessed.
   (`sdl events show <id> --json | jq .payload.debug_meta`) is in that list,
   and that the bundle was uploaded to the same project.
 - `401` from the CLI: wrong `--auth-token`.
-- `501`: the server has no storage for artifacts (only possible when embedded
-  without `storage_url`).
+- `501`: the server has no storage for artifacts (in mallard: `[storage]
+  artifacts_path` is empty).

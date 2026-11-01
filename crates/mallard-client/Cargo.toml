@@ -4,6 +4,9 @@ description = "Async client for mallard: Sentry errors and OpenTelemetry data be
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [dependencies]
 sdl-client.workspace = true
@@ -11,3 +14,6 @@ odl-client.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true

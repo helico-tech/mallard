@@ -38,7 +38,7 @@ cargo run -p odl-server -- openapi > docs/openapi.json   # after API changes (a 
 - Table columns are append-only; column order in `store/schema.rs` must match
   `otlp/convert.rs`.
 - User input reaches SQL only as bound parameters.
-- Public library surface (`Server`, `store::open_connection`, `odl_client`,
-  `odl_cli::{Command, Ctx, run, Embedded}`) is used by obs-ducklake. Don't
-  break it silently.
+- Public library surface (`Server`, `odl_client`, `odl_cli::{Command, Ctx,
+  run, Embedded}`) is used by mallard. Don't break it silently. DuckDB set-up
+  (`open_connection`, extensions, secrets) lives in `crates/mallard-duck`.
 - Work tracking: `work/queue.md` → stories/issues; decisions → `docs/adr/`.

@@ -4,6 +4,9 @@ description = "mallard: errors, traces, logs and metrics on one DuckLake. Server
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [[bin]]
 name = "mallard"
@@ -14,7 +17,8 @@ mallard-server.workspace = true
 mallard-client.workspace = true
 odl-cli.workspace = true
 sdl-cli.workspace = true
-duckdb.workspace = true
+mallard-duck.workspace = true
+mallard-common = { workspace = true, features = ["server"] }
 tokio.workspace = true
 tokio-util.workspace = true
 clap.workspace = true
@@ -22,10 +26,10 @@ anyhow.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-metrics-exporter-prometheus.workspace = true
 futures.workspace = true
 mallard-term.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+
+[lints]
+workspace = true

@@ -4,6 +4,8 @@ description = "Async HTTP client for the otel-ducklake query API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 odl-api.workspace = true
@@ -16,3 +18,6 @@ url.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+
+[lints]
+workspace = true

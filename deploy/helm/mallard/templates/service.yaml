@@ -24,5 +24,9 @@ spec:
       targetPort: otlp-grpc
       protocol: TCP
       appProtocol: grpc
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
   selector:
     {{- include "mallard.selectorLabels" . | nindent 4 }}

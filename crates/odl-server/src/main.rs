@@ -4,10 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use odl_server::{
-    Server,
-    config::{Config, LogFormat},
-};
+use mallard_common::{init_tracing, shutdown_signal};
+use odl_server::{Server, config::Config};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -43,21 +41,9 @@ enum Cmd {
     InstallExtensions {
         /// Extensions to install.
         /// json and parquet are compiled into the binary and need no install.
-        #[arg(default_values_t = ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "icu"].map(String::from))]
+        #[arg(default_values_t = mallard_duck::ALL_EXTENSIONS.iter().map(ToString::to_string))]
         names: Vec<String>,
     },
-}
-
-fn init_tracing(format: LogFormat) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info,tower_http=warn,h2=warn,tonic=warn".into());
-    // No ANSI colors when logs go to a file or a container log driver.
-    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let b = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi);
-    match format {
-        LogFormat::Json => b.json().init(),
-        LogFormat::Text => b.init(),
-    }
 }
 
 #[tokio::main]
@@ -76,7 +62,7 @@ async fn main() -> Result<()> {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(cfg.server.log_format);
             // DuckDB work blocks; keep it off the async runtime threads.
-            tokio::task::spawn_blocking(move || odl_server::install_extensions(&cfg, &names)).await??;
+            tokio::task::spawn_blocking(move || mallard_duck::install_extensions(&cfg.duckdb, &names)).await??;
             Ok(())
         }
         Cmd::Maintenance { full } => {
@@ -105,29 +91,12 @@ async fn main() -> Result<()> {
             let shutdown = CancellationToken::new();
             let sd = shutdown.clone();
             tokio::spawn(async move {
-                wait_for_signal().await;
-                info!("signal received");
+                shutdown_signal().await;
                 sd.cancel();
             });
             server.serve(shutdown).await?;
             info!("stopped");
             Ok(())
         }
-    }
-}
-
-async fn wait_for_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {},
-            _ = term.recv() => {},
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
     }
 }

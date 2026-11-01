@@ -6,21 +6,19 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, Request, State},
-    http::{StatusCode, header},
-    middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
-    routing::get,
+    extract::{Path, State},
+    http::StatusCode,
+    middleware,
+};
+use mallard_common::{
+    auth::Tokens,
+    http::{ApiErr, BearerAuth, J, Q, docs_routes, require_bearer},
 };
 use odl_api::*;
-use utoipa::{
-    Modify, OpenApi,
-    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
-};
+use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    auth::Tokens,
     query::{
         QueryError, Reader, Window, logs, metrics, sql, storage,
         traces::{self, clamp_limit},
@@ -63,87 +61,31 @@ const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
 )]
 struct ApiDoc;
 
-struct BearerAuth;
-
-impl Modify for BearerAuth {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.get_or_insert_with(Default::default);
-        components.add_security_scheme(
-            "bearer",
-            SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
-        );
-    }
-}
-
-/// Error type for handlers.
-pub struct ApiErr(StatusCode, String, String);
-
 impl From<QueryError> for ApiErr {
     fn from(e: QueryError) -> Self {
         match e {
-            QueryError::BadRequest(m) => ApiErr(StatusCode::BAD_REQUEST, "bad_request".into(), m),
-            QueryError::NotFound(m) => ApiErr(StatusCode::NOT_FOUND, "not_found".into(), m),
-            e @ QueryError::Timeout(_) => ApiErr(StatusCode::GATEWAY_TIMEOUT, "timeout".into(), e.to_string()),
-            e @ QueryError::Busy => ApiErr(StatusCode::SERVICE_UNAVAILABLE, "busy".into(), e.to_string()),
+            QueryError::BadRequest(m) => ApiErr::bad_request(m),
+            QueryError::NotFound(m) => ApiErr::not_found(m),
+            e @ QueryError::Timeout(_) => ApiErr::new(StatusCode::GATEWAY_TIMEOUT, "timeout", e.to_string()),
+            e @ QueryError::Busy => ApiErr::new(StatusCode::SERVICE_UNAVAILABLE, "busy", e.to_string()),
             QueryError::Internal(e) => {
                 // Details (paths, bucket names, connection strings) stay in the log.
                 tracing::error!(error = %crate::store::redact(&format!("{e:#}")), "query failed");
-                ApiErr(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal".into(),
-                    "internal error; see the server log".into(),
-                )
+                ApiErr::internal()
             }
         }
     }
 }
 
-impl IntoResponse for ApiErr {
-    fn into_response(self) -> Response {
-        (self.0, Json(ApiError { error: self.1, message: self.2 })).into_response()
-    }
-}
-
 type R<T> = Result<Json<T>, ApiErr>;
 
-/// `Query` extractor whose errors use the API's JSON error body.
-pub struct Q<T>(pub T);
-
-impl<T, S> axum::extract::FromRequestParts<S> for Q<T>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = ApiErr;
-
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, state: &S) -> Result<Self, ApiErr> {
-        Query::<T>::from_request_parts(parts, state)
-            .await
-            .map(|Query(v)| Q(v))
-            .map_err(|e| ApiErr(StatusCode::BAD_REQUEST, "bad_request".into(), e.body_text()))
-    }
-}
-
-/// `Json` extractor whose errors use the API's JSON error body.
-pub struct J<T>(pub T);
-
-impl<T, S> axum::extract::FromRequest<S> for J<T>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = ApiErr;
-
-    async fn from_request(req: Request, state: &S) -> Result<Self, ApiErr> {
-        Json::<T>::from_request(req, state)
-            .await
-            .map(|Json(v)| J(v))
-            .map_err(|e| ApiErr(e.status(), "bad_request".into(), e.body_text()))
-    }
-}
-
 fn window<Q: HasWindow>(st: &ApiState, q: &Q) -> Result<Window, ApiErr> {
-    Ok(Window::resolve(&q.window(), HOUR, st.reader.max_window)?)
+    resolve(st, q, HOUR)
+}
+
+fn resolve<Q: HasWindow>(st: &ApiState, q: &Q, default: std::time::Duration) -> Result<Window, ApiErr> {
+    let w = q.window();
+    Ok(Window::resolve(w.from, w.to, w.since.as_deref(), default, st.reader.max_window)?)
 }
 
 /// Routes behind the bearer-token check.
@@ -171,41 +113,16 @@ fn public_routes() -> OpenApiRouter<Arc<ApiState>> {
 /// route list, so the two cannot drift apart.
 pub fn router(state: Arc<ApiState>) -> Router {
     let (api, openapi) = protected_routes()
-        .layer(middleware::from_fn_with_state(state.clone(), auth))
+        .layer(middleware::from_fn_with_state(state.tokens.clone(), require_bearer))
         .merge(public_routes())
         .with_state(state)
         .split_for_parts();
-    let spec_json = openapi.to_json().unwrap_or_default();
-    let docs_html = scalar_html();
-    api.route("/openapi.json", get(move || async move { ([(header::CONTENT_TYPE, "application/json")], spec_json) }))
-        .route("/docs", get(move || async move { Html(docs_html) }))
+    api.merge(docs_routes(&openapi, "otel-ducklake API"))
 }
 
 /// The OpenAPI document without building a server (for `otel-ducklake openapi`).
 pub fn openapi() -> utoipa::openapi::OpenApi {
     protected_routes().merge(public_routes()).split_for_parts().1
-}
-
-/// API reference page. Loads the spec from a relative URL so it works when
-/// nested. The page script comes from a CDN (pinned with SRI), so `/docs` needs
-/// internet access in the browser; `/openapi.json` does not.
-fn scalar_html() -> String {
-    r#"<!doctype html>
-<html><head><title>otel-ducklake API</title><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/></head>
-<body><script id="api-reference" data-url="openapi.json"></script>
-<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.25.0" integrity="sha384-VPR3QD7bdyIR9EHf6dRrFXz7NO0yJV7/UCVTLQ6e7a0wgzot5WaxvciVrrYOKEpU" crossorigin="anonymous"></script></body></html>"#
-        .to_string()
-}
-
-async fn auth(State(st): S, req: Request, next: Next) -> Response {
-    let header = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    if st.tokens.allows(header) {
-        next.run(req).await
-    } else {
-        ApiErr(StatusCode::UNAUTHORIZED, "unauthorized".into(), "invalid or missing bearer token".into())
-            .into_response()
-    }
 }
 
 #[utoipa::path(get, path = "/api/v1/health", tag = "system",
@@ -297,7 +214,7 @@ async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> R<Vec<TraceSummary>
     responses((status = 200, body = Trace), (status = 404, body = ApiError)))]
 async fn get_trace(State(st): S, Path(trace_id): Path<String>, Q(q): Q<TraceGetQuery>) -> R<Trace> {
     // Without a window, look back a week.
-    let w = Window::resolve(&q.window(), std::time::Duration::from_secs(7 * 86400), st.reader.max_window)?;
+    let w = resolve(&st, &q, std::time::Duration::from_secs(7 * 86400))?;
     Ok(Json(st.reader.run(move |c| traces::get(c, &w, &trace_id)).await?))
 }
 
@@ -372,10 +289,10 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
     responses((status = 200, body = SqlResponse), (status = 400, body = ApiError), (status = 403, body = ApiError)))]
 async fn run_sql(State(st): S, J(req): J<SqlRequest>) -> R<SqlResponse> {
     if !st.enable_sql {
-        return Err(ApiErr(
+        return Err(ApiErr::new(
             StatusCode::FORBIDDEN,
-            "disabled".into(),
-            "ad-hoc SQL is disabled; set query.enable_sql = true (requires auth.api_tokens)".into(),
+            "disabled",
+            "ad-hoc SQL is disabled; set query.enable_sql = true (requires auth.api_tokens)",
         ));
     }
     let limit = clamp_limit(req.limit, 1000, 100_000)?;

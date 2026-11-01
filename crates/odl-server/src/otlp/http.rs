@@ -1,6 +1,7 @@
 //! OTLP/HTTP receiver (port 4318 by default): `POST /v1/traces`, `/v1/logs`,
 //! `/v1/metrics` with `application/x-protobuf` or `application/json` bodies,
-//! optionally `Content-Encoding: gzip` or `zstd`.
+//! optionally `Content-Encoding: gzip` or `zstd`. Answers CORS, so browser
+//! exporters can post directly.
 
 use std::{io::Read, sync::Arc};
 
@@ -38,6 +39,8 @@ pub fn router(ingest: Arc<Ingest>) -> Router {
         .route("/v1/metrics", post(metrics))
         .layer(DefaultBodyLimit::max(limit))
         .layer(middleware::from_fn_with_state(ingest.clone(), admit))
+        // Outermost: browser exporters' preflight requests carry no token.
+        .layer(mallard_common::http::ingest_cors(&[], &[]))
         .with_state(ingest)
 }
 

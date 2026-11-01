@@ -10,7 +10,7 @@
  mallard CLI/TUI ──▶│ :8080 HTTP  /sentry/v1/... sentry API, /sentry/api/0 sentry-cli            │
                 │             /otel/...    otel query API (nested)                           │
                 │             /v1/traces|logs|metrics   OTLP/HTTP (also on :4318)             │
-                │             /healthz /readyz /metrics                                       │
+                │             /healthz /readyz /metrics (or server.metrics_addr)      │
                 └───────────────┬────────────────────────────────────────────────────────────┘
                                 ▼
                 one DuckLake catalog (DuckDB file | SQLite | Postgres)
@@ -24,7 +24,9 @@
 | crate | role |
 |---|---|
 | `mallard` | The one binary. `serve` runs the server; `status`, `trace`, `errors …` (= `sdl-cli` commands), `telemetry …` (= `odl-cli` commands) and `tui` talk to a server over HTTP. |
-| `mallard-server` | Loads config, opens the shared catalog (`odl_server::store::open_connection`), builds both sides on it, mounts their routers, runs their background jobs, owns logging, metrics and shutdown. |
+| `mallard-server` | Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. The `mallard` binary installs logging and the Prometheus recorder (`mallard-common`). |
+| `mallard-common` | Shared by both sides (ADR 0005): duration/size parsing, query windows, the `ApiError` body; with feature `server` the config loader, bearer tokens, HTTP helpers (`ApiErr`, `Q`, `J`, `require_bearer`, CORS, docs page, readiness), logging, signals, Prometheus. |
+| `mallard-duck` | The only crate that depends on `duckdb`: `[storage]`/`[duckdb]` types, `open_connection`, extensions, secrets, SQL quoting, identifier check, redaction, object-store options for sourcemaps. |
 | `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables, formats, colour, error lines, TUI theme, keys and `Outcome` (ADR 0006). Depends on neither client. |
 | `mallard-client` | Wraps `sdl-client` (`<url>/sentry`) and `odl-client` (`<url>/otel`) behind one base URL + token; trace correlation (spans + errors + logs). |
 | `sdl-*` | Sentry side. See [sentry/architecture.md](sentry/architecture.md). |
@@ -35,11 +37,18 @@
 - Each side owns its domain (ingest, storage schema, maintenance).
   `mallard-*` never writes into their schemas directly.
 - One `duckdb` crate version for the workspace (it is bundled and linked
-  once).
-- Library crates have no global side effects; the `mallard` binary sets up
-  logging, metrics and the runtime.
-- One config file, TOML, sections `[server]`, `[storage]` (shared),
-  `[sentry]`, `[otel]`. Env overrides: `MALLARD_<SECTION>__<KEY>`.
+  once): only `mallard-duck` depends on it; everything else uses
+  `mallard_duck::duckdb`.
+- Library crates have no global side effects; the binaries set up logging,
+  metrics and the runtime (with `mallard-common`).
+- One config file, TOML, sections `[server]`, `[storage]`, `[duckdb]`
+  (mallard's), `[sentry]`, `[otel]` (only what each side owns). One loader
+  (`mallard_common::config`): env overrides `MALLARD_<SECTION>__<KEY>`
+  (text settings stay text), `${NAME}` inside parsed strings, unknown keys
+  are errors.
+- Both query APIs require a bearer token (`server.api_tokens`) and answer
+  errors as `{"error": code, "message": text}`.
+- Schemas are fixed: `sentry`, `otel`; otel owns catalog-wide maintenance.
 - Correlation lives in `mallard-client`, built on the two library APIs
   (`/sentry/v1/events?trace_id=`, `/otel/api/v1/traces/{id}`,
   `/otel/api/v1/logs?trace_id=`). The server adds no API of its own, so it

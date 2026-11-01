@@ -5,7 +5,8 @@
 //! - `/sentry/...`  everything of sentry-ducklake (ingest, `/v1` API, sentry-cli)
 //! - `/otel/...`    otel-ducklake query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
-//! - `/healthz`, `/readyz`, `/metrics`
+//! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
+//!   when that is set)
 //!
 //! OTLP/gRPC is served on `server.otlp_grpc_addr`.
 
@@ -14,7 +15,8 @@ pub mod config;
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use axum::{Router, response::IntoResponse, routing::get};
+use axum::{Router, routing::get};
+use mallard_common::http::readiness;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +29,7 @@ use config::{OTEL_PREFIX, SENTRY_PREFIX};
 
 pub struct Platform {
     cfg: Arc<Config>,
-    otel: odl_server::Server,
+    otel: Arc<odl_server::Server>,
     sentry: sdl_server::Server,
     metrics: Option<PrometheusHandle>,
 }
@@ -36,13 +38,15 @@ impl Platform {
     /// Open the shared DuckLake catalog and start both libraries on it.
     pub async fn new(cfg: Config) -> Result<Platform> {
         let ocfg = cfg.otel_config();
-        let scfg = cfg.sentry_config();
-        let c = ocfg.clone();
-        let conn = tokio::task::spawn_blocking(move || odl_server::open_connection(&c))
+        let (st, db) = (cfg.storage.clone(), cfg.duckdb.clone());
+        let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
             .await?
             .context("opening the DuckLake catalog")?;
-        let otel = odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?;
-        let sentry = sdl_server::Server::with_connection(scfg, conn).await.context("starting sentry")?;
+        let otel =
+            Arc::new(odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?);
+        let sentry = sdl_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
+            .await
+            .context("starting sentry")?;
         Ok(Platform { cfg: Arc::new(cfg), otel, sentry, metrics: None })
     }
 
@@ -56,18 +60,25 @@ impl Platform {
         &self.cfg
     }
 
+    /// `/metrics`, when a recorder was given.
+    fn metrics_router(&self) -> Router {
+        match self.metrics.clone() {
+            Some(h) => Router::new().route("/metrics", get(move || std::future::ready(h.render()))),
+            None => Router::new(),
+        }
+    }
+
     /// Everything served on `server.http_addr`.
     pub fn http_router(&self) -> Router {
-        // Ready = sentry's writer thread is alive (otel's health is static).
-        let sentry_ready = self.sentry.router();
+        let (sentry, otel) = (self.sentry.clone(), self.otel.clone());
         let mut r = Router::new()
             .nest(SENTRY_PREFIX, self.sentry.router())
             .nest(OTEL_PREFIX, self.otel.api_router())
             .merge(self.otel.otlp_http_router())
             .route("/healthz", get(|| async { "ok" }))
-            .route("/readyz", get(move || readyz(sentry_ready.clone())));
-        if let Some(h) = self.metrics.clone() {
-            r = r.route("/metrics", get(move || std::future::ready(h.render())));
+            .route("/readyz", get(move || ready(sentry.clone(), otel.clone())));
+        if self.cfg.server.metrics_addr.is_empty() {
+            r = r.merge(self.metrics_router());
         }
         r
     }
@@ -82,7 +93,7 @@ impl Platform {
     /// any listener fails. Then stop the receivers first and flush both
     /// libraries, so nothing arrives after the final flush.
     pub async fn serve_on(self, listeners: Listeners, shutdown: CancellationToken) -> Result<()> {
-        let Listeners { http, otlp_http, otlp_grpc } = listeners;
+        let Listeners { http, otlp_http, otlp_grpc, metrics } = listeners;
         info!(
             http = %http.local_addr()?, otlp_http = %otlp_http.local_addr()?, otlp_grpc = %otlp_grpc.local_addr()?,
             "listening"
@@ -101,6 +112,7 @@ impl Platform {
             .layer(TraceLayer::new_for_http())
             .into_make_service_with_connect_info::<SocketAddr>();
         let grpc = tonic::transport::Server::builder().add_routes(self.otel.grpc_routes());
+        let metrics_app = self.metrics_router();
 
         // Whichever receiver stops first (error or shutdown) stops the others.
         let sd = shutdown.clone();
@@ -123,6 +135,15 @@ impl Platform {
             r.context("OTLP/gRPC server")
         });
 
+        let sd = shutdown.clone();
+        let t4 = tokio::spawn(async move {
+            let Some(l) = metrics else { return Ok(()) };
+            info!(metrics = %l.local_addr()?, "listening");
+            let r = axum::serve(l, metrics_app).with_graceful_shutdown(sd.clone().cancelled_owned()).await;
+            sd.cancel();
+            r.context("metrics server")
+        });
+
         let receivers_down = CancellationToken::new();
         // If a background job ends early (e.g. fails to start), stop the
         // receivers too: data they accept would never be written.
@@ -137,11 +158,12 @@ impl Platform {
             r
         };
         let receivers = async {
-            let (a, b, c) = tokio::join!(t1, t2, t3);
+            let (a, b, c, d) = tokio::join!(t1, t2, t3, t4);
             receivers_down.cancel();
             a??;
             b??;
             c??;
+            d??;
             anyhow::Ok(())
         };
         let (r, o, s) = tokio::join!(receivers, otel_bg, sentry_bg);
@@ -153,31 +175,36 @@ impl Platform {
     }
 }
 
-/// The three listening sockets. Bind them up front so a busy port fails
+/// The listening sockets. Bind them up front so a busy port fails
 /// start-up instead of leaving the server half running.
 pub struct Listeners {
     pub http: TcpListener,
     pub otlp_http: TcpListener,
     pub otlp_grpc: TcpListener,
+    /// `server.metrics_addr`, when set.
+    pub metrics: Option<TcpListener>,
 }
 
 impl Listeners {
     pub async fn bind(cfg: &config::ServerConfig) -> Result<Listeners> {
+        let metrics = match cfg.metrics_addr.as_str() {
+            "" => None,
+            addr => Some(bind(addr).await?),
+        };
         Ok(Listeners {
             http: bind(&cfg.http_addr).await?,
             otlp_http: bind(&cfg.otlp_http_addr).await?,
             otlp_grpc: bind(&cfg.otlp_grpc_addr).await?,
+            metrics,
         })
     }
 }
 
-async fn readyz(sentry: Router) -> axum::response::Response {
-    use tower::ServiceExt;
-    let req = axum::http::Request::get("/readyz").body(axum::body::Body::empty()).expect("static request");
-    match sentry.oneshot(req).await {
-        Ok(r) => r.into_response(),
-        Err(e) => match e {},
-    }
+/// Ready when both sides are ready; the body names what is not.
+async fn ready(sentry: sdl_server::Server, otel: Arc<odl_server::Server>) -> axum::response::Response {
+    let (s, o) = tokio::join!(sentry.ready(), otel.ready());
+    let why: Vec<String> = [s, o].into_iter().filter_map(Result::err).collect();
+    readiness(if why.is_empty() { Ok(()) } else { Err(why.join("; ")) })
 }
 
 async fn bind(addr: &str) -> Result<TcpListener> {

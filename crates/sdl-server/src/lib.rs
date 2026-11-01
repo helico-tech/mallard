@@ -1,16 +1,19 @@
 //! Sentry-compatible error tracking backed by DuckLake.
 //!
-//! Use it as a binary (`sentry-ducklake serve`) or embed it:
+//! Embed it on a connection with the DuckLake catalog attached as `lake`
+//! (see `mallard_duck::open_connection`); it creates the `sentry` schema:
 //!
 //! ```no_run
-//! # async fn demo() -> anyhow::Result<()> {
-//! use sdl_server::{Config, Server};
-//! let cfg = Config {
-//!     storage_url: Some("s3://my-bucket/errors".into()),
-//!     api_token: Some("secret".into()),
-//!     ..Config::default()
+//! # async fn demo(conn: mallard_duck::duckdb::Connection) -> anyhow::Result<()> {
+//! use sdl_server::{Config, Host, Server};
+//! let host = Host {
+//!     public_url: "https://errors.example.com/sentry".into(),
+//!     api_tokens: vec!["secret".into()],
+//!     artifacts: None,
+//!     catalog_maintenance: None,
+//!     maintenance_threads: 0,
 //! };
-//! let server = Server::new(cfg).await?;
+//! let server = Server::with_connection(Config::default(), host, conn).await?;
 //! let app = axum::Router::new().nest("/sentry", server.router());
 //! let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
 //! axum::serve(listener, app).await?;
@@ -18,32 +21,41 @@
 //! # Ok(()) }
 //! ```
 //!
-//! The library installs no global tracing subscriber or metrics recorder;
-//! it only emits `tracing` events and `metrics` counters.
+//! Or run the `sentry-ducklake` binary ([`Standalone`]). The library
+//! installs no global tracing subscriber or metrics recorder; it only emits
+//! `tracing` events and `metrics` counters.
 
 mod api;
 mod config;
 mod db;
 mod ingest;
 mod sourcemaps;
+mod standalone;
 mod storage;
 
-pub use config::{Config, Secret};
-pub use db::install_all_extensions;
+pub use config::{
+    Artifacts, Config, Host, IngestConfig, MaintenanceConfig, QueryConfig, RetentionConfig, SourcemapConfig,
+};
+pub use standalone::{Secret, Standalone};
 
 use anyhow::{Context, Result};
 use db::Db;
+use mallard_common::auth::{AuthPolicy, Tokens};
 use sourcemaps::SourceMaps;
 use std::future::Future;
 use std::sync::Arc;
 use storage::Storage;
 
+/// DuckLake schema that holds the tables.
+pub const SCHEMA: &str = "sentry";
+
 struct AppState {
     cfg: Config,
+    public_url: String,
     db: Db,
     storage: Option<Storage>,
     sourcemaps: SourceMaps,
-    tokens: Vec<String>,
+    tokens: Tokens,
     /// Recently stored event ids per project, to drop SDK retries.
     recent_events: moka::sync::Cache<(u32, uuid::Uuid), ()>,
 }
@@ -55,56 +67,60 @@ pub struct Server {
 }
 
 impl Server {
-    /// Standalone: open DuckDB and attach the catalog from `cfg`.
-    /// Requires `cfg.storage_url`.
-    pub async fn new(cfg: Config) -> Result<Server> {
-        cfg.validate()?;
-        let url = cfg.storage_url.clone().context("storage_url is required (e.g. s3://bucket/prefix or ./data)")?;
+    /// Standalone: open DuckDB, attach the catalog and keep the lake and
+    /// sourcemaps below `args.storage_url`.
+    pub async fn new(args: &Standalone) -> Result<Server> {
+        let (st, duck) = args.storage()?;
+        let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &duck)).await??;
+        Self::with_connection(args.config(), args.host(), conn).await
+    }
+
+    /// `conn` has the DuckLake catalog attached as `lake` (with secrets
+    /// set). We create the `sentry` schema in it. Global DuckDB settings
+    /// belong to the host and are left untouched (except
+    /// `host.maintenance_threads`, which must be 0 on a shared connection).
+    pub async fn with_connection(cfg: Config, host: Host, conn: mallard_duck::duckdb::Connection) -> Result<Server> {
+        cfg.validate().context("sentry")?;
+        host.validate()?;
         let c = cfg.clone();
+        let maintenance =
+            db::writer::Maintenance { catalog_wide: host.catalog_maintenance, threads: host.maintenance_threads };
+        let artifacts = host.artifacts.clone();
         // Both create directories and open files: keep them off async threads.
         let (db, storage) = tokio::task::spawn_blocking(move || {
-            let storage = Storage::new(&url, &c)?;
-            anyhow::Ok((Db::open(&c, &storage)?, storage))
+            let storage = artifacts.map(|a| Storage::new(&a.url, &a.options)).transpose()?;
+            let catalog = conn
+                .query_row(
+                    "SELECT path FROM duckdb_databases() WHERE database_name = ?",
+                    [mallard_duck::CATALOG],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            anyhow::Ok((Db::with_connection(conn, &c, maintenance, mallard_duck::redact(&catalog))?, storage))
         })
         .await??;
-        Ok(Self::assemble(cfg, db, Some(storage)))
-    }
-
-    /// Embedded: `conn` has the DuckLake catalog attached as
-    /// `cfg.lake_alias` (with secrets set). We create `cfg.schema` in it.
-    /// `cfg.storage_url` is only used for sourcemap bundles (optional).
-    /// Global DuckDB settings (threads, memory, temp dir, extensions,
-    /// `maintenance_threads`) belong to the host and are left untouched.
-    pub async fn with_connection(mut cfg: Config, conn: duckdb::Connection) -> Result<Server> {
-        cfg.validate()?;
-        cfg.maintenance_threads = 0;
-        if cfg.duckdb_threads.is_some()
-            || cfg.duckdb_memory_limit.is_some()
-            || cfg.extension_dir.is_some()
-            || cfg.duckdb_temp_dir.is_some()
-        {
-            tracing::warn!("duckdb_* settings and extension_dir are ignored with a shared connection");
+        if host.api_tokens.iter().all(|t| t.trim().is_empty()) {
+            tracing::warn!("no API token configured: the management API rejects all requests");
         }
-        let c = cfg.clone();
-        let (db, storage) = tokio::task::spawn_blocking(move || {
-            let storage = c.storage_url.as_deref().map(|u| Storage::new(u, &c)).transpose()?;
-            anyhow::Ok((Db::with_connection(conn, &c, "external".into())?, storage))
-        })
-        .await??;
-        Ok(Self::assemble(cfg, db, storage))
-    }
-
-    fn assemble(cfg: Config, db: Db, storage: Option<Storage>) -> Server {
-        let tokens = cfg.api_tokens();
-        if tokens.is_empty() {
-            tracing::warn!("no api_token configured: the management API rejects all requests");
-        }
-        let sourcemaps = SourceMaps::new(storage.clone(), cfg.sourcemap_cache_mb);
+        let sourcemaps = SourceMaps::new(storage.clone(), cfg.sourcemaps.cache_size);
         let recent_events = moka::sync::Cache::builder()
             .max_capacity(200_000)
             .time_to_live(std::time::Duration::from_secs(3600))
             .build();
-        Server { state: Arc::new(AppState { cfg, db, storage, sourcemaps, tokens, recent_events }) }
+        let tokens = Tokens::new(&host.api_tokens, AuthPolicy::Required);
+        Ok(Server {
+            state: Arc::new(AppState {
+                cfg,
+                public_url: host.public_url,
+                db,
+                storage,
+                sourcemaps,
+                tokens,
+                recent_events,
+            }),
+        })
     }
 
     /// `/api/{project_id}/envelope/` and `/api/{project_id}/store/`.
@@ -124,6 +140,12 @@ impl Server {
 
     pub fn openapi() -> utoipa::openapi::OpenApi {
         api::openapi()
+    }
+
+    /// Ready to serve: the writer runs and the catalog answers. The error
+    /// is a short reason (details are logged).
+    pub async fn ready(&self) -> Result<(), String> {
+        self.state.ready().await
     }
 
     /// Wait for `shutdown` to resolve, then stop cleanly (see [`Server::shutdown`]).
