@@ -264,12 +264,19 @@ pub fn list_issues(
          ), st AS (
             SELECT group_hash, arg_max(status, changed_at) AS status
             FROM $S.issue_activity WHERE project_id = ? GROUP BY group_hash
+         ), i AS (
+            -- Two processes may each have written a row for one group.
+            SELECT group_hash, arg_min(title, first_seen) AS title, arg_min(culprit, first_seen) AS culprit,
+                   arg_min(level, first_seen) AS level, arg_min(platform, first_seen) AS platform,
+                   arg_min(exception_type, first_seen) AS exception_type,
+                   arg_min(first_release, first_seen) AS first_release, min(first_seen) AS first_seen
+            FROM $S.issues WHERE project_id = ? GROUP BY group_hash
          )
          SELECT agg.group_hash, i.title, i.culprit, i.level, i.platform, i.exception_type,
                 coalesce(st.status, 'unresolved') AS status, epoch_us(i.first_seen) AS first_us,
                 agg.cnt, agg.last_us, {sort} AS sort_value
          FROM agg
-         JOIN $S.issues i ON i.project_id = ? AND i.group_hash = agg.group_hash
+         JOIN i ON i.group_hash = agg.group_hash
          LEFT JOIN st ON st.group_hash = agg.group_hash
          WHERE (? = 'all' OR coalesce(st.status, 'unresolved') = ?){search}
          ORDER BY {sort} DESC, agg.group_hash
@@ -789,7 +796,11 @@ pub fn project_stats(
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
     )?;
     let new_issues: i64 = conn.query_row(
-        &ns.sql("SELECT count(*) FROM $S.issues WHERE project_id = ? AND first_seen >= make_timestamp(?) AND first_seen < make_timestamp(?)"),
+        // Per group: two processes may each have written a row for one.
+        &ns.sql(
+            "SELECT count(*) FROM (SELECT min(first_seen) AS first_seen FROM $S.issues WHERE project_id = ? GROUP BY group_hash)
+             WHERE first_seen >= make_timestamp(?) AND first_seen < make_timestamp(?)",
+        ),
         params![project_id as i32, start_us(w), end_us(w)],
         |r| r.get(0),
     )?;
@@ -819,8 +830,11 @@ pub fn list_releases(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, li
               AND release IS NOT NULL
             GROUP BY release
          ), n AS (
-            SELECT first_release, count(*) AS new_issues FROM $S.issues
-            WHERE project_id = ? AND first_release IS NOT NULL GROUP BY first_release
+            -- Per group: two processes may each have written a row for one.
+            SELECT first_release, count(*) AS new_issues
+            FROM (SELECT arg_min(first_release, first_seen) AS first_release FROM $S.issues
+                  WHERE project_id = ? GROUP BY group_hash)
+            WHERE first_release IS NOT NULL GROUP BY first_release
          )
          SELECT r.release, r.first_us, r.last_us, r.events, r.issues, coalesce(n.new_issues, 0)
          FROM r LEFT JOIN n ON n.first_release = r.release

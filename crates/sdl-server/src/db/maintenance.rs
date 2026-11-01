@@ -6,6 +6,10 @@
 //! caused no conflict on either side. A `DELETE` that removes rows does
 //! conflict with every concurrent insert into the table, so retention is the
 //! one step that stays on the writer thread ([`WriteCmd::Retention`]).
+//!
+//! With several processes on one catalog, the holder of a lease in `meta` runs
+//! maintenance (ADR 0015). Overlapping runs are safe, only wasteful: losers of
+//! a conflict roll back.
 
 use super::writer::WriteCmd;
 use super::{Ns, Tick};
@@ -29,6 +33,9 @@ const COMPACTED_TABLES: &[&str] = &["events", "issues", "issue_activity", "artif
 
 /// How often the inlined-rows counter is checked.
 const ROWS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The `meta` row that says which process runs maintenance.
+pub const LEASE: &str = "maintenance_lease";
 
 /// Settings for maintenance that is not scoped to this schema.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +69,11 @@ pub struct Maintainer {
     flush_rows: usize,
     flush: Tick,
     compact: Tick,
+    /// Who this process is in the lease.
+    holder: String,
+    /// How long a lease holds: a few flushes, so a stopped process is
+    /// replaced soon, and a long run rarely outlives it.
+    lease_for: Duration,
 }
 
 impl Maintainer {
@@ -87,6 +99,8 @@ impl Maintainer {
             flush_rows: cfg.maintenance.flush_rows.max(1),
             flush: Tick::new(cfg.maintenance.flush_interval),
             compact: Tick::new(cfg.maintenance.compact_interval),
+            holder: uuid::Uuid::new_v4().simple().to_string(),
+            lease_for: cfg.maintenance.flush_interval * 3,
         }
     }
 
@@ -112,19 +126,44 @@ impl Maintainer {
     }
 
     fn periodic(&mut self) {
-        if self.flush.is_due() || self.inlined.load(Ordering::Relaxed) >= self.flush_rows {
-            if let Err(e) = self.flush_inlined()
-                && !self.stopping.load(Ordering::Relaxed)
-            {
-                tracing::error!(error = format!("{e:#}"), "flushing inlined data failed");
+        let flush_due = self.flush.is_due();
+        let compact_due = self.compact.is_due();
+        // Every process flushes what it inlined past the limit: only it knows
+        // the count, and its rows must not pile up in the catalog.
+        let too_many_rows = self.inlined.load(Ordering::Relaxed) >= self.flush_rows;
+        if !flush_due && !compact_due && !too_many_rows {
+            return;
+        }
+        let leader = (flush_due || compact_due) && self.renew_lease();
+        if too_many_rows || (flush_due && leader) {
+            match self.flush_inlined() {
+                Ok(()) => {}
+                // Another process flushed these rows.
+                Err(e) if mallard_duck::is_conflict(&e) || self.stopping.load(Ordering::Relaxed) => {
+                    tracing::debug!(error = format!("{e:#}"), "flush did not finish");
+                }
+                Err(e) => tracing::error!(error = format!("{e:#}"), "flushing inlined data failed"),
             }
+        }
+        if flush_due {
             self.flush.done();
         }
-        if self.compact.is_due() {
-            if let Err(e) = self.compact_and_expire() {
+        if compact_due {
+            if leader && let Err(e) = self.compact_and_expire() {
                 tracing::error!(error = format!("{e:#}"), "compaction failed");
             }
             self.compact.done();
+        }
+    }
+
+    fn renew_lease(&self) -> bool {
+        match try_lease(&self.conn, &self.ns, &self.holder, self.lease_for) {
+            Ok(leader) => leader,
+            Err(e) => {
+                metrics::counter!("sdl_maintenance_errors_total").increment(1);
+                tracing::warn!(error = format!("{e:#}"), "maintenance lease failed");
+                false
+            }
         }
     }
 
@@ -213,6 +252,44 @@ impl Maintainer {
         } else {
             metrics::counter!("sdl_maintenance_errors_total").increment(errors.len() as u64);
             Err(anyhow!(errors.join("; ")))
+        }
+    }
+}
+
+/// Take or renew the maintenance lease for `lease_for`. False when another
+/// process holds it, or takes it at this moment: its `DELETE` of the row makes
+/// the second commit conflict.
+pub fn try_lease(conn: &Connection, ns: &Ns, holder: &str, lease_for: Duration) -> Result<bool> {
+    let now = Utc::now().timestamp_micros();
+    let until = now + lease_for.as_micros() as i64;
+    conn.execute_batch("BEGIN TRANSACTION")?;
+    let attempt = (|| -> Result<bool> {
+        let mut stmt = conn.prepare(&ns.sql("SELECT value FROM $S.meta WHERE key = ?"))?;
+        let rows = stmt.query_map([LEASE], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let taken = rows
+            .iter()
+            .filter_map(|v| v.split_once(' '))
+            .any(|(who, till)| who != holder && till.parse::<i64>().is_ok_and(|till| till > now));
+        if taken {
+            return Ok(false);
+        }
+        conn.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [LEASE])?;
+        conn.execute(
+            &ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(?))"),
+            params![LEASE, format!("{holder} {until}"), now],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(true)
+    })();
+    match attempt {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            if mallard_duck::is_conflict(&e) { Ok(false) } else { Err(e) }
         }
     }
 }

@@ -121,7 +121,7 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
     let header_key = key_from_headers(&parts.headers, query.as_deref());
     let limit = match &header_key {
         Some(key) => {
-            check_key(state, project_id, key)?;
+            check_key(state, project_id, key).await?;
             state.cfg.ingest.max_body_bytes.as_usize()
         }
         None => state.cfg.ingest.max_body_bytes.as_usize().min(UNAUTHENTICATED_BODY_LIMIT),
@@ -167,8 +167,8 @@ fn key_from_headers(headers: &HeaderMap, query: Option<&str>) -> Option<String> 
         .or_else(|| query.and_then(auth::parse_query))
 }
 
-fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Response> {
-    match state.db.caches.project(project_id) {
+async fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Response> {
+    match state.db.project_by_ref(&project_id.to_string()).await {
         Some(p) if constant_time_eq(p.public_key.as_bytes(), key.as_bytes()) => Ok(()),
         Some(_) => Err(sentry_error(StatusCode::UNAUTHORIZED, "invalid api key")),
         None => Err(sentry_error(StatusCode::NOT_FOUND, "project not found")),
@@ -177,13 +177,13 @@ fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Respons
 
 /// Check the key from the envelope's `dsn` header when there was none in
 /// the headers or query (those were checked before reading the body).
-fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) -> Result<(), Response> {
+async fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) -> Result<(), Response> {
     if inc.header_key.is_some() {
         return Ok(());
     }
     let key = envelope_dsn.and_then(|d| sdl_protocol::dsn::Dsn::parse(d).ok()).map(|d| d.public_key);
     match key {
-        Some(key) => check_key(state, inc.project_id, &key),
+        Some(key) => check_key(state, inc.project_id, &key).await,
         None => Err(sentry_error(StatusCode::UNAUTHORIZED, "missing authorization information")),
     }
 }
@@ -232,7 +232,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
         Ok(e) => e,
         Err(e) => return sentry_error(StatusCode::BAD_REQUEST, &format!("invalid envelope: {e}")),
     };
-    if let Err(r) = authenticate(&state, &inc, env.dsn()) {
+    if let Err(r) = authenticate(&state, &inc, env.dsn()).await {
         return r;
     }
     let mut stored_id: Option<String> = None;
@@ -276,7 +276,7 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
         Ok(i) => i,
         Err(r) => return r,
     };
-    if let Err(r) = authenticate(&state, &inc, None) {
+    if let Err(r) = authenticate(&state, &inc, None).await {
         return r;
     }
     let Some(json_bytes) =

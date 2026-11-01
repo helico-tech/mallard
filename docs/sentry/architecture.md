@@ -87,8 +87,10 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
   instance, used via `spawn_blocking`. Each query sees the latest committed
   snapshot.
 - **Caches** (projects, issue status, known bundles) live in memory and are
-  updated by the writer after a commit. Consequence: **one process per
-  catalog**. See [issue 0001](../work/issues/0001-multi-replica-caches.md).
+  updated by the writer after a commit. Several processes can share a Postgres
+  catalog: a cache miss reads the catalog, the writer reads what others wrote
+  every 30 s, and one process runs maintenance
+  ([ADR 0015](../adr/0015-sentry-several-processes.md)).
 
 ## Embedding
 

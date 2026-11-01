@@ -191,8 +191,8 @@ pub(crate) fn check_slug(slug: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn project(state: &AppState, r: &str) -> Result<ProjectRow, ApiErr> {
-    state.db.caches.project_by_ref(r).ok_or_else(|| not_found("project"))
+async fn project(state: &AppState, r: &str) -> Result<ProjectRow, ApiErr> {
+    state.db.project_by_ref(r).await.ok_or_else(|| not_found("project"))
 }
 
 fn issue_hash(id: &str) -> Result<u64, ApiErr> {
@@ -216,6 +216,7 @@ async fn info(State(state): S) -> Json<ServerInfo> {
 
 #[utoipa::path(get, path = "/v1/projects", responses((status = 200, body = Vec<Project>)))]
 async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
+    state.db.refresh_projects().await;
     Ok(Json(state.db.caches.projects().into_iter().map(|p| to_project(&state, p)).collect::<Result<_, _>>()?))
 }
 
@@ -236,7 +237,7 @@ async fn create_project(State(state): S, J(req): J<CreateProject>) -> Result<(St
 #[utoipa::path(get, path = "/v1/projects/{project}", params(("project" = String, Path, description = "Project id or slug")),
     responses((status = 200, body = Project), (status = 404, body = ApiError)))]
 async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Project> {
-    Ok(Json(to_project(&state, project(&state, &p)?)?))
+    Ok(Json(to_project(&state, project(&state, &p).await?)?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues",
@@ -252,7 +253,7 @@ async fn list_issues(
     Q(r): Q<WindowRange>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult<IssueList> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     let status = read::StatusFilter::parse(q.status.as_deref())
         .ok_or_else(|| bad("status must be unresolved, resolved, ignored or all"))?;
     let sort = read::IssueSort::parse(q.sort.as_deref())
@@ -282,7 +283,7 @@ async fn get_issue(
     Q(q): Q<WindowQuery>,
     Q(r): Q<WindowRange>,
 ) -> ApiResult<IssueDetail> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     let g = issue_hash(&id)?;
     let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
@@ -300,7 +301,7 @@ async fn update_issue(
     Path((p, id)): Path<(String, String)>,
     J(req): J<UpdateIssue>,
 ) -> ApiResult<IssueDetail> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     let g = issue_hash(&id)?;
     let reason = match req.reason.as_deref().map(str::trim) {
         None | Some("") => "user".to_string(),
@@ -330,7 +331,7 @@ async fn list_events(
     Q(r): Q<WindowRange>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult<EventList> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     // No window unless one is asked for (all events, newest first).
     let w = if q.since.is_some() || r.from.is_some() || r.to.is_some() {
         Some(window(&state, q.since.as_deref(), &r, 14 * DAY)?)
@@ -397,7 +398,7 @@ async fn get_event(
     Path((p, id)): Path<(String, String)>,
     Q(q): Q<EventDetailQuery>,
 ) -> ApiResult<EventDetail> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     let eid = sdl_protocol::event::parse_uuid(&id).ok_or_else(|| bad("invalid event id"))?;
     let g = q.issue.as_deref().map(issue_hash).transpose()?;
     state
@@ -430,7 +431,7 @@ async fn project_stats(
     Q(q): Q<WindowQuery>,
     Q(r): Q<WindowRange>,
 ) -> ApiResult<ProjectStats> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     let w = window(&state, q.since.as_deref(), &r, DAY)?;
     // Without a step, read.rs picks one (about 24 buckets).
     let step = q.interval.as_deref().or(r.step.as_deref());
@@ -448,7 +449,7 @@ async fn list_releases(
     Q(q): Q<ReleaseQuery>,
     Q(r): Q<WindowRange>,
 ) -> ApiResult<ReleaseList> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
     let limit = q.limit.unwrap_or(50);
     Ok(Json(state.db.read(move |c, ns| read::list_releases(c, ns, pid, &w, limit)).await?))
@@ -457,7 +458,7 @@ async fn list_releases(
 #[utoipa::path(get, path = "/v1/projects/{project}/sourcemaps", params(("project" = String, Path)),
     responses((status = 200, body = Vec<ArtifactBundle>), (status = 404, body = ApiError)))]
 async fn list_sourcemaps(State(state): S, Path(p): Path<String>) -> ApiResult<Vec<ArtifactBundle>> {
-    let pid = project(&state, &p)?.id;
+    let pid = project(&state, &p).await?.id;
     Ok(Json(state.db.read(move |c, ns| read::list_bundles(c, ns, pid)).await?))
 }
 

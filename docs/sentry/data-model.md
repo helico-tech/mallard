@@ -10,9 +10,10 @@ Design rules:
 1. **Append-only.** Rows are never updated. Mutable state (issue status) is an
    append-only log where the newest row wins. In a lakehouse an `UPDATE`
    rewrites data or writes delete files; an `INSERT` is cheap.
-2. **One writer.** All row writes go through one thread, in batches. One batch
-   is one DuckLake transaction and one snapshot. Maintenance runs next to it
-   and only rewrites files (ADR 0014).
+2. **One writer per process.** All row writes go through one thread, in
+   batches. One batch is one DuckLake transaction and one snapshot. Maintenance
+   runs next to it and only rewrites files (ADR 0014). Several processes can
+   share a catalog (ADR 0015).
 3. **Prune by time, then by issue.** Almost every query filters on
    `project_id`, a time window and often `group_hash`. The physical
    layout is built for exactly that.
@@ -34,7 +35,7 @@ Design rules:
 | `projects` | one per project | on create | slug, DSN public key |
 | `artifact_bundles` | one per (bundle, project) | sourcemap upload | bundle object + release |
 | `artifact_files` | one per file in a bundle | sourcemap upload | debug-id / url lookup |
-| `meta` | a few | startup | schema version |
+| `meta` | a few | startup, project creation, maintenance | schema version; `project_seq` and `maintenance_lease` are replaced (ADR 0015) |
 
 ### `events`
 
@@ -87,6 +88,8 @@ otel-ducklake's spans table, so `sentry.events JOIN otel.spans USING
 
 `issues` gets one row the first time a group hash is seen (first seen =
 the earliest event `timestamp` in that batch, first release, first title).
+Two processes can each write one for a new group, so reads take one row per
+group (`arg_min(..., first_seen)`).
 It is not lowered when an older event arrives in a later batch (append-only).
 The current title, level and culprit come from the newest event in the
 queried window (`arg_max(title, timestamp)`), as in Sentry.

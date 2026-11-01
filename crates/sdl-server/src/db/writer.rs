@@ -15,11 +15,11 @@
 
 use super::maintenance::{MaintCmd, flush_inlined};
 use super::schema::{OVERFLOW_GROUP, OVERFLOW_TITLE};
-use super::{Caches, Ns, ProjectRow, us_to_dt};
+use super::{Caches, Ns, ProjectRow, Tick, us_to_dt};
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use mallard_duck::duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
@@ -114,6 +114,7 @@ pub struct Writer {
     /// Rows inlined since the last flush; the maintenance thread reads it.
     inlined: Arc<AtomicUsize>,
     new_issues: NewIssueCount,
+    sync: Tick,
 }
 
 /// New issues per project in the current hour, of this process.
@@ -140,6 +141,14 @@ const EARLY_COMMIT_EVENTS: usize = 200;
 /// fingerprint).
 pub const MAX_NEW_ISSUES_PER_HOUR: u32 = 1000;
 
+/// How often to pick up what other processes on this catalog wrote (projects,
+/// status changes, bundles; ADR 0015).
+const SYNC_INTERVAL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(30) };
+
+/// A sync reads rows this much older than the last one: writes of another
+/// process carry its clock. Reading a row twice is harmless.
+const SYNC_CLOCK_SLACK: Duration = Duration::from_secs(300);
+
 /// Commits tried again after a conflict with another process. Doubling from
 /// 20 ms, this waits at most about 2.5 s; then the batch fails and the SDK
 /// retries it.
@@ -159,6 +168,24 @@ const MOVE_STAGED: &str = "INSERT INTO $S.events SELECT
     exception_type, exception_value, message, handled, user_key, trace_id::UUID, span_id, sdk_name, sdk_version,
     CAST(tags_json::JSON AS MAP(VARCHAR, VARCHAR)), size_bytes, payload
     FROM $T.staging_events";
+
+/// The `meta` row [`Writer::create_project`] rewrites.
+const PROJECT_SEQ: &str = "project_seq";
+
+/// Rows of `meta` that get replaced, not added: a `DELETE` of no rows conflicts
+/// with nothing, so each must exist before its first use.
+pub fn ensure_meta_rows(conn: &Connection, ns: &Ns) -> Result<()> {
+    for key in [PROJECT_SEQ, super::maintenance::LEASE] {
+        let n: i64 = conn.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = ?"), [key], |r| r.get(0))?;
+        if n == 0 {
+            conn.execute(
+                &ns.sql("INSERT INTO $S.meta VALUES (?, '', make_timestamp(?))"),
+                params![key, Utc::now().timestamp_micros()],
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// Store the schema version once (the latest row wins).
 pub fn record_schema_version(conn: &Connection, ns: &Ns) -> Result<()> {
@@ -181,6 +208,18 @@ pub fn record_schema_version(conn: &Connection, ns: &Ns) -> Result<()> {
 }
 
 pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
+    load_projects(conn, ns, caches)?;
+    load_bundles(conn, ns, caches, 0)?;
+    tracing::info!(
+        projects = caches.projects.read().expect("lock").len(),
+        bundles = caches.bundle_count(),
+        "loaded caches"
+    );
+    Ok(())
+}
+
+/// Read all projects (a small table).
+pub fn load_projects(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     let mut stmt = conn.prepare(
         &ns.sql("SELECT id, slug, name, platform, public_key, epoch_us(created_at) FROM $S.projects ORDER BY id"),
     )?;
@@ -194,35 +233,37 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
             created_at: us_to_dt(r.get(5)?),
         })
     })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
     let mut projects = caches.projects.write().expect("lock");
     for p in rows {
-        let p = p?;
         projects.insert(p.id, p);
     }
-    drop(projects);
+    Ok(())
+}
 
-    let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles"))?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?)))?;
+/// Read bundles created since `since_us`.
+fn load_bundles(conn: &Connection, ns: &Ns, caches: &Caches, since_us: i64) -> Result<()> {
+    let mut stmt = conn.prepare(&ns.sql(
+        "SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles WHERE created_at >= make_timestamp(?)",
+    ))?;
+    let rows = stmt.query_map([since_us], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?))
+    })?;
     for row in rows {
         let (b, p, r) = row?;
         caches.add_bundle(p, &b, r.as_deref(), []);
     }
     let mut stmt = conn.prepare(&ns.sql(
-        "SELECT DISTINCT bundle_id, project_id, debug_id::VARCHAR FROM $S.artifact_files
-         WHERE debug_id IS NOT NULL AND file_type = 'source_map'",
+        "SELECT DISTINCT f.bundle_id, f.project_id, f.debug_id::VARCHAR
+         FROM $S.artifact_files f JOIN $S.artifact_bundles b USING (bundle_id, project_id)
+         WHERE f.debug_id IS NOT NULL AND f.file_type = 'source_map' AND b.created_at >= make_timestamp(?)",
     ))?;
-    let rows =
-        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, String>(2)?)))?;
+    let rows = stmt
+        .query_map([since_us], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, String>(2)?)))?;
     for row in rows {
         let (b, p, id) = row?;
         caches.add_bundle(p, &b, None, uuid::Uuid::try_parse(&id).ok());
     }
-    tracing::info!(
-        projects = caches.projects.read().expect("lock").len(),
-        bundles = caches.bundle_count(),
-        "loaded caches"
-    );
     Ok(())
 }
 
@@ -249,6 +290,7 @@ impl Writer {
             maintainer,
             inlined,
             new_issues: NewIssueCount::default(),
+            sync: Tick::new(SYNC_INTERVAL),
         })
     }
 
@@ -256,9 +298,13 @@ impl Writer {
         tracing::info!(schema = %self.ns.schema, "writer started");
         let mut shutdown_reply = None;
         while shutdown_reply.is_none() {
-            let cmd = match self.rx.recv() {
+            let cmd = match self.rx.recv_timeout(self.sync.due_in()) {
                 Ok(c) => c,
-                Err(_) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.sync_if_due();
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
             };
             match cmd {
                 WriteCmd::Event(e) => {
@@ -297,6 +343,7 @@ impl Writer {
                 WriteCmd::Shutdown { reply } => shutdown_reply = Some(reply),
                 other => self.handle(other),
             }
+            self.sync_if_due();
         }
         // Drain what is still queued (late requests get answered, not dropped).
         let mut batch = Vec::new();
@@ -321,6 +368,39 @@ impl Writer {
         if let Some(reply) = shutdown_reply {
             let _ = reply.send(());
         }
+    }
+
+    fn sync_if_due(&mut self) {
+        if !self.sync.is_due() {
+            return;
+        }
+        let since_us = (Utc::now() - chrono::Duration::from_std(SYNC_INTERVAL + SYNC_CLOCK_SLACK).unwrap_or_default())
+            .timestamp_micros();
+        if let Err(e) = self.sync_catalog(since_us) {
+            tracing::warn!(error = format!("{e:#}"), "reading what other processes wrote failed");
+        }
+        self.sync.done();
+    }
+
+    /// Pick up what other processes wrote (ADR 0015). New issues are found on
+    /// a cache miss. All cache changes of status happen on this thread, so a
+    /// sync cannot overwrite a newer status with an older one.
+    fn sync_catalog(&self, since_us: i64) -> Result<()> {
+        load_projects(&self.conn, &self.ns, &self.caches)?;
+        load_bundles(&self.conn, &self.ns, &self.caches, since_us)?;
+        let mut stmt = self.conn.prepare(&self.ns.sql(
+            "SELECT project_id, group_hash, arg_max(status, changed_at) FROM $S.issue_activity
+             WHERE changed_at >= make_timestamp(?) GROUP BY ALL",
+        ))?;
+        let rows = stmt
+            .query_map([since_us], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
+        for row in rows {
+            let (p, g, status) = row?;
+            if self.caches.issues.contains_key(&(p, g)) {
+                self.caches.issues.insert((p, g), status.parse().unwrap_or_default());
+            }
+        }
+        Ok(())
     }
 
     fn handle(&mut self, cmd: WriteCmd) {
@@ -609,34 +689,40 @@ impl Writer {
         Ok(())
     }
 
+    /// Ids count up. Writing the `project_seq` row in the same transaction
+    /// makes two concurrent calls conflict, also across processes (a
+    /// `DELETE` conflicts with concurrent writes, ADR 0015); the loser tries
+    /// again and sees the other's project, its id and its slug.
     fn create_project(&self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow, WriteError> {
         let ns = &self.ns;
-        let id = {
-            let projects = self.caches.projects.read().expect("lock");
-            if projects.values().any(|p| p.slug == slug) {
-                return Err(WriteError::SlugTaken(slug));
-            }
-            projects.keys().max().copied().unwrap_or(0) + 1
-        };
         let mut key = [0u8; 16];
         rand::fill(&mut key);
-        let row = ProjectRow { id, slug, name, platform, public_key: hex::encode(key), created_at: Utc::now() };
-        self.in_tx(|c| {
+        let public_key = hex::encode(key);
+        let created_at = Utc::now();
+        let id = self.in_tx(|c| {
+            let taken: i64 =
+                c.query_row(&ns.sql("SELECT count(*) FROM $S.projects WHERE slug = ?"), [&slug], |r| r.get(0))?;
+            if taken > 0 {
+                return Ok(None);
+            }
+            let id: i32 = c.query_row(&ns.sql("SELECT coalesce(max(id), 0) + 1 FROM $S.projects"), [], |r| r.get(0))?;
+            c.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [PROJECT_SEQ])?;
+            c.execute(
+                &ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(?))"),
+                params![PROJECT_SEQ, id.to_string(), created_at.timestamp_micros()],
+            )?;
             c.execute(
                 &ns.sql("INSERT INTO $S.projects VALUES (?, ?, ?, ?, ?, make_timestamp(?))"),
-                params![
-                    row.id as i32,
-                    row.slug,
-                    row.name,
-                    row.platform,
-                    row.public_key,
-                    row.created_at.timestamp_micros()
-                ],
+                params![id, slug, name, platform, public_key, created_at.timestamp_micros()],
             )?;
-            Ok(())
+            Ok(Some(id))
         })?;
-        self.caches.projects.write().expect("lock").insert(id, row.clone());
-        Ok(row)
+        // Also when the slug is taken: tells the cache about that project.
+        load_projects(&self.conn, ns, &self.caches)?;
+        match id {
+            Some(id) => Ok(ProjectRow { id: id as u32, slug, name, platform, public_key, created_at }),
+            None => Err(WriteError::SlugTaken(slug)),
+        }
     }
 
     fn set_status(
@@ -647,6 +733,8 @@ impl Writer {
         reason: &str,
     ) -> Result<bool, WriteError> {
         let ns = &self.ns;
+        // The lake, not the cache: another process may have changed it.
+        self.caches.issues.invalidate(&(project_id, group_hash));
         self.load_issues([(project_id, group_hash)])?;
         match self.caches.issues.get(&(project_id, group_hash)) {
             None => return Err(WriteError::IssueNotFound),

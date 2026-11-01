@@ -142,7 +142,13 @@ pub struct Db {
     pub queue_capacity: usize,
     writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     maintainer: Maintainer,
+    /// When the projects were last read because of a miss.
+    project_refresh: Mutex<Option<Instant>>,
 }
+
+/// At most this often an unknown project reads the catalog. Ingest answers
+/// anyone, and a made-up project id must not cost a query.
+const PROJECT_REFRESH_GAP: Duration = Duration::from_secs(1);
 
 /// The maintenance thread as [`Db`] sees it.
 #[derive(Clone)]
@@ -231,13 +237,7 @@ impl Db {
     ) -> Result<Db> {
         let ns = Ns::new(mallard_duck::CATALOG, crate::SCHEMA);
         let duckdb_version: String = conn.query_row("SELECT version()", [], |r| r.get(0))?;
-        for stmt in schema::CREATE {
-            conn.execute_batch(&ns.sql(stmt)).with_context(|| format!("creating schema: {stmt}"))?;
-        }
-        for stmt in schema::table_options() {
-            conn.execute_batch(&ns.sql(&stmt)).with_context(|| format!("setting table option: {stmt}"))?;
-        }
-        writer::record_schema_version(&conn, &ns)?;
+        migrate(&conn, &ns)?;
 
         let caches = Arc::new(Caches::new(cfg.retention.events));
         writer::load_caches(&conn, &ns, &caches)?;
@@ -291,7 +291,33 @@ impl Db {
                 interrupt,
                 thread: Arc::new(Mutex::new(Some(maint_handle))),
             },
+            project_refresh: Mutex::new(None),
         })
+    }
+
+    /// The project with this id or slug. Not cached: another process may
+    /// have created it, so read the projects again.
+    pub async fn project_by_ref(&self, r: &str) -> Option<ProjectRow> {
+        if let Some(p) = self.caches.project_by_ref(r) {
+            return Some(p);
+        }
+        self.refresh_projects().await;
+        self.caches.project_by_ref(r)
+    }
+
+    /// Read the projects from the catalog, unless that just happened.
+    pub async fn refresh_projects(&self) {
+        {
+            let mut last = self.project_refresh.lock().expect("lock");
+            if last.is_some_and(|t| t.elapsed() < PROJECT_REFRESH_GAP) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let caches = self.caches.clone();
+        if let Err(e) = self.read(move |c, ns| writer::load_projects(c, ns, &caches)).await {
+            tracing::warn!(error = format!("{e:#}"), "reading the projects failed");
+        }
     }
 
     /// Stop maintenance, write what is queued, flush inlined data and stop
@@ -373,6 +399,34 @@ impl Db {
             result.unwrap_or_else(|_| Err(anyhow!("query panicked")))
         })
         .await?
+    }
+}
+
+/// Create the schema, tables and options. Several processes starting at once
+/// race on these (DuckLake reports a conflict for the loser). All steps are
+/// idempotent, so try again.
+fn migrate(conn: &Connection, ns: &Ns) -> Result<()> {
+    let once = || -> Result<()> {
+        for stmt in schema::CREATE {
+            conn.execute_batch(&ns.sql(stmt)).with_context(|| format!("creating schema: {stmt}"))?;
+        }
+        for stmt in schema::table_options() {
+            conn.execute_batch(&ns.sql(&stmt)).with_context(|| format!("setting table option: {stmt}"))?;
+        }
+        writer::record_schema_version(conn, ns)?;
+        writer::ensure_meta_rows(conn, ns)
+    };
+    let mut attempt = 0;
+    loop {
+        match once() {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < 10 && mallard_duck::is_conflict(&e) => {
+                attempt += 1;
+                tracing::warn!(attempt, error = format!("{e:#}"), "creating the schema conflicted; trying again");
+                std::thread::sleep(Duration::from_millis(100 * attempt));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -516,11 +570,17 @@ pub(crate) mod tests {
 
     /// A Db on a local lake in `dir`.
     pub(crate) fn open_db(dir: &std::path::Path, readers: usize) -> Db {
+        open_db_on(&dir.join("catalog.ducklake").display().to_string(), dir, readers, |_| {})
+    }
+
+    /// A Db on `catalog`, as one more process would open it (its own DuckDB).
+    fn open_db_on(catalog: &str, dir: &std::path::Path, readers: usize, change: impl FnOnce(&mut Config)) -> Db {
         let mut cfg = Config::default();
         cfg.query.readers = readers;
         cfg.ingest.batch_window = Duration::from_millis(10);
+        change(&mut cfg);
         let st = mallard_duck::StorageConfig {
-            catalog: dir.join("catalog.ducklake").display().to_string(),
+            catalog: catalog.to_string(),
             data_path: dir.join("lake").display().to_string(),
             ..Default::default()
         };
@@ -875,6 +935,240 @@ pub(crate) mod tests {
             .await;
         assert!(matches!(missing, Err(WriteError::IssueNotFound)));
         db.shutdown().await;
+    }
+
+    async fn create(db: &Db, slug: &str) -> Result<ProjectRow, WriteError> {
+        let (name, slug) = (slug.to_string(), slug.to_string());
+        db.call(move |reply| WriteCmd::CreateProject { name, slug, platform: None, reply }).await
+    }
+
+    /// Wait until `f` holds, for what another process wrote to reach us.
+    async fn eventually(what: &str, mut f: impl AsyncFnMut() -> bool) {
+        for _ in 0..200 {
+            if f().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("never happened: {what}");
+    }
+
+    /// Issue 0001: two processes on one catalog. Run on SQLite, which needs
+    /// no server; on Postgres too by [`two_processes_on_postgres`].
+    async fn two_processes(catalog: &str, dir: &std::path::Path) {
+        let a = Arc::new(open_db_on(catalog, dir, 2, |_| {}));
+        let b = Arc::new(open_db_on(catalog, dir, 2, |_| {}));
+
+        // A project of one process is known to the other at once, by id and
+        // by slug, for ingest and API. Ids do not collide.
+        let p1 = create(&a, "p1").await.unwrap();
+        assert_eq!(p1.id, 1);
+        tokio::time::sleep(PROJECT_REFRESH_GAP).await;
+        assert_eq!(b.project_by_ref("1").await.unwrap().public_key, p1.public_key);
+        assert_eq!(create(&b, "p2").await.unwrap().id, 2);
+        eventually("a learns of p2", async || a.caches.project_by_ref("p2").is_some()).await;
+
+        // Creating at once: no id twice; one slug is one project.
+        let mut tasks = Vec::new();
+        for i in 0..6 {
+            for db in [a.clone(), b.clone()] {
+                let db2 = db.clone();
+                tasks.push(tokio::spawn(async move { create(&db, &format!("same-{i}")).await }));
+                let slug = format!("own-{i}-{}", tasks.len());
+                tasks.push(tokio::spawn(async move { create(&db2, &slug).await }));
+            }
+        }
+        let mut created = 0;
+        for t in tasks {
+            match t.await.unwrap() {
+                Ok(_) => created += 1,
+                Err(WriteError::SlugTaken(_)) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(created, 12 + 6);
+        let ids: (i64, i64, i64) = a
+            .read(|c, ns| {
+                Ok(c.query_row(
+                    &ns.sql("SELECT count(*), count(DISTINCT id), count(DISTINCT slug) FROM $S.projects"),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids, (20, 20, 20));
+
+        // Both store the first event of one group at once: maybe two rows in
+        // `issues`, one issue in every answer. No event lost, under maintenance
+        // of both.
+        let now = Utc::now();
+        let body = serde_json::json!({"message": "m", "fingerprint": ["g"]});
+        let mut tasks = Vec::new();
+        for db in [a.clone(), b.clone()] {
+            let body = body.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..40 {
+                    store(&db, 1, body.clone(), now).await;
+                }
+            }));
+        }
+        for db in [a.clone(), b.clone()] {
+            tasks.push(tokio::spawn(async move {
+                let r: Result<()> = db.call(|reply| WriteCmd::Maintenance { reply }).await;
+                if let Err(e) = r {
+                    assert!(format!("{e:#}").to_lowercase().contains("conflict"), "{e:#}");
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let issues = issues_of(&a, 1).await;
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].count, 80);
+        let group_hash = read::parse_group_id(&issues[0].id).unwrap();
+        let w = issue_window();
+        let detail = b.read(move |c, ns| read::issue_detail(c, ns, 1, group_hash, &w)).await.unwrap().unwrap();
+        assert_eq!(detail.summary.count, 80);
+        let stats = a.read(move |c, ns| read::project_stats(c, ns, 1, &w, None)).await.unwrap();
+        assert_eq!(stats.new_issues, 1, "counted once, also with two rows");
+
+        // A resolve in one process reaches the writer of the other, so an
+        // event there reopens the issue.
+        let set = a.call(move |reply| WriteCmd::SetStatus {
+            project_id: 1,
+            group_hash,
+            status: IssueStatus::Resolved,
+            reason: "user".into(),
+            reply,
+        });
+        assert!(set.await.unwrap());
+        eventually("b learns of the resolve", async || {
+            b.caches.issues.get(&(1, group_hash)) == Some(IssueStatus::Resolved)
+        })
+        .await;
+        store(&b, 1, body, now).await;
+        assert_eq!(issues_of(&a, 1).await[0].status, IssueStatus::Unresolved);
+
+        // A bundle uploaded through one process is used by the other.
+        let bundle = NewBundle {
+            bundle_id: "abc".into(),
+            project_ids: vec![1],
+            release: Some("1.0".into()),
+            dist: None,
+            object_key: "bundles/abc.zip".into(),
+            size_bytes: 1,
+            files: vec![],
+        };
+        let r: Result<()> = a.call(|reply| WriteCmd::AddBundle { bundle: Box::new(bundle), reply }).await;
+        r.unwrap();
+        eventually("b learns of the bundle", async || b.caches.project_has_release(1, "1.0")).await;
+
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_processes_on_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        two_processes(&format!("sqlite:{}", dir.path().join("catalog.sqlite").display()), dir.path()).await;
+    }
+
+    /// Needs an empty Postgres database, e.g.
+    /// `SDL_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn two_processes_on_postgres() {
+        let dir = tempfile::tempdir().unwrap();
+        let libpq = std::env::var("SDL_TEST_POSTGRES").expect("SDL_TEST_POSTGRES");
+        two_processes(&format!("postgres:{libpq}"), dir.path()).await;
+    }
+
+    /// Issue 0001: a second `issues` row of a group (two processes wrote one)
+    /// changes no answer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_issue_rows_count_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let now = Utc::now();
+        let body = serde_json::json!({"message": "m", "fingerprint": ["g"], "release": "1.0"});
+        store(&db, 1, body, now).await;
+        let conn = db.readers.lock().unwrap().pop().unwrap();
+        // Later first_seen and another title: the earlier row must win.
+        conn.execute_batch(&db.ns.sql(
+            "INSERT INTO $S.issues SELECT project_id, group_hash, first_seen + INTERVAL 1 SECOND, first_event_id,
+             '2.0', 'later title', culprit, level, platform, exception_type FROM $S.issues",
+        ))
+        .unwrap();
+        db.readers.lock().unwrap().push(conn);
+        assert_eq!(count_issue_rows(&db, 1).await, 2);
+
+        let w = issue_window();
+        let issues = issues_of(&db, 1).await;
+        assert_eq!(issues.len(), 1);
+        let first_seen = issues[0].first_seen;
+        let stats = db.read(move |c, ns| read::project_stats(c, ns, 1, &w, None)).await.unwrap();
+        assert_eq!(stats.new_issues, 1);
+        let releases = db.read(move |c, ns| read::list_releases(c, ns, 1, &w, 10)).await.unwrap().releases;
+        assert_eq!((releases[0].version.as_str(), releases[0].new_issues), ("1.0", 1));
+        let group = read::parse_group_id(&issues[0].id).unwrap();
+        let detail = db.read(move |c, ns| read::issue_detail(c, ns, 1, group, &w)).await.unwrap().unwrap();
+        assert_eq!((detail.summary.first_seen, detail.first_release.as_deref()), (first_seen, Some("1.0")));
+        db.shutdown().await;
+    }
+
+    /// Issue 0001: one process holds the maintenance lease; the other takes
+    /// over when it runs out. Holders renew theirs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_process_holds_the_maintenance_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let long = Duration::from_secs(600);
+        let lease = |who: &'static str, d: Duration| {
+            db.read(move |c, ns| {
+                c.execute_batch("ROLLBACK")?;
+                maintenance::try_lease(c, ns, who, d)
+            })
+        };
+        assert!(lease("a", long).await.unwrap());
+        assert!(!lease("b", long).await.unwrap(), "a holds it");
+        assert!(lease("a", Duration::from_millis(1)).await.unwrap(), "a renews, briefly");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(lease("b", long).await.unwrap(), "a's has run out");
+        assert!(!lease("a", long).await.unwrap(), "b holds it now");
+        db.shutdown().await;
+    }
+
+    /// Two processes that both see a free lease: the second commit loses,
+    /// also on the very first lease of a catalog.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lease_race_has_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = format!("sqlite:{}", dir.path().join("catalog.sqlite").display());
+        let a = open_db_on(&catalog, dir.path(), 1, |_| {});
+        let b = open_db_on(&catalog, dir.path(), 1, |_| {});
+        let ns = a.ns.clone();
+        let (ca, cb) = (a.readers.lock().unwrap().pop().unwrap(), b.readers.lock().unwrap().pop().unwrap());
+        let claim = |c: &Connection, who: &str| -> Result<()> {
+            c.execute_batch("BEGIN TRANSACTION")?;
+            let _: i64 =
+                c.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = ?"), [maintenance::LEASE], |r| r.get(0))?;
+            c.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [maintenance::LEASE])?;
+            c.execute(&ns.sql("INSERT INTO $S.meta VALUES (?, ?, make_timestamp(0))"), [maintenance::LEASE, who])?;
+            Ok(())
+        };
+        claim(&ca, "a 0").unwrap();
+        claim(&cb, "b 0").unwrap();
+        let results = [ca.execute_batch("COMMIT"), cb.execute_batch("COMMIT")];
+        let _ = ca.execute_batch("ROLLBACK");
+        let _ = cb.execute_batch("ROLLBACK");
+        let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+        assert_eq!(errors.len(), 1, "exactly one commit loses: {errors:?}");
+        a.readers.lock().unwrap().push(ca);
+        b.readers.lock().unwrap().push(cb);
+        a.shutdown().await;
+        b.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

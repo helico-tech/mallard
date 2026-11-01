@@ -32,7 +32,7 @@ Public URL: {{ .Values.publicUrl }}
    API docs: $MALLARD_URL/sentry/docs and $MALLARD_URL/otel/docs
 {{- if and (eq .Values.catalog.type "postgres") (gt (int .Values.replicaCount) 1) }}
 
-WARNING: replicaCount={{ .Values.replicaCount }}. Each pod runs its own background
-maintenance and the Sentry side keeps per-pod project caches. Read the
-"Running more than one pod" notes in docs/sentry/deployment.md.
+NOTE: replicaCount={{ .Values.replicaCount }}. All pods take ingest and API requests. A status
+change or sourcemap bundle reaches the other pods within 30 s; one pod runs Sentry
+maintenance. Read "Running more than one pod" in docs/sentry/deployment.md.
 {{- end }}

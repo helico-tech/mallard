@@ -257,7 +257,7 @@ example the same PVC as the DuckDB catalog). Not usable with several pods.
 | | DuckDB file (`SDL_CATALOG=/data/catalog.ducklake`) | PostgreSQL (`SDL_CATALOG=postgres:host=... dbname=...`) |
 |---|---|---|
 | Moving parts | None extra. | A PostgreSQL database (managed: RDS, Cloud SQL, Azure DB, CloudNativePG, ...). |
-| Processes | Exactly one. The file is locked by the process. | Several processes can attach (see limits below). |
+| Processes | Exactly one. The file is locked by the process. | Several (see "Running more than one pod"). |
 | Kubernetes | PVC `ReadWriteOnce`, 1 replica, `Recreate`: a few seconds of downtime on every upgrade or node move; SDKs retry or drop events during that time. | Pods keep no state; rolling updates without downtime. |
 | Backups | Stop the server (or snapshot the volume) and copy the file. | `pg_dump` or the provider's point-in-time recovery. |
 | Good for | Small teams, single VM, compose. | Production on Kubernetes, HA databases you already run. |
@@ -267,22 +267,30 @@ few hundred MB). Give the PVC 5-10 GiB; most of it is DuckDB spill space.
 
 ### Running more than one pod
 
-With the PostgreSQL catalog several pods can share one catalog, but the
-current server keeps an in-memory cache of projects and issue states that it
-loads at start and does not refresh. So:
+With the PostgreSQL catalog several pods can share one catalog
+([ADR 0015](../adr/0015-sentry-several-processes.md)). Ingest and API work on
+every pod. Maintenance runs on one of them: the holder of a lease in the catalog
+(valid for 3 flush intervals, so a replacement takes over within about 15
+minutes by default).
 
-- A project created through one pod is unknown to the other pods (their
-  ingest rejects its DSN) until they restart.
-- Issue status changes (resolve, ignore) made through one pod are not seen
-  by the others until restart.
-- Every pod runs catalog-wide maintenance (`SDL_CATALOG_WIDE_MAINTENANCE`
-  defaults to `true`).
+What to expect:
 
-This is tracked in [work/issues/0001](../work/issues/0001-multi-replica-caches.md).
-Until the server refreshes these caches, run one replica (the chart
-default). The Postgres catalog still gives you stateless pods, rolling
-updates with a brief overlap and easy backups. If you do run more pods:
-create projects, then restart the deployment.
+- A project created through one pod works on all pods at once: an unknown
+  project makes a pod read the catalog (at most once a second).
+- A status change (resolve, ignore) or a sourcemap bundle reaches the other pods
+  within 30 s. In that time an event on another pod does not reopen a
+  just-resolved issue, and may be stored without symbolication.
+- Both pods can write the first event of one new group at the same moment. Then
+  `issues` has two rows for it; the API shows one issue. Raw SQL
+  (`POST /v1/sql`) sees both rows.
+- The limit on new issues (1000 per project and hour) and the dedupe of SDK
+  retries are per pod.
+- Clocks must agree within 5 minutes.
+
+Storage must be object storage, not a local path. Tested with two processes on
+one Postgres catalog and on one SQLite file (`db::tests::two_processes_*`).
+OTel maintenance still runs on every pod, with jitter
+([issue 0051](../../work/issues/0051-otel-maintenance-on-every-replica.md)).
 
 ## Upgrades
 
@@ -292,8 +300,7 @@ create projects, then restart the deployment.
 - Back up the catalog first (see below).
 - DuckDB file catalog: the pod is replaced (`Recreate`); expect a short gap.
 - Postgres catalog: a rolling update starts the new pod before stopping the
-  old one; both write for a moment, which DuckLake handles with optimistic
-  commits.
+  old one; both write for a moment, as any two pods do.
 - The duckdb crate (and so the DuckDB/DuckLake format) is pinned per
   release. Downgrading across a DuckLake catalog format change is not
   supported: restore the backup instead.

@@ -167,7 +167,7 @@ impl Server {
     /// Returns the event id. A repeated `event_id` is stored once. The
     /// [`EventObserver`] is not told.
     pub async fn ingest_event(&self, project_id: u32, payload: serde_json::Value) -> Result<String, IngestError> {
-        if self.state.db.caches.project(project_id).is_none() {
+        if self.state.db.project_by_ref(&project_id.to_string()).await.is_none() {
             return Err(IngestError::UnknownProject);
         }
         let source = ingest::Source { project_id, client_ip: None, from_sdk: false };
