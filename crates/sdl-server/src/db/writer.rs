@@ -133,16 +133,21 @@ const MOVE_STAGED: &str = "INSERT INTO $S.events SELECT
     CAST(tags_json::JSON AS MAP(VARCHAR, VARCHAR)), size_bytes, payload
     FROM $T.staging_events";
 
+/// Store the schema version once (the latest row wins).
 pub fn record_schema_version(conn: &Connection, ns: &Ns) -> Result<()> {
-    let current: Option<String> = conn
-        .query_row(&ns.sql("SELECT max(value) FROM $S.meta WHERE key = 'schema_version'"), [], |r| r.get(0))
-        .ok()
-        .flatten();
-    let want = super::schema::SCHEMA_VERSION.to_string();
-    if current.as_deref() != Some(want.as_str()) {
+    // Compare as numbers: as text, "10" < "9".
+    let current: Option<i32> = conn
+        .query_row(
+            &ns.sql("SELECT max(TRY_CAST(value AS INTEGER)) FROM $S.meta WHERE key = 'schema_version'"),
+            [],
+            |r| r.get(0),
+        )
+        .context("reading the schema version")?;
+    let want = super::schema::SCHEMA_VERSION;
+    if current != Some(want) {
         conn.execute(
             &ns.sql("INSERT INTO $S.meta VALUES ('schema_version', ?, make_timestamp(?))"),
-            params![want, Utc::now().timestamp_micros()],
+            params![want.to_string(), Utc::now().timestamp_micros()],
         )?;
     }
     Ok(())

@@ -452,6 +452,24 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn schema_version_is_recorded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            let db = open_db(dir.path(), 1);
+            db.shutdown().await;
+        }
+        let db = open_db(dir.path(), 1);
+        let n: i64 = db
+            .read(|c, ns| {
+                Ok(c.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = 'schema_version'"), [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        db.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn panicking_read_returns_a_clean_connection() {
         let dir = tempfile::tempdir().unwrap();
         let db = open_db(dir.path(), 1);
