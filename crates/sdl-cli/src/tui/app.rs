@@ -4,6 +4,7 @@
 
 use crate::cli::Hints;
 use crate::event_view::{self as ev, Breadcrumb, Exception, Frame};
+use crate::{SortBy, StatusFilter};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -11,11 +12,47 @@ use sdl_client::types::*;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const STATUSES: [&str; 4] = ["unresolved", "resolved", "ignored", "all"];
-pub const SORTS: [(&str, &str); 4] =
-    [("last_seen", "Last seen"), ("first_seen", "First seen"), ("count", "Events"), ("users", "Users")];
-/// Window and the stats bucket size that gives ~50 bars.
-pub const WINDOWS: [(&str, &str); 5] = [("1h", "1m"), ("24h", "30m"), ("7d", "3h"), ("14d", "6h"), ("30d", "12h")];
+/// Time window of the issue list, the stats and the issue detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    Hour,
+    Day,
+    Week,
+    TwoWeeks,
+    Month,
+}
+
+impl Window {
+    pub const ALL: [Window; 5] = [Window::Hour, Window::Day, Window::Week, Window::TwoWeeks, Window::Month];
+
+    /// The API's `since` value.
+    pub fn since(self) -> &'static str {
+        match self {
+            Window::Hour => "1h",
+            Window::Day => "24h",
+            Window::Week => "7d",
+            Window::TwoWeeks => "14d",
+            Window::Month => "30d",
+        }
+    }
+
+    /// Stats bucket size that gives ~50 bars.
+    pub fn interval(self) -> &'static str {
+        match self {
+            Window::Hour => "1m",
+            Window::Day => "30m",
+            Window::Week => "3h",
+            Window::TwoWeeks => "6h",
+            Window::Month => "12h",
+        }
+    }
+}
+
+/// The item `step` places after `cur` in `all`, wrapping around.
+fn cycle<T: Copy + PartialEq>(all: &[T], cur: T, step: isize) -> T {
+    let i = all.iter().position(|x| *x == cur).unwrap_or(0) as isize;
+    all[(i + step).rem_euclid(all.len() as isize) as usize]
+}
 pub const REFRESH_EVERY: Duration = Duration::from_secs(5);
 pub const INFO_EVERY: Duration = Duration::from_secs(2);
 const TOAST_FOR: Duration = Duration::from_secs(4);
@@ -24,19 +61,19 @@ const PAGE: usize = 10;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuesKey {
     pub project: String,
-    pub status: usize,
-    pub sort: usize,
-    pub window: usize,
+    pub status: StatusFilter,
+    pub sort: SortBy,
+    pub window: Window,
     pub query: String,
 }
 
 impl IssuesKey {
     pub fn query(&self) -> IssueQuery {
         IssueQuery {
-            status: Some(STATUSES[self.status].into()),
+            status: Some(self.status.as_str().into()),
             query: (!self.query.is_empty()).then(|| self.query.clone()),
-            since: Some(WINDOWS[self.window].0.into()),
-            sort: Some(SORTS[self.sort].0.into()),
+            since: Some(self.window.since().into()),
+            sort: Some(self.sort.as_str().into()),
             limit: Some(200),
             ..Default::default()
         }
@@ -48,8 +85,8 @@ pub enum Req {
     Info,
     Projects,
     Issues(IssuesKey),
-    Stats { project: String, window: usize },
-    Issue { project: String, id: String, window: usize },
+    Stats { project: String, window: Window },
+    Issue { project: String, id: String, window: Window },
     Events { project: String, issue: String, before: Option<String> },
     Event { project: String, issue: String, event_id: String },
     SetStatus { project: String, id: String, status: IssueStatus },
@@ -126,7 +163,7 @@ pub enum Resp {
     Issues(IssuesKey, Res<IssueList>),
     Stats {
         project: String,
-        window: usize,
+        window: Window,
         result: Res<ProjectStats>,
     },
     Issue {
@@ -370,9 +407,9 @@ pub struct App {
     pub projects: Vec<Project>,
     pub project: Option<String>,
     pub projects_loaded: bool,
-    pub status: usize,
-    pub sort: usize,
-    pub window: usize,
+    pub status: StatusFilter,
+    pub sort: SortBy,
+    pub window: Window,
     pub query: String,
     /// Search text while typing after `/`.
     pub input: Option<String>,
@@ -419,9 +456,9 @@ impl App {
             projects: vec![],
             project,
             projects_loaded: false,
-            status: 0,
-            sort: 0,
-            window: 1,
+            status: StatusFilter::Unresolved,
+            sort: SortBy::LastSeen,
+            window: Window::Day,
             query: String::new(),
             input: None,
             issues: vec![],
@@ -765,28 +802,28 @@ impl App {
             }
             KeyCode::Enter => return self.open_selected(),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                self.status = (self.status + 1) % STATUSES.len();
+                self.status = cycle(&StatusFilter::ALL, self.status, 1);
                 return self.reload_list();
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                self.status = (self.status + STATUSES.len() - 1) % STATUSES.len();
+                self.status = cycle(&StatusFilter::ALL, self.status, -1);
                 return self.reload_list();
             }
             KeyCode::Char(c @ '1'..='4') => {
-                self.status = c as usize - '1' as usize;
+                self.status = StatusFilter::ALL[c as usize - '1' as usize];
                 return self.reload_list();
             }
             KeyCode::Char('/') => self.input = Some(self.query.clone()),
             KeyCode::Char('s') => {
-                self.sort = (self.sort + 1) % SORTS.len();
+                self.sort = cycle(&SortBy::ALL, self.sort, 1);
                 return self.reload_list();
             }
             KeyCode::Char('t') => {
-                self.window = (self.window + 1) % WINDOWS.len();
+                self.window = cycle(&Window::ALL, self.window, 1);
                 return self.reload_list();
             }
             KeyCode::Char('T') => {
-                self.window = (self.window + WINDOWS.len() - 1) % WINDOWS.len();
+                self.window = cycle(&Window::ALL, self.window, -1);
                 return self.reload_list();
             }
             KeyCode::Char('p') => {
@@ -1210,11 +1247,7 @@ impl App {
             Resp::SetStatus { id, status, result } => {
                 match result {
                     Ok(d) => {
-                        let verb = match status {
-                            IssueStatus::Resolved => "resolved",
-                            IssueStatus::Ignored => "ignored",
-                            IssueStatus::Unresolved => "unresolved",
-                        };
+                        let verb = status.as_str();
                         self.toast(format!("✓ {verb}: {}", crate::fmt::truncate(&d.summary.title, 60)), false);
                         if let Some(det) = self.detail.as_mut().filter(|x| x.id == id) {
                             det.detail = Some(d);
@@ -1264,7 +1297,7 @@ mod tests {
     fn filters_and_search_produce_requests() {
         let mut app = loaded_app();
         let r = app.on_key(KeyEvent::from(KeyCode::Tab));
-        assert!(matches!(&r[1], Req::Issues(k) if k.status == 1));
+        assert!(matches!(&r[1], Req::Issues(k) if k.status == StatusFilter::Resolved));
         app.on_key(key('/'));
         for c in "boom".chars() {
             assert!(app.on_key(key(c)).is_empty());
@@ -1273,7 +1306,15 @@ mod tests {
         assert_eq!(app.query, "boom");
         assert!(matches!(&r[1], Req::Issues(k) if k.query == "boom" && k.query().query.as_deref() == Some("boom")));
         let r = app.on_key(key('t'));
-        assert!(matches!(&r[0], Req::Stats { window: 2, .. }));
+        assert!(matches!(&r[0], Req::Stats { window: Window::Week, .. }));
+        let r = app.on_key(key('T'));
+        assert!(matches!(&r[0], Req::Stats { window: Window::Day, .. }));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.status, StatusFilter::Unresolved);
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.status, StatusFilter::All, "wraps around");
+        app.on_key(key('3'));
+        assert_eq!(app.status, StatusFilter::Ignored);
     }
 
     #[test]
@@ -1351,7 +1392,7 @@ mod tests {
         assert!(r.is_empty() && app.ignored);
         assert_eq!(app.issues[0].status, IssueStatus::Unresolved);
         app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT));
-        assert!(app.ignored && app.sort == 0);
+        assert!(app.ignored && app.sort == SortBy::LastSeen);
         app.on_key(key('/'));
         app.on_key(key('x'));
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));

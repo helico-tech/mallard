@@ -170,13 +170,12 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
             Resp::Issues(key, r)
         }
         Req::Stats { project, window } => {
-            let (since, interval) = app::WINDOWS[window];
-            let q = WindowQuery { since: Some(since.into()), interval: Some(interval.into()) };
+            let q = WindowQuery { since: Some(window.since().into()), interval: Some(window.interval().into()) };
             let result = c.stats(&project, &q).await.map_err(e);
             Resp::Stats { project, window, result }
         }
         Req::Issue { project, id, window } => {
-            let q = WindowQuery { since: Some(app::WINDOWS[window].0.into()), interval: None };
+            let q = WindowQuery { since: Some(window.since().into()), interval: None };
             let result = c.issue(&project, &id, &q).await.map_err(e);
             Resp::Issue { id, result }
         }

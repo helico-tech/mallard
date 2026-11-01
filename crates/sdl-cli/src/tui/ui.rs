@@ -3,6 +3,7 @@
 
 use super::app::*;
 use super::theme::{self as th};
+use crate::StatusFilter;
 use crate::fmt;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -219,7 +220,7 @@ fn render_issues(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_stats(f: &mut Frame, area: Rect, app: &App) {
-    let window = WINDOWS[app.window].0;
+    let window = app.window.since();
     let kpi_w = if area.width >= 100 { 56 } else { area.width };
     let [kpi, chart] = Layout::horizontal([Constraint::Length(kpi_w), Constraint::Min(0)]).areas(area);
 
@@ -290,9 +291,10 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_filters(f: &mut Frame, area: Rect, app: &App) {
     let mut tabs = vec![Span::raw(" ")];
-    for (i, s) in STATUSES.iter().enumerate() {
+    for status in StatusFilter::ALL {
+        let s = status.as_str();
         let label = format!("{}{}", s[..1].to_uppercase(), &s[1..]);
-        if i == app.status {
+        if status == app.status {
             let count = if app.issues_loaded { format!(" {}", app.issues.len()) } else { String::new() };
             tabs.push(Span::styled(format!(" {label}{count} "), th::tab_active()));
         } else {
@@ -309,9 +311,9 @@ fn render_filters(f: &mut Frame, area: Rect, app: &App) {
         right.push(Span::styled("(esc clears)  ", th::faint()));
     }
     right.push(Span::styled("sort ", th::faint()));
-    right.push(Span::styled(format!("{} ▾  ", SORTS[app.sort].1), th::text()));
+    right.push(Span::styled(format!("{} ▾  ", app.sort.label()), th::text()));
     right.push(Span::styled("window ", th::faint()));
-    right.push(Span::styled(format!("{} ", WINDOWS[app.window].0), th::text()));
+    right.push(Span::styled(format!("{} ", app.window.since()), th::text()));
     if area.width > 80 {
         f.render_widget(Paragraph::new(Line::from(right).right_aligned()), area);
     }
@@ -322,7 +324,7 @@ fn status_span(s: IssueStatus) -> Span<'static> {
 }
 
 fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut title = vec![title_span("Issues"), Span::styled(format!("{} ", STATUSES[app.status]), th::dim())];
+    let mut title = vec![title_span("Issues"), Span::styled(format!("{} ", app.status.as_str()), th::dim())];
     if let Some(e) = app.issues_error.as_ref().filter(|_| !app.issues.is_empty()) {
         // The list is still shown; the failed refresh is noted in the title.
         title.push(Span::styled(format!("✗ refresh failed: {} ", fmt::truncate(e, 60)), Style::new().fg(th::RED)));
@@ -331,7 +333,7 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let window = WINDOWS[app.window].0;
+    let window = app.window.since();
     if app.issues.is_empty() {
         let lines = if let Some(e) = &app.issues_error {
             vec![
@@ -349,7 +351,8 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
         } else if !app.issues_loaded {
             vec![Line::from(Span::styled(format!("{} loading issues…", spinner(app)), th::dim()))]
         } else {
-            let what = if app.status == 3 { String::new() } else { format!("{} ", STATUSES[app.status]) };
+            let what =
+                if app.status == StatusFilter::All { String::new() } else { format!("{} ", app.status.as_str()) };
             let q = if app.query.is_empty() { String::new() } else { format!(" matching \"{}\"", app.query) };
             vec![
                 Line::from(Span::styled(
@@ -439,7 +442,7 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let now = app.now;
-    let window = WINDOWS[app.window].0;
+    let window = app.window.since();
     let Some(d) = app.detail.as_mut() else { return };
     let [title, tabs, content] =
         Layout::vertical([Constraint::Length(4), Constraint::Length(1), Constraint::Min(0)]).areas(area);

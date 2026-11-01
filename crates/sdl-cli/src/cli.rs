@@ -3,7 +3,7 @@
 use crate::event_view as ev;
 use crate::fmt;
 use crate::paint as p;
-use crate::{Command, EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SortBy, SourcemapsCmd, StatusFilter};
+use crate::{Command, EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SourcemapsCmd};
 use anyhow::{Result, bail};
 use chrono::Utc;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, modifiers, presets};
@@ -341,26 +341,10 @@ fn print_project(pr: &Project, h: &Hints) -> Result<()> {
 
 fn issue_query(a: &IssueListArgs) -> IssueQuery {
     IssueQuery {
-        status: Some(
-            match a.status {
-                StatusFilter::Unresolved => "unresolved",
-                StatusFilter::Resolved => "resolved",
-                StatusFilter::Ignored => "ignored",
-                StatusFilter::All => "all",
-            }
-            .into(),
-        ),
+        status: Some(a.status.as_str().into()),
         query: a.query.clone(),
         since: a.since.clone(),
-        sort: Some(
-            match a.sort {
-                SortBy::LastSeen => "last_seen",
-                SortBy::FirstSeen => "first_seen",
-                SortBy::Count => "count",
-                SortBy::Users => "users",
-            }
-            .into(),
-        ),
+        sort: Some(a.sort.as_str().into()),
         environment: a.env.clone(),
         release: a.release.clone(),
         limit: a.limit,

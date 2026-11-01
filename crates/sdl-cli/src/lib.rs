@@ -76,7 +76,7 @@ pub enum ProjectsCmd {
     Show { project: String },
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum StatusFilter {
     Unresolved,
     Resolved,
@@ -84,7 +84,22 @@ pub enum StatusFilter {
     All,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+impl StatusFilter {
+    pub const ALL: [StatusFilter; 4] =
+        [StatusFilter::Unresolved, StatusFilter::Resolved, StatusFilter::Ignored, StatusFilter::All];
+
+    /// The API's `status` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusFilter::Unresolved => "unresolved",
+            StatusFilter::Resolved => "resolved",
+            StatusFilter::Ignored => "ignored",
+            StatusFilter::All => "all",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SortBy {
     #[value(name = "last_seen")]
     LastSeen,
@@ -92,6 +107,30 @@ pub enum SortBy {
     FirstSeen,
     Count,
     Users,
+}
+
+impl SortBy {
+    pub const ALL: [SortBy; 4] = [SortBy::LastSeen, SortBy::FirstSeen, SortBy::Count, SortBy::Users];
+
+    /// The API's `sort` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SortBy::LastSeen => "last_seen",
+            SortBy::FirstSeen => "first_seen",
+            SortBy::Count => "count",
+            SortBy::Users => "users",
+        }
+    }
+
+    /// Name of the sorted column.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SortBy::LastSeen => "Last seen",
+            SortBy::FirstSeen => "First seen",
+            SortBy::Count => "Events",
+            SortBy::Users => "Users",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
