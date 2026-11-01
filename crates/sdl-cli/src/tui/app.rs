@@ -1544,6 +1544,21 @@ mod tests {
     }
 
     #[test]
+    fn stepping_past_the_last_event_appends_the_older_page_and_shows_it() {
+        let mut app = detail_app();
+        app.detail_mut().unwrap().next_cursor = Some("c1".into());
+        press(&mut app, key('['));
+        let r = press(&mut app, key('['));
+        assert!(matches!(&r[..], [Req::Events { before: Some(c), .. }] if c == "c1"), "{r:?}");
+        let page = EventList { events: vec![event_summary("e3", 300)], next_cursor: None };
+        let r = app.on_response(Resp::Events { issue: "b2".into(), before: Some("c1".into()), result: Ok(page) });
+        assert!(matches!(&r[..], [Req::Event { event_id, .. }] if event_id == "e3"), "{r:?}");
+        let d = app.detail().unwrap();
+        assert_eq!(d.events.iter().map(|e| e.event_id.as_str()).collect::<Vec<_>>(), ["e1", "e2", "e3"]);
+        assert_eq!((d.event_idx, d.next_cursor.as_deref(), d.want_older), (2, None, false));
+    }
+
+    #[test]
     fn older_page_is_requested_once() {
         let mut app = detail_app();
         let d = app.detail_mut().unwrap();

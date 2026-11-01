@@ -1129,11 +1129,24 @@ mod tests {
     pub fn draw(app: &mut App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| render(f, f.area(), app)).unwrap();
-        let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        screen(&term)
+    }
+
+    #[test]
+    fn json_lines_are_highlighted_by_kind() {
+        let parts =
+            |l: &str| json_line(l).spans.iter().map(|s| (s.content.to_string(), s.style.fg)).collect::<Vec<_>>();
+        let p = parts(r#"    "level": "error","#);
+        assert_eq!(p[0].0, "    ");
+        assert_eq!(p[1], ("\"level\"".into(), Some(th::ACCENT)));
+        assert_eq!(p[3], ("\"error\"".into(), Some(th::GREEN)));
+        assert_eq!(p[4].0, ",");
+        assert_eq!(parts(r#""n": -1.5"#)[3], ("-1.5".into(), Some(th::YELLOW)));
+        assert_eq!(parts(r#""ok": true,"#)[3].1, Some(th::MAGENTA));
+        assert_eq!(parts("null")[1].1, Some(th::MAGENTA));
+        // A value line without a key, and structure lines.
+        assert_eq!(parts(r#"  "x","#)[1], ("\"x\"".into(), Some(th::GREEN)));
+        assert_eq!(parts("  },")[1].0, "}");
     }
 
     fn press(app: &mut App, c: KeyCode) {

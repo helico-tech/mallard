@@ -265,6 +265,7 @@ pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::fixtures::screen;
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
@@ -272,14 +273,6 @@ mod tests {
 
     fn key(c: KeyCode) -> Event {
         Event::Key(KeyEvent::from(c))
-    }
-
-    fn screen(term: &Terminal<TestBackend>) -> String {
-        let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     /// Drives `Embedded` through draw / handle_event / tick. No server runs

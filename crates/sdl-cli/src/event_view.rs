@@ -227,8 +227,10 @@ impl Breadcrumb {
 fn parse_ts(v: &Value) -> Option<DateTime<Utc>> {
     match v {
         Value::Number(n) => {
+            // floor, not trunc: -1.5 is 2 s before the epoch plus 0.5 s.
             let f = n.as_f64()?;
-            Utc.timestamp_opt(f.trunc() as i64, ((f.fract()) * 1e9) as u32).single()
+            let secs = f.floor();
+            Utc.timestamp_opt(secs as i64, ((f - secs) * 1e9) as u32).single()
         }
         Value::String(s) => DateTime::parse_from_rfc3339(s)
             .map(|d| d.with_timezone(&Utc))
@@ -338,6 +340,18 @@ pub fn contexts(payload: &Value) -> Vec<(String, String)> {
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn timestamps_from_numbers_strings_and_rfc3339() {
+        let t = |v: Value| parse_ts(&v).map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        assert_eq!(t(json!(1_700_000_000)).as_deref(), Some("2023-11-14T22:13:20.000Z"));
+        assert_eq!(t(json!(1_700_000_000.25)).as_deref(), Some("2023-11-14T22:13:20.250Z"));
+        assert_eq!(t(json!("1700000000.25")).as_deref(), Some("2023-11-14T22:13:20.250Z"));
+        assert_eq!(t(json!("2026-10-31T12:00:00.5+02:00")).as_deref(), Some("2026-10-31T10:00:00.500Z"));
+        assert_eq!(t(json!(-1.5)).as_deref(), Some("1969-12-31T23:59:58.500Z"));
+        assert_eq!(t(json!("yesterday")), None);
+        assert_eq!(t(json!(true)), None);
+    }
 
     pub fn node_payload() -> Value {
         json!({

@@ -4,6 +4,15 @@ use super::app::*;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use sdl_client::types::*;
 
+/// The text of a test terminal, one line per row.
+pub fn screen(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buf = term.backend().buffer();
+    (0..buf.area.height)
+        .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 31, 12, 0, 0).unwrap()
 }
@@ -95,7 +104,7 @@ pub fn issue_detail() -> IssueDetail {
     }
 }
 
-fn event_summary(id: &str, mins_ago: i64) -> EventSummary {
+pub fn event_summary(id: &str, mins_ago: i64) -> EventSummary {
     EventSummary {
         event_id: id.into(),
         project_id: 1,
