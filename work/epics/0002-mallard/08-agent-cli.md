@@ -13,6 +13,7 @@ AI coding agents can do every common observability job with the CLI: find errors
 - Agent-facing help doc (how to use mallard as an agent).
 
 ## Plan
+Spec: [docs/specs/agent-cli.md](../../../docs/specs/agent-cli.md) (researched 2026-11-01). Implement P0 after story 07 (split), on the flattened command tree (spec item 15).
 
 ## Progress log
 
