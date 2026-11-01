@@ -28,20 +28,9 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-/// What the host should do after [`Embedded::handle_event`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
-pub enum Outcome {
-    /// The key was used.
-    Consumed,
-    /// The key was not used; the host may handle it.
-    Ignored,
-    /// The user asked to quit (`q` on the issue list, `ctrl-c`).
-    Quit,
-    /// The user pressed `t` on an event that has this trace id.
-    OpenTrace(String),
-}
+/// What the host should do after [`Embedded::handle_event`]; `x` on an
+/// event with a trace id is [`Outcome::Jump`].
+pub use mallard_term::tui::Outcome;
 
 /// The TUI as an embeddable component. Data loads run as tasks on the tokio
 /// runtime that was current when [`Embedded::new`] was called; their results
@@ -120,8 +109,9 @@ impl Embedded {
         self.app.fatal.take()
     }
 
-    /// Show the error events of this trace (all projects).
-    pub fn show_trace_errors(&mut self, trace_id: &str) {
+    /// Show the error events of this trace (all projects). The other side's
+    /// `Embedded::open_trace` has the same name.
+    pub fn open_trace(&mut self, trace_id: &str) {
         self.ensure_started();
         let reqs = self.app.show_trace(trace_id);
         self.dispatch(reqs);
@@ -243,7 +233,7 @@ pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
                 ev = events.next() => match ev {
                     Some(Ok(ev)) => match ui.handle_event(&ev) {
                         Outcome::Quit => break,
-                        Outcome::OpenTrace(t) => ui.show_trace_errors(&t),
+                        Outcome::Jump(t) => ui.open_trace(&t),
                         Outcome::Consumed | Outcome::Ignored => {}
                     },
                     Some(Err(e)) => return Err(e.into()),
@@ -307,7 +297,7 @@ mod tests {
         let s = screen(&term);
         assert!(s.contains("cannot reach server"), "{s}");
 
-        ui.show_trace_errors("b7644661850f40e69380d8c9ea253e84");
+        ui.open_trace("b7644661850f40e69380d8c9ea253e84");
         term.draw(|f| ui.draw(f, f.area())).unwrap();
         assert!(screen(&term).contains("Trace"));
         assert_eq!(ui.handle_event(&key(KeyCode::Esc)), Outcome::Consumed);
@@ -324,9 +314,9 @@ mod tests {
             Embedded::new(Client::new("http://127.0.0.1:9", Some("t")).unwrap(), None)
         };
         // Not in a runtime context here: these spawn loads and must not panic.
-        assert_eq!(ui.handle_event(&key(KeyCode::Char('R'))), Outcome::Consumed);
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('r'))), Outcome::Consumed);
         ui.tick();
-        ui.show_trace_errors("b7644661850f40e69380d8c9ea253e84");
+        ui.open_trace("b7644661850f40e69380d8c9ea253e84");
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| ui.draw(f, f.area())).unwrap();
     }

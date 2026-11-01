@@ -44,12 +44,12 @@ pub mod keys {
     pub const SHARED: &[(&str, &str)] = &[
         ("↑↓ j k  pgup pgdn  g G", "move"),
         ("↵", "open"),
-        ("esc q", "back (q quits on the first screen)"),
-        ("tab  1-9", "switch the tabs of this screen"),
+        ("esc q", "back (q on top: quit)"),
+        ("tab  1-9", "tabs of this screen"),
         ("/", "filter or search"),
-        ("t T", "next / previous time window"),
+        ("t T", "next / prev time window"),
         ("r", "refresh now"),
-        ("x", "this trace on the other tab"),
+        ("x", "same trace, other tab"),
         ("?", "help"),
         ("ctrl-c", "quit"),
     ];

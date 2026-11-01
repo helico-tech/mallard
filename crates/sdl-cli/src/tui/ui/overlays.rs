@@ -3,7 +3,8 @@
 use super::*;
 
 pub(super) fn render_help(f: &mut Frame, area: Rect) {
-    let r = centered(area, 76, 26);
+    use mallard_term::tui::keys;
+    let r = centered(area, 112, 20);
     f.render_widget(Clear, r);
     let block = Block::new()
         .borders(Borders::ALL)
@@ -13,47 +14,31 @@ pub(super) fn render_help(f: &mut Frame, area: Rect) {
         .title_bottom(Line::from(Span::styled(" any key closes ", th::faint())).right_aligned());
     let inner = block.inner(r);
     f.render_widget(block, r);
-    let row = |k: &str, d: &str| {
-        Line::from(vec![Span::styled(format!("  {k:<12}"), th::key()), Span::styled(d.to_string(), th::text())])
+    let row_w = |k: &str, d: &str, w: usize| {
+        Line::from(vec![Span::styled(format!("  {k:<w$}"), th::key()), Span::styled(d.to_string(), th::text())])
     };
-    let left = vec![
-        section_line("Everywhere"),
-        row("↑ ↓  j k", "move"),
-        row("g G", "top / bottom"),
-        row("PgUp PgDn", "page"),
-        row("R", "refresh now"),
-        row("?", "this help"),
-        row("ctrl-c", "quit"),
-        Line::raw(""),
-        section_line("Issues list"),
-        row("⏎", "open issue"),
-        row("tab ← →", "status tab"),
-        row("1-4", "unresolved/resolved/…"),
-        row("/", "search title, culprit"),
-        row("s", "cycle sort"),
-        row("t T", "cycle time window"),
-        row("p", "switch project"),
-        row("q", "quit"),
-    ];
+    let row = |k: &str, d: &str| row_w(k, d, 14);
+    // The keys every tab shares come first (mallard_term::tui::keys).
+    let mut left = vec![section_line("Everywhere")];
+    left.extend(keys::SHARED.iter().map(|(k, d)| row_w(k, d, 22)));
+    left.push(Line::raw(""));
+    left.push(Line::from(Span::styled(format!("  {} Data refreshes every 5s.", keys::TIMES), th::faint())));
     let right = vec![
+        section_line("Issues list"),
+        row("tab ← → 1-4", "status tab"),
+        row("s", "cycle sort"),
+        row("p", "switch project"),
+        row("R I U", "resolve / ignore / unresolve"),
+        Line::raw(""),
         section_line("Issue detail"),
-        row("tab ← →", "next / prev section"),
-        row("1-5", "jump to section"),
+        row("tab ← → 1-5", "section"),
         row("[ ]", "older / newer event"),
         row("a", "in-app frames only"),
         row("w", "raw (minified) frames"),
-        row("t", "events of this trace"),
-        row("⏎", "show event (Events)"),
-        row("esc q", "back"),
-        Line::raw(""),
-        section_line("Status"),
-        row("r", "resolve"),
-        row("i", "ignore"),
-        row("u", "unresolve"),
-        Line::raw(""),
-        Line::from(Span::styled("  Data refreshes every 5s.", th::faint())),
+        row("x", "this event's trace"),
+        row("R I U", "resolve / ignore / unresolve"),
     ];
-    let [l, rr] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(inner);
+    let [l, rr] = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(inner);
     f.render_widget(Paragraph::new(left), l);
     f.render_widget(Paragraph::new(right), rr);
 }
@@ -92,7 +77,7 @@ pub(super) fn render_projects(f: &mut Frame, area: Rect, app: &App, selected: us
     let mut state = ratatui::widgets::TableState::default().with_selected(Some(selected));
     let table =
         Table::new(rows, [Constraint::Length(1), Constraint::Length(18), Constraint::Min(10), Constraint::Length(12)])
-            .row_highlight_style(th::selected_row())
+            .row_highlight_style(th::selected())
             .highlight_symbol(Span::styled("▌", th::accent()))
             .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(table, inner, &mut state);

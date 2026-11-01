@@ -1,6 +1,7 @@
 //! Key presses: what they change and which loads they start.
 
 use super::*;
+use mallard_term::tui::keys;
 
 /// What a key press did: requests to send, and what the host should do.
 type Step = (Vec<Req>, Outcome);
@@ -66,11 +67,11 @@ impl App {
             return done(self.on_key_search(k));
         }
         match k.code {
-            KeyCode::Char('?') => {
+            KeyCode::Char(keys::HELP) => {
                 self.overlay = Overlay::Help;
                 return done(vec![]);
             }
-            KeyCode::Char('R') => return done(self.refresh_all()),
+            KeyCode::Char(keys::REFRESH) => return done(self.refresh_all()),
             _ => {}
         }
         match self.view() {
@@ -231,7 +232,7 @@ impl App {
                 self.status = StatusFilter::ALL[c as usize - '1' as usize];
                 self.reload_list()
             }
-            KeyCode::Char('/') => {
+            KeyCode::Char(keys::SEARCH) => {
                 self.input = Some(self.query.clone());
                 vec![]
             }
@@ -239,11 +240,11 @@ impl App {
                 self.sort = cycle(&SortBy::ALL, self.sort, 1);
                 self.reload_list()
             }
-            KeyCode::Char('t') => {
+            KeyCode::Char(keys::WINDOW_NEXT) => {
                 self.window = cycle(&Window::ALL, self.window, 1);
                 self.reload_list()
             }
-            KeyCode::Char('T') => {
+            KeyCode::Char(keys::WINDOW_PREV) => {
                 self.window = cycle(&Window::ALL, self.window, -1);
                 self.reload_list()
             }
@@ -253,9 +254,10 @@ impl App {
                 self.overlay = Overlay::Projects { selected };
                 vec![Req::Projects]
             }
-            KeyCode::Char('r') => self.set_selected_status(IssueStatus::Resolved),
-            KeyCode::Char('i') => self.set_selected_status(IssueStatus::Ignored),
-            KeyCode::Char('u') => self.set_selected_status(IssueStatus::Unresolved),
+            // Writes are capitals, so a refresh (`r`) can never change data.
+            KeyCode::Char('R') => self.set_selected_status(IssueStatus::Resolved),
+            KeyCode::Char('I') => self.set_selected_status(IssueStatus::Ignored),
+            KeyCode::Char('U') => self.set_selected_status(IssueStatus::Unresolved),
             _ => return ignored(),
         })
     }
@@ -311,8 +313,8 @@ impl App {
                 self.pop();
                 return done(self.list_requests());
             }
-            KeyCode::Char('t') => match d.trace_id() {
-                Some(t) => return (vec![], Outcome::OpenTrace(t.to_string())),
+            KeyCode::Char(keys::JUMP) => match d.trace_id() {
+                Some(t) => return (vec![], Outcome::Jump(t.to_string())),
                 None => self.toast("this event has no trace id", false),
             },
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
@@ -336,10 +338,10 @@ impl App {
                     self.toast("this event has no raw (unsymbolicated) frames", false);
                 }
             }
-            KeyCode::Char(c @ ('r' | 'i' | 'u')) => {
+            KeyCode::Char(c @ ('R' | 'I' | 'U')) => {
                 let status = match c {
-                    'r' => IssueStatus::Resolved,
-                    'i' => IssueStatus::Ignored,
+                    'R' => IssueStatus::Resolved,
+                    'I' => IssueStatus::Ignored,
                     _ => IssueStatus::Unresolved,
                 };
                 let id = d.id.clone();

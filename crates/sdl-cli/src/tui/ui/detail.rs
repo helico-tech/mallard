@@ -26,7 +26,7 @@ pub(super) fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(title);
     f.render_widget(block, title);
     let mut l1 = vec![
-        Span::styled(th::level_label(level), th::badge(level)),
+        Span::styled(th::level_label(level), th::level_badge(level)),
         Span::raw(" "),
         Span::styled(title_text, th::bold()),
     ];
@@ -394,7 +394,7 @@ fn render_breadcrumbs(f: &mut Frame, area: Rect, d: &mut Detail) {
     let table =
         Table::new(rows, [Constraint::Length(12), Constraint::Length(8), Constraint::Length(18), Constraint::Min(10)])
             .header(Row::new(["TIME", "LEVEL", "CATEGORY", "MESSAGE"]).style(th::faint().bold()))
-            .row_highlight_style(th::selected_row())
+            .row_highlight_style(th::selected())
             .highlight_symbol(Span::styled("▌", th::accent()))
             .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(table, inner, &mut d.crumbs_state);
@@ -448,7 +448,7 @@ fn render_events(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateTim
         ],
     )
     .header(Row::new(["", "WHEN", "EVENT", "ENV", "RELEASE", "USER", "MESSAGE"]).style(th::faint().bold()))
-    .row_highlight_style(th::selected_row())
+    .row_highlight_style(th::selected())
     .highlight_symbol(Span::styled("▌", th::accent()))
     .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(table, inner, &mut d.events_state);

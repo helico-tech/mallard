@@ -192,7 +192,7 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|i| {
             let mut cells = vec![
-                Cell::from(Span::styled(th::level_label(&i.level), th::badge(&i.level))),
+                Cell::from(Span::styled(th::level_label(&i.level), th::level_badge(&i.level))),
                 Cell::from(Text::from(vec![
                     Line::from(Span::styled(i.title.clone(), th::bold())),
                     Line::from(Span::styled(i.culprit.clone().unwrap_or_default(), th::dim())),
@@ -221,7 +221,7 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(th::faint().add_modifier(Modifier::BOLD)).bottom_margin(0))
-        .row_highlight_style(th::selected_row())
+        .row_highlight_style(th::selected())
         .highlight_symbol(Span::styled("▌", th::accent()))
         .highlight_spacing(HighlightSpacing::Always)
         .column_spacing(1);

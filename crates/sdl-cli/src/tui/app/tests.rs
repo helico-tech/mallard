@@ -81,7 +81,7 @@ fn enter_opens_detail_and_loads_latest_event() {
 #[test]
 fn resolve_is_optimistic_and_refreshes() {
     let mut app = loaded_app();
-    let r = press(&mut app, key('r'));
+    let r = press(&mut app, key('R'));
     assert!(matches!(&r[0], Req::SetStatus { status: IssueStatus::Resolved, .. }));
     assert_eq!(app.issues[0].status, IssueStatus::Resolved);
     let mut d = issue_detail();
@@ -107,7 +107,7 @@ fn unknown_and_reserved_keys_are_ignored() {
 #[test]
 fn trace_view_opens_event_detail() {
     let mut app = detail_app();
-    let Outcome::OpenTrace(t) = app.on_key(key('t')).1 else { panic!("t opens the trace") };
+    let Outcome::Jump(t) = app.on_key(key('x')).1 else { panic!("x jumps to the trace") };
     assert_eq!(t, "b7644661850f40e69380d8c9ea253e84");
     let r = app.show_trace(&t);
     assert_eq!(r, vec![Req::Trace { trace_id: t.clone() }]);
@@ -266,21 +266,21 @@ fn a_stale_response_does_not_end_a_newer_load() {
 fn r_retries_failed_trace_events_and_event_loads() {
     let mut app = detail_app();
     app.on_response(Resp::Event { event_id: "e1".into(), result: Err(FetchError::api("boom")) });
-    let r = press(&mut app, key('R'));
+    let r = press(&mut app, key('r'));
     assert!(r.iter().any(|r| matches!(r, Req::Event { event_id, .. } if event_id == "e1")), "{r:?}");
     assert!(!r.iter().any(|r| matches!(r, Req::Events { .. })), "events are loaded: {r:?}");
 
     let mut app = loaded_app();
     press(&mut app, KeyEvent::from(KeyCode::Enter));
     app.on_response(Resp::Events { issue: "a1".into(), before: None, result: Err(FetchError::api("boom")) });
-    let r = press(&mut app, key('R'));
+    let r = press(&mut app, key('r'));
     assert!(r.iter().any(|r| matches!(r, Req::Events { issue, before: None, .. } if issue == "a1")), "{r:?}");
 
     let mut app = loaded_app();
     let t = "b7644661850f40e69380d8c9ea253e84";
     app.show_trace(t);
     app.on_response(Resp::Trace { trace_id: t.into(), result: Err(FetchError::offline("down")) });
-    let r = press(&mut app, key('R'));
+    let r = press(&mut app, key('r'));
     assert!(r.contains(&Req::Trace { trace_id: t.into() }), "{r:?}");
 }
 
@@ -342,4 +342,22 @@ fn project_switcher() {
     let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
     assert_eq!(app.project.as_deref(), Some("api"));
     assert!(matches!(&r[1], Req::Issues(k) if k.project == "api"));
+}
+
+/// Review 2.O: `r` means refresh on both tabs; writes are capitals; the
+/// jump to the other tab is `x`, and `t` is the time window everywhere.
+#[test]
+fn shared_keys_mean_the_same_as_on_the_telemetry_tab() {
+    let mut app = loaded_app();
+    let r = press(&mut app, key('r'));
+    assert!(!r.iter().any(|r| matches!(r, Req::SetStatus { .. })), "r must not write: {r:?}");
+    assert!(r.iter().any(|r| matches!(r, Req::Issues(_))), "r refreshes: {r:?}");
+    assert_eq!(app.issues[0].status, IssueStatus::Unresolved);
+    for (k, status) in [('I', IssueStatus::Ignored), ('U', IssueStatus::Unresolved)] {
+        let r = press(&mut app, key(k));
+        assert!(matches!(&r[0], Req::SetStatus { status: s, .. } if *s == status), "{k}: {r:?}");
+    }
+    let mut app = detail_app();
+    assert!(!matches!(app.on_key(key('t')).1, Outcome::Jump(_)), "t is not the jump key");
+    assert!(matches!(app.on_key(key('x')).1, Outcome::Jump(_)));
 }

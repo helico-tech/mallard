@@ -66,7 +66,7 @@ fn red_cells(r: &RedStats) -> Vec<Cell<'static>> {
         Cell::from(Line::from(ms(r.p50_ms)).right_aligned()).style(theme::dim()),
         Cell::from(Line::from(ms(r.p95_ms)).right_aligned()).style(theme::text()),
         Cell::from(Line::from(ms(r.p99_ms)).right_aligned()).style(theme::dim()),
-        Cell::from(Line::from(compact(r.span_count as f64)).right_aligned()).style(theme::muted()),
+        Cell::from(Line::from(compact(r.span_count as f64)).right_aligned()).style(theme::faint()),
     ]
 }
 
@@ -103,7 +103,7 @@ impl Embedded {
                 return Some(Outcome::Consumed);
             }
             match k.code {
-                KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h' | 'q') => {
                     o.ops = None;
                     return Some(Outcome::Consumed);
                 }
@@ -175,11 +175,11 @@ impl Embedded {
             Some(s) => {
                 let fill = s.ingest.buffered_bytes as f64 / s.ingest.max_buffer_bytes.max(1) as f64;
                 let c = if fill > 0.8 {
-                    theme::ERR
+                    theme::RED
                 } else if fill > 0.5 {
-                    theme::WARN
+                    theme::YELLOW
                 } else {
-                    theme::OK
+                    theme::GREEN
                 };
                 (
                     format!("{:.0}%", fill * 100.0),
@@ -191,7 +191,7 @@ impl Embedded {
                     c,
                 )
             }
-            None => ("–".into(), String::new(), theme::MUTED),
+            None => ("–".into(), String::new(), theme::FAINT),
         };
         let cols = if area.width >= 100 { 5 } else { 4 };
         let areas = Layout::horizontal(vec![Constraint::Ratio(1, cols); cols as usize]).split(area);
@@ -216,7 +216,7 @@ impl Embedded {
         Tile {
             label: "p95 latency",
             value: dash(ms(p95)),
-            color: theme::WARN,
+            color: theme::YELLOW,
             sub: "avg of per-bucket p95".into(),
             spark: &lat_spark,
         }
@@ -256,7 +256,7 @@ impl Embedded {
             .and_then(|s| Some([s.points.first()?.time.timestamp() as f64, s.points.last()?.time.timestamp() as f64]));
         let throughput = [
             Series { name: "requests/s".into(), color: theme::ACCENT, points: &rate },
-            Series { name: "errors/s".into(), color: theme::ERR, points: &errs },
+            Series { name: "errors/s".into(), color: theme::RED, points: &errs },
         ];
         widgets::time_chart(
             f,
@@ -267,9 +267,9 @@ impl Embedded {
             &compact,
         );
         let latency = [
-            Series { name: "p50".into(), color: theme::OK, points: &p50 },
-            Series { name: "p95".into(), color: theme::WARN, points: &p95 },
-            Series { name: "p99".into(), color: theme::ERR, points: &p99 },
+            Series { name: "p50".into(), color: theme::GREEN, points: &p50 },
+            Series { name: "p95".into(), color: theme::YELLOW, points: &p95 },
+            Series { name: "p99".into(), color: theme::RED, points: &p99 },
         ];
         widgets::time_chart(
             f,
@@ -299,7 +299,7 @@ impl Embedded {
                 .map(|op| {
                     let mut cells = vec![
                         Cell::from(op.name.clone()).style(theme::text()),
-                        Cell::from(op.kind.as_str().to_lowercase()).style(theme::muted()),
+                        Cell::from(op.kind.as_str().to_lowercase()).style(theme::faint()),
                     ];
                     cells.extend(red_cells(&op.red));
                     Row::new(cells)
@@ -311,7 +311,7 @@ impl Embedded {
                 Span::styled(" Operations · ", theme::title()),
                 Span::styled(format!("● {svc} "), Style::new().fg(theme::service_color(svc))),
             ]);
-            let block = widgets::panel_with("", Line::from(format!(" {} ", ops.len())).style(theme::muted()), true)
+            let block = widgets::panel_with("", Line::from(format!(" {} ", ops.len())).style(theme::faint()), true)
                 .title(title);
             let empty = rows.is_empty();
             let inner = block.inner(area);
@@ -329,8 +329,8 @@ impl Embedded {
             if empty {
                 let (msg, style) = match &o.error {
                     Some(e) => (format!("⚠ {e}"), theme::error()),
-                    None if o.ops_loaded => ("no operations in this window".into(), theme::muted()),
-                    None => ("loading operations…".into(), theme::muted()),
+                    None if o.ops_loaded => ("no operations in this window".into(), theme::faint()),
+                    None => ("loading operations…".into(), theme::faint()),
                 };
                 widgets::placeholder(f, inner, &msg, style);
             }
@@ -352,7 +352,7 @@ impl Embedded {
         widths.extend(red_w);
         let block = widgets::panel_with(
             "Services",
-            Line::from(format!(" {} services ", o.services.len())).style(theme::muted()),
+            Line::from(format!(" {} services ", o.services.len())).style(theme::faint()),
             true,
         );
         let inner = block.inner(area);
@@ -371,8 +371,8 @@ impl Embedded {
         if empty {
             let (msg, style) = match &o.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None if o.refreshed.is_some() => ("no spans in this window".to_string(), theme::muted()),
-                None => ("loading…".to_string(), theme::muted()),
+                None if o.refreshed.is_some() => ("no spans in this window".to_string(), theme::faint()),
+                None => ("loading…".to_string(), theme::faint()),
             };
             widgets::placeholder(f, inner, &msg, style);
         }

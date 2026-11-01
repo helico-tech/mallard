@@ -11,6 +11,8 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Wrap},
 };
 
+use mallard_term::tui::keys;
+
 use super::{Embedded, VIEWS, View, theme, widgets};
 
 impl Embedded {
@@ -24,33 +26,32 @@ impl Embedded {
     }
 
     pub(super) fn draw_header(&self, f: &mut Frame, area: Rect) {
-        const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let (ok, label) = self.live();
         let mut right = vec![];
         if self.loader.any_pending() {
-            right.push(Span::styled(format!("{} ", SPIN[self.spin % SPIN.len()]), theme::dim()));
+            right.push(Span::styled(format!("{} ", mallard_term::tui::spinner(self.spin)), theme::dim()));
         }
         if let Some(r) = self.ingest_rate {
-            right.push(Span::styled("↗ ", theme::muted()));
+            right.push(Span::styled("↗ ", theme::faint()));
             right.push(Span::styled(format!("{}/s", crate::fmt::compact(r)), theme::text()));
-            right.push(Span::styled(" ingest  ", theme::muted()));
+            right.push(Span::styled(" ingest  ", theme::faint()));
         }
-        right.push(Span::styled("◷ ", theme::muted()));
+        right.push(Span::styled("◷ ", theme::faint()));
         right.push(Span::styled(format!("last {}", self.since()), theme::accent()));
         right.push(Span::raw("  "));
-        right.push(Span::styled("● ", Style::new().fg(if ok { theme::OK } else { theme::ERR })));
+        right.push(Span::styled("● ", Style::new().fg(if ok { theme::GREEN } else { theme::RED })));
         right.push(Span::styled(format!("{label} "), theme::dim()));
         let right = Line::from(right);
         let rw = right.width() as u16;
         let left = Line::from(vec![
             Span::styled(" ◆ otel-ducklake ", theme::accent()),
-            Span::styled("│ ", theme::muted()),
+            Span::styled("│ ", theme::faint()),
             Span::styled(
                 widgets::trunc(self.client.base_url(), area.width.saturating_sub(rw + 22) as usize),
                 theme::dim(),
             ),
         ]);
-        f.render_widget(Block::default().style(Style::new().bg(theme::SURFACE)), area);
+        f.render_widget(Block::default().style(Style::new().bg(theme::PANEL)), area);
         f.render_widget(left, area);
         if rw < area.width {
             f.render_widget(right, Rect { x: area.x + area.width - rw, width: rw, ..area });
@@ -63,7 +64,7 @@ impl Embedded {
             if *v == self.view {
                 spans.push(Span::styled(format!(" {} {name} ", i + 1), theme::badge(theme::ACCENT)));
             } else {
-                spans.push(Span::styled(format!(" {}", i + 1), theme::muted()));
+                spans.push(Span::styled(format!(" {}", i + 1), theme::faint()));
                 spans.push(Span::styled(format!(" {name} "), theme::dim()));
             }
             spans.push(Span::raw(" "));
@@ -92,7 +93,7 @@ impl Embedded {
                 Span::styled(chars[start..].iter().collect::<String>(), theme::bold()),
             ];
             if start == 0 {
-                spans.push(Span::styled(format!("   {}", p.help), theme::muted()));
+                spans.push(Span::styled(format!("   {}", p.help), theme::faint()));
             }
             f.render_widget(Line::from(spans), area);
             let offset = u16::try_from(label_w + before).unwrap_or(u16::MAX);
@@ -107,7 +108,7 @@ impl Embedded {
         if let Some((msg, is_err, _)) = &self.flash {
             let text = format!(" {} ", widgets::trunc(msg, (area.width / 2) as usize));
             let w = Line::from(text.as_str()).width() as u16;
-            let style = if *is_err { theme::badge(theme::ERR) } else { theme::badge(theme::OK) };
+            let style = if *is_err { theme::badge(theme::RED) } else { theme::badge(theme::GREEN) };
             if w < area.width {
                 f.render_widget(Span::styled(text, style), Rect { x: area.right() - w, width: w, ..area });
                 // Hints get the rest, with a one-cell gap.
@@ -120,7 +121,7 @@ impl Embedded {
     fn hints(&self) -> Vec<(&'static str, &'static str)> {
         let mut h = self.view_hints();
         if !self.errors_enabled {
-            h.retain(|(k, _)| *k != "e");
+            h.retain(|(k, _)| *k != "x");
         }
         h
     }
@@ -132,10 +133,10 @@ impl Embedded {
             }
             View::Overview => vec![("↵", "operations"), ("t", "window"), ("r", "refresh")],
             View::Traces if self.traces.detail.is_some() => {
-                vec![("j/k", "span"), ("pgup/dn", "scroll"), ("l", "logs"), ("e", "errors"), ("esc", "back")]
+                vec![("j/k", "span"), ("pgup/dn", "scroll"), ("l", "logs"), ("x", "errors"), ("esc", "back")]
             }
             View::Traces => {
-                vec![("/", "filter"), ("E", "errors only"), ("↵", "open"), ("e", "errors"), ("t", "window")]
+                vec![("/", "filter"), ("E", "errors only"), ("↵", "open"), ("x", "errors"), ("t", "window")]
             }
             View::Logs if self.logs.detail.is_some() => {
                 vec![("o", "open trace"), ("j/k", "scroll"), ("esc", "close")]
@@ -156,20 +157,15 @@ impl Embedded {
     }
 
     pub(super) fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rows: &[(&str, &str)] = &[
-            ("1-5  tab", "switch view"),
-            ("t / T", "next / previous time window"),
-            ("r", "refresh now"),
-            ("↑↓ j k  pgup pgdn  g G", "move"),
-            ("↵", "open / drill down"),
-            ("esc", "back / close"),
-            ("q  ctrl-c", "quit"),
+        // The keys every tab shares come first (mallard_term::tui::keys).
+        let mut rows: Vec<(&str, &str)> = keys::SHARED.to_vec();
+        rows.extend([
             ("", ""),
             ("Overview", "↵ service → operations → traces"),
             (
                 "Traces",
                 if self.errors_enabled {
-                    "/ filter  E errors only  ↵ waterfall  l logs  e errors"
+                    "/ filter  E errors only  ↵ waterfall  l logs  x errors"
                 } else {
                     "/ filter  E errors only  ↵ waterfall  l logs"
                 },
@@ -178,8 +174,10 @@ impl Embedded {
             ("Logs", "/ filter  s severity  space follow  ↵ details  o open trace"),
             ("", "filter: service=api level=warn trace=<id> words to find"),
             ("Metrics", "/ search  ↵ chart  a aggregation  b group by"),
-        ];
-        let w = 78.min(area.width);
+            ("", ""),
+            ("", keys::TIMES),
+        ]);
+        let w = 100.min(area.width);
         let h = (rows.len() as u16 + 4).min(area.height);
         let r = widgets::centered(area, w, h);
         f.render_widget(Clear, r);
@@ -187,7 +185,7 @@ impl Embedded {
             .iter()
             .map(|(k, d)| {
                 Line::from(vec![
-                    Span::styled(format!("{k:>24}  "), theme::accent()),
+                    Span::styled(format!("{k:>24}  "), theme::key()),
                     Span::styled(d.to_string(), theme::text()),
                 ])
             })

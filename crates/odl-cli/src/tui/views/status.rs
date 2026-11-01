@@ -22,7 +22,7 @@ impl Embedded {
             f.render_widget(block, area);
             let (msg, style) = match &self.stats_error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None => ("loading…".to_string(), theme::muted()),
+                None => ("loading…".to_string(), theme::faint()),
             };
             widgets::placeholder(f, inner, &msg, style);
             return;
@@ -61,7 +61,7 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
                 Cell::from(Line::from(compact(sig.rejected as f64)).right_aligned()).style(if sig.rejected > 0 {
                     theme::error()
                 } else {
-                    theme::muted()
+                    theme::faint()
                 }),
             ])
         })
@@ -80,14 +80,14 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
     );
     let fill = (i.buffered_bytes as f64 / i.max_buffer_bytes.max(1) as f64).clamp(0.0, 1.0);
     let color = if fill > 0.8 {
-        theme::ERR
+        theme::RED
     } else if fill > 0.5 {
-        theme::WARN
+        theme::YELLOW
     } else {
-        theme::OK
+        theme::GREEN
     };
     f.render_widget(
-        Gauge::default().ratio(fill).gauge_style(Style::new().fg(color).bg(theme::SURFACE)).label(Span::styled(
+        Gauge::default().ratio(fill).gauge_style(Style::new().fg(color).bg(theme::PANEL)).label(Span::styled(
             format!(
                 "buffer {} rows · {} of {}",
                 compact(i.buffered_rows as f64),
@@ -104,14 +104,14 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
         Span::styled("   errors ", theme::dim()),
         Span::styled(
             i.flush_errors.to_string(),
-            if i.flush_errors > 0 { theme::error() } else { Style::new().fg(theme::OK) },
+            if i.flush_errors > 0 { theme::error() } else { Style::new().fg(theme::GREEN) },
         ),
     ])];
     if let Some(fl) = &i.last_flush {
         lines.push(Line::from(vec![
             Span::styled("last flush ", theme::dim()),
             Span::styled(format!("{} rows in {}", compact(fl.rows as f64), ms(fl.duration_ms)), theme::text()),
-            Span::styled(format!(" at {}", widgets::local(fl.at, "%H:%M:%S")), theme::dim()),
+            Span::styled(format!(" at {}", widgets::utc(fl.at, "%H:%M:%S")), theme::dim()),
         ]));
     }
     if let Some(e) = &i.last_flush_error {
@@ -154,7 +154,7 @@ fn draw_storage(f: &mut Frame, area: Rect, s: &Stats) {
                 Cell::from(Line::from(compact(t.inlined_rows as f64)).right_aligned()).style(theme::dim()),
                 Cell::from(Line::from(compact(t.files as f64)).right_aligned()).style(theme::dim()),
                 Cell::from(Line::from(bytes(t.bytes as u64)).right_aligned()).style(theme::text()),
-                Cell::from(Line::from(avg).right_aligned()).style(theme::muted()),
+                Cell::from(Line::from(avg).right_aligned()).style(theme::faint()),
             ])
         })
         .collect();
@@ -189,18 +189,15 @@ fn draw_storage(f: &mut Frame, area: Rect, s: &Stats) {
                 Span::styled(m.task.clone(), theme::text()),
                 Span::raw(" "),
                 if m.ok {
-                    Span::styled("ok", Style::new().fg(theme::OK))
+                    Span::styled("ok", Style::new().fg(theme::GREEN))
                 } else {
                     Span::styled("failed", theme::error())
                 },
-                Span::styled(
-                    format!(" at {} in {}", widgets::local(m.at, "%H:%M:%S"), ms(m.duration_ms)),
-                    theme::dim(),
-                ),
+                Span::styled(format!(" at {} in {}", widgets::utc(m.at, "%H:%M:%S"), ms(m.duration_ms)), theme::dim()),
             ]),
-            Line::from(Span::styled(m.detail.clone(), theme::muted())),
+            Line::from(Span::styled(m.detail.clone(), theme::faint())),
         ],
-        None => vec![Line::from(Span::styled("no maintenance run yet", theme::muted()))],
+        None => vec![Line::from(Span::styled("no maintenance run yet", theme::faint()))],
     };
     f.render_widget(Paragraph::new(maint).wrap(ratatui::widgets::Wrap { trim: true }), maint_area);
 }
