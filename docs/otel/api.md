@@ -44,7 +44,7 @@ All endpoints except `/api/v1/health`, `/openapi.json` and `/docs` need
 | `GET /api/v1/spans/{span_id}` | one span (default window: 7 days) |
 | `GET /api/v1/logs?service=&min_severity=&q=&trace_id=&attributes=&limit=&order=&cursor=` | log records (paged) |
 | `GET /api/v1/logs/series?service=&q=&step=` | log counts per bucket by severity band |
-| `GET /api/v1/metrics?service=&q=` | metric catalog: name, type, unit, temporality, series/point counts |
+| `GET /api/v1/metrics?service=&q=` | metric catalog: name, type, unit, temporality (`delta`, `cumulative`, `mixed` when it has both, empty for gauges and summaries), series/point counts |
 | `GET /api/v1/metrics/query?name=&agg=&group_by=&attributes=&service=&step=` | time series |
 | `GET /api/v1/attributes?signal=&service=&metric=&key=&limit=` | attribute keys with counts, or the top values of `key` (sampled) |
 | `GET /api/v1/schema` | the tables and columns SQL can query |
