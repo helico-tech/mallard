@@ -20,7 +20,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     query::{
-        QueryError, Reader, Window, attributes, logs, metrics, sql, storage,
+        QueryError, Reader, Window, attributes, exemplars, logs, metrics, sql, storage,
         traces::{self, clamp_limit},
     },
     stats::Stats,
@@ -302,7 +302,7 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
     Ok(Json(
         st.reader
             .run(move |c| {
-                metrics::query(
+                let mut r = metrics::query(
                     c,
                     &w,
                     &metrics::MetricRequest {
@@ -313,7 +313,21 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
                         attributes: q.attributes.as_deref(),
                         step,
                     },
-                )
+                )?;
+                if q.exemplars == Some(true) {
+                    r.exemplars = exemplars::query(
+                        c,
+                        &w,
+                        &exemplars::ExemplarRequest {
+                            name: &q.name,
+                            service: q.service.as_deref(),
+                            group_by: q.group_by.as_deref(),
+                            attributes: q.attributes.as_deref(),
+                            step,
+                        },
+                    )?;
+                }
+                Ok(r)
             })
             .await?,
     ))

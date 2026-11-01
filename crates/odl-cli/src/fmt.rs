@@ -12,7 +12,7 @@ use comfy_table::{Cell, CellAlignment, Color};
 use mallard_term::color::{alert, bold, cyan, dim, green, red, yellow};
 pub(crate) use mallard_term::fmt::{bytes, compact, ms};
 pub(crate) use mallard_term::table::table;
-pub(crate) use mallard_term::text::{clean, json_safe};
+pub(crate) use mallard_term::text::clean;
 use odl_client::api::*;
 
 /// Append one formatted line to a `String`.
@@ -344,24 +344,26 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
         t.add_row(row);
     }
     put!(out, "{t}");
+    if !r.exemplars.is_empty() {
+        let mut t = table(&["time", "series", "value", "trace", "span"]);
+        for e in &r.exemplars {
+            let label = if e.labels.is_empty() { "(all)".to_string() } else { fmt_attrs(&e.labels) };
+            t.add_row(vec![
+                Cell::new(e.time.format("%H:%M:%S")),
+                Cell::new(label),
+                num(e.value),
+                Cell::new(clean(&e.trace_id)),
+                Cell::new(clean(e.span_id.as_deref().unwrap_or("-"))),
+            ]);
+        }
+        put!(out, "exemplars\n{t}");
+    }
     out
 }
 
 pub(crate) fn sql_text(r: &SqlResponse) -> String {
     let headers: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
-    let mut t = table(&headers);
-    for row in &r.rows {
-        t.add_row(row.iter().map(|v| match v {
-            serde_json::Value::String(s) => Cell::new(clean(s)),
-            serde_json::Value::Null => Cell::new("NULL").fg(Color::DarkGrey),
-            serde_json::Value::Number(n) => Cell::new(n).set_alignment(CellAlignment::Right),
-            // Nested values print as JSON: strings in it are escaped.
-            other => Cell::new(json_safe(&other.to_string())),
-        }));
-    }
-    let summary =
-        format!("{} rows{} in {}", r.rows.len(), if r.truncated { " (truncated)" } else { "" }, ms(r.elapsed_ms));
-    format!("{t}\n{}", dim(&summary))
+    mallard_term::table::sql_result(&headers, &r.rows, r.truncated, r.elapsed_ms)
 }
 
 /// Keys (or values of one key) with how many sampled rows have them.
@@ -486,6 +488,29 @@ mod tests {
             },
         };
         assert!(only_sgr(&services_text(&[svc])));
+        let labels: Attributes = [(EVIL.to_string(), EVIL.to_string())].into();
+        let m = MetricQueryResult {
+            name: EVIL.into(),
+            metric_type: MetricType::Histogram,
+            unit: EVIL.into(),
+            agg: "p95".into(),
+            step_secs: 60,
+            series: vec![MetricSeries {
+                labels: labels.clone(),
+                points: vec![MetricPoint { time: chrono::Utc::now(), value: 1.0 }],
+            }],
+            exemplars: vec![MetricExemplar {
+                labels,
+                time: chrono::Utc::now(),
+                value: 2.0,
+                trace_id: EVIL.into(),
+                span_id: Some(EVIL.into()),
+                attributes: Default::default(),
+            }],
+        };
+        let text = metric_text(&m);
+        assert!(text.contains("exemplars"), "{text}");
+        assert!(only_sgr(&text), "{text}");
     }
 
     #[test]

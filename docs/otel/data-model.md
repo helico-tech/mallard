@@ -125,14 +125,20 @@ WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR
 **Alternatives considered** (see [ADR 0002](adr/0002-data-model.md)):
 
 - `VARIANT` (typed, can be shredded into columns with statistics). DuckLake 1.1
-  supports it, but attribute keys contain dots (`http.route`), which collide
-  with variant path syntax. Type preservation matters little once common
-  numeric attributes are filtered with `TRY_CAST`. We may revisit this for
-  promoted columns.
+  supports it and dotted keys work (`variant_extract(attributes, 'http.route')`),
+  but it is measured about 2-8× slower than the map on attribute queries, shredded
+  and all, at the same size. The Rust `duckdb` crate cannot decode the type
+  either ([bench/typed-attributes](../../bench/otel/typed-attributes/README.md)).
 - `JSON` text: larger, and needs parsing on every read.
-- Promoting many semantic-convention attributes to columns: faster filters,
-  but a large and ever-changing schema. Today only `service_name` is promoted.
-  More can be appended later without rewriting old data (see 10).
+- Promoting semantic-convention attributes to columns: faster filters, but a
+  large and ever-changing schema. Today only `service_name` is promoted.
+  Measured for `http.route`, `http.response.status_code` and `db.system.name`:
+  a query that reads only the column is 6-11× faster, but the API filter must
+  also see resource attributes and rows from before the column, and then the
+  gain is 1.3-2.4× (from about 200-400 ms to 100-300 ms for one hour of 2 M
+  spans), for one API path and three keys. Not worth a permanent schema
+  change until real installs hit this path. More can be appended later
+  without rewriting old data (see 12).
 
 ### 6. Sort order inside files
 
@@ -230,12 +236,30 @@ read in ad-hoc SQL.
 - `temporality` is kept per point (`cumulative`, `delta`, or empty for
   gauges). The query API handles both: increase = difference of last values
   per bucket for cumulative (a drop counts as a counter reset), and sum of
-  values for delta.
+  values for delta. One metric may mix both: each series is handled by
+  its own temporality.
 - Integer values are stored as `DOUBLE`, which is exact up to 2^53.
 - Non-finite values (`NaN`, `±Infinity`; in OTLP/JSON the strings `"NaN"`,
   `"Infinity"`, `"-Infinity"`) are stored as the DOUBLE values `nan` and
   `±inf`. JSON has no such numbers: the query API returns them as `null`.
-- **Not stored:** exemplars, and metric `metadata`. Exponential histogram
+- **Exemplars** (sample measurements that link a point to a trace) are kept
+  per point in `exemplars STRUCT(time TIMESTAMP, value DOUBLE, trace_id UUID,
+  span_id UBIGINT, attributes MAP(VARCHAR, VARCHAR))[]`, the last column of
+  `metric_points`, `metric_histograms` and `metric_exp_histograms` (OTLP
+  summaries have none). Same conventions as span links: ids as `UUID` /
+  `UBIGINT` (invalid → `NULL`), `attributes` are the exemplar's filtered
+  attributes, a zero time falls back to the point's time. Nested like span
+  events, so queries that don't touch exemplars don't read them
+  ([ADR 0012](../adr/0012-store-metric-exemplars.md)). Jump to the traces:
+
+  ```sql
+  SELECT e.time, e.value, replace(e.trace_id::VARCHAR, '-', '') AS trace_id
+  FROM metric_histograms, unnest(exemplars) AS u(e)
+  WHERE metric_name = 'http.server.request.duration'
+    AND time > now()::TIMESTAMP - INTERVAL 1 HOUR AND e.trace_id IS NOT NULL
+  ORDER BY e.value DESC LIMIT 10;
+  ```
+- **Not stored:** metric `metadata`. Exponential histogram
   negative buckets are kept as stored, but folded into one "≤ 0" bucket when
   computing percentiles.
 

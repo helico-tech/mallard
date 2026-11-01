@@ -240,6 +240,12 @@ pub struct SignalIngestStats {
     /// UNAVAILABLE). Exporters retry them, so they usually arrive later.
     #[serde(default)]
     pub throttled: u64,
+    /// Requests refused with back-pressure (HTTP 429 / gRPC UNAVAILABLE):
+    /// by the in-flight memory limit before the body is read (their items
+    /// are unknown, so not in `throttled`), or by the full write buffer.
+    /// Exporters retry them.
+    #[serde(default)]
+    pub throttled_requests: u64,
     /// Items refused for good: invalid (e.g. a span without a valid trace
     /// or span id, reported as OTLP partial success) or in a request too
     /// large for the buffer.
@@ -613,6 +619,9 @@ pub struct MetricQuery {
     pub attributes: Option<String>,
     /// Bucket width, e.g. `1m`. Default picks ~60 buckets.
     pub step: Option<String>,
+    /// Also return exemplars: per series and bucket the one with the
+    /// highest value that links to a trace.
+    pub exemplars: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -623,6 +632,26 @@ pub struct MetricQueryResult {
     pub agg: String,
     pub step_secs: u64,
     pub series: Vec<MetricSeries>,
+    /// Only with `exemplars=true` (at most 1000, oldest first). Missing
+    /// from older servers.
+    #[serde(default)]
+    pub exemplars: Vec<MetricExemplar>,
+}
+
+/// A sample measurement recorded with a metric point, linking it to the
+/// trace (span) that was active at the time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct MetricExemplar {
+    /// Labels of the series it belongs to (the `group_by` keys).
+    pub labels: Attributes,
+    pub time: DateTime<Utc>,
+    pub value: f64,
+    /// 32 hex characters.
+    pub trace_id: String,
+    /// 16 hex characters.
+    pub span_id: Option<String>,
+    /// The exemplar's filtered attributes (those the aggregation dropped).
+    pub attributes: Attributes,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -729,7 +758,8 @@ pub struct SqlResponse {
     /// Row values as JSON. Non-JSON types (timestamps, UUIDs, maps) are rendered as strings.
     #[schema(value_type = Vec<Vec<Object>>)]
     pub rows: Vec<Vec<serde_json::Value>>,
-    /// True when more rows existed than `limit`.
+    /// True when more rows existed than `limit`, or the rows reached the
+    /// server's size cap (32 MiB of row data).
     pub truncated: bool,
     pub elapsed_ms: f64,
 }

@@ -38,8 +38,12 @@ No acknowledged row was lost or duplicated in any run. A merge and flush of
   processes (ADR 0021).
 - `POST /v1/maintenance` still goes through the writer's queue, so what was
   queued before it is committed first; the writer only hands it on.
-- On shutdown maintenance stops first, interrupting a running merge (rolled
-  back, nothing lost); then the writer drains and does the final flush.
+- On shutdown and on drop maintenance stops first, interrupting a running merge
+  (rolled back, nothing lost); then the writer drains and does the final flush.
+  Both threads are joined: one left inside DuckDB at process exit crashes it
+  (issue 0018). A run cut short answers with an error, never "done".
+- `Server::run_maintenance` (`mallard-server maintenance`) answers after flush,
+  retention and compaction, so the command exits with the work done.
 
 ## Consequences
 - Compaction and flushes no longer pause ingest. Retention still does, for

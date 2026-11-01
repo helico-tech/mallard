@@ -27,6 +27,35 @@ pub fn parse_group_id(s: &str) -> Option<u64> {
 
 pub const TREND_BUCKETS: i64 = 24;
 
+/// Tables `POST /v1/sql` may read (the default schema of the readers), with
+/// the time column to filter on.
+pub const SQL_TABLES: [(&str, &str); 3] =
+    [("events", "received_at"), ("issues", "first_seen"), ("issue_activity", "changed_at")];
+
+/// The tables and columns `POST /v1/sql` can query.
+pub fn schema(c: &Connection, ns: &Ns) -> Result<Schema> {
+    let mut stmt = c.prepare(
+        "SELECT table_name, column_name, data_type FROM duckdb_columns() \
+         WHERE database_name = ? AND schema_name = ? ORDER BY table_name, column_index",
+    )?;
+    let cols: Vec<(String, String, String)> = stmt
+        .query_map(params![ns.alias, ns.schema], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let tables = SQL_TABLES
+        .iter()
+        .map(|(name, time_column)| SchemaTable {
+            name: name.to_string(),
+            time_column: time_column.to_string(),
+            columns: cols
+                .iter()
+                .filter(|c| c.0 == *name)
+                .map(|c| SqlColumn { name: c.1.clone(), data_type: c.2.clone() })
+                .collect(),
+        })
+        .collect();
+    Ok(Schema { tables })
+}
+
 pub use mallard_common::window::Window;
 
 fn start_us(w: &Window) -> i64 {

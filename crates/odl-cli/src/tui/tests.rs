@@ -36,7 +36,14 @@ fn stats() -> Stats {
         ingest: IngestStats {
             signals: [Signal::Traces, Signal::Logs, Signal::Metrics]
                 .into_iter()
-                .map(|signal| SignalIngestStats { signal, requests: 10, accepted: 1234, throttled: 0, invalid: 0 })
+                .map(|signal| SignalIngestStats {
+                    signal,
+                    requests: 10,
+                    accepted: 1234,
+                    throttled: 0,
+                    throttled_requests: 0,
+                    invalid: 0,
+                })
                 .collect(),
             buffered_rows: 120,
             buffered_bytes: 1_000_000,
@@ -424,6 +431,7 @@ fn metrics_render_and_chart() {
                 .map(|i| MetricPoint { time: now - TimeDelta::minutes(30 - i), value: 0.1 + i as f64 / 100.0 })
                 .collect(),
         }],
+        exemplars: vec![],
     });
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);

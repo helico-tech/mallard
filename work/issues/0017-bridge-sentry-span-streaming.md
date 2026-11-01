@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -31,3 +31,12 @@ for the trace. The same app with `traceLifecycle: "static"` passes.
   in, the same as in static mode once the trace is sampled.
 - When fixed, drop `todo` from the test (and consider making `stream` the
   main case, since it is the SDK default).
+
+Done (ADR 0013): `Server::set_span_sink` in sdl-server, `bridge/span.rs` in
+mallard-server. `span` v2 items take the transactions path: same queue, same
+`dedupe_window`, same OTLP span dedupe, same `[bridge] transactions` switch;
+metric `mallard_bridge_span_items_total`. Standalone sdl-server without a
+sink keeps dropping and counting them. Stream mode is now the main e2e case,
+static stays covered. Older standalone (v1) `span` items are counted as
+`unsupported`: issue 0040. v2 spans carry no `server_name` or `platform`, so
+`host.name` and `telemetry.sdk.language` stay empty on these spans.

@@ -42,7 +42,7 @@ Options for "maintenance runs in one process":
   status changes of the last 5 minutes (other processes write with their own
   clock). All status cache changes stay on that thread, so a sync never replaces
   a newer status with an older one.
-- **Issues.** A cache miss asks the lake (issue 0002), so a group another
+- **Issues.** A cache miss asks the lake (Sentry issue 0002), so a group another
   process created gets no new row, except when both create it within one batch.
   Then two `issues` rows exist, so **every read of `issues` must take one row per
   group** (`arg_min(..., first_seen)`).

@@ -36,6 +36,8 @@ pub(crate) struct Side<T> {
 pub(crate) struct Capabilities {
     /// `mallard sql` works.
     pub sql: Option<bool>,
+    /// `mallard sql --errors` works.
+    pub sql_errors: Option<bool>,
     /// Longest `--since`/`--from` window per side.
     pub max_window_secs: Windows,
     /// How long data is kept (0 = forever).
@@ -64,6 +66,7 @@ fn capabilities(s: Option<&ServerInfo>, o: Option<&Stats>) -> Capabilities {
     let oc = o.and_then(|o| o.capabilities.as_ref());
     Capabilities {
         sql: oc.map(|c| c.sql),
+        sql_errors: s.and_then(|s| s.sql),
         max_window_secs: Windows {
             errors: s.and_then(|s| s.max_window_secs),
             telemetry: oc.map(|c| c.max_window_secs),
@@ -163,8 +166,13 @@ fn status_text(
             None => "-".into(),
         };
         text.push_str(&format!(
-            "\nlimits    sql {}  max window {}  keep errors {} traces {} logs {} metrics {}",
+            "\nlimits    sql {}  sql --errors {}  max window {}  keep errors {} traces {} logs {} metrics {}",
             if sql { "on" } else { "off" },
+            match caps.sql_errors {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "-",
+            },
             secs(caps.max_window_secs.telemetry),
             secs(caps.retention_secs.errors),
             secs(caps.retention_secs.traces),

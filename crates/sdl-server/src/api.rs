@@ -79,7 +79,7 @@ fn tag_filters(raw: Option<&str>) -> Result<Vec<(String, String)>, ApiErr> {
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
         ArtifactBundle, ApiError, EventsByTrace, TraceEvents, TraceEvent, Release, ReleaseList,
-        SqlRequest, SqlResponse, SqlColumn
+        SqlRequest, SqlResponse, SqlColumn, Schema, SchemaTable
     )),
     modifiers(&BearerAuth),
     security(("bearer" = []))
@@ -104,6 +104,7 @@ fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(list_sourcemaps))
         .routes(routes!(run_maintenance))
         .routes(routes!(run_sql))
+        .routes(routes!(get_schema))
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {
@@ -211,6 +212,7 @@ async fn info(State(state): S) -> Json<ServerInfo> {
         public_url: Some(state.public_url.clone()),
         retention_secs: Some(state.cfg.retention.events.as_secs()),
         max_window_secs: Some(state.cfg.query.max_window.as_secs()),
+        sql: Some(state.cfg.query.enable_sql),
     })
 }
 
@@ -470,8 +472,12 @@ async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Tables `POST /v1/sql` may read (the default schema of the readers).
-const SQL_TABLES: &[&str] = &["events", "issues", "issue_activity"];
+#[utoipa::path(get, path = "/v1/schema",
+    description = "The tables `POST /v1/sql` can query, with their columns. Works when SQL is off.",
+    responses((status = 200, body = Schema)))]
+async fn get_schema(State(state): S) -> ApiResult<Schema> {
+    Ok(Json(state.db.read(read::schema).await?))
+}
 
 #[utoipa::path(post, path = "/v1/sql", request_body = SqlRequest,
     description = "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless \
@@ -491,9 +497,10 @@ async fn run_sql(State(state): S, J(req): J<SqlRequest>) -> ApiResult<SqlRespons
         return Err(bad("limit must be between 1 and 100000"));
     }
     let timeout = state.cfg.query.sql_timeout;
+    let tables = read::SQL_TABLES.map(|(name, _)| name);
     let run = state
         .db
-        .read_for(timeout, move |c, _| Ok(mallard_duck::sql::run(c, crate::SCHEMA, SQL_TABLES, &req.query, limit)))
+        .read_for(timeout, move |c, _| Ok(mallard_duck::sql::run(c, crate::SCHEMA, &tables, &req.query, limit)))
         .await?;
     match run {
         None => Err(ApiErr::new(
@@ -605,6 +612,9 @@ async fn assemble(State(state): S, Json(req): Json<AssembleRequest>) -> Result<J
 }
 
 /// Releases are not stored; we answer so bundler plugins don't log errors.
+// Stubs: `sentry-cli releases new|finalize|deploys` succeed and nothing is
+// stored; `GET /v1/projects/{p}/releases` derives releases from events
+// (work/issues/0060).
 async fn release_upsert(Json(body): Json<serde_json::Value>) -> Response {
     let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
     (StatusCode::CREATED, Json(release_info(&version))).into_response()

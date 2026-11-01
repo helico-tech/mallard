@@ -336,9 +336,11 @@ impl Db {
     /// Stop maintenance, write what is queued, flush inlined data and stop
     /// the writer thread. Idempotent. Later writes fail with "writer stopped".
     pub async fn shutdown(&self) {
-        let Some(handle) = self.writer_thread.lock().expect("lock").take() else { return };
+        // Before taking the writer's handle: if this future is dropped while
+        // waiting here, `Drop` still has both threads to stop and join.
         let m = self.maintainer.clone();
         let _ = tokio::task::spawn_blocking(move || m.stop_and_join()).await;
+        let Some(handle) = self.writer_thread.lock().expect("lock").take() else { return };
         let (tx, rx) = oneshot::channel();
         let sender = self.tx.clone();
         let sent = tokio::task::spawn_blocking(move || sender.send(WriteCmd::Shutdown { reply: tx }).is_ok())
@@ -524,17 +526,23 @@ impl Db {
 }
 
 impl Drop for Db {
-    /// Call `shutdown().await` before dropping. Without it, maintenance is
-    /// told to stop; once it has, and `tx` is gone, the queue disconnects:
-    /// the writer writes what is queued, flushes and stops on its own thread
-    /// (it owns its connection, so DuckDB stays up until then). Drop does not
-    /// wait for that: it may run on an async worker thread.
+    /// Call `shutdown().await` before dropping: it does not block an async
+    /// thread. Without it (a dropped server future, a failed start) stop both
+    /// threads here and wait: the writer writes what is queued and flushes.
+    /// Neither must outlive us detached: when the process then exits, C++ static
+    /// destructors run under a thread that is still inside DuckDB (SIGSEGV,
+    /// issue 0018). Like the otel side's `Flusher`.
     fn drop(&mut self) {
-        let running = self.writer_thread.get_mut().map(|h| h.is_some()).unwrap_or(false);
-        if running {
-            tracing::warn!("Db dropped without shutdown(); the writer finishes in the background");
-            self.maintainer.stop();
-        }
+        // Maintenance first: it may be waiting for the writer (retention), and
+        // the writer's final flush must not overlap it.
+        self.maintainer.stop_and_join();
+        let handle = self.writer_thread.get_mut().unwrap_or_else(|p| p.into_inner()).take();
+        let Some(handle) = handle else { return };
+        tracing::warn!("Db dropped without shutdown(); waiting for the writer");
+        let (reply, _) = oneshot::channel();
+        // Fails only when the writer is gone already.
+        let _ = self.tx.send(WriteCmd::Shutdown { reply });
+        let _ = handle.join();
     }
 }
 
@@ -563,7 +571,7 @@ pub(crate) mod tests {
         assert_eq!(c.bundle_count(), 2);
     }
 
-    /// Issue 0002: the issue cache has a size limit, and an issue without
+    /// Sentry issue 0002: the issue cache has a size limit, and an issue without
     /// events for the retention period leaves it.
     #[test]
     fn issue_cache_is_bounded() {
@@ -600,6 +608,95 @@ pub(crate) mod tests {
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let settings = maintenance::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
         Db::with_connection(conn, &cfg, settings, "test".into()).unwrap()
+    }
+
+    /// Dropping without `shutdown()` stops the writer and waits for it
+    /// (issue 0018): the writer's reference to the caches is gone by then.
+    #[tokio::test]
+    async fn drop_stops_the_writer_and_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let caches = db.caches.clone();
+        assert!(Arc::strong_count(&caches) > 2, "Db and the writer hold it too");
+        drop(db);
+        assert_eq!(Arc::strong_count(&caches), 1);
+    }
+
+    /// Dropping without `shutdown()` stops the maintenance thread too and
+    /// waits for it (issue 0018), also in the middle of a run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_stops_maintenance_and_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        for running in [false, true] {
+            let db = open_db(dir.path(), 1);
+            let stopping = db.maintainer.stopping.clone();
+            assert_eq!(Arc::strong_count(&stopping), 3, "the thread holds it too");
+            if running {
+                queue_event(&db, "x", Utc::now()).await.unwrap().unwrap();
+                let (reply, _rx) = oneshot::channel();
+                db.try_send(WriteCmd::Maintenance { reply }).unwrap();
+            }
+            drop(db);
+            assert_eq!(Arc::strong_count(&stopping), 1, "the thread ended");
+        }
+    }
+
+    /// `mallard-server maintenance` exits when `Server::run_maintenance`
+    /// answers. So by then flush, retention (writer thread) and compaction
+    /// (maintenance thread) are done.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn maintenance_answers_after_all_of_its_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 2);
+        let now = Utc::now();
+        // Files: one past retention, two to merge. Then one inlined row to flush.
+        let conn = db.readers.lock().unwrap().pop().unwrap();
+        for at in [now - chrono::Duration::days(200), now, now] {
+            queue_event(&db, "x", at).await.unwrap().unwrap();
+            maintenance::flush_inlined(&conn, &db.ns).unwrap();
+        }
+        db.readers.lock().unwrap().push(conn);
+        queue_event(&db, "x", now).await.unwrap().unwrap();
+        let files = async || -> i64 {
+            db.read(|c, ns| {
+                Ok(c.query_row(
+                    &ns.sql("SELECT count(*) FROM ducklake_list_files($C, 'events', schema => $N)"),
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(files().await, 3, "the last row is inlined");
+
+        let r: Result<()> = db.call(|reply| WriteCmd::Maintenance { reply }).await;
+        r.unwrap();
+        assert_eq!(count_events(&db).await, 3, "retention removed the old day");
+        assert_eq!(files().await, 1, "flushed and merged");
+        db.shutdown().await;
+    }
+
+    /// A run cut short by a shutdown must not answer "done".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopped_maintenance_does_not_report_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 2);
+        let conn = db.readers.lock().unwrap().pop().unwrap();
+        let (_tx, rx) = crossbeam_channel::bounded(1);
+        let mut m = maintenance::Maintainer::new(
+            conn,
+            db.ns.clone(),
+            rx,
+            db.tx.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+            &Config::default(),
+            maintenance::Maintenance { catalog_wide: None, threads: 0 },
+        );
+        let e = tokio::task::spawn_blocking(move || m.run_now()).await.unwrap().unwrap_err();
+        assert!(format!("{e:#}").contains("stopped"), "{e:#}");
+        db.shutdown().await;
     }
 
     async fn select_one(db: &Db) -> Result<i32> {
@@ -758,7 +855,7 @@ pub(crate) mod tests {
         db.read(|c, ns| Ok(c.query_row(&ns.sql("SELECT count(*) FROM $S.events"), [], |r| r.get(0))?)).await.unwrap()
     }
 
-    /// Issue 0003: compaction and flushes run next to the writer. Events
+    /// Sentry issue 0003: compaction and flushes run next to the writer. Events
     /// are committed while they run, none get lost, and retention (on the
     /// writer thread) removes old days without failing a batch.
     #[tokio::test(flavor = "multi_thread")]
@@ -862,7 +959,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    /// Issue 0002: after the limit, new groups of that project share one
+    /// Sentry issue 0002: after the limit, new groups of that project share one
     /// issue. Existing groups and other projects go on as usual.
     #[tokio::test(flavor = "multi_thread")]
     async fn new_issues_over_the_limit_share_one_issue() {
@@ -905,7 +1002,7 @@ pub(crate) mod tests {
         db.shutdown().await;
     }
 
-    /// Issue 0002: an issue that left the cache is found in the lake: no
+    /// Sentry issue 0002: an issue that left the cache is found in the lake: no
     /// second row, and a resolved one reopens.
     #[tokio::test(flavor = "multi_thread")]
     async fn issue_outside_the_cache_is_found_in_the_lake() {
@@ -966,7 +1063,7 @@ pub(crate) mod tests {
         panic!("never happened: {what}");
     }
 
-    /// Issue 0001: two processes on one catalog. Run on SQLite, which needs
+    /// Sentry issue 0001: two processes on one catalog. Run on SQLite, which needs
     /// no server; on Postgres too by [`two_processes_on_postgres`].
     async fn two_processes(catalog: &str, dir: &std::path::Path) {
         let a = Arc::new(open_db_on(catalog, dir, 2, |_| {}));
@@ -1190,7 +1287,7 @@ pub(crate) mod tests {
         db.shutdown().await;
     }
 
-    /// Issue 0001: a second `issues` row of a group (two processes wrote one)
+    /// Sentry issue 0001: a second `issues` row of a group (two processes wrote one)
     /// changes no answer.
     #[tokio::test(flavor = "multi_thread")]
     async fn duplicate_issue_rows_count_once() {
@@ -1223,7 +1320,7 @@ pub(crate) mod tests {
         db.shutdown().await;
     }
 
-    /// Issue 0001: one process holds the maintenance lease; the other takes
+    /// Sentry issue 0001: one process holds the maintenance lease; the other takes
     /// over when it runs out. Holders renew theirs.
     #[tokio::test(flavor = "multi_thread")]
     async fn one_process_holds_the_maintenance_lease() {

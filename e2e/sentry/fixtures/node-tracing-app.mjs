@@ -1,9 +1,9 @@
 // A small Node HTTP service with @sentry/node tracing on. Only the DSN
 // points at mallard. Usage: DSN=... node node-tracing-app.mjs <static|stream> [tag]
 //
-// `static` sends each trace as a `transaction` item (what mallard's bridge
-// turns into OTel spans); `stream` is SDK 11's default span streaming
-// (`span` items, not bridged yet: work/issues/0017).
+// `stream` is SDK 11's default span streaming (`span` items), `static` sends
+// each local root span as a `transaction` item. mallard's bridge turns both
+// into OTel spans.
 //
 // It serves `GET /checkout`, which runs two child spans; the second one
 // throws, the handler reports the error and answers 500. The app calls its
@@ -14,7 +14,7 @@
 
 import * as Sentry from "@sentry/node";
 
-const [traceLifecycle = "static", tag = "run"] = process.argv.slice(2);
+const [traceLifecycle = "stream", tag = "run"] = process.argv.slice(2);
 
 Sentry.init({
   dsn: process.env.DSN,

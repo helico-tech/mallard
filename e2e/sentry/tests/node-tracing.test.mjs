@@ -1,7 +1,7 @@
-// @sentry/node with tracing on, through mallard's bridge (ADR 0009): the
-// SDK's transactions become OTel spans in /otel, and the error of the
-// request sits in that trace on the span it was thrown in, a child of the
-// request's span.
+// @sentry/node with tracing on, through mallard's bridge (ADR 0009, 0013):
+// the SDK's streamed spans (the default) or transactions become OTel spans
+// in /otel, and the error of the request sits in that trace on the span it
+// was thrown in, a child of the request's span.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -46,12 +46,15 @@ async function checkout(lifecycle, tag) {
   return run;
 }
 
-test("transactions (traceLifecycle static): spans in /otel, the error under the request span", async () => {
-  const run = await checkout("static", "t1");
-
+/**
+ * What both lifecycles must show: the error under the throwing span, and
+ * the whole trace in /otel (bridge) with the right parents, kind, status,
+ * service and release.
+ */
+async function assertTrace(run, tag) {
   // The error event.
   const ev = await server.event(project.slug, run.event_id);
-  assert.equal(ev.title, "Error: card declined t1");
+  assert.equal(ev.title, `Error: card declined ${tag}`);
   const thrown = exceptions(ev).at(-1).stacktrace.frames.at(-1);
   assert.equal(thrown.function, "declineCard");
   assert.match(thrown.filename, /fixtures\/node-tracing-app\.mjs$/);
@@ -79,7 +82,7 @@ test("transactions (traceLifecycle static): spans in /otel, the error under the 
   assert.equal(charge.parent_span_id, run.server_span_id);
   assert.equal(charge.status_code, "ERROR");
   assert.equal(charge.attributes["sentry.op"], "payment.charge");
-  // The caller's transaction is in the same trace; the request span hangs under its fetch span.
+  // The caller's spans are in the same trace; the request span hangs under its fetch span.
   const client = trace.spans.find((s) => s.name === "checkout client");
   assert.ok(client, `caller span in ${JSON.stringify(trace.spans.map((s) => s.name))}`);
   const fetchSpan = byId.get(root.parent_span_id);
@@ -91,13 +94,20 @@ test("transactions (traceLifecycle static): spans in /otel, the error under the 
     byTrace.events.map((e) => [e.event_id, e.span_id]),
     [[run.event_id, run.charge_span_id]],
   );
+  return trace;
+}
+
+// The SDK 11 default: `span` envelope items (v2), ADR 0013.
+test("span streaming (SDK 11 default): spans in /otel, the error under the request span", async () => {
+  const run = await checkout("stream", "s1");
+  const trace = await assertTrace(run, "s1");
+  const root = trace.spans.find((s) => s.span_id === run.server_span_id);
+  assert.equal(root.attributes["sentry.segment.name"], root.name, "the segment name is kept");
+  assert.equal(root.scope_name, "sentry.javascript.node");
 });
 
-// @sentry/node 11 streams spans by default (`span` envelope items, v2); the
-// bridge only converts `transaction` items, so these spans are dropped.
-test("span streaming (SDK 11 default): spans in /otel", { todo: "work/issues/0017: bridge Sentry span v2 items" }, async () => {
-  const run = await checkout("stream", "s1");
-  const ev = await server.event(project.slug, run.event_id);
-  assert.equal(ev.trace_id, run.trace_id, "the error is stored either way");
-  await waitForTrace(run, 10_000);
+// `traceLifecycle: "static"`: one `transaction` item per local root span.
+test("transactions (traceLifecycle static): spans in /otel, the error under the request span", async () => {
+  const run = await checkout("static", "t1");
+  await assertTrace(run, "t1");
 });

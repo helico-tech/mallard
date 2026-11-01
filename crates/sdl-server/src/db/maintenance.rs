@@ -149,7 +149,10 @@ impl Maintainer {
             self.flush.done();
         }
         if compact_due {
-            if leader && let Err(e) = self.compact_and_expire() {
+            if leader
+                && let Err(e) = self.compact_and_expire()
+                && !self.stopping.load(Ordering::Relaxed)
+            {
                 tracing::error!(error = format!("{e:#}"), "compaction failed");
             }
             self.compact.done();
@@ -167,7 +170,8 @@ impl Maintainer {
         }
     }
 
-    fn run_now(&mut self) -> Result<()> {
+    /// Answered only when all of it is done: the one-shot command exits then.
+    pub fn run_now(&mut self) -> Result<()> {
         let r = self.flush_inlined().and_then(|_| self.compact_and_expire());
         self.flush.done();
         self.compact.done();
@@ -243,8 +247,8 @@ impl Maintainer {
         }
         metrics::histogram!("sdl_compact_seconds").record(started.elapsed().as_secs_f64());
         if self.stopping.load(Ordering::Relaxed) {
-            // Interrupted on purpose; the next run starts over.
-            return Ok(());
+            // Cut short on purpose; a caller must not take this for done.
+            return Err(anyhow!("maintenance stopped by shutdown"));
         }
         if errors.is_empty() {
             tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");

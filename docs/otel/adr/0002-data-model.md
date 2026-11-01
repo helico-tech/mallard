@@ -4,7 +4,8 @@ Date: 2026-11-01
 
 ## Status
 
-accepted
+accepted; amended by [ADR 0012](../../adr/0012-store-metric-exemplars.md)
+(exemplars are stored)
 
 ## Context
 

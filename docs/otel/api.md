@@ -45,7 +45,7 @@ All endpoints except `/api/v1/health`, `/openapi.json` and `/docs` need
 | `GET /api/v1/logs?service=&min_severity=&q=&trace_id=&attributes=&limit=&order=&cursor=` | log records (paged) |
 | `GET /api/v1/logs/series?service=&q=&step=` | log counts per bucket by severity band |
 | `GET /api/v1/metrics?service=&q=` | metric catalog: name, type, unit, temporality, series/point counts |
-| `GET /api/v1/metrics/query?name=&agg=&group_by=&attributes=&service=&step=` | time series |
+| `GET /api/v1/metrics/query?name=&agg=&group_by=&attributes=&service=&step=&exemplars=` | time series (and exemplars) |
 | `GET /api/v1/attributes?signal=&service=&metric=&key=&limit=` | attribute keys with counts, or the top values of `key` (sampled) |
 | `GET /api/v1/schema` | the tables and columns SQL can query |
 | `POST /api/v1/sql` | `{"query": "...", "limit": 1000}` → columns + rows (off by default) |
@@ -107,12 +107,21 @@ and other sums, `p95` for histograms and summaries.
 | `p50`, `p95`, `p99.9`, … | – | – | percentile of the merged bucket increase within the time bucket (linear interpolation within a bucket) | average across series of the reported quantile closest to the requested one |
 
 - Delta temporality is supported: the increase is the sum of the values.
+  Temporality is taken per series, so one metric can mix delta and
+  cumulative series.
 - `group_by=route,service.name` splits series by attribute values
   (`service.name` maps to the service column). At most 5 keys, 500 series and
   200,000 points per response.
 - Exponential histograms are converted to explicit buckets
   (`base = 2^(2^-scale)`); zero and negative buckets fold into one "≤ 0"
   bucket.
+- `exemplars=true` also returns `exemplars`: for each series (`group_by`
+  labels) and bucket, the stored exemplar with the highest value that has a
+  trace id, with its `trace_id`, `span_id`, value, time and filtered
+  attributes. The same filters apply. At most 1000, oldest first. Open the
+  trace with `/traces/{trace_id}`: that is "from a latency spike to the
+  request that caused it". Gauges, sums and histograms carry exemplars;
+  summaries have none in OTLP.
 
 ### Attributes (`/attributes`)
 
@@ -142,7 +151,9 @@ JSON equivalent (timestamps, UUIDs) as strings, maps as objects, NaN/Inf as
 null. Errors in the query are 400 with DuckDB's message. Table and CTE names
 must be plain identifiers; `SHOW`/`DESCRIBE`/`SUMMARIZE` and a few functions
 (`repeat`, `lpad`, `rpad`, file/settings/env access) are refused. See
-[ADR 0005](adr/0005-sql-endpoint.md).
+[ADR 0005](adr/0005-sql-endpoint.md). An answer holds at most `limit` rows
+(default 1000, max 100000) and 32 MiB of row data; `truncated` is true when
+either cut it short ([mallard ADR 0015](../adr/0015-sql-resource-limits.md)).
 
 ## Examples
 
@@ -155,6 +166,7 @@ curl -s "$API/logs?since=10m&min_severity=17&q=timeout" | jq -r '.[].body'
 curl -s "$API/spans/00f067aa0ba902b7" | jq -r .trace_id
 curl -s "$API/attributes?signal=spans&service=checkout&key=http.route" | jq -r '.items[] | "\(.value) \(.count)"'
 curl -s "$API/metrics/query?name=http.server.request.duration&agg=p99&group_by=http.route&since=6h&step=5m" | jq
+curl -s "$API/metrics/query?name=http.server.request.duration&agg=p99&since=1h&exemplars=true" | jq '.exemplars[] | {time, value, trace_id}'
 curl -s -X POST "$API/sql" -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"query":"SELECT service_name, count(*) FROM spans GROUP BY 1"}' | jq
 ```

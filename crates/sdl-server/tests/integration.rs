@@ -574,14 +574,28 @@ async fn concurrent_retries_are_stored_once() {
     t.stop().await;
 }
 
+/// Slug, content type, envelope's `sdk` header and payload of a `span` item.
+type SeenSpans = (String, Option<String>, Option<Value>, Vec<u8>);
+
 #[derive(Default)]
 struct Hooks {
     transactions: std::sync::Mutex<Vec<sdl_server::Transaction>>,
+    spans: std::sync::Mutex<Vec<SeenSpans>>,
     events: std::sync::Mutex<Vec<(u32, uuid::Uuid, u64)>>,
 }
 impl sdl_server::TransactionSink for Hooks {
     fn transaction(&self, t: sdl_server::Transaction) {
         self.transactions.lock().unwrap().push(t);
+    }
+}
+impl sdl_server::SpanSink for Hooks {
+    fn spans(&self, s: sdl_server::Spans<'_>) {
+        self.spans.lock().unwrap().push((
+            s.project_slug,
+            s.content_type.map(str::to_string),
+            s.envelope_headers.get("sdk").cloned(),
+            s.payload.to_vec(),
+        ));
     }
 }
 impl sdl_server::EventObserver for Hooks {
@@ -598,6 +612,8 @@ async fn host_hooks_and_in_process_events() {
     let url = format!("{}/api/1/envelope/?sentry_key={key}", t.base);
     let hooks = Arc::new(Hooks::default());
     t.server.set_transaction_sink(hooks.clone()).unwrap();
+    t.server.set_span_sink(hooks.clone()).unwrap();
+    assert!(t.server.set_span_sink(hooks.clone()).is_err(), "set once");
     t.server.set_event_observer(hooks.clone()).unwrap();
     assert!(t.server.set_event_observer(hooks.clone()).is_err(), "set once");
 
@@ -614,6 +630,15 @@ async fn host_hooks_and_in_process_events() {
     assert!(std::str::from_utf8(&tx[0].payload).unwrap().contains("GET /"));
     let seen = hooks.events.lock().unwrap().clone();
     assert_eq!(seen, [(1, uuid::Uuid::parse_str(trace).unwrap(), 0xb7ad6b7169203331)]);
+
+    // Span items go to the sink with their content type and envelope headers.
+    let body = "{\"sdk\":{\"name\":\"s\"}}\n{\"type\":\"span\",\"content_type\":\"a/b\"}\n{\"items\":[]}\n";
+    assert_eq!(t.http.post(&url).body(body).send().await.unwrap().status(), 200);
+    let spans = hooks.spans.lock().unwrap().clone();
+    assert_eq!(
+        spans,
+        [("hooked".to_string(), Some("a/b".to_string()), Some(json!({"name": "s"})), b"{\"items\":[]}".to_vec())]
+    );
 
     // In-process events: grouped like any other, deduped by id, not observed.
     let ev = json!({"event_id": "1f6d8c0c43fc4630ad850ee518f1b9d2", "platform": "python",

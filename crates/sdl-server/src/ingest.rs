@@ -13,7 +13,7 @@
 
 use crate::db::{EnqueueError, EventWrite, WriteCmd};
 use crate::sourcemaps::MAX_REFS_PER_EVENT;
-use crate::{AppState, IngestError, Transaction};
+use crate::{AppState, IngestError, Spans, Transaction};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Request, State};
@@ -21,7 +21,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use chrono::Utc;
-use sdl_protocol::envelope::Envelope;
+use sdl_protocol::envelope::{Envelope, Item};
 use sdl_protocol::event::parse_uuid;
 use sdl_protocol::{NormalizeContext, ProcessedEvent, auth, normalize_event, symbolicate};
 use serde_json::{Value, json};
@@ -92,6 +92,22 @@ fn forward_transaction(state: &AppState, project_id: u32, payload: Bytes) {
     match (sink, slug) {
         (Some(sink), Some(project_slug)) => sink.transaction(Transaction { project_id, project_slug, payload }),
         _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => "transaction").increment(1),
+    }
+}
+
+/// Give a `span` item to the host's sink, or drop it when there is none.
+fn forward_spans(state: &AppState, project_id: u32, envelope: &Envelope, item: &Item) {
+    let sink = state.span_sink.get();
+    let slug = state.db.caches.project(project_id).map(|p| p.slug);
+    match (sink, slug) {
+        (Some(sink), Some(project_slug)) => sink.spans(Spans {
+            project_id,
+            project_slug,
+            content_type: item.headers.get("content_type").and_then(Value::as_str),
+            envelope_headers: &envelope.headers,
+            payload: &item.payload,
+        }),
+        _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => "span").increment(1),
     }
 }
 
@@ -258,6 +274,8 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
             }
             // Stored by the host when it set a sink (mallard: as traces).
             "transaction" => forward_transaction(&state, inc.project_id, item.payload.clone()),
+            // Span streaming (SDK 11 default); also stored by the host's sink.
+            "span" => forward_spans(&state, inc.project_id, &env, item),
             // Accepted and dropped: sessions, client reports, attachments,
             // replays, profiles, check-ins, logs, feedback...
             // This server stores errors only (see docs/compatibility.md).
