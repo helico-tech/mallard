@@ -88,7 +88,8 @@ folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
 
 | where | what |
 |---|---|
-| `:8080 /sentry/...` | Sentry ingest (DSN `http://KEY@host:8080/sentry/1`), Sentry API `/sentry/v1`, docs `/sentry/docs`, sentry-cli (`--url http://host:8080/sentry`) |
+| `:8080 /sentry/...` | Sentry ingest (DSN `http://KEY@host:8080/sentry/1`), Sentry API `/sentry/v1`, docs `/sentry/docs`, bundler plugins (`url: http://host:8080/sentry`) |
+| `:8080 /api/0/...` | sentry-cli's API (`--url http://host:8080`: the Rust `sentry-cli` only accepts a URL root; also under `/sentry/api/0`) |
 | `:8080 /otel/...` | telemetry query API `/otel/api/v1`, docs `/otel/docs` |
 | `:8080 /v1/traces\|logs\|metrics`, `:4318` | OTLP/HTTP |
 | `:4317` | OTLP/gRPC |
