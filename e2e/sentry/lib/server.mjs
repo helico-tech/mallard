@@ -1,8 +1,8 @@
-// Test harness: start one mallard-server per test file on a free port with
+// Test harness: start one `mallard serve` per test file on a free port with
 // its own temp dir and config file, and talk to its APIs.
 //
-// Binary: $MALLARD_SERVER_BIN, else ../../target/debug/mallard-server (built
-// with `cargo build -p mallard-server` if missing).
+// Binary: $MALLARD_BIN, else ../../target/debug/mallard (built with
+// `cargo build -p mallard` if missing).
 
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -17,11 +17,11 @@ export const REPO_DIR = path.resolve(E2E_DIR, "../..");
 const TOKEN = "e2e-token";
 
 export function serverBinary() {
-  if (process.env.MALLARD_SERVER_BIN) return path.resolve(process.env.MALLARD_SERVER_BIN);
-  const bin = path.join(REPO_DIR, "target", "debug", "mallard-server");
+  if (process.env.MALLARD_BIN) return path.resolve(process.env.MALLARD_BIN);
+  const bin = path.join(REPO_DIR, "target", "debug", "mallard");
   if (!existsSync(bin)) {
-    console.error(`[e2e] ${bin} missing, running cargo build -p mallard-server ...`);
-    execFileSync("cargo", ["build", "-p", "mallard-server"], { cwd: REPO_DIR, stdio: "inherit" });
+    console.error(`[e2e] ${bin} missing, running cargo build -p mallard ...`);
+    execFileSync("cargo", ["build", "-p", "mallard"], { cwd: REPO_DIR, stdio: "inherit" });
   }
   return bin;
 }
@@ -106,7 +106,7 @@ export class TestServer {
     const env = { ...process.env, RUST_LOG: process.env.RUST_LOG || "info" };
     // The config file is the whole config: no MALLARD_* overrides from the shell.
     for (const k of Object.keys(env)) if (k.startsWith("MALLARD_")) delete env[k];
-    const proc = spawn(bin, ["-c", config, "serve"], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(bin, ["serve", "-c", config], { env, stdio: ["ignore", "pipe", "pipe"] });
     for (const s of [proc.stdout, proc.stderr]) {
       s.setEncoding("utf8");
       s.on("data", (d) => {

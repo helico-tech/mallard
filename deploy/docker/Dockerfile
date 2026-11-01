@@ -6,7 +6,7 @@
 #
 #   docker build -f deploy/docker/Dockerfile -t mallard .
 #
-# Stage 1 compiles `mallard-server` and the `mallard` CLI/TUI (DuckDB's C++ is compiled
+# Stage 1 compiles the `mallard` binary: server, CLI and TUI (DuckDB's C++ is compiled
 # from source, so the first build takes a few minutes; BuildKit cache mounts
 # keep the cargo registry and target dir between builds). Stage 2 is a small
 # glibc image with all DuckDB extensions pre-installed, so the server needs
@@ -28,8 +28,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked -p mallard-server -p mallard \
- && install -D -m 0755 target/release/mallard-server /out/mallard-server \
+    cargo build --release --locked -p mallard \
  && install -D -m 0755 target/release/mallard /out/mallard
 
 # -------------------------------------------------------------- runtime stage
@@ -42,12 +41,12 @@ RUN apt-get update \
  && useradd --system --uid 10001 --gid mallard --home-dir /data --shell /usr/sbin/nologin mallard \
  && install -d -o mallard -g mallard -m 0750 /data
 
-# The CLI ships too, for `docker exec … mallard status` and debugging.
-COPY --from=build /out/mallard-server /out/mallard /usr/local/bin/
+# One binary: it runs the server and is the CLI for `docker exec … mallard status`.
+COPY --from=build /out/mallard /usr/local/bin/
 
 # Every DuckDB extension any config may need (ducklake, httpfs, aws, azure,
 # postgres, ...), installed for the runtime platform. Read-only for the server.
-RUN mallard-server install-extensions --dir /opt/duckdb/extensions \
+RUN mallard install-extensions --dir /opt/duckdb/extensions \
  && chmod -R a+rX /opt/duckdb/extensions
 
 # /data is the working directory: with no config the DuckDB-file catalog and
@@ -68,5 +67,5 @@ EXPOSE 8080 4318 4317
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
   CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
 
-ENTRYPOINT ["/usr/local/bin/mallard-server"]
+ENTRYPOINT ["/usr/local/bin/mallard"]
 CMD ["serve"]

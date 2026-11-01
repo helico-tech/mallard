@@ -1,6 +1,6 @@
 # End-to-end tests
 
-These tests prove that real Sentry tools work against `mallard-server` when
+These tests prove that real Sentry tools work against `mallard serve` when
 you change only the DSN / URL (the Sentry side is under `/sentry`):
 
 | File | What it proves |
@@ -33,7 +33,7 @@ npm test
 
 ## How the harness works
 
-- `lib/server.mjs` starts one `mallard-server` per test file with its own
+- `lib/server.mjs` starts one `mallard serve` per test file with its own
   temp dir and config file (`mallard.toml` there: `http_addr` on a random
   free port, never 8765; OTLP listeners on `127.0.0.1:0`; DuckDB-file
   catalog, lake and sourcemap artifacts in the temp dir; token
@@ -44,12 +44,12 @@ npm test
   `server.otel(method, path)` calls `/otel/...`.
   `TestServer.start(name, { bridge: { dedupe_window: "1s" } })` sets
   `[bridge]` keys. `MALLARD_*` variables of the shell are not passed on.
-  The server binary is:
-  1. `$MALLARD_SERVER_BIN` if set, else
-  2. `../../target/debug/mallard-server`, built with
-     `cargo build -p mallard-server` if it is missing. It is **not** rebuilt
-     when it exists: run `cargo build -p mallard-server` after changing
-     server code.
+  The binary is:
+  1. `$MALLARD_BIN` if set, else
+  2. `../../target/debug/mallard`, built with `cargo build -p mallard` if it
+     is missing. It is **not** rebuilt when it exists: run
+     `cargo build -p mallard` after changing server code (also after a
+     `--no-default-features` build, which has no `serve`).
 - Events are committed before the ingest request returns, so tests read
   them right after `Sentry.flush()`. Spans go through the OTel write buffer
   (flushed every few seconds), so trace tests poll. Where a process exits on its own
@@ -64,7 +64,7 @@ npm test
 
 | Variable | Effect |
 |---|---|
-| `MALLARD_SERVER_BIN` | Server binary to test. |
+| `MALLARD_BIN` | `mallard` binary to test. |
 | `MALLARD_E2E_TMPDIR` | Parent dir for the per-server temp dirs (default: OS temp dir). |
 | `MALLARD_E2E_KEEP=1` | Keep the server temp dirs (config, catalog, lake) after the run. |
 | `MALLARD_E2E_VERBOSE=1` | Print server logs. |

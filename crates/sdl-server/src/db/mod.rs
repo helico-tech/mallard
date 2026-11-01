@@ -641,7 +641,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// `mallard-server maintenance` exits when `Server::run_maintenance`
+    /// `mallard maintenance` exits when `Server::run_maintenance`
     /// answers. So by then flush, retention (writer thread) and compaction
     /// (maintenance thread) are done.
     #[tokio::test(flavor = "multi_thread")]
