@@ -18,15 +18,19 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
 JS end-to-end tests with real Sentry SDKs: `e2e/sentry/README.md`.
-After otel API changes: `cargo run -p odl-server -- openapi > docs/otel/openapi.json`
-(a test checks it).
+After API changes: `cargo run -p odl-server -- openapi > docs/otel/openapi.json`
+and `cargo run -p sdl-server -- openapi > docs/sentry/openapi.json` (tests check them).
+Helm: `helm lint --strict deploy/helm/mallard -f deploy/helm/mallard/ci/<file>.yaml`;
+the rendered `mallard.toml` must pass `mallard check -c <file>`.
 
 ## Map
 
 | path | what |
 |---|---|
 | `crates/mallard` | the `mallard` binary: `serve`, `status`, `trace`, `errors …`, `telemetry …`, `tui` |
-| `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, shutdown |
+| `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, readiness, shutdown |
+| `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
+| `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
 | `crates/sdl-*` | Sentry side: `sdl-protocol` (pure protocol), `sdl-server` (ingest, writer, `/v1` API), `sdl-types`, `sdl-client`, `sdl-cli` (commands + TUI component), `sdl-loadgen` |
 | `crates/odl-*` | OpenTelemetry side: `odl-server` (OTLP receivers, storage, maintenance, query API), `odl-api`, `odl-client`, `odl-cli` (commands + TUI component), `odl-loadgen` |
@@ -44,8 +48,20 @@ The product is `mallard`.
 ## Rules
 
 - `duckdb = "=1.20000.1"` (DuckDB 2.0.0), one version for the whole
-  workspace. `libduckdb-sys` must build without DEBUG (see the profile in
+  workspace. Only `mallard-duck` depends on it; use `mallard_duck::duckdb`.
+  `libduckdb-sys` must build without DEBUG (see the profile in
   `Cargo.toml`): debug builds abort on the prebuilt extensions.
+- Infrastructure both sides need lives once, in `mallard-common` or
+  `mallard-duck` (ADR 0005): config loading, durations/sizes, auth, error
+  body, CORS, docs page, logging, signals, metrics, DuckDB set-up. Domain
+  code (writers, maintenance, schemas) stays per side. Terminal output
+  belongs in `mallard-term`.
+- Config: libraries expose serde structs with `deny_unknown_fields` and
+  never read files or env; binaries load them with
+  `mallard_common::config::load`. mallard's `[otel]`/`[sentry]` hold only
+  what each side owns.
+- API errors are `{"error": code, "message": text}` (`mallard_common::http::ApiErr`);
+  use `Q`/`J` extractors so bad input gets that body too.
 - One DuckDB connection is shared: catalog `lake`, schemas `sentry` and
   `otel` (ADR 0001). Libraries never change global DuckDB settings on a
   shared connection; `mallard-server` owns `[duckdb]`.

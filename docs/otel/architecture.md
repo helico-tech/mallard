@@ -97,8 +97,7 @@ One thread runs these tasks:
 | retention | 1 h | delete expired days; expire snapshots older than 1 h; delete unreferenced files after 15 min |
 
 Merges and deletes only touch this schema's tables. Snapshot expiry and file
-cleanup are catalog-wide, and can be switched off per instance
-(`maintenance.catalog_wide`).
+cleanup are catalog-wide; in mallard the otel side owns them (ADR 0001).
 
 ### Query API (`api/`, `query/`)
 

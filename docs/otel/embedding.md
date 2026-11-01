@@ -29,7 +29,7 @@ addresses; that is what the binary uses.
 ### Sharing one DuckDB / DuckLake with other components
 
 ```rust
-let conn = odl_server::store::open_connection(&cfg)?; // settings, extensions, secrets, ATTACH ... AS lake
+let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb)?; // settings, extensions, secrets, ATTACH ... AS lake
 let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // schema "otel"
 // another component uses conn.try_clone()? with schema "sentry", etc.
 ```
@@ -38,12 +38,11 @@ let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // sch
   its own schema and tables, uses `try_clone()` of the connection, and never
   changes global DuckDB settings.
 - Merges and retention are scoped to this schema. Snapshot expiry and file
-  cleanup are catalog-wide: when several applications share one catalog, set
-  `maintenance.catalog_wide = true` in exactly one of them (replicas of the
-  same application may all run it).
-- Pin the same `duckdb` version (`=1.20000.1`) and features (`bundled`,
-  `appender-arrow`, `chrono`) in the whole workspace, and build
-  `libduckdb-sys` without debug assertions:
+  cleanup are catalog-wide and always run with `maintenance.enabled`: the
+  otel side owns them on a shared catalog; the other components must not
+  run them (sentry: `Host::catalog_maintenance = None`).
+- Use DuckDB only through `mallard_duck::duckdb` (one version for the whole
+  workspace), and build `libduckdb-sys` without debug assertions:
 
   ```toml
   [profile.dev.package.libduckdb-sys]

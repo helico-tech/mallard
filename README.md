@@ -79,11 +79,15 @@ Client commands read `MALLARD_URL` and `MALLARD_TOKEN`.
 
 ## Configuration
 
-One TOML file, see `config/mallard.example.toml`. `[server]`, `[storage]`
-and `[duckdb]` are shared; `[otel]` and `[sentry]` hold each side's own
-settings (`docs/otel/configuration.md`, `docs/sentry/deployment.md`). Any key
-can be overridden with `MALLARD_<SECTION>__<KEY>`, e.g.
-`MALLARD_OTEL__RETENTION__TRACES=3d`.
+One TOML file, see `config/mallard.example.toml` (every key with its
+default). `[server]`, `[storage]` and `[duckdb]` are shared; `[otel]` and
+`[sentry]` hold only each side's own settings. Unknown keys are errors. Any
+key can be overridden with `MALLARD_<SECTION>__<KEY>`, e.g.
+`MALLARD_OTEL__RETENTION__TRACES=0` or `MALLARD_SERVER__API_TOKENS=a,b`
+(text settings keep the value as is; lists may be comma separated).
+`${NAME}` inside a text value is replaced by environment variable `NAME`.
+`mallard check -c mallard.toml --connect` validates a file and opens the
+catalog.
 
 ## More
 

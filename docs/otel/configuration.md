@@ -7,11 +7,13 @@
 3. environment variables `ODL_<SECTION>__<KEY>`, e.g.
    `ODL_STORAGE__DATA_PATH=s3://bucket/otel/`, `ODL_QUERY__MAX_CONCURRENT=8`.
    Values are parsed as TOML when the setting is a number, boolean or list
-   (`ODL_AUTH__API_TOKENS='["a","b"]'`), and taken literally for text
-   settings.
+   (`ODL_AUTH__API_TOKENS='["a","b"]'`, or comma separated: `a,b`), and
+   taken literally for text settings (`ODL_RETENTION__TRACES=0`).
+   Unknown keys are errors.
 
 Inside any text value, `${NAME}` is replaced by environment variable `NAME`
-(start-up fails if it is not set). Use this to keep secrets out of files:
+after the file is parsed, so the value may contain quotes (start-up fails if
+it is not set). Use this to keep secrets out of files:
 
 ```toml
 [auth]
@@ -41,7 +43,6 @@ Durations: `500ms`, `5s`, `10m`, `6h`, `7d`, `1h30m`; `0` means "off" or
 |---|---|---|
 | `catalog` | `data/catalog.ducklake` | DuckLake catalog: a DuckDB file path, `sqlite:<path>`, or `postgres:<libpq connection string>`. See [storage-backends.md](storage-backends.md). |
 | `data_path` | `data/lake/` | Where Parquet files go: a local directory or `s3://`, `gs://`, `az://`, `abfss://`, `r2://`, ... It must match the path stored in an existing catalog. |
-| `schema` | `otel` | DuckLake schema for the tables. Lets several applications share one catalog. |
 | `secrets` | `[]` | List of DuckDB secrets (credentials), see below. |
 | `extensions` | `[]` | Extra DuckDB extensions to load. Needed ones are loaded automatically. |
 | `data_inlining_row_limit` | `1000` | Inserts below this many rows are stored in the catalog until the next compaction. `0` turns inlining off. |
@@ -103,7 +104,6 @@ without rewriting files.
 | `retention_interval` | `1h` | Retention deletes, snapshot expiry and file cleanup. |
 | `snapshot_retention` | `1h` | Keep old snapshots (time travel) this long. |
 | `file_cleanup_delay` | `15m` | Delete unreferenced files only after this grace period, so running queries don't lose files. |
-| `catalog_wide` | `true` | Run snapshot expiry and file cleanup. They affect the whole catalog. Running them on every replica of otel-ducklake is safe; when several *applications* share one catalog, let exactly one application run them. |
 
 ## `[query]`
 
