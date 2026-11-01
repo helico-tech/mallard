@@ -10,10 +10,12 @@
 //! # Ok(()) }
 //! ```
 
+pub use mallard_api;
 pub use mallard_otel_client;
 pub use mallard_sentry_client;
 
 use chrono::{DateTime, Utc};
+use mallard_api::{AppList, AppsQuery, FindQuery, FindResult};
 use mallard_otel_client::api::{LogQuery, LogRecord, Span, TraceGetQuery};
 use mallard_sentry_client::types::EventSummary;
 use serde::Serialize;
@@ -81,6 +83,8 @@ pub struct Client {
     token: Option<String>,
     pub sentry: mallard_sentry_client::Client,
     pub otel: mallard_otel_client::Client,
+    /// The same HTTP calls and errors, on the server's own `/api/v1`.
+    host: mallard_otel_client::Client,
 }
 
 impl std::fmt::Debug for Client {
@@ -113,7 +117,8 @@ impl Client {
         let token = token.filter(|t| !t.is_empty()).map(str::to_string);
         let sentry = mallard_sentry_client::Client::new(&format!("{base}/sentry"), token.as_deref())?;
         let otel = mallard_otel_client::Client::new(&format!("{base}/otel"), token.as_deref())?;
-        Ok(Client { base, token, sentry, otel })
+        let host = mallard_otel_client::Client::new(&base, token.as_deref())?;
+        Ok(Client { base, token, sentry, otel, host })
     }
 
     pub fn base_url(&self) -> &str {
@@ -122,6 +127,22 @@ impl Client {
 
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
+    }
+
+    /// `GET /api/v1/apps`: the projects and services as one list.
+    pub async fn apps(&self, q: &AppsQuery) -> Result<AppList, Error> {
+        Ok(self.host.get_json("/api/v1/apps", q).await?)
+    }
+
+    /// `GET /api/v1/find`: what an id points at. `None` when every source was
+    /// read and none has it; a source that failed is an error (or, next to a
+    /// match, a warning).
+    pub async fn find(&self, q: &FindQuery) -> Result<Option<FindResult>, Error> {
+        match self.host.get_json("/api/v1/find", q).await {
+            Ok(r) => Ok(Some(r)),
+            Err(mallard_otel_client::Error::Api { code, .. }) if code == "not_found" => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Spans, Sentry errors and logs of one trace, all searched over the

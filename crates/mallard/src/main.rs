@@ -7,6 +7,7 @@
 //! live here. The old `errors …` / `telemetry …` paths stay as hidden
 //! aliases of the same commands.
 
+mod apps;
 mod errors;
 mod find;
 mod help;
@@ -76,6 +77,12 @@ enum Cmd {
     Status,
     /// Create a project if it does not exist; print its DSN and the OTLP env vars.
     Setup(setup::SetupArgs),
+    /// Apps: a project and the services with the same slug, or either alone (default window 24h).
+    Apps {
+        /// Services need data in this window; projects are always listed.
+        #[command(flatten)]
+        window: WindowArgs,
+    },
     /// What is this id (trace, event, issue or span)? Prints matches and the command to see more.
     Find {
         /// A trace or event id (32 hex) or an issue or span id (16 hex).
@@ -298,6 +305,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Server(_) => unreachable!("handled above"),
         Cmd::Status => status::run(&r).await,
         Cmd::Setup(a) => setup::run(&r, a).await,
+        Cmd::Apps { window } => apps::run(&r, &window).await,
         Cmd::Find { id, window, wait } => find::run(&r, &id, &window, &wait).await,
         Cmd::Issues(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Issues(c), &r.sentry()).await,
         Cmd::Events(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Events(c), &r.sentry()).await,
@@ -383,6 +391,8 @@ mod tests {
         for args in [
             &["status"][..],
             &["setup", "checkout", "--platform", "node"],
+            &["apps"],
+            &["apps", "--since", "7d"],
             &["find", "0af7651916cd43dd8448eb211c80319c"],
             &["issues", "list", "--new", "--first-release", "web@1", "--since", "1h"],
             &["issues", "list", "--from", "2h", "--to", "1h", "--sort", "count", "-n", "10"],

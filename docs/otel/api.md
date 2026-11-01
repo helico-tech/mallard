@@ -51,9 +51,14 @@ API: it is `POST /v1/traces`, `/v1/logs` and `/v1/metrics` on the server root.
 | `GET /api/v1/logs/series?service=&q=&step=` | log counts per bucket by severity band |
 | `GET /api/v1/metrics?service=&q=` | metric catalog: name, type, unit, temporality (`delta`, `cumulative`, `mixed` when it has both, empty for gauges and summaries), series/point counts |
 | `GET /api/v1/metrics/query?name=&agg=&group_by=&attributes=&service=&step=&exemplars=` | time series (and exemplars) |
-| `GET /api/v1/attributes?signal=&service=&metric=&key=&limit=` | attribute keys with counts, or the top values of `key` (sampled) |
+| `GET /api/v1/attributes?signal=&service=&metric=&key=&prefix=&limit=` | attribute keys with counts, or the top values of `key` (sampled) |
 | `GET /api/v1/schema` | the tables and columns SQL can query |
 | `POST /api/v1/sql` | `{"query": "...", "limit": 1000}` → columns + rows (off by default) |
+
+`service` can be repeated on `attributes`, `logs`, `logs/series`, `metrics`,
+`metrics/query`, `operations`, `spans/series` and `traces`: `service=a&service=b`
+matches either (at most 50), for an app with two service names (ADR 0028). One value
+behaves as it always did.
 
 ### RED stats (`/services`, `/operations`, `/spans/series`)
 
@@ -136,9 +141,15 @@ rows that have it, most frequent first. With `key`: the most frequent
 values of that key. Span/log/point attributes and resource attributes are
 counted together, as the `attributes=` filters match either. `service`
 narrows to one service, `metric` (signal `metrics` only) to one metric.
+`prefix` keeps the keys, or with `key` the values, that start with it, in any
+case, for suggestions while typing. Values are filtered before the sample, so
+`total_rows` counts the rows with such a value and a rare one is found too.
 The counts come from a random sample of at most 10,000 matching rows:
 `total_rows` says how many rows matched, `sampled_rows` how many were
-counted. The window is the usual one (default 1 hour).
+counted. The window is the usual one (default 1 hour). Only its newest part
+with at least 500,000 rows of that signal is read, at the steps 1h, 6h, 1d, 7d,
+so a wide window stays cheap on a busy lake: `counted_from` says where that part
+starts, and a value seen only before it is not listed.
 
 ### Schema (`/schema`)
 

@@ -39,13 +39,17 @@ impl Out {
 }
 
 async fn mallard(url: &str, args: &[&str]) -> Out {
-    let (bin, url) = (env!("CARGO_BIN_EXE_mallard"), url.to_string());
+    mallard_with_token(url, TOKEN, args).await
+}
+
+async fn mallard_with_token(url: &str, token: &str, args: &[&str]) -> Out {
+    let (bin, url, token) = (env!("CARGO_BIN_EXE_mallard"), url.to_string(), token.to_string());
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     tokio::task::spawn_blocking(move || {
         let o = Command::new(bin)
             .args(&args)
             .env("MALLARD_URL", url)
-            .env("MALLARD_TOKEN", TOKEN)
+            .env("MALLARD_TOKEN", token)
             .env_remove("MALLARD_PROJECT")
             .env_remove("MALLARD_FORMAT")
             .env("NO_COLOR", "1")
@@ -119,6 +123,72 @@ async fn agent_contract_end_to_end() {
     let o = mallard(url, &["find", &"f".repeat(32), "--json"]).await;
     assert_eq!((o.code, o.error()["code"].as_str()), (4, Some("not_found")), "{}", o.stderr);
     assert!(o.json()["items"].as_array().unwrap().is_empty(), "the empty list is still printed");
+
+    // find keeps its output since it uses /api/v1/find: exact keys, exact lines.
+    let t = found.iter().find(|m| m["kind"] == "trace").unwrap();
+    assert_eq!(
+        t,
+        &serde_json::json!({"kind": "trace", "trace_id": trace, "spans": 1, "errors": 1, "logs": 1, "next": format!("mallard trace {trace}")})
+    );
+    let text = mallard(url, &["find", &trace]).await.ok();
+    assert_eq!(text.stdout.trim_end(), format!("trace  {trace}  1 spans, 1 errors, 1 logs  → mallard trace {trace}"));
+    assert_eq!(text.stderr, "");
+    let events = mallard(url, &["events", "list", "--trace", &trace, "-p", "checkout", "--json"]).await.ok().json();
+    let event = events["items"][0]["event_id"].as_str().unwrap().to_string();
+    let issue = events["items"][0]["issue_id"].as_str().unwrap().to_string();
+    let v = mallard(url, &["find", &event, "--json"]).await.ok().json();
+    assert_eq!(
+        v["items"][0],
+        serde_json::json!({"kind": "event", "event_id": event, "issue_id": issue, "project_id": pid,
+            "title": v["items"][0]["title"], "trace_id": trace,
+            "next": format!("mallard events show {event} --issue {issue} -p {pid}")}),
+    );
+    assert_eq!(v["count"], 1, "{v}");
+    assert!(v["window"]["from"].is_string(), "{v}");
+    // An event is looked up at any age, whatever the window.
+    let old = ["find", &event, "--from", "2000-01-01T00:00:00Z", "--to", "2000-01-02T00:00:00Z", "--json"];
+    assert_eq!(mallard(url, &old).await.ok().json()["items"][0]["kind"], "event");
+    // An issue id: in every project, or the one of -p.
+    let v = mallard(url, &["find", &issue, "--json"]).await.ok().json();
+    assert_eq!(
+        v["items"][0],
+        serde_json::json!({"kind": "issue", "issue_id": issue, "project": "checkout",
+            "title": v["items"][0]["title"], "status": "unresolved", "count": 1,
+            "next": format!("mallard issues show {issue} -p checkout")}),
+    );
+    // A window above one side's limit: a usage error when nothing else is found,
+    // never "not found"; the event still shows without the failed trace lookup.
+    let o = mallard(url, &["find", &"f".repeat(32), "--since", "500d", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (2, Some("usage")), "{}", o.stderr);
+    assert_eq!(o.stdout, "", "an error, no empty list");
+    let found_old = mallard(url, &["find", &event, "--since", "500d", "--json"]).await.ok().json();
+    assert_eq!(found_old["items"][0]["kind"], "event", "{found_old}");
+    // A project that does not exist: exit 4 with its own message, no empty list.
+    let o = mallard(url, &["find", "85fede14250ec6be", "-p", "nope", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (4, Some("not_found")), "{}", o.stderr);
+    assert!(o.error()["message"].as_str().unwrap().contains("project not found"), "{}", o.stderr);
+    assert_eq!(o.stdout, "");
+
+    // apps: the project and its service are one app, under the output contract.
+    let a = mallard(url, &["apps", "--since", "1h", "--json"]).await.ok().json();
+    assert_eq!(a["count"], 1, "{a}");
+    assert_eq!(a["truncated"], false);
+    assert!(a["window"]["from"].is_string(), "{a}");
+    assert_eq!(
+        a["items"][0],
+        serde_json::json!({"slug": "checkout", "name": "checkout", "project": pid, "services": ["checkout"]})
+    );
+    let nd = mallard(url, &["apps", "--since", "1h", "--fields", "slug,services", "--format", "ndjson"]).await.ok();
+    assert_eq!(nd.stdout.trim(), r#"{"slug":"checkout","services":["checkout"]}"#);
+    let text = mallard(url, &["apps"]).await.ok();
+    assert!(text.stdout.lines().next().is_some_and(|l| l.trim_start().starts_with("app")), "{}", text.stdout);
+    assert!(text.stdout.lines().nth(1).is_some_and(|l| l.trim_start().starts_with("checkout")), "{}", text.stdout);
+    assert!(!text.stdout.contains('│'), "plain when piped: {}", text.stdout);
+    let o = mallard(url, &["apps", "--since", "soon"]).await;
+    assert_eq!(o.code, 2, "{}", o.stderr);
+    let o = mallard_with_token(url, "wrong", &["apps", "--json"]).await;
+    assert_eq!((o.code, o.error()["code"].as_str()), (3, Some("unauthorized")), "{}", o.stderr);
+    assert_eq!(mallard_with_token(url, "wrong", &["find", &trace, "--json"]).await.code, 3);
 
     // traces list: the Sentry error count per trace; trace: per span.
     let l = mallard(url, &["traces", "list", "--since", "1h", "--json"]).await.ok().json();
@@ -355,4 +425,45 @@ async fn tags_cursors_releases_and_error_sql() {
     assert_eq!((o.code, o.error()["code"].as_str()), (7, Some("disabled")), "{}", o.stderr);
     assert!(o.error()["message"].as_str().unwrap().contains("sentry.query.enable_sql"), "{}", o.stderr);
     srv.stop().await;
+}
+
+/// A server that answers every request with this status and JSON error.
+async fn failing_server(status: &'static str, code: &'static str) -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut c, _)) = l.accept().await {
+            let mut buf = [0; 4096];
+            let _ = c.read(&mut buf).await;
+            let body = format!(r#"{{"error":"{code}","message":"a side failed"}}"#);
+            let head = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = c.write_all(format!("{head}{body}").as_bytes()).await;
+        }
+    });
+    url
+}
+
+/// A failed side is its own exit code: `find` never reports it as "not found".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_and_apps_report_a_failed_side() {
+    let id = "0af7651916cd43dd8448eb211c80319c";
+    for (status, code, exit, kind) in [
+        ("500 Internal Server Error", "internal", 1, "internal"),
+        ("503 Service Unavailable", "busy", 6, "unavailable"),
+        ("504 Gateway Timeout", "timeout", 6, "unavailable"),
+    ] {
+        let url = failing_server(status, code).await;
+        for args in [&["find", id, "--json"][..], &["find", "85fede14250ec6be", "--json"], &["apps", "--json"]] {
+            let o = mallard(&url, args).await;
+            assert_eq!((o.code, o.error()["code"].as_str()), (exit, Some(kind)), "{args:?} {status}: {}", o.stderr);
+            assert_eq!(o.stdout, "", "{args:?}: no empty list");
+        }
+    }
+    // Nothing listening: the same as every command.
+    let o = mallard("http://127.0.0.1:9", &["find", id, "--json"]).await;
+    assert_eq!(o.code, 6, "{}", o.stderr);
 }

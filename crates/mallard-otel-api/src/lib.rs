@@ -346,7 +346,8 @@ pub struct OperationQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
-    /// Only operations of this service.
+    /// Only operations of this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     /// Only entry spans (kind SERVER/CONSUMER or root spans). Default true.
     pub entry_only: Option<bool>,
@@ -392,6 +393,8 @@ pub struct SpanSeriesQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
+    /// Only this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     pub operation: Option<String>,
     /// Bucket width, e.g. `30s`, `5m`. Default picks ~60 buckets.
@@ -429,7 +432,8 @@ pub struct TraceQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
-    /// Match traces with a span from this service.
+    /// Match traces with a span from this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     /// Match traces with a span with this name.
     pub operation: Option<String>,
@@ -528,6 +532,8 @@ pub struct LogQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
+    /// Only this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     /// Minimum severity number (1-24). 9=INFO, 13=WARN, 17=ERROR, 21=FATAL.
     pub min_severity: Option<u8>,
@@ -571,6 +577,8 @@ pub struct LogSeriesQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
+    /// Only this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     pub q: Option<String>,
     pub step: Option<String>,
@@ -610,6 +618,8 @@ pub struct MetricListQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
+    /// Only this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     /// Substring filter on the metric name.
     pub q: Option<String>,
@@ -639,6 +649,8 @@ pub struct MetricQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
+    /// Only this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     /// Aggregation: `avg` (default for gauges), `min`, `max`, `sum`,
     /// `rate` (per-second increase, default for monotonic sums), `increase`,
@@ -721,11 +733,15 @@ pub struct AttributeQuery {
     pub to: Option<DateTime<Utc>>,
     /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
     pub since: Option<String>,
+    /// Only this service; repeat for several (at most 50).
+    #[param(value_type = Option<Vec<String>>, style = Form, explode)]
     pub service: Option<String>,
     /// Only this metric (signal `metrics` only).
     pub metric: Option<String>,
     /// Top values of this key instead of the keys.
     pub key: Option<String>,
+    /// Only keys, or with `key` only values, that start with this (any case).
+    pub prefix: Option<String>,
     /// Max keys or values returned (default 50, max 1000).
     pub limit: Option<u32>,
 }
@@ -733,10 +749,14 @@ pub struct AttributeQuery {
 /// Attribute keys (or values of one key) with how many sampled rows have them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AttributeStats {
-    /// Matching rows in the window.
+    /// Matching rows since `counted_from`.
     pub total_rows: u64,
     /// Rows counted: a random sample of at most 10,000 of the matching rows.
     pub sampled_rows: u64,
+    /// The rows looked at start here: the newest part of the window with enough
+    /// rows (at least 500,000), or the start of the window. A value seen only
+    /// before this is not listed.
+    pub counted_from: DateTime<Utc>,
     /// Most frequent first.
     pub items: Vec<AttributeCount>,
 }
@@ -801,6 +821,9 @@ pub struct SqlColumn {
     #[serde(rename = "type")]
     pub data_type: String,
 }
+
+/// Most `service` parameters in one request.
+pub const MAX_SERVICE_FILTERS: usize = 50;
 
 /// Query types that carry a time window (`from`, `to`, `since`).
 pub trait HasWindow {

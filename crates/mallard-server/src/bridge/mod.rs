@@ -35,6 +35,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::api::service_slug;
 use crate::config::BridgeConfig;
 use exception::OtelException;
 
@@ -497,34 +498,9 @@ impl Ctx {
     }
 }
 
-/// A valid project slug for a service name (`unknown_service:node` →
-/// `unknown-service-node`).
-fn service_slug(service: &str) -> String {
-    let mut s = mallard_sentry_api::slugify(service);
-    s.truncate(64);
-    let s = s.trim_end_matches('-').to_string();
-    if s.is_empty() {
-        "unknown-service".into()
-    } else if s.bytes().all(|b| b.is_ascii_digit()) {
-        format!("service-{s}")
-    } else {
-        s
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn service_names_become_valid_slugs() {
-        assert_eq!(service_slug("checkout"), "checkout");
-        assert_eq!(service_slug("Checkout API"), "checkout-api");
-        assert_eq!(service_slug("unknown_service:node"), "unknown-service-node");
-        assert_eq!(service_slug("42"), "service-42");
-        assert_eq!(service_slug("::"), "unknown-service");
-        assert_eq!(service_slug(&"a".repeat(80)).len(), 64);
-    }
 
     fn request(ids: &[(u8, u8)]) -> ExportTraceServiceRequest {
         use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};

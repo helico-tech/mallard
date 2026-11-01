@@ -6,11 +6,13 @@
 //! - `/api/0/...`   sentry-cli's API again (it only accepts a URL root)
 //! - `/otel/...`    telemetry query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
+//! - `/api/v1/apps`, `/api/v1/find`  what spans both sides (ADR 0027)
 //! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
 //!   when that is set)
 //!
 //! OTLP/gRPC is served on `server.otlp_grpc_addr`.
 
+pub mod api;
 pub mod bridge;
 pub mod commands;
 pub mod config;
@@ -109,7 +111,9 @@ impl Platform {
     /// Everything served on `server.http_addr`.
     pub fn http_router(&self) -> Router {
         let (sentry, otel) = (self.sentry.clone(), self.otel.clone());
+        let api_state = Arc::new(api::ApiState { otel: self.otel.clone(), sentry: self.sentry.clone() });
         let mut r = Router::new()
+            .merge(api::router(api_state, &self.cfg.server.api_tokens))
             .nest(SENTRY_PREFIX, self.sentry.router())
             .nest_service(SENTRY_CLI_PREFIX, sentry_cli_at_root(self.sentry.router()))
             .nest(OTEL_PREFIX, self.otel.api_router())

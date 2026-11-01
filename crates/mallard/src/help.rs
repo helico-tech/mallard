@@ -30,6 +30,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
         &["setup"],
         "mallard setup checkout --platform node >> .env\n  mallard setup checkout --json   # {\"project\":…,\"created\":false,\"env\":{…}}\n  mallard setup checkout --sentry-cli >> .env   # adds SENTRY_URL, SENTRY_ORG, SENTRY_PROJECT, SENTRY_AUTH_TOKEN",
     ),
+    (&["apps"], "mallard apps --since 7d\n  mallard apps --json --fields slug,project,services"),
     (
         &["find"],
         "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue or span\n  mallard find 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if nothing arrives",

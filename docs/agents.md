@@ -72,6 +72,13 @@ mallard find <trace-id> --wait 30s
 mallard logs -S checkout -q "order 42" --since 5m --wait 20s
 ```
 
+**Which apps are there?** An app is a project and the services with the same slug, or
+either alone. `project` is null without a project, `services` empty without telemetry
+in the window. Use the slug with `-p`; use a name from `services` with `-S`.
+```sh
+mallard apps --since 7d --json --fields slug,project,services
+```
+
 **What is this id?** (pasted from a log or a bug report)
 ```sh
 mallard find <32-hex trace or event id | 16-hex issue or span id>   # each match has "next": the command to run

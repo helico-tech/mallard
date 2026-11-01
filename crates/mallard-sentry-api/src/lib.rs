@@ -506,6 +506,48 @@ pub struct WindowRange {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct TagQuery {
+    /// Window, e.g. `1h`, `14d`, ending at `to` (default `14d`). Ignored when `from` is set.
+    pub since: Option<String>,
+    /// Top values of this tag instead of the tag keys.
+    pub key: Option<String>,
+    /// Only keys, or with `key` only values, that start with this (any case).
+    pub prefix: Option<String>,
+    /// Max keys or values returned (default 50, max 1000).
+    pub limit: Option<u32>,
+}
+
+/// Tag keys (or values of one key) with how many sampled events have them.
+/// The same shape as the telemetry side's `/api/v1/attributes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TagStats {
+    /// Matching events since `counted_from`.
+    pub total_rows: u64,
+    /// Events counted: a sample of at most 10,000 of the matching events.
+    pub sampled_rows: u64,
+    /// The events looked at start here: the newest part of the window with enough
+    /// events (at least 500,000), or the start of the window. A value seen only
+    /// before this is not listed.
+    pub counted_from: DateTime<Utc>,
+    /// Most frequent first.
+    pub items: Vec<TagCount>,
+}
+
+/// One tag key, or one value of the key asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TagCount {
+    pub key: String,
+    /// The value, when a `key` was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Sampled events with this key (or value).
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
 pub struct WindowQuery {
     /// Window, e.g. `24h`, `14d` (default `24h` for stats, `14d` for issues).
     pub since: Option<String>,
