@@ -477,6 +477,23 @@ fn status_renders() {
 }
 
 #[test]
+fn status_shows_throttled_requests_in_every_layout() {
+    let mut e = fixture();
+    let _ = e.handle_event(&ch('5'));
+    e.stats.as_mut().unwrap().ingest.signals[0].throttled_requests = 7;
+    // The narrowest side-by-side layout, and the widest stacked one.
+    for (w, h) in [(120, 30), (119, 30)] {
+        let s = render(&mut e, w, h);
+        let header = s.lines().find(|l| l.contains("signal")).unwrap();
+        for col in ["requests", "accepted", "throttled", "thr reqs", "invalid"] {
+            assert!(header.contains(col), "{w} wide: missing {col:?} in\n{s}");
+        }
+        let traces = s.lines().find(|l| l.contains("traces")).unwrap();
+        assert!(traces.contains('7'), "{w} wide:\n{s}");
+    }
+}
+
+#[test]
 fn global_keys() {
     let mut e = fixture();
     assert_eq!(e.handle_event(&key(KeyCode::F(1))), Outcome::Ignored);

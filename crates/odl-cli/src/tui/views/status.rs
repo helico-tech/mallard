@@ -27,7 +27,8 @@ impl Embedded {
             widgets::placeholder(f, inner, &msg, style);
             return;
         };
-        let wide = area.width >= 100;
+        // The ingest table needs 52 columns inside its panel (45% of 120).
+        let wide = area.width >= 120;
         let [left, right] = if wide {
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area)
         } else {
@@ -63,9 +64,10 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
                 Cell::from(sig.signal.as_str()).style(theme::text()),
                 Cell::from(Line::from(compact(sig.requests as f64)).right_aligned()).style(theme::dim()),
                 Cell::from(Line::from(compact(sig.accepted as f64)).right_aligned()).style(theme::bold()),
-                // Throttled items are retried by exporters (a warning);
-                // invalid ones are lost (an error).
+                // Throttled items and requests are retried by exporters (a
+                // warning); invalid ones are lost (an error).
                 count_cell(sig.throttled, Style::new().fg(theme::YELLOW)),
+                count_cell(sig.throttled_requests, Style::new().fg(theme::YELLOW)),
                 count_cell(sig.invalid, theme::error()),
             ])
         })
@@ -75,6 +77,7 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
         Cell::from(Line::from("requests").right_aligned()),
         Cell::from(Line::from("accepted").right_aligned()),
         Cell::from(Line::from("throttled").right_aligned()),
+        Cell::from(Line::from("thr reqs").right_aligned()),
         Cell::from(Line::from("invalid").right_aligned()),
     ])
     .style(theme::header_row());
@@ -83,10 +86,11 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
             rows,
             [
                 Constraint::Fill(1),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(10),
                 Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Length(9),
+                Constraint::Length(8),
+                Constraint::Length(7),
             ],
         )
         .header(header),

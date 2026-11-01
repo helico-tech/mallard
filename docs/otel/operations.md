@@ -4,7 +4,7 @@
 
 - `GET /api/v1/health`: liveness/readiness (no auth).
 - `odl status` / `GET /api/v1/stats`: requests, accepted, throttled and
-  invalid items per signal, and `throttled_requests` (API only); buffer fill; flush count, errors and duration; rows, files,
+  invalid items per signal, and `throttled_requests` (requests refused before their body was read); buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
 - Prometheus (mallard's `/metrics`): `odl_ingest_requests_total`,
   `odl_ingest_items_total` (label `signal`),
