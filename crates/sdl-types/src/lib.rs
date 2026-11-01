@@ -399,7 +399,8 @@ pub struct SqlResponse {
     /// or JSON objects.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<Vec<Object>>))]
     pub rows: Vec<Vec<serde_json::Value>>,
-    /// True when more rows existed than `limit`.
+    /// True when more rows existed than `limit`, or the rows reached the
+    /// server's size cap (32 MiB of row data).
     pub truncated: bool,
     pub elapsed_ms: f64,
 }

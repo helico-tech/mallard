@@ -2079,7 +2079,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when more rows existed than `limit`."
+            "description": "True when more rows existed than `limit`, or the rows reached the\nserver's size cap (32 MiB of row data)."
           }
         }
       },
