@@ -295,6 +295,10 @@ async fn ingest_auth_compression_cors_and_dedupe() {
     let r = t.http.post(format!("{url}?sentry_key={key}")).body("not json").send().await.unwrap();
     assert_eq!(r.status(), 400);
 
+    // A cursor that does not parse is an error, not the first page again.
+    let (s, _) = t.api(reqwest::Method::GET, "/v1/projects/web/events?before=garbage", None).await;
+    assert_eq!(s, 400);
+
     // Management API requires the token.
     let r = t.http.get(format!("{}/v1/projects", t.base)).send().await.unwrap();
     assert_eq!(r.status(), 401);

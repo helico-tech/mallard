@@ -287,7 +287,9 @@ async fn list_events(State(state): S, Path(p): Path<String>, Query(q): Query<Eve
     if q.trace_id.as_deref().is_some_and(|t| sdl_protocol::event::parse_trace_id(t).is_none()) {
         return Err(bad("trace_id must be 32 hex characters"));
     }
-    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q)).await?))
+    let before =
+        q.before.as_deref().map(|c| read::Cursor::parse(c).ok_or_else(|| bad("invalid cursor"))).transpose()?;
+    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, before)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/events", params(TraceQuery),

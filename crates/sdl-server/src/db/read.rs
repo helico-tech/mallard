@@ -14,8 +14,9 @@ pub fn group_id(hash: u64) -> String {
     format!("{hash:016x}")
 }
 
+/// 16 hex digits (no sign, which `from_str_radix` would accept).
 pub fn parse_group_id(s: &str) -> Option<u64> {
-    (s.len() == 16).then(|| u64::from_str_radix(s, 16).ok()).flatten()
+    (s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| u64::from_str_radix(s, 16).ok()).flatten()
 }
 
 pub const TREND_BUCKETS: i64 = 24;
@@ -139,36 +140,44 @@ pub fn list_issues(
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
 
     let mut filters = String::new();
-    let mut filter_params: Vec<Box<dyn ToSql>> = Vec::new();
+    let mut filter_values: Vec<&String> = Vec::new();
     if let Some(env) = &q.environment {
         filters.push_str(" AND environment = ?");
-        filter_params.push(Box::new(env.clone()));
+        filter_values.push(env);
     }
     if let Some(rel) = &q.release {
         filters.push_str(" AND release = ?");
-        filter_params.push(Box::new(rel.clone()));
+        filter_values.push(rel);
     }
+    let (pid, start_us) = (project_id as i32, w.start_us());
 
     // Phase 1: rank issues with cheap aggregates only (count, max). Distinct
     // users are only computed for all groups when sorting by them, and then
     // approximately.
     let users_expr = if sort == IssueSort::Users { "approx_count_distinct(user_key)" } else { "0" };
     let sort = sort.column();
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
-    p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
-    p.push(Box::new(project_id as i32)); // st
-    p.push(Box::new(project_id as i32)); // issues join
-    p.push(Box::new(status));
-    p.push(Box::new(status));
-    let mut search = String::new();
-    if let Some(text) = q.query.as_ref().filter(|t| !t.trim().is_empty()) {
-        // Matches the issue's first title and culprit.
-        search.push_str(r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')");
-        let like = format!("%{}%", text.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-        p.push(Box::new(like.clone()));
-        p.push(Box::new(like));
-    }
-    p.push(Box::new(limit));
+    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us];
+    p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
+    p.push(&pid); // st
+    p.push(&pid); // issues join
+    p.push(&status);
+    p.push(&status);
+    // Text search matches the issue's first title and culprit.
+    let like = q
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|text| format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+    let search = match &like {
+        Some(like) => {
+            p.push(like);
+            p.push(like);
+            r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')"
+        }
+        None => "",
+    };
+    p.push(&limit);
     let sql = ns.sql(&format!(
         "WITH agg AS (
             SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, {users_expr} AS users
@@ -190,7 +199,7 @@ pub fn list_issues(
          LIMIT ?"
     ));
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+    let rows = stmt.query_map(params_from_iter(p), |r| {
         Ok(IssueSummary {
             id: group_id(r.get(0)?),
             project_id,
@@ -216,8 +225,8 @@ pub fn list_issues(
     // Phase 2: exact users and the latest title/culprit/level, only for the
     // issues on this page.
     let list = groups.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
-    p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
+    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us];
+    p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
     let sql = ns.sql(&format!(
         "SELECT group_hash, count(DISTINCT user_key), arg_max(title, received_at), arg_max(culprit, received_at),
                 arg_max(level, received_at)
@@ -227,7 +236,7 @@ pub fn list_issues(
     ));
     let mut stmt = conn.prepare(&sql)?;
     let mut latest: HashMap<u64, (u64, String, Option<String>, String)> = HashMap::new();
-    for row in stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+    for row in stmt.query_map(params_from_iter(p), |r| {
         Ok((r.get::<_, u64>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?, r.get(4)?))
     })? {
         let (g, users, title, culprit, level) = row?;
@@ -247,17 +256,6 @@ pub fn list_issues(
         }
     }
     Ok(IssueList { issues, window_start: w.start, window_end: w.end })
-}
-
-/// Filter params are strings; rebuild them for a second statement.
-fn clone_param(p: &dyn ToSql) -> Box<dyn ToSql> {
-    match p.to_sql() {
-        Ok(duckdb::types::ToSqlOutput::Owned(duckdb::types::Value::Text(s))) => Box::new(s),
-        Ok(duckdb::types::ToSqlOutput::Borrowed(duckdb::types::ValueRef::Text(b))) => {
-            Box::new(String::from_utf8_lossy(b).into_owned())
-        }
-        _ => Box::new(Option::<String>::None),
-    }
 }
 
 pub fn issue_detail(
@@ -425,6 +423,7 @@ pub fn list_events(
     project_id: u32,
     group: Option<u64>,
     q: &EventQuery,
+    before: Option<Cursor>,
 ) -> Result<EventList> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
     let mut sql = format!("SELECT {EVENT_COLUMNS} FROM $S.events WHERE project_id = ?");
@@ -442,8 +441,7 @@ pub fn list_events(
         p.push(Box::new(t.to_string()));
         p.push(Box::new(since));
     }
-    // Cursor: "<received_at micros>:<event_id>" (ties broken by event id).
-    if let Some((us, id)) = q.before.as_deref().and_then(parse_cursor) {
+    if let Some(Cursor { us, id }) = before {
         match id {
             Some(id) => {
                 sql.push_str(" AND (received_at < make_timestamp(?) OR (received_at = make_timestamp(?) AND event_id < ?::UUID))");
@@ -496,10 +494,20 @@ pub fn events_by_trace(
 /// Days searched by trace id lookups.
 pub const TRACE_WINDOW_DAYS: i64 = 30;
 
-fn parse_cursor(c: &str) -> Option<(i64, Option<uuid::Uuid>)> {
-    match c.split_once(':') {
-        Some((us, id)) => Some((us.parse().ok()?, Some(uuid::Uuid::try_parse(id).ok()?))),
-        None => Some((c.parse().ok()?, None)),
+/// Paging cursor `"<received_at micros>:<event_id>"` (ties broken by event
+/// id); a bare `"<micros>"` is accepted too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    us: i64,
+    id: Option<uuid::Uuid>,
+}
+
+impl Cursor {
+    pub fn parse(c: &str) -> Option<Cursor> {
+        match c.split_once(':') {
+            Some((us, id)) => Some(Cursor { us: us.parse().ok()?, id: Some(uuid::Uuid::try_parse(id).ok()?) }),
+            None => Some(Cursor { us: c.parse().ok()?, id: None }),
+        }
     }
 }
 
@@ -786,6 +794,32 @@ mod tests {
     use super::*;
 
     const DAY_US: i64 = 86_400_000_000;
+
+    #[test]
+    fn cursors() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(Cursor::parse(&format!("123:{}", id.simple())), Some(Cursor { us: 123, id: Some(id) }));
+        assert_eq!(Cursor::parse("-5"), Some(Cursor { us: -5, id: None }));
+        assert_eq!(Cursor::parse("abc"), None);
+        assert_eq!(Cursor::parse("123:not-a-uuid"), None);
+    }
+
+    #[test]
+    fn group_ids_are_strict_hex() {
+        assert_eq!(parse_group_id("00f067aa0ba902b7"), Some(0x00f067aa0ba902b7));
+        assert_eq!(parse_group_id("+00f067aa0ba902b"), None);
+        assert_eq!(parse_group_id("00f067aa0ba902b"), None);
+    }
+
+    #[test]
+    fn windows() {
+        let now = Utc::now();
+        let w = Window::parse(None, "14d", now).unwrap();
+        assert_eq!(w.end - w.start, chrono::Duration::days(14));
+        assert_eq!(Window::parse(Some("1h"), "14d", now).unwrap().span_us(), 3_600_000_000);
+        assert!(Window::parse(Some("soon"), "14d", now).is_err());
+        assert!(Window::parse(Some("100000000y"), "14d", now).is_err(), "too large");
+    }
 
     #[test]
     fn issue_list_filters() {
