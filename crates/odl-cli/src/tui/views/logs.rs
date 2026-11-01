@@ -180,7 +180,7 @@ impl Embedded {
         if (!self.logs.requested && self.logs.retry_at.is_none_or(|t| Instant::now() >= t)) || force {
             let mut q = self.logs.base_query(since.clone());
             q.limit = Some(1000);
-            q.order = Some("desc".into());
+            q.order = Some(LogOrder::Desc);
             let c = self.client.clone();
             self.loader.cancel(Kind::LogTail);
             if self.loader.spawn(Kind::Logs, async move { c.logs(&q).await }, Data::Logs) {

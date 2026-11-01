@@ -214,7 +214,7 @@ impl LogTail {
                 q.since = None;
             }
         }
-        q.order = Some("desc".into());
+        q.order = Some(LogOrder::Desc);
         let limit = q.limit.unwrap_or(500).clamp(1, 5000);
         q.limit = Some(limit);
         let mut records = self.client.logs(&q).await?;

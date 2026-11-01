@@ -322,6 +322,15 @@ impl Filter {
     }
 }
 
+/// Read a text column holding one value of a closed set (e.g. a span kind).
+/// NULL reads as the empty string. An unknown value is an error.
+pub fn enum_col<T: std::str::FromStr<Err = odl_api::UnknownValue>>(r: &duckdb::Row, i: usize) -> duckdb::Result<T> {
+    let s: Option<String> = r.get(i)?;
+    s.unwrap_or_default()
+        .parse()
+        .map_err(|e| duckdb::Error::FromSqlConversionFailure(i, duckdb::types::Type::Text, Box::new(e)))
+}
+
 /// Parse a JSON column produced by `to_json(...)` into a value.
 pub fn json_col<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
     s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()

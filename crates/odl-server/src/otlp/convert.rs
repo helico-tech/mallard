@@ -20,6 +20,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use base64::Engine as _;
+use odl_api::{MetricType, SpanKind, SpanStatus, Temporality};
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
@@ -235,22 +236,22 @@ struct SpanCols {
     ln_attrs: Option<AttrCol>,
 }
 
-pub fn span_kind(k: i32) -> &'static str {
+fn span_kind(k: i32) -> SpanKind {
     match k {
-        1 => "INTERNAL",
-        2 => "SERVER",
-        3 => "CLIENT",
-        4 => "PRODUCER",
-        5 => "CONSUMER",
-        _ => "UNSPECIFIED",
+        1 => SpanKind::Internal,
+        2 => SpanKind::Server,
+        3 => SpanKind::Client,
+        4 => SpanKind::Producer,
+        5 => SpanKind::Consumer,
+        _ => SpanKind::Unspecified,
     }
 }
 
-fn status_code(c: i32) -> &'static str {
+fn status_code(c: i32) -> SpanStatus {
     match c {
-        1 => "OK",
-        2 => "ERROR",
-        _ => "UNSET",
+        1 => SpanStatus::Ok,
+        2 => SpanStatus::Error,
+        _ => SpanStatus::Unset,
     }
 }
 
@@ -307,9 +308,9 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
                 c.parent.append_option(span_id(&s.parent_span_id));
                 c.service.append_value(&res.service);
                 c.name.append_value(&s.name);
-                c.kind.append_value(span_kind(s.kind));
+                c.kind.append_value(span_kind(s.kind).as_str());
                 let (code, msg) = s.status.as_ref().map(|st| (st.code, st.message.as_str())).unwrap_or((0, ""));
-                c.status_code.append_value(status_code(code));
+                c.status_code.append_value(status_code(code).as_str());
                 c.status_message.append_value(msg);
                 c.trace_state.append_value(&s.trace_state);
                 c.flags.append_value(s.flags);
@@ -494,7 +495,7 @@ struct MetricCtx<'a> {
     name: &'a str,
     description: &'a str,
     unit: &'a str,
-    temporality: &'static str,
+    temporality: Temporality,
     /// Data point kind, part of the series identity.
     kind: &'static str,
 }
@@ -527,7 +528,7 @@ impl MetricBase {
         self.name.append_value(m.name);
         self.description.append_value(m.description);
         self.unit.append_value(m.unit);
-        self.temporality.append_value(m.temporality);
+        self.temporality.append_value(m.temporality.as_str());
         self.series.append_value(series_id(m.res_hash, (m.scope_name, m.scope_version), m.name, m.kind, &a));
         self.flags.append_value(flags);
         self.scope_name.append_value(m.scope_name);
@@ -590,11 +591,11 @@ fn series_id(res_hash: u64, scope: (&str, &str), name: &str, kind: &str, a: &[(S
     h.digest()
 }
 
-fn temporality(t: i32) -> &'static str {
+fn temporality(t: i32) -> Temporality {
     match t {
-        1 => "delta",
-        2 => "cumulative",
-        _ => "",
+        1 => Temporality::Delta,
+        2 => Temporality::Cumulative,
+        _ => Temporality::Unspecified,
     }
 }
 
@@ -656,7 +657,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     name: &m.name,
                     description: &m.description,
                     unit: &m.unit,
-                    temporality: "",
+                    temporality: Temporality::Unspecified,
                     kind: "",
                 };
                 match &m.data {
@@ -664,7 +665,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         ctx.kind = "gauge";
                         for p in &g.data_points {
                             np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
-                            np_type.append_value("gauge");
+                            np_type.append_value(MetricType::Gauge.as_str());
                             np_mono.append_value(false);
                             np_value.append_option(number_value(p.value.as_ref()));
                         }
@@ -674,7 +675,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         ctx.temporality = temporality(sum.aggregation_temporality);
                         for p in &sum.data_points {
                             np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
-                            np_type.append_value("sum");
+                            np_type.append_value(MetricType::Sum.as_str());
                             np_mono.append_value(sum.is_monotonic);
                             np_value.append_option(number_value(p.value.as_ref()));
                         }

@@ -97,7 +97,7 @@ pub fn bar(offset_ns: i64, duration_ns: i64, total_ns: i64, width: u16) -> (u16,
 pub mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use odl_client::api::Span;
+    use odl_client::api::{Span, SpanKind, SpanStatus};
 
     pub fn span(id: &str, parent: Option<&str>, start_ms: i64, dur_ms: i64) -> Span {
         Span {
@@ -105,11 +105,11 @@ pub mod tests {
             span_id: id.into(),
             parent_span_id: parent.map(str::to_string),
             name: format!("op-{id}"),
-            kind: "SERVER".into(),
+            kind: SpanKind::Server,
             service_name: "svc".into(),
             start_time: Utc.timestamp_millis_opt(1_700_000_000_000 + start_ms).unwrap(),
             duration_ns: dur_ms * 1_000_000,
-            status_code: "UNSET".into(),
+            status_code: SpanStatus::Unset,
             status_message: String::new(),
             trace_state: String::new(),
             scope_name: String::new(),

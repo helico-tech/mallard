@@ -9,7 +9,9 @@ use odl_api::{
 };
 use serde::Deserialize;
 
-use super::{Filter, QResult, QueryError, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
+use super::{
+    Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, parse_trace_id, span_hex, trace_hex,
+};
 
 /// Entry spans: where requests enter a service.
 const ENTRY: &str = "(kind IN ('SERVER', 'CONSUMER') OR parent_span_id IS NULL)";
@@ -78,7 +80,7 @@ pub fn operations(
     let mut stmt = conn.prepare(&sql)?;
     let secs = w.secs();
     let rows = stmt.query_map(params_from_iter(f.params), |r| {
-        Ok(OperationSummary { service: r.get(0)?, name: r.get(1)?, kind: r.get(2)?, red: red(r, 3, secs)? })
+        Ok(OperationSummary { service: r.get(0)?, name: r.get(1)?, kind: enum_col(r, 2)?, red: red(r, 3, secs)? })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -256,11 +258,11 @@ pub fn span_from_row(r: &duckdb::Row) -> duckdb::Result<Span> {
         span_id: r.get(1)?,
         parent_span_id: r.get(2)?,
         name: r.get(3)?,
-        kind: r.get(4)?,
+        kind: enum_col(r, 4)?,
         service_name: r.get(5)?,
         start_time: from_micros(r.get(6)?),
         duration_ns: r.get(7)?,
-        status_code: r.get(8)?,
+        status_code: enum_col(r, 8)?,
         status_message: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
         trace_state: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
         scope_name: r.get::<_, Option<String>>(11)?.unwrap_or_default(),

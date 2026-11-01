@@ -146,7 +146,7 @@ pub fn print_stats(s: &Stats, url: &str) {
     let mut t = table(&["signal", "requests", "accepted", "rejected"]);
     for sig in &i.signals {
         t.add_row(vec![
-            Cell::new(&sig.signal),
+            Cell::new(sig.signal),
             num(sig.requests as f64),
             num(sig.accepted as f64),
             num(sig.rejected as f64),
@@ -216,8 +216,11 @@ pub fn print_operations(v: &[OperationSummary]) {
     }
     let mut t = table(&["service", "operation", "kind", "spans", "rate", "errors", "p50", "p95", "p99"]);
     for s in v {
-        let mut row =
-            vec![Cell::new(&s.service), Cell::new(&s.name), Cell::new(s.kind.to_lowercase()).fg(Color::DarkGrey)];
+        let mut row = vec![
+            Cell::new(&s.service),
+            Cell::new(&s.name),
+            Cell::new(s.kind.as_str().to_lowercase()).fg(Color::DarkGrey),
+        ];
         row.extend(red_cells(&s.red));
         t.add_row(row);
     }
@@ -286,9 +289,9 @@ pub fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
         let (a, len) = crate::tui::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
         let (a, len) = (a as usize, len as usize);
         let bar = format!("{}{}{}", " ".repeat(a), "█".repeat(len), " ".repeat(width.saturating_sub(a + len)));
-        let bar = if s.status_code == "ERROR" { bar.red().to_string() } else { bar.cyan().to_string() };
+        let bar = if s.status_code == SpanStatus::Error { bar.red().to_string() } else { bar.cyan().to_string() };
         let label = format!("{}{} {}", row.prefix, s.service_name.bold(), s.name);
-        let err = if s.status_code == "ERROR" { format!(" {}", "✗".red()) } else { String::new() };
+        let err = if s.status_code == SpanStatus::Error { format!(" {}", "✗".red()) } else { String::new() };
         outln!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6));
         if show_attrs {
             let indent = " ".repeat(row.depth * 2 + 2);
@@ -361,7 +364,7 @@ pub fn print_metrics(v: &[MetricInfo]) {
             Cell::new(format!(
                 "{}{}",
                 m.metric_type,
-                if m.temporality.is_empty() { String::new() } else { format!(" ({})", m.temporality) }
+                if m.temporality == Temporality::Unspecified { String::new() } else { format!(" ({})", m.temporality) }
             )),
             Cell::new(&m.unit),
             num(m.series_count as f64),

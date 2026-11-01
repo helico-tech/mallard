@@ -298,7 +298,7 @@ impl Embedded {
                 .map(|op| {
                     let mut cells = vec![
                         Cell::from(op.name.clone()).style(theme::text()),
-                        Cell::from(op.kind.to_lowercase()).style(theme::muted()),
+                        Cell::from(op.kind.as_str().to_lowercase()).style(theme::muted()),
                     ];
                     cells.extend(red_cells(&op.red));
                     Row::new(cells)

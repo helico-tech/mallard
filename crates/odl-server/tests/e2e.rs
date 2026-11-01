@@ -294,8 +294,8 @@ async fn traces_roundtrip() {
     assert_eq!(root.span_id, "0000000000000001");
     assert_eq!(root.parent_span_id, None);
     assert_eq!(root.service_name, "checkout");
-    assert_eq!(root.kind, "SERVER");
-    assert_eq!(root.status_code, "ERROR");
+    assert_eq!(root.kind, SpanKind::Server);
+    assert_eq!(root.status_code, SpanStatus::Error);
     assert_eq!(root.duration_ns, 120_000_000);
     assert_eq!(root.attributes["http.route"], "/checkout");
     assert_eq!(root.resource_attributes["host.name"], "h1");
@@ -404,10 +404,10 @@ async fn metrics_queries() {
         })
         .await;
     let counter = list.iter().find(|m| m.name == "http.requests").unwrap();
-    assert_eq!(counter.metric_type, "sum");
+    assert_eq!(counter.metric_type, MetricType::Sum);
     assert_eq!(counter.series_count, 2);
-    assert_eq!(counter.temporality, "cumulative");
-    assert!(list.iter().any(|m| m.metric_type == "histogram"));
+    assert_eq!(counter.temporality, Temporality::Cumulative);
+    assert!(list.iter().any(|m| m.metric_type == MetricType::Histogram));
 
     // Counter rate per route: /a grows 100/min, /b 50/min.
     let r: MetricQueryResult = h.get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&group_by=route").await;

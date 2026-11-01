@@ -64,7 +64,7 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
         .iter()
         .map(|sig| {
             Row::new(vec![
-                Cell::from(sig.signal.clone()).style(theme::text()),
+                Cell::from(sig.signal.as_str()).style(theme::text()),
                 Cell::from(Line::from(compact(sig.requests as f64)).right_aligned()).style(theme::dim()),
                 Cell::from(Line::from(compact(sig.accepted as f64)).right_aligned()).style(theme::bold()),
                 Cell::from(Line::from(compact(sig.rejected as f64)).right_aligned()).style(if sig.rejected > 0 {
@@ -145,7 +145,7 @@ fn draw_storage(f: &mut Frame, area: Rect, s: &Stats) {
     };
     f.render_widget(
         Paragraph::new(vec![
-            kv("catalog", st.catalog_type.clone(), theme::accent()),
+            kv("catalog", st.catalog_type.to_string(), theme::accent()),
             kv("data", st.data_path.clone(), theme::text()),
             kv("snapshot", st.snapshot_id.to_string(), theme::text()),
         ]),

@@ -11,17 +11,17 @@ use odl_api::{FlushInfo, IngestStats, MaintenanceInfo, SignalIngestStats};
 use crate::store::schema::Signal;
 
 #[derive(Default)]
-pub struct SignalCounters {
-    pub requests: AtomicU64,
-    pub accepted: AtomicU64,
-    pub rejected: AtomicU64,
+struct SignalCounters {
+    requests: AtomicU64,
+    accepted: AtomicU64,
+    rejected: AtomicU64,
 }
 
 #[derive(Default)]
 pub struct Stats {
-    pub traces: SignalCounters,
-    pub logs: SignalCounters,
-    pub metrics: SignalCounters,
+    traces: SignalCounters,
+    logs: SignalCounters,
+    metrics: SignalCounters,
     buffered_rows: AtomicU64,
     buffered_bytes: AtomicU64,
     flushes: AtomicU64,
@@ -33,7 +33,7 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn signal(&self, s: Signal) -> &SignalCounters {
+    fn signal(&self, s: Signal) -> &SignalCounters {
         match s {
             Signal::Traces => &self.traces,
             Signal::Logs => &self.logs,
@@ -79,14 +79,17 @@ impl Stats {
     }
 
     pub fn ingest(&self, max_buffer_bytes: u64) -> IngestStats {
-        let sig = |name: &str, c: &SignalCounters| SignalIngestStats {
-            signal: name.to_string(),
-            requests: c.requests.load(Relaxed),
-            accepted: c.accepted.load(Relaxed),
-            rejected: c.rejected.load(Relaxed),
+        let sig = |s: Signal| {
+            let c = self.signal(s);
+            SignalIngestStats {
+                signal: s,
+                requests: c.requests.load(Relaxed),
+                accepted: c.accepted.load(Relaxed),
+                rejected: c.rejected.load(Relaxed),
+            }
         };
         IngestStats {
-            signals: vec![sig("traces", &self.traces), sig("logs", &self.logs), sig("metrics", &self.metrics)],
+            signals: [Signal::Traces, Signal::Logs, Signal::Metrics].map(sig).to_vec(),
             buffered_rows: self.buffered_rows.load(Relaxed),
             buffered_bytes: self.buffered_bytes.load(Relaxed),
             max_buffer_bytes,

@@ -121,7 +121,7 @@ impl Server {
             stats: stats.clone(),
             tokens: Tokens::new(&cfg.auth.api_tokens),
             schema: lake.schema.clone(),
-            catalog_type: lake.catalog_kind.as_str().to_string(),
+            catalog_type: lake.catalog_kind,
             data_path: lake.data_path.clone(),
             max_buffer_bytes,
             enable_sql: cfg.query.enable_sql,

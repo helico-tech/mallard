@@ -19,6 +19,121 @@ use utoipa::{IntoParams, ToSchema};
 /// Attribute map. Values are stringified OTLP `AnyValue`s (see docs/data-model.md).
 pub type Attributes = BTreeMap<String, String>;
 
+/// A string that is not one of the values of a closed set.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {kind} {value:?}")]
+pub struct UnknownValue {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+/// A closed set of values sent as strings: serde names, `as_str`,
+/// `Display` and `FromStr` from one list.
+macro_rules! string_enum {
+    ($(#[$m:meta])* $name:ident: $kind:literal { $($(#[$vm:meta])* $v:ident = $s:literal),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+        pub enum $name {
+            $($(#[$vm])* #[serde(rename = $s)] $v),+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $($name::$v => $s),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = UnknownValue;
+
+            fn from_str(s: &str) -> Result<Self, UnknownValue> {
+                match s {
+                    $($s => Ok($name::$v),)+
+                    _ => Err(UnknownValue { kind: $kind, value: s.to_string() }),
+                }
+            }
+        }
+    };
+}
+
+string_enum! {
+    /// OTLP span kind.
+    SpanKind: "span kind" {
+        Unspecified = "UNSPECIFIED",
+        Internal = "INTERNAL",
+        Server = "SERVER",
+        Client = "CLIENT",
+        Producer = "PRODUCER",
+        Consumer = "CONSUMER",
+    }
+}
+
+string_enum! {
+    /// OTLP span status code.
+    SpanStatus: "span status" {
+        Unset = "UNSET",
+        Ok = "OK",
+        Error = "ERROR",
+    }
+}
+
+string_enum! {
+    /// Kind of metric data point.
+    MetricType: "metric type" {
+        Gauge = "gauge",
+        Sum = "sum",
+        Histogram = "histogram",
+        ExponentialHistogram = "exponential_histogram",
+        Summary = "summary",
+    }
+}
+
+string_enum! {
+    /// Aggregation temporality of sums and histograms; empty for gauges and summaries.
+    Temporality: "temporality" {
+        Unspecified = "",
+        Delta = "delta",
+        Cumulative = "cumulative",
+    }
+}
+
+string_enum! {
+    /// Telemetry signal.
+    Signal: "signal" {
+        Traces = "traces",
+        Logs = "logs",
+        Metrics = "metrics",
+    }
+}
+
+string_enum! {
+    /// DuckLake catalog backend.
+    CatalogType: "catalog type" {
+        DuckDb = "duckdb",
+        Sqlite = "sqlite",
+        Postgres = "postgres",
+        MySql = "mysql",
+    }
+}
+
+string_enum! {
+    /// Sort order of log records.
+    LogOrder: "order" {
+        /// Oldest first.
+        Asc = "asc",
+        /// Newest first (default).
+        Desc = "desc",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors & health
 // ---------------------------------------------------------------------------
@@ -92,8 +207,7 @@ pub struct IngestStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SignalIngestStats {
-    /// `traces`, `logs` or `metrics`.
-    pub signal: String,
+    pub signal: Signal,
     pub requests: u64,
     /// Spans, log records or metric data points accepted.
     pub accepted: u64,
@@ -110,8 +224,7 @@ pub struct FlushInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StorageStats {
-    /// `duckdb`, `sqlite` or `postgres`.
-    pub catalog_type: String,
+    pub catalog_type: CatalogType,
     pub data_path: String,
     pub snapshot_id: i64,
     pub tables: Vec<TableStats>,
@@ -196,7 +309,7 @@ pub struct ServiceSummary {
 pub struct OperationSummary {
     pub service: String,
     pub name: String,
-    pub kind: String,
+    pub kind: SpanKind,
     #[serde(flatten)]
     pub red: RedStats,
 }
@@ -300,13 +413,11 @@ pub struct Span {
     pub span_id: String,
     pub parent_span_id: Option<String>,
     pub name: String,
-    /// UNSPECIFIED, INTERNAL, SERVER, CLIENT, PRODUCER or CONSUMER.
-    pub kind: String,
+    pub kind: SpanKind,
     pub service_name: String,
     pub start_time: DateTime<Utc>,
     pub duration_ns: i64,
-    /// UNSET, OK or ERROR.
-    pub status_code: String,
+    pub status_code: SpanStatus,
     pub status_message: String,
     pub trace_state: String,
     pub scope_name: String,
@@ -357,7 +468,7 @@ pub struct LogQuery {
     /// Max records (default 100, max 5000).
     pub limit: Option<u32>,
     /// `desc` (newest first, default) or `asc`.
-    pub order: Option<String>,
+    pub order: Option<LogOrder>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -432,12 +543,10 @@ pub struct MetricListQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MetricInfo {
     pub name: String,
-    /// gauge, sum, histogram, exponential_histogram or summary.
-    pub metric_type: String,
+    pub metric_type: MetricType,
     pub unit: String,
     pub description: String,
-    /// `cumulative`, `delta` or empty for gauges.
-    pub temporality: String,
+    pub temporality: Temporality,
     pub series_count: u64,
     pub point_count: u64,
     pub services: Vec<String>,
@@ -471,7 +580,7 @@ pub struct MetricQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MetricQueryResult {
     pub name: String,
-    pub metric_type: String,
+    pub metric_type: MetricType,
     pub unit: String,
     pub agg: String,
     pub step_secs: u64,
@@ -574,6 +683,21 @@ mod tests {
         assert_eq!(f, vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]);
         assert!(parse_attribute_filter("novalue").is_err());
         assert!(parse_attribute_filter("=x").is_err());
+    }
+
+    #[test]
+    fn closed_sets_keep_their_wire_strings() {
+        assert_eq!(serde_json::to_string(&SpanKind::Server).unwrap(), r#""SERVER""#);
+        assert_eq!(serde_json::to_string(&Temporality::Unspecified).unwrap(), r#""""#);
+        assert_eq!(
+            serde_json::from_str::<MetricType>(r#""exponential_histogram""#).unwrap(),
+            MetricType::ExponentialHistogram
+        );
+        assert_eq!("cumulative".parse(), Ok(Temporality::Cumulative));
+        assert_eq!(SpanStatus::Error.to_string(), "ERROR");
+        assert!("sideways".parse::<LogOrder>().is_err());
+        let q: LogQuery = serde_json::from_str(r#"{"order":"asc"}"#).unwrap();
+        assert_eq!(q.order, Some(LogOrder::Asc));
     }
 
     #[test]

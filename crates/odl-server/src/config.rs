@@ -275,24 +275,7 @@ impl Default for DuckDbConfig {
 }
 
 /// Catalog backend derived from `storage.catalog`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CatalogKind {
-    DuckDb,
-    Sqlite,
-    Postgres,
-    MySql,
-}
-
-impl CatalogKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CatalogKind::DuckDb => "duckdb",
-            CatalogKind::Sqlite => "sqlite",
-            CatalogKind::Postgres => "postgres",
-            CatalogKind::MySql => "mysql",
-        }
-    }
-}
+pub use odl_api::CatalogType as CatalogKind;
 
 impl StorageConfig {
     pub fn catalog_kind(&self) -> CatalogKind {

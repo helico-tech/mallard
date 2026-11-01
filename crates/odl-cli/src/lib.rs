@@ -307,7 +307,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 trace_id: trace,
                 attributes: attrs(&attr),
                 limit: Some(limit),
-                order: Some("desc".into()),
+                order: Some(LogOrder::Desc),
             };
             if !follow {
                 let mut v = c.logs(&q).await?;

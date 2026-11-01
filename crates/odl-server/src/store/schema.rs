@@ -20,22 +20,7 @@ pub struct TableDef {
     pub sort_by: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Signal {
-    Traces,
-    Logs,
-    Metrics,
-}
-
-impl Signal {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Signal::Traces => "traces",
-            Signal::Logs => "logs",
-            Signal::Metrics => "metrics",
-        }
-    }
-}
+pub use odl_api::Signal;
 
 const ATTRS: &str = "MAP(VARCHAR, VARCHAR)";
 

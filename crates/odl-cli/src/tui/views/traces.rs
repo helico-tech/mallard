@@ -158,7 +158,7 @@ impl Embedded {
                 since,
                 trace_id: Some(id),
                 limit: Some(2000),
-                order: Some("asc".into()),
+                order: Some(LogOrder::Asc),
                 ..Default::default()
             };
             self.loader.spawn(Kind::TraceLogs, async move { c.logs(&q).await }, Data::Logs);
@@ -409,7 +409,7 @@ impl Embedded {
             widgets::placeholder(f, inner, &msg, style);
             return;
         };
-        let errors = trace.spans.iter().filter(|s| s.status_code == "ERROR").count();
+        let errors = trace.spans.iter().filter(|s| s.status_code == SpanStatus::Error).count();
         let services: std::collections::BTreeSet<&str> = trace.spans.iter().map(|s| s.service_name.as_str()).collect();
         let mut right = vec![
             TSpan::styled(format!(" {} ", ms(d.total_ns as f64 / 1e6)), theme::bold()),
@@ -459,7 +459,7 @@ impl Embedded {
             .iter()
             .map(|row| {
                 let s = &trace.spans[row.span];
-                let is_err = s.status_code == "ERROR";
+                let is_err = s.status_code == SpanStatus::Error;
                 let svc_color = theme::service_color(&s.service_name);
                 let mut label: Vec<TSpan> = vec![TSpan::styled(row.prefix.clone(), theme::muted())];
                 let used = widgets::width(&row.prefix);
@@ -516,17 +516,18 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
     };
     let trace_start = d.trace.as_ref().and_then(|t| t.spans.iter().map(|s| s.start_time).min()).unwrap_or(s.start_time);
     let offset = (s.start_time - trace_start).num_nanoseconds().unwrap_or(0) as f64 / 1e6;
-    let (status, sc) = match s.status_code.as_str() {
-        "ERROR" => ("ERROR", theme::ERR),
-        "OK" => ("OK", theme::OK),
-        _ => ("UNSET", theme::MUTED),
+    let sc = match s.status_code {
+        SpanStatus::Error => theme::ERR,
+        SpanStatus::Ok => theme::OK,
+        SpanStatus::Unset => theme::MUTED,
     };
+    let status = s.status_code.as_str();
     let mut out = vec![
         Line::from(vec![
             TSpan::styled(format!(" {status} "), theme::badge(sc)),
             TSpan::raw(" "),
             TSpan::styled(format!("● {}", s.service_name), Style::new().fg(theme::service_color(&s.service_name))),
-            TSpan::styled(format!("  {}", s.kind.to_lowercase()), theme::muted()),
+            TSpan::styled(format!("  {}", s.kind.as_str().to_lowercase()), theme::muted()),
         ]),
         Line::from(vec![
             TSpan::styled("  duration ", theme::dim()),

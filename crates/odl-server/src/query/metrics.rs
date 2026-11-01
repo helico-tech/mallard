@@ -18,9 +18,9 @@ use std::{
 };
 
 use duckdb::{Connection, params_from_iter, types::Value};
-use odl_api::{MetricInfo, MetricPoint, MetricQueryResult, MetricSeries};
+use odl_api::{MetricInfo, MetricPoint, MetricQueryResult, MetricSeries, MetricType, Temporality};
 
-use super::{Filter, QResult, QueryError, Window, bad, from_micros, json_col};
+use super::{Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col};
 
 const MAX_SERIES: usize = 500;
 const MAX_POINTS: usize = 200_000;
@@ -72,10 +72,10 @@ pub fn list(conn: &Connection, w: &Window, service: Option<&str>, q: Option<&str
     let rows = stmt.query_map(params_from_iter(params), |r| {
         Ok(MetricInfo {
             name: r.get(0)?,
-            metric_type: r.get(1)?,
+            metric_type: enum_col(r, 1)?,
             unit: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
             description: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            temporality: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            temporality: enum_col(r, 4)?,
             series_count: r.get::<_, i64>(5)? as u64,
             point_count: r.get::<_, i64>(6)? as u64,
             services: json_col(r.get(7)?),
@@ -146,9 +146,9 @@ impl Agg {
 
 struct Kind {
     table: &'static str,
-    metric_type: String,
+    metric_type: MetricType,
     monotonic: bool,
-    temporality: String,
+    temporality: Temporality,
     unit: String,
 }
 
@@ -162,18 +162,20 @@ fn detect(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Kind> {
              FROM {table} WHERE {}",
             f.sql()
         );
-        let (ty, mono, temp, unit, n): (Option<String>, Option<bool>, Option<String>, Option<String>, i64) = conn
-            .query_row(&sql, params_from_iter(f.params.clone()), |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })?;
-        if n > 0 {
-            return Ok(Kind {
+        let kind = conn.query_row(&sql, params_from_iter(f.params.clone()), |r| {
+            if r.get::<_, i64>(4)? == 0 {
+                return Ok(None);
+            }
+            Ok(Some(Kind {
                 table,
-                metric_type: ty.unwrap_or_default(),
-                monotonic: mono.unwrap_or(false),
-                temporality: temp.unwrap_or_default(),
-                unit: unit.unwrap_or_default(),
-            });
+                metric_type: enum_col(r, 0)?,
+                monotonic: r.get::<_, Option<bool>>(1)?.unwrap_or(false),
+                temporality: enum_col(r, 2)?,
+                unit: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            }))
+        })?;
+        if let Some(kind) = kind {
+            return Ok(kind);
         }
     }
     Err(QueryError::NotFound(format!("metric {:?} has no data in the time window", req.name)))
@@ -274,7 +276,7 @@ impl Collector {
 
 pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<MetricQueryResult> {
     let kind = detect(conn, w, req)?;
-    let is_counter = kind.metric_type == "sum" && kind.monotonic;
+    let is_counter = kind.metric_type == MetricType::Sum && kind.monotonic;
     let agg = match req.agg {
         Some(a) => Agg::parse(a)?,
         None => match kind.table {
@@ -303,7 +305,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
     let mut col = Collector::new(group_by);
     match kind.table {
         "metric_points" => {
-            let cumulative = kind.temporality == "cumulative";
+            let cumulative = kind.temporality == Temporality::Cumulative;
             match agg {
                 Agg::Quantile(_) => {
                     return Err(bad("percentiles need a histogram or summary metric"));
@@ -344,7 +346,8 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
                 Agg::Sum => format!(
                     "SELECT k, b, sum(v) FROM (SELECT {lexpr} AS k, series_id, {bucket} AS b, \
                         {inner} AS v FROM metric_points WHERE {where_} AND time >= ? GROUP BY ALL) GROUP BY ALL",
-                    inner = if cumulative || kind.metric_type == "gauge" { "avg(value)" } else { "sum(value)" },
+                    inner =
+                        if cumulative || kind.metric_type == MetricType::Gauge { "avg(value)" } else { "sum(value)" },
                     where_ = f.sql()
                 ),
                 Agg::Quantile(_) => unreachable!(),
@@ -370,7 +373,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
             if !matches!(agg, Agg::Quantile(_) | Agg::Avg | Agg::Count | Agg::Rate | Agg::Increase) {
                 return Err(bad("histograms and summaries support pNN, avg, count, rate, increase"));
             }
-            let cumulative = summary || kind.temporality == "cumulative";
+            let cumulative = summary || kind.temporality == Temporality::Cumulative;
             // Columns: count, sum, a, b, scale, zero_count, offset (see `Row`).
             let cols: [&str; 7] = match table {
                 "metric_histograms" => [

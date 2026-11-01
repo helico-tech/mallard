@@ -34,7 +34,7 @@ pub struct ApiState {
     pub stats: Arc<Stats>,
     pub tokens: Tokens,
     pub schema: String,
-    pub catalog_type: String,
+    pub catalog_type: CatalogType,
     pub data_path: String,
     pub max_buffer_bytes: u64,
     pub enable_sql: bool,
@@ -224,7 +224,7 @@ async fn stats(State(st): S) -> R<odl_api::Stats> {
         uptime_secs: st.started.elapsed().as_secs(),
         ingest: st.stats.ingest(st.max_buffer_bytes),
         storage: StorageStats {
-            catalog_type: st.catalog_type.clone(),
+            catalog_type: st.catalog_type,
             data_path: st.data_path.clone(),
             snapshot_id,
             tables,
@@ -306,13 +306,7 @@ async fn get_trace(State(st): S, Path(trace_id): Path<String>, Q(q): Q<TraceGetQ
 async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> R<Vec<LogRecord>> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 100, 5000)?;
-    let ascending = match q.order.as_deref() {
-        None | Some("desc") => false,
-        Some("asc") => true,
-        Some(o) => {
-            return Err(QueryError::BadRequest(format!("order must be asc or desc, got {o:?}")).into());
-        }
-    };
+    let ascending = q.order == Some(LogOrder::Asc);
     Ok(Json(
         st.reader
             .run(move |c| {
