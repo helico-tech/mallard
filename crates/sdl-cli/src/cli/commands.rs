@@ -13,6 +13,7 @@ use mallard_term::color::Out;
 use mallard_term::error::Hints;
 use mallard_term::output::List;
 use mallard_term::table::{fancy, right, table};
+use mallard_term::wait::until;
 use mallard_term::window::{Window, WindowArgs};
 use sdl_client::types::*;
 use serde::Serialize;
@@ -395,35 +396,45 @@ async fn set_status(ctx: &Ctx, project: &str, a: SetStatusArgs, status: IssueSta
 pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
     let o = ctx.out;
     match cmd {
-        EventsCmd::List { issue, trace, limit, window } => {
+        EventsCmd::List { issue, trace, limit, window, wait } => {
             let by_trace = trace.is_some();
-            // Trace ids are searched in the last 30 days by default.
-            let w = if by_trace {
-                Some(window.resolve(30 * DAY)?)
-            } else {
-                window.is_set().then(|| window.resolve(DAY)).transpose()?
+            let project = if by_trace { None } else { Some(ctx.resolve_project().await?) };
+            // Resolved on every try: with --wait the window moves along.
+            let fetch = || async {
+                // Trace ids are searched in the last 30 days by default.
+                let w = if by_trace {
+                    Some(window.resolve(30 * DAY)?)
+                } else {
+                    window.is_set().then(|| window.resolve(DAY)).transpose()?
+                };
+                let r = w.as_ref().map(range).unwrap_or_default();
+                let list = match (&trace, &project) {
+                    (Some(trace_id), _) => {
+                        let q = TraceQuery { trace_id: trace_id.clone(), limit, ..Default::default() };
+                        ctx.client.events_by_trace_in(&q, &r).await
+                    }
+                    (None, project) => {
+                        let q = EventQuery { issue: issue.clone(), limit, ..Default::default() };
+                        ctx.client.events_in(project.as_deref().unwrap_or_default(), &q, &r).await
+                    }
+                }
+                .map_err(|e| ctx.err(e))?;
+                anyhow::Ok((w, list))
             };
-            let r = w.as_ref().map(range).unwrap_or_default();
-            let list = if let Some(trace_id) = trace {
-                let q = TraceQuery { trace_id, limit, ..Default::default() };
-                ctx.client.events_by_trace_in(&q, &r).await
-            } else {
-                let project = ctx.resolve_project().await?;
-                ctx.client.events_in(&project, &EventQuery { issue, limit, ..Default::default() }, &r).await
-            }
-            .map_err(|e| ctx.err(e))?;
+            let ((w, list), waited) = until(&ctx.output, &wait, fetch, |(_, l)| !l.events.is_empty()).await?.split();
             if !ctx.output.text() {
                 let mut l =
                     List::new(list.events).limit(Some(limit.unwrap_or(50).clamp(1, 500))).cursor(list.next_cursor);
                 if let Some(w) = w {
                     l = l.window(w);
                 }
-                return ctx.output.list(&l);
+                ctx.output.list(&l)?;
+                return waited;
             }
             let list = fmt::sanitize(list, true)?;
             if list.events.is_empty() {
                 out!(o, "no events");
-                return Ok(());
+                return waited;
             }
             let now = Utc::now();
             let mut headers = vec!["EVENT", "ISSUE", "LEVEL", "TITLE", "ENV", "RELEASE", "USER", "WHEN"];

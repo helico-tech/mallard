@@ -99,5 +99,7 @@ transactions = true               # store Sentry transactions and their spans as
 exceptions = true                 # OTel exceptions (span events, logs) become Sentry events and issues
 default_project = ""              # project slug for exceptions whose service.name matches no project;
                                   # "" = create a project per service (created when missing either way)
-dedupe_window = "10s"             # an OTel exception waits this long for a Sentry SDK event of the
-                                  # same trace + span; if one came, it is dropped (max "10m")
+dedupe_window = "10s"             # how long a bridged item waits for its copy from the other side
+                                  # (max "10m"): an OTel exception for a Sentry SDK event of the same
+                                  # trace + span, a Sentry transaction for OTLP spans with its span
+                                  # ids (ADR 0010). Copies that came are dropped.

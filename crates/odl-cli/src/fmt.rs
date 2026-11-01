@@ -27,7 +27,7 @@ fn num(v: impl Into<f64>) -> Cell {
     Cell::new(compact(v.into())).set_alignment(CellAlignment::Right)
 }
 
-fn err_cell(rate: f64) -> Cell {
+pub(crate) fn err_cell(rate: f64) -> Cell {
     let c = Cell::new(format!("{:.2}%", rate * 100.0)).set_alignment(CellAlignment::Right);
     if rate >= 0.05 {
         c.fg(Color::Red)

@@ -24,6 +24,7 @@ serde_json.workspace = true
 serde.workspace = true
 futures.workspace = true
 mallard-term.workspace = true
+comfy-table.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 

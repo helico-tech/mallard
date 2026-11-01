@@ -13,8 +13,15 @@ Design rules:
 2. **One writer.** All writes go through one thread, in batches. One batch is
    one DuckLake transaction and one snapshot.
 3. **Prune by time, then by issue.** Almost every query filters on
-   `project_id`, a `received_at` window and often `group_hash`. The physical
+   `project_id`, a time window and often `group_hash`. The physical
    layout is built for exactly that.
+4. **Event time for issues, receive time for storage.** First/last seen,
+   trends, tag facets and stats use the event's `timestamp`, as Sentry does.
+   Ingest replaces a `timestamp` more than 60 s after or 30 days before the
+   receive time with the receive time (`MAX_SECS_IN_FUTURE` /
+   `MAX_SECS_IN_PAST` in `sdl-protocol`), so it stays close to
+   `received_at`. Partitions, retention, event lists, trace lookups and the
+   issue activity log use `received_at` / write time.
 
 ## Tables
 
@@ -48,8 +55,10 @@ SORTED BY (project_id, group_hash, received_at);
 ```
 
 **Partitioning by day of `received_at`** (not the client `timestamp`, which
-can be skewed): a time window query reads only the days it covers, and
-retention (`DELETE ... WHERE received_at < cutoff`) removes whole files.
+can be skewed): retention (`DELETE ... WHERE received_at < cutoff`) removes
+whole files. A window on `received_at` reads only the days it covers; a
+window on `timestamp` is pruned by DuckLake's per-file min/max, which stays
+tight because `timestamp` is clamped to near `received_at` (rule 4).
 Daily is the right grain for the target scale: hourly would create too many
 small files, monthly would make retention coarse and windows read too much.
 
@@ -75,10 +84,11 @@ otel-ducklake's spans table, so `sentry.events JOIN otel.spans USING
 
 ### `issues` and `issue_activity`
 
-`issues` gets one row the first time a group hash is seen (first seen, first
-release, first title). The current title, level and culprit come from the
-newest event in the queried window (`arg_max(title, received_at)`), as in
-Sentry.
+`issues` gets one row the first time a group hash is seen (first seen =
+the earliest event `timestamp` in that batch, first release, first title).
+It is not lowered when an older event arrives in a later batch (append-only).
+The current title, level and culprit come from the newest event in the
+queried window (`arg_max(title, timestamp)`), as in Sentry.
 
 Status is `arg_max(status, changed_at)` over `issue_activity`. Reasons:
 `user` (API) and `regression` (a new event for a resolved issue reopens it;
@@ -142,11 +152,11 @@ Every `SDL_COMPACT_INTERVAL` (1 h) the writer runs, scoped to its schema:
 
 | API | Reads | Pruning |
 |---|---|---|
-| issue list | `events` (project, window): group_hash, user_key, received_at, title, culprit, level; `issues`; `issue_activity` | days in window |
-| issue detail | same for one group + tag facets | days + row groups by group_hash |
-| events of issue | narrow columns, `ORDER BY received_at DESC LIMIT` | row groups by group_hash |
+| issue list | `events` (project, `timestamp` window): group_hash, user_key, timestamp, title, culprit, level; `issues`; `issue_activity` | files by timestamp min/max |
+| issue detail | same for one group + tag facets | files + row groups by group_hash |
+| events of issue | narrow columns, `received_at` window, `ORDER BY received_at DESC LIMIT` | row groups by group_hash |
 | event detail | one row incl. `payload` | group_hash when `?issue=` is given; else growing windows (1 d, 7 d, 31 d, all) |
-| stats | received_at, level, group_hash, user_key | days in window |
+| stats | timestamp, level, group_hash, user_key | files by timestamp min/max |
 | by trace | trace_id (UUID equality) | days in window |
 
 ## Changing the schema

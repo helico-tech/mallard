@@ -18,7 +18,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use mallard_duck::duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -422,22 +422,37 @@ impl Writer {
     fn try_write_events(&self, batch: &[EventWrite]) -> Result<()> {
         let ns = &self.ns;
         // Decide new issues and regressions against the cache, but only
-        // apply cache changes after the commit succeeded.
+        // apply cache changes after the commit succeeded. A new issue starts
+        // at its earliest event (by event time) in the batch. Regressions are
+        // logged at commit time: the activity log is ordered by write time.
         let mut new_issues: Vec<&EventWrite> = Vec::new();
         let mut activity: Vec<(u32, u64, IssueStatus, &'static str)> = Vec::new();
-        let mut seen_in_batch: HashSet<(u32, u64)> = HashSet::new();
+        // Group -> its index in `new_issues`, if it is new.
+        let mut seen_in_batch: HashMap<(u32, u64), Option<usize>> = HashMap::new();
         {
             let issues = self.caches.issues.read().expect("lock");
             for w in batch {
                 let key = (w.project_id, w.event.group_hash);
-                if !seen_in_batch.insert(key) {
+                if let Some(slot) = seen_in_batch.get(&key) {
+                    if let Some(i) = *slot
+                        && w.event.timestamp < new_issues[i].event.timestamp
+                    {
+                        new_issues[i] = w;
+                    }
                     continue;
                 }
-                match issues.get(&key) {
-                    None => new_issues.push(w),
-                    Some(IssueStatus::Resolved) => activity.push((key.0, key.1, IssueStatus::Unresolved, "regression")),
-                    Some(_) => {}
-                }
+                let slot = match issues.get(&key) {
+                    None => {
+                        new_issues.push(w);
+                        Some(new_issues.len() - 1)
+                    }
+                    Some(IssueStatus::Resolved) => {
+                        activity.push((key.0, key.1, IssueStatus::Unresolved, "regression"));
+                        None
+                    }
+                    Some(_) => None,
+                };
+                seen_in_batch.insert(key, slot);
             }
         }
 
@@ -494,7 +509,7 @@ impl Writer {
                     stmt.execute(params![
                         w.project_id as i32,
                         e.group_hash,
-                        e.received_at.timestamp_micros(),
+                        e.timestamp.timestamp_micros(),
                         e.event_id.to_string(),
                         e.release,
                         e.title,

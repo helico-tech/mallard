@@ -1,6 +1,12 @@
 //! Read queries for the `/v1` API. Every query filters on `project_id` and,
-//! where possible, on a `received_at` window (partition pruning) and
-//! `group_hash` (row-group pruning thanks to the sort order).
+//! where possible, on a time window and `group_hash` (row-group pruning
+//! thanks to the sort order).
+//!
+//! Issues, trends, tag facets and stats count events by event time
+//! (`timestamp`, as Sentry does). Ingest keeps it within
+//! [`sdl_protocol::event::MAX_SECS_IN_PAST`] / `MAX_SECS_IN_FUTURE` of
+//! `received_at`, so DuckLake's per-file min/max still skips other days.
+//! Event lists, trace lookups and retention stay on `received_at`.
 
 use super::{Ns, us_to_dt};
 use anyhow::Result;
@@ -44,9 +50,9 @@ fn trends(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, groups: &[u64
     // Numbers only, so building the IN list is injection-safe.
     let list = groups.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
     let sql = ns.sql(&format!(
-        "SELECT group_hash, CAST(floor((epoch_us(received_at) - ?) / ?) AS BIGINT) AS b, count(*)
+        "SELECT group_hash, CAST(floor((epoch_us(timestamp) - ?) / ?) AS BIGINT) AS b, count(*)
          FROM $S.events
-         WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?) AND group_hash IN ({list})
+         WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?) AND group_hash IN ({list})
          GROUP BY ALL"
     ));
     let mut stmt = conn.prepare(&sql)?;
@@ -180,9 +186,9 @@ pub fn list_issues(
     p.push(&limit);
     let sql = ns.sql(&format!(
         "WITH agg AS (
-            SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, {users_expr} AS users
+            SELECT group_hash, count(*) AS cnt, epoch_us(max(timestamp)) AS last_us, {users_expr} AS users
             FROM $S.events
-            WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?){filters}
+            WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?){filters}
             GROUP BY group_hash
          ), st AS (
             SELECT group_hash, arg_max(status, changed_at) AS status
@@ -228,10 +234,10 @@ pub fn list_issues(
     let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us, &end_us];
     p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
     let sql = ns.sql(&format!(
-        "SELECT group_hash, count(DISTINCT user_key), arg_max(title, received_at), arg_max(culprit, received_at),
-                arg_max(level, received_at)
+        "SELECT group_hash, count(DISTINCT user_key), arg_max(title, timestamp), arg_max(culprit, timestamp),
+                arg_max(level, timestamp)
          FROM $S.events
-         WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?){filters} AND group_hash IN ({list})
+         WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?){filters} AND group_hash IN ({list})
          GROUP BY group_hash"
     ));
     let mut stmt = conn.prepare(&sql)?;
@@ -290,10 +296,10 @@ pub fn issue_detail(
     };
     let agg = conn.query_row(
         &ns.sql(
-            "SELECT count(*), count(DISTINCT user_key), epoch_us(max(received_at)),
-                    arg_max(title, received_at), arg_max(culprit, received_at), arg_max(level, received_at),
-                    arg_max(release, received_at), arg_max(event_id::VARCHAR, received_at)
-             FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)",
+            "SELECT count(*), count(DISTINCT user_key), epoch_us(max(timestamp)),
+                    arg_max(title, timestamp), arg_max(culprit, timestamp), arg_max(level, timestamp),
+                    arg_max(release, timestamp), arg_max(event_id::VARCHAR, timestamp)
+             FROM $S.events WHERE project_id = ? AND group_hash = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)",
         ),
         params![project_id as i32, group, start_us(w), end_us(w)],
         |r| {
@@ -317,7 +323,7 @@ pub fn issue_detail(
             .query_row(
                 &ns.sql(
                     "SELECT event_id::VARCHAR FROM $S.events WHERE project_id = ? AND group_hash = ?
-                     ORDER BY received_at DESC LIMIT 1",
+                     ORDER BY timestamp DESC LIMIT 1",
                 ),
                 params![project_id as i32, group],
                 |r| r.get::<_, String>(0),
@@ -374,7 +380,7 @@ fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Windo
         "WITH kv AS (
             SELECT k, v, count(*) AS c FROM (
                 SELECT unnest(map_keys(tags)) AS k, unnest(map_values(tags)) AS v
-                FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)
+                FROM $S.events WHERE project_id = ? AND group_hash = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)
             ) GROUP BY k, v
          )
          SELECT k, v, c, count(*) OVER (PARTITION BY k) AS uniq
@@ -660,10 +666,10 @@ pub fn project_stats(
         })
         .collect();
     let mut stmt = conn.prepare(&ns.sql(
-        "SELECT CAST(floor((epoch_us(received_at) - ?) / ?) AS BIGINT) AS b, count(*),
+        "SELECT CAST(floor((epoch_us(timestamp) - ?) / ?) AS BIGINT) AS b, count(*),
                 count(*) FILTER (WHERE level IN ('error', 'fatal')),
                 count(*) FILTER (WHERE level = 'warning')
-         FROM $S.events WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)
+         FROM $S.events WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)
          GROUP BY b",
     ))?;
     for row in stmt.query_map(params![start_us(w), interval_us, project_id as i32, start_us(w), end_us(w)], |r| {
@@ -680,7 +686,7 @@ pub fn project_stats(
     let (total, issues, users) = conn.query_row(
         &ns.sql(
             "SELECT count(*), count(DISTINCT group_hash), count(DISTINCT user_key)
-             FROM $S.events WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)",
+             FROM $S.events WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)",
         ),
         params![project_id as i32, start_us(w), end_us(w)],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),

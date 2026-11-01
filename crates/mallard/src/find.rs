@@ -10,6 +10,7 @@ use anyhow::Result;
 use mallard_term::error::{Described, Kind, usage};
 use mallard_term::output::List;
 use mallard_term::text::clean;
+use mallard_term::wait::{WaitArgs, until};
 use mallard_term::window::WindowArgs;
 use serde::Serialize;
 
@@ -65,18 +66,23 @@ fn kind_of(id: &str) -> Option<IdKind> {
     }
 }
 
-pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs) -> Result<()> {
+pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs, wait: &WaitArgs) -> Result<()> {
     let kind = kind_of(id).ok_or_else(|| {
         usage(format!(
             "{:?} is not an id mallard can look up: use a trace or event id (32 hex) or an issue or span id (16 hex)",
             clean(id)
         ))
     })?;
-    let w = window.resolve(WINDOW)?;
-    let matches = match kind {
-        IdKind::Hex32(id) => hex32(r, &id, w.from, w.to).await?,
-        IdKind::Hex16(id) => hex16(r, &id, w.from, w.to).await?,
+    // The window is resolved on every try: with --wait it moves along.
+    let fetch = || async {
+        let w = window.resolve(WINDOW)?;
+        let matches = match &kind {
+            IdKind::Hex32(id) => hex32(r, id, w.from, w.to).await?,
+            IdKind::Hex16(id) => hex16(r, id, w.from, w.to).await?,
+        };
+        anyhow::Ok((w, matches))
     };
+    let ((w, matches), waited) = until(&r.output, wait, fetch, |(_, m)| !m.is_empty()).await?.split();
     let list = List::new(matches).window(w);
     if r.output.text() {
         for m in &list.items {
@@ -85,6 +91,7 @@ pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs) -> Result<()> {
     } else {
         r.output.list(&list)?;
     }
+    waited?;
     if list.items.is_empty() {
         return Err(anyhow::Error::new(
             Described::new(Kind::NotFound, format!("nothing found for {id}"))
