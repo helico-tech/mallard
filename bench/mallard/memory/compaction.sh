@@ -23,6 +23,7 @@ docker volume rm "$C" >/dev/null 2>&1 || true
 docker run -d --name "$C" --memory="$MEM" --memory-swap="$MEM" --cpus="$CPUS" -v "$C:/data" \
   -p "127.0.0.1:$PORT:8080" -p "127.0.0.1:$((PORT + 1)):4318" \
   -e MALLARD_SERVER__API_TOKENS="$TOKEN" -e MALLARD_DUCKDB__MEMORY_LIMIT="$LIMIT" -e MALLARD_DUCKDB__THREADS="$THREADS" \
+  -e MALLARD_OTEL__INGEST__MAX_BUFFER_BYTES="${BUFFER:-128MB}" \
   -e MALLARD_SENTRY__MAINTENANCE__COMPACT_INTERVAL=24h -e MALLARD_OTEL__MAINTENANCE__COMPACT_INTERVAL=2m \
   "$IMG" serve >/dev/null || exit 1
 for _ in $(seq 1 60); do curl -fs "$HTTP/healthz" >/dev/null && break; sleep 1; done

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Both sides under load in one memory-limited container, with maintenance on
-# short intervals. An out-of-memory kill is a result, not an error of this script.
+# Both sides under load in one memory-limited container, on the shipped maintenance
+# intervals unless overridden. An out-of-memory kill is a result, not an error of this script.
 # Usage: run.sh <name> <container memory> <duckdb.memory_limit> <max_buffer_bytes> <duckdb.threads> <duration>
 #   e.g. run.sh b 2g 768MB 256MB 0 15m      (see README.md for all settings)
 set -uo pipefail
@@ -15,11 +15,11 @@ SENTRY_CONC=${SENTRY_CONC:-1024}                 # each waits for its commit, so
 OTEL_RATE=${OTEL_RATE:-1000}                     # traces/s, about 11 spans per trace
 OTEL_BATCH=${OTEL_BATCH:-20}
 OTEL_CONC=${OTEL_CONC:-8}
-SENTRY_COMPACT=${SENTRY_COMPACT:-2m}             # default 1h
-SENTRY_FLUSH=${SENTRY_FLUSH:-30s}                # default 5m
-OTEL_COMPACT=${OTEL_COMPACT:-2m}                 # default 10m
-OTEL_FULL=${OTEL_FULL:-5m}                       # default 6h
-OTEL_RETENTION=${OTEL_RETENTION:-5m}             # default 1h: snapshot expiry and file cleanup
+SENTRY_COMPACT=${SENTRY_COMPACT:-2m}             # these five are the shipped defaults
+SENTRY_FLUSH=${SENTRY_FLUSH:-5m}
+OTEL_COMPACT=${OTEL_COMPACT:-10m}
+OTEL_FULL=${OTEL_FULL:-6h}
+OTEL_RETENTION=${OTEL_RETENTION:-1h}             # snapshot expiry and file cleanup
 SETTLE=${SETTLE:-60}                             # seconds after the load, so a last compaction runs
 OUT=${OUT:-bench-out}/$NAME
 QUERIES=${QUERIES:-1}                            # 0: no query load

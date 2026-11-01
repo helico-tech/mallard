@@ -160,7 +160,7 @@ writer thread: take everything queued (group commit)
 ## Maintenance
 
 The maintenance thread flushes inlined data (see above) and, every
-`sentry.maintenance.compact_interval` (1 h), runs, scoped to its schema:
+`sentry.maintenance.compact_interval` (2 min), runs, scoped to its schema:
 
 1. retention, on the writer thread because a `DELETE` conflicts with concurrent
    inserts ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)):

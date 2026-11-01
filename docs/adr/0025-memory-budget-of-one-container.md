@@ -1,7 +1,7 @@
 # 0025 — The memory budget of one container, and what it takes to keep it
 
 ## Status
-proposed (the owner decides at merge: the 16 MB target and `MALLOC_ARENA_MAX`)
+proposed (the owner decides at merge: the 16 MB target, the two Sentry defaults and `MALLOC_ARENA_MAX`)
 
 ## Context
 Both sides share one process and one `duckdb.memory_limit`. The rule of the old binaries counted one
@@ -25,6 +25,10 @@ compaction; a second DuckDB instance for maintenance; a smaller target file; mor
   `bench/mallard/memory`.
 - **`events` merges to 16 MB** instead of 64 MB, the smallest change that made compaction work at 1 GB.
   It costs up to 2x on Sentry queries, which stay near 200 ms at 1M events.
+- **Sentry does less at once:** `maintenance.flush_rows` 10000 (was 50000) and `compact_interval` 2m (was 1h).
+  Flushing 50k events got a 2 GiB container killed, also at 100 events/s, and merging what piled up in 10 minutes
+  at 300 events/s ran out of memory at 1 GB. Costs: more small files between merges, and retention's pruned
+  scan on the writer thread every 2 minutes instead of every hour.
 - **The image sets `MALLOC_ARENA_MAX=2`.** Peak memory falls 0.5-1.1 GiB. It costs some throughput at heavy
   load, where 4 GiB is the setting to use anyway.
 - **Compose runs 2 GiB, 1GB + 128MB, 4 threads.** The thread count is fixed because `threads = 0` follows the
@@ -32,8 +36,10 @@ compaction; a second DuckDB instance for maintenance; a smaller target file; mor
 - The connection stays shared (ADR 0001).
 
 ## Consequences
-- 2 GiB holds 300 events/s + 2,800 spans/s, with little margin (1.94 GiB). 4 GiB holds three times that
-  (2GB + 256MB, 3.00 GiB). Above, give it more memory.
+- 2 GiB holds 300 events/s + 2,800 spans/s (1.84 GiB on compose). 4 GiB holds about three times that
+  (2GB + 256MB, 3.02 GiB). Above, give it more memory.
+- Measure on the shipped intervals, not only shortened ones. Runs with a 30 s flush passed where the
+  defaults got killed.
 - Changing a table's target file, or adding memory outside DuckDB, means measuring again.
 - `events` files already merged stay as they are; only new merges use 16 MB.
 - The memory above the limit is not explained (issue 0133). If a better allocator or a fix lowers it, this rule

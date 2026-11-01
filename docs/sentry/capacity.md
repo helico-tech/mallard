@@ -80,7 +80,7 @@ curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maint
 | events by trace id (30d) | 86 ms | 30 ms | 249 ms | 25 ms | 16 ms |
 
 "Not compacted" means right after a burst: thousands of small files (one per
-large batch) plus inlined rows. Compaction runs hourly (or on
+large batch) plus inlined rows. Compaction ran hourly in these runs (now every 2 minutes; or on
 `POST /sentry/v1/maintenance`) and merges them into a few sorted 64 MB files per day;
 that is what makes queries 5-15x faster and keeps them flat as data grows.
 At normal traffic the data never gets that fragmented. `events` now merges to 16 MB, which
@@ -119,8 +119,10 @@ costs up to 2x on these queries ([Memory](#memory)).
   | 64 MB | 768 MB | 1 | 500k | **out of memory, 2 of 2 runs** | 1.5 GiB |
   | 16 MB | 2 GB | 8 | 1M | worked, 3 of 3 runs, in 2 s or less | 3.4 GiB |
 
-  At saturation many files are already near 16 MB, so such a compaction merges less. The
-  periodic runs below merged real small files with a 1 GB limit, 12 of 12 ok.
+  At saturation many files are already near 16 MB, so such a compaction merges less. A compaction
+  also has to stay small: at a 1 GB limit and 300 events/s, merging every 2 minutes worked 15 of 15 times, while
+  every 10 minutes or every hour ran out of memory each time. So `compact_interval` is now 2m and `flush_rows`
+  10000 ([both sides](../otel/capacity.md#both-sides-in-one-container)).
 - 16 MB files cost query time. 1M compacted events, 2 GB, 1 thread, same load as the query table
   above (p50): issue list 167 → 206 ms, tag facets 95 → 182 ms, 50 newest events 20 → 42 ms,
   hourly stats 41 → 73 ms, event detail 65 → 71 ms. One pair of runs, with other work on the machine.
@@ -132,7 +134,8 @@ costs up to 2x on these queries ([Memory](#memory)).
   events removed that cap.
 - Inlined rows sit uncompressed in the catalog until flushed. Flushing only
   every 5 minutes let the catalog grow to 540 MB under load and made commits
-  slow during its checkpoints. Flushing every 50k rows keeps it ~14 MB.
+  slow during its checkpoints. Flushing every 50k rows keeps it ~14 MB. With both sides in 2 GiB, a
+  flush of 50k got the container killed, so it is now 10k.
 - Compaction with large target files and many threads ran out of memory under
   2 GB; 64 MB target files and single-threaded maintenance fixed it. With a shared
   connection and all threads 64 MB no longer fits, so `events` now uses 16 MB.

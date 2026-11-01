@@ -32,22 +32,24 @@ and then failed twice, and at 1 GB and 768MB it failed every time on 500k events
 release build in Docker, 4 GiB container (3 GiB at 1 GB and 768MB), 8 CPUs, next to 100 traces/s.
 
 ### What was done
-The target file of `events` went from 64 MB to 16 MB. With 16 MB, 8 threads and 2 GB: 3 of 3 worked. In the
-periodic runs at a 1 GB limit, 12 of 12 worked with 8 threads and 13 of 13 on compose with 4 threads. One run
-with 8 threads on compose failed 2 of 13. See
+The target file of `events` went from 64 MB to 16 MB and `compact_interval` from 1h to 2m. With 16 MB, 8 threads
+and 2 GB: 3 of 3 worked. With both changes on compose, a 1 GB limit, 4 threads and 300 events/s: 15 of 15 worked,
+and 15 of 15 at 2 GB with 8 threads and 1,000 events/s. With the 16 MB target alone, every hourly and 10-minute
+merge failed at those rates. One run with 8 threads on compose at 1 GB failed 2 of 13. See
 [ADR 0025](../../docs/adr/0025-memory-budget-of-one-container.md).
 
 ### Options, with what each costs
 | option | adds | costs |
 |---|---|---|
-| **16 MB target file (done)** | works at 1 GB and at 2 GB with 8 threads; one line | queries up to 2x slower on 1M events (still about 200 ms); more files per day |
+| **16 MB target file and a merge every 2 min (done)** | works at 1 GB with 4 threads and at 2 GB with 8; two constants | queries up to 2x slower on 1M events (still about 200 ms); more files per day; retention's pruned scan on the writer every 2 min |
 | lower `duckdb.threads` for everything | no code | not enough by itself: 1 thread fails at 1 GB; queries slower |
 | `SET threads` during compaction (`Host::maintenance_threads`, exists) | no second connection | slows ingest and queries while it runs (ADR 0014); not enough by itself, same as above |
 | a separate DuckDB instance for maintenance, with its own limit | memory of compaction apart from the writer, so a failed merge no longer fails ingest | a second buffer pool in the same container, so less memory for each; a second catalog attach; more code; 1 thread still needs over 1 GB at 64 MB |
 | more memory | no code | 4 GiB with 64 MB files and 2 GB still failed (run `d2-mod`: killed, 2 of 4 compactions failed) |
 
-Preference: the 16 MB target, as done. A separate instance is not needed now. Reconsider it if a failed merge
+Preference: the 16 MB target and the short interval, as done. A separate instance is not needed now. Reconsider it if a failed merge
 still hurts ingest after issue 0132.
 
-Not checked: whether a 16 MB merge fits when a day has far more than 1M events, and files that are already over
-16 MB from a heavy burst (these are not merged again, which is why a burst compacts in seconds).
+Not checked: whether this holds when a day has far more than the 4M events of the longest run, and after full
+speed compaction fell behind (0 of 5 worked in that 10-minute run; whether it catches up afterwards is not
+known). Files already over 16 MB from a heavy burst are not merged again, which is why a burst compacts in seconds.

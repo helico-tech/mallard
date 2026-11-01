@@ -13,9 +13,10 @@ error. The cause was not found. What the runs show:
 
 - Most of it sits in glibc's heaps. `MALLOC_ARENA_MAX=2` lowered peak RSS by 0.5-1.1 GiB (run `b-low`
   1.97 GiB and killed, `e8-low` 1.44 GiB; `d-mod` 3.84 GiB, `d3-mod` 2.70 GiB).
-- Kills came within a few seconds of a query round or a Sentry flush, but not always the same one.
-  Each query alone added less than 60 MB on a server with 250k events, and a run without queries
-  (`b-low-noq`) still reached 1.95 GiB.
+- Large Sentry flushes matter: `flush_rows` 50000 got a 2 GiB container killed at 100 events/s, 10000 did
+  not (`dd-100`, `dd-f10`). How a flush of 260 MB of rows turns into a 0.5 GiB jump is not known.
+- Kills also came within a few seconds of a query round, but not always. Each query alone added less
+  than 60 MB on a server with 250k events, and a run without queries (`b-low-noq`) still reached 1.95 GiB.
 - The peak rises with the limit: a 4 GiB container with a 2 GB limit reached 4.01 GiB and was killed
   (`d2-mod`).
 

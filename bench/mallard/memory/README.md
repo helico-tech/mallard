@@ -1,7 +1,7 @@
 # Memory of both sides in one container
 
 Runs `mallard serve` in a Docker container with a hard memory limit, with both load
-generators, a little query load, and maintenance on short intervals. An out-of-memory
+generators, a little query load, and the shipped maintenance intervals. An out-of-memory
 kill is a result. The results are in
 [docs/otel/capacity.md](../../../docs/otel/capacity.md#both-sides-in-one-container).
 
@@ -30,6 +30,9 @@ Results go to `bench-out/<name>/`, and `summary.sh` prints them at the end of a 
 
 - Use the process peak RSS (`VmHWM`) and anon memory. Container peak also counts file cache,
   which the kernel reclaims, so it reaches the limit in nearly every run.
+- Check a setting on the shipped intervals, at least once. Shorter intervals hide problems: a 30 s flush
+  and a 2 min merge passed at settings that the old intervals got killed. Override them with `SENTRY_FLUSH`
+  and the like.
 - A run counts as passed only with no kill, no `Out of Memory` line, and all compactions
   done. Surviving is not enough: a failed Sentry compaction also fails the writer's batch.
 - `--cpus=N` with `threads = 0` gives N DuckDB threads. `--cpuset-cpus` does not: DuckDB
