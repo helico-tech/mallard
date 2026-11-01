@@ -65,8 +65,9 @@ auth:
 
 ## Resources
 
-Defaults (requests 500m/1Gi, limits 2 CPU/2Gi, `duckdb.memoryLimit: 1400MB`)
-fit small and mid-sized setups. Keep `duckdb.memoryLimit` at about 70% of the
-memory limit. The root filesystem is read-only; DuckDB spills to `/data/tmp`.
+Defaults (requests 500m/1Gi, limits 2 CPU/2Gi, `duckdb.memoryLimit: 1200MB`)
+fit small and mid-sized setups. The process uses about `duckdb.memoryLimit`
++ 0.5 GB, so keep it at most the memory limit minus 600 MB (~60%). The root
+filesystem is read-only; DuckDB spills to `/data/tmp`.
 
 See `values.yaml` for every option.
