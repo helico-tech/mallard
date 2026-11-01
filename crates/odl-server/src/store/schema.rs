@@ -43,7 +43,7 @@ pub const SPANS: TableDef = TableDef {
     name: "spans",
     time_column: "start_time",
     signal: Signal::Traces,
-    sort_by: "start_time",
+    sort_by: "date_trunc('hour', start_time), service_name, start_time",
     columns: &[
         ("start_time", "TIMESTAMP"),
         ("duration_ns", "BIGINT"),
@@ -76,7 +76,7 @@ pub const LOGS: TableDef = TableDef {
     name: "logs",
     time_column: "time",
     signal: Signal::Logs,
-    sort_by: "time",
+    sort_by: "date_trunc('hour', time), service_name, time",
     columns: &[
         ("time", "TIMESTAMP"),
         ("observed_time", "TIMESTAMP"),
