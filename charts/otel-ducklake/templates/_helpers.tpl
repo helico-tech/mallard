@@ -54,7 +54,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.auth.enabled (not .Values.auth.existingSecret) (not .Values.auth.apiToken) -}}
-{{- fail "auth.enabled requires auth.apiToken or auth.existingSecret (keys api-token, ingest-token)" -}}
+{{- fail "auth.enabled requires auth.apiToken or auth.existingSecret (key api-token; ingest-token when auth.ingestAuth)" -}}
+{{- end -}}
+{{- if and .Values.auth.ingestAuth (not .Values.auth.enabled) -}}
+{{- fail "auth.ingestAuth requires auth.enabled" -}}
+{{- end -}}
+{{- if and .Values.auth.enabled .Values.auth.ingestAuth (not .Values.auth.existingSecret) (not .Values.auth.ingestToken) -}}
+{{- fail "auth.ingestAuth requires auth.ingestToken (or auth.existingSecret with key ingest-token)" -}}
+{{- end -}}
+{{- if and .Values.ingress.enabled (not .Values.auth.enabled) -}}
+{{- fail "ingress.enabled exposes the query API outside the cluster: set auth.enabled=true (with auth.apiToken or auth.existingSecret)" -}}
 {{- end -}}
 {{- if and .Values.query.enableSql (not .Values.auth.enabled) -}}
 {{- fail "query.enableSql requires auth.enabled" -}}
@@ -81,11 +90,16 @@ metadata:
     {{- end }}
   annotations:
     checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    {{- if .Values.auth.enabled }}
+    # Restart pods when tokens (or the referenced existing Secret) change.
+    checksum/secret: {{ .Values.auth | toJson | sha256sum }}
+    {{- end }}
     {{- with .Values.podAnnotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   serviceAccountName: {{ include "otel-ducklake.serviceAccountName" . }}
+  automountServiceAccountToken: false
   {{- with .Values.imagePullSecrets }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
@@ -109,11 +123,19 @@ spec:
             secretKeyRef:
               name: {{ include "otel-ducklake.secretName" . }}
               key: api-token
+        # Read by the `odl` CLI inside the pod (kubectl exec ... odl status).
+        - name: ODL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "otel-ducklake.secretName" . }}
+              key: api-token
+        {{- if .Values.auth.ingestAuth }}
         - name: ODL_INGEST_TOKEN
           valueFrom:
             secretKeyRef:
               name: {{ include "otel-ducklake.secretName" . }}
               key: ingest-token
+        {{- end }}
         {{- end }}
         {{- with .Values.extraEnv }}
         {{- toYaml . | nindent 8 }}
