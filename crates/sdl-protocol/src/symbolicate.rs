@@ -13,7 +13,7 @@
 
 use serde_json::{Value, json};
 use sourcemap::{DecodedMap, SourceMap, SourceView};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -98,26 +98,24 @@ fn debug_ids(ev: &Value) -> HashMap<String, Uuid> {
         .collect()
 }
 
-pub fn collect_refs(ev: &Value) -> Vec<SourceMapRef> {
+/// The distinct minified files (at most `limit`) that the event's frames
+/// point at, in frame order.
+pub fn collect_refs(ev: &Value, limit: usize) -> Vec<SourceMapRef> {
     let ids = debug_ids(ev);
-    let mut out: Vec<SourceMapRef> = Vec::new();
-    let mut holders: Vec<&Value> = Vec::new();
-    for key in ["exception", "threads"] {
-        if let Some(values) = ev.get(key).and_then(|e| e.get("values")).and_then(Value::as_array) {
-            holders.extend(values.iter());
-        }
-    }
-    holders.push(ev);
-    for h in holders {
-        for f in frames(h).filter(|f| is_symbolicatable(f)) {
-            let abs = f["abs_path"].as_str().unwrap_or_default();
-            if out.iter().any(|r| r.abs_path == abs) {
-                continue;
-            }
-            out.push(SourceMapRef { abs_path: abs.to_string(), debug_id: ids.get(strip_file_scheme(abs)).copied() });
-        }
-    }
-    out
+    let mut seen: HashSet<&str> = HashSet::new();
+    let holders = ["exception", "threads"]
+        .into_iter()
+        .filter_map(|key| ev.get(key).and_then(|e| e.get("values")).and_then(Value::as_array))
+        .flatten()
+        .chain(std::iter::once(ev));
+    holders
+        .flat_map(frames)
+        .filter(|f| is_symbolicatable(f))
+        .filter_map(|f| f["abs_path"].as_str())
+        .filter(|abs| seen.insert(abs))
+        .take(limit)
+        .map(|abs| SourceMapRef { abs_path: abs.to_string(), debug_id: ids.get(strip_file_scheme(abs)).copied() })
+        .collect()
 }
 
 /// Release-artifact url candidates for a minified file, most specific first:
@@ -315,8 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn collect_refs_dedupes_and_stops_at_the_limit() {
+        let frames: Vec<Value> = (0..100)
+            .map(|i| json!({"abs_path": format!("https://h.test/{}.js", i % 10), "lineno": 1, "colno": 1}))
+            .collect();
+        let ev = json!({"stacktrace": {"frames": frames}});
+        assert_eq!(collect_refs(&ev, 50).len(), 10);
+        let refs = collect_refs(&ev, 3);
+        let paths: Vec<&str> = refs.iter().map(|r| r.abs_path.as_str()).collect();
+        assert_eq!(paths, ["https://h.test/0.js", "https://h.test/1.js", "https://h.test/2.js"]);
+    }
+
+    #[test]
     fn collects_refs_with_debug_ids() {
-        let refs = collect_refs(&event());
+        let refs = collect_refs(&event(), 50);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].debug_id, Some(Uuid::parse_str("c941d872-af1f-4f0c-a7ff-ad3d295fe153").unwrap()));
         assert_eq!(refs[1].debug_id, None);

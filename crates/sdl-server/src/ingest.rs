@@ -13,6 +13,7 @@
 
 use crate::AppState;
 use crate::db::{EnqueueError, EventWrite, WriteCmd};
+use crate::sourcemaps::MAX_REFS_PER_EVENT;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Request, State};
@@ -288,8 +289,15 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     // Normalizing, symbolicating and grouping are CPU work: keep them off
     // the async worker threads.
     let blocking_err = |_| sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed");
-    let ev = tokio::task::spawn_blocking(move || normalize_event(raw, &ctx)).await.map_err(blocking_err)?;
-    let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev).await;
+    let want_refs = state.sourcemaps.applies_to(&state.db, inc.project_id);
+    let (ev, refs) = tokio::task::spawn_blocking(move || {
+        let ev = normalize_event(raw, &ctx);
+        let refs = if want_refs { symbolicate::collect_refs(&ev, MAX_REFS_PER_EVENT) } else { Vec::new() };
+        (ev, refs)
+    })
+    .await
+    .map_err(blocking_err)?;
+    let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev, refs).await;
     let (processed, payload_json) = tokio::task::spawn_blocking(move || {
         let mut ev = ev;
         if !maps.is_empty() {

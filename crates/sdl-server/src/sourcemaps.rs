@@ -382,15 +382,24 @@ impl SourceMaps {
         }
     }
 
-    /// Resolve every minified file referenced by the event's frames.
-    pub async fn resolve(&self, db: &Db, project_id: u32, event: &Value) -> HashMap<String, ParsedMap> {
+    /// Whether events of this project can be symbolicated at all.
+    pub fn applies_to(&self, db: &Db, project_id: u32) -> bool {
+        self.enabled() && db.caches.project_has_bundles(project_id)
+    }
+
+    /// Resolve the minified files `refs` (from [`symbolicate::collect_refs`]
+    /// with [`MAX_REFS_PER_EVENT`]) of `event`.
+    pub async fn resolve(
+        &self,
+        db: &Db,
+        project_id: u32,
+        event: &Value,
+        refs: Vec<SourceMapRef>,
+    ) -> HashMap<String, ParsedMap> {
         let mut out = HashMap::new();
-        if !self.enabled() || !db.caches.project_has_bundles(project_id) {
-            return out;
-        }
         let release = event.get("release").and_then(Value::as_str);
         let dist = event.get("dist").and_then(Value::as_str);
-        for r in symbolicate::collect_refs(event).into_iter().take(MAX_REFS_PER_EVENT) {
+        for r in refs {
             if let Some((loc, how)) = self.locate(db, project_id, &r, release, dist).await
                 && let Some(m) = self.load_map(&loc, how).await
             {
