@@ -30,6 +30,13 @@ enum Cmd {
         #[arg(long)]
         connect: bool,
     },
+    /// Run both sides' maintenance once and exit: flush, retention, compaction.
+    /// Stop the server first when the catalog is a DuckDB file or SQLite.
+    Maintenance {
+        /// Merge all telemetry files below the target size, not only small ones.
+        #[arg(long)]
+        full: bool,
+    },
     /// Download every DuckDB extension any config may need, so the server
     /// runs without internet access (used when building the Docker image).
     InstallExtensions {
@@ -45,6 +52,7 @@ async fn main() -> Result<()> {
     match args.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Serve => serve(config).await,
         Cmd::Check { connect } => check(config, connect).await,
+        Cmd::Maintenance { full } => maintenance(config, full).await,
         Cmd::InstallExtensions { dir } => install_extensions(&dir),
     }
 }
@@ -76,6 +84,15 @@ async fn serve(config: Option<&Path>) -> Result<()> {
         sd.cancel();
     });
     platform.serve(shutdown).await
+}
+
+async fn maintenance(config: Option<&Path>, full: bool) -> Result<()> {
+    let cfg = Config::load(config)?;
+    init_tracing(cfg.server.log_format);
+    for line in mallard_server::run_maintenance(cfg, full).await? {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn install_extensions(dir: &Path) -> Result<()> {

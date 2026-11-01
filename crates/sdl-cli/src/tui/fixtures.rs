@@ -148,6 +148,7 @@ pub(super) fn info() -> ServerInfo {
         public_url: None,
         retention_secs: None,
         max_window_secs: None,
+        sql: None,
     }
 }
 
@@ -166,6 +167,7 @@ pub(super) fn loaded_app() -> App {
         public_url: None,
         retention_secs: None,
         max_window_secs: None,
+        sql: None,
     })));
     let key = app.issues_key().unwrap();
     app.on_response(Resp::Issues(

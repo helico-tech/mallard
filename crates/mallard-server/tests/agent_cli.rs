@@ -1,7 +1,7 @@
 //! The agent contract end to end (ADR 0008): the real `mallard` binary
 //! against a mallard server in this process. Covers `setup`, `find` (also
 //! span ids), `issues list --new`, `issues resolve --reason`, `logs --around`,
-//! `schema`, `schema attrs`, `--cursor`,
+//! `schema` (both sides), `schema attrs`, `--cursor`,
 //! `--fields`, ndjson, plain text when piped, exit codes and JSON errors.
 //!
 //! The binary is `target/<profile>/mallard`: `cargo test --workspace`
@@ -93,6 +93,8 @@ async fn agent_contract_end_to_end() {
     let st = mallard(url, &["status", "--json"]).await.ok().json();
     assert_eq!(st["ok"], true, "{st}");
     assert_eq!(st["capabilities"]["sql"], false);
+    assert_eq!(st["capabilities"]["sql_errors"], false);
+    assert_eq!(st["sentry"]["info"]["sql"], false, "{st}");
     assert_eq!(st["capabilities"]["ingest_lag_secs"], 0.2);
     assert!(st["capabilities"]["retention_secs"]["errors"].is_u64(), "{st}");
 
@@ -242,9 +244,21 @@ async fn agent_contract_end_to_end() {
     // schema and schema attrs.
     let s = mallard(url, &["schema", "--json"]).await.ok().json();
     assert_eq!(
-        (s["items"][0]["name"].as_str(), s["items"][0]["time_column"].as_str()),
-        (Some("spans"), Some("start_time"))
+        (s["items"][0]["side"].as_str(), s["items"][0]["name"].as_str(), s["items"][0]["time_column"].as_str()),
+        (Some("telemetry"), Some("spans"), Some("start_time"))
     );
+    let errors: Vec<(&str, &str)> = s["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["side"] == "errors")
+        .map(|t| (t["name"].as_str().unwrap(), t["time_column"].as_str().unwrap()))
+        .collect();
+    assert_eq!(errors, [("events", "received_at"), ("issues", "first_seen"), ("issue_activity", "changed_at")], "{s}");
+    let events = s["items"].as_array().unwrap().iter().find(|t| t["name"] == "events").unwrap();
+    assert!(events["columns"].as_array().unwrap().iter().any(|c| c["name"] == "tags"), "{events}");
+    let text = mallard(url, &["schema"]).await.ok();
+    assert!(text.stdout.lines().any(|l| l.contains("errors") && l.contains("trace_id")), "{}", text.stdout);
     let a = mallard(url, &["schema", "attrs", "--key", "service.name", "--since", "1h", "--json"]).await.ok().json();
     assert_eq!((a["items"][0]["value"].as_str(), a["items"][0]["count"].as_u64()), (Some("checkout"), Some(1)), "{a}");
     let text = mallard(url, &["schema", "attrs", "--signal", "logs"]).await.ok();
@@ -338,6 +352,10 @@ async fn tags_cursors_releases_and_error_sql() {
     let q = "SELECT tags['user'] AS u, count(*) AS n FROM events GROUP BY 1 ORDER BY 1";
     let v = mallard(url, &["sql", "--errors", q, "--json"]).await.ok().json();
     assert_eq!(v["rows"], serde_json::json!([["u-1", 2], ["u-2", 1]]), "{v}");
+    let st = mallard(url, &["status", "--json"]).await.ok().json();
+    assert_eq!((&st["capabilities"]["sql"], &st["capabilities"]["sql_errors"]), (&false.into(), &true.into()), "{st}");
+    let text = mallard(url, &["status"]).await.ok();
+    assert!(text.stdout.contains("sql off  sql --errors on"), "{}", text.stdout);
     let text = mallard(url, &["sql", "--errors", q]).await.ok();
     assert!(text.stdout.contains("u-1") && text.stdout.contains("2 rows"), "{}", text.stdout);
     let o = mallard(url, &["sql", "--errors", "SELECT * FROM spans", "--json"]).await;

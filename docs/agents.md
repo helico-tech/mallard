@@ -158,8 +158,8 @@ mallard metrics list -q http
 mallard metrics show http.server.request.duration -g p95 -b http.route --since 6h --step 5m
 ```
 
-**Health and limits:** `mallard status --json` has `capabilities`: `sql` on/off,
-`max_window_secs`, `retention_secs`, `ingest_lag_secs` (how long new telemetry takes
+**Health and limits:** `mallard status --json` has `capabilities`: `sql` and
+`sql_errors` (`sql --errors`) on/off, `max_window_secs`, `retention_secs`, `ingest_lag_secs` (how long new telemetry takes
 to show up), `ingest_auth`.
 
 **What can I filter on?** Attribute keys with counts, then the top values of one
@@ -173,10 +173,13 @@ mallard schema attrs --signal metrics --metric http.server.request.duration   # 
 **Ad-hoc SQL** (telemetry tables `spans`, `logs`, `metric_points`, …; with `--errors`
 the error tables `events`, `issues`, `issue_activity`; often off):
 ```sh
-mallard schema --format ndjson                                       # tables, time column, columns
+mallard schema --format ndjson                                       # side, table, time column, columns
 mallard sql "SELECT service_name, count(*) FROM spans GROUP BY 1"   # exit 7 when off
 mallard sql --errors "SELECT tags['url'] AS url, count(*) FROM events GROUP BY 1 ORDER BY 2 DESC"
 ```
+`schema` lists both sides: tables with `"side": "errors"` need `--errors`. An answer
+holds at most `-n` rows (default 100) and 32 MiB of row data; `truncated: true` means
+it was cut short: raise `-n` or select fewer columns.
 
 ## Good to know
 

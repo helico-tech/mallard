@@ -637,8 +637,9 @@ upload (sentry-cli works), natural-language search, dashboards/alerts.
 - `mallard errors issues list --since` and other Sentry-side windows have no
   client-side `value_parser` (the otel side validates with `check_window`).
 - `events show` text says "Breadcrumbs (newest first)" but showed ascending
-  times with `sdl-loadgen` data; the code reverses the SDK order, so this may
-  only be the loadgen's order. Worth a check with a real SDK.
+  times with `sdl-loadgen` data. Checked with `@sentry/node` 11: SDKs send
+  oldest first, so the label is right and the loadgen had the wrong order
+  (fixed).
 - `send-test` default message still says "hello from the sdl CLI".
 - Sentry release endpoints are stubs: `sentry-cli releases new/deploys` look
   successful but store nothing; agents may assume releases exist.

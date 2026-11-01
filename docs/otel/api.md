@@ -144,7 +144,9 @@ JSON equivalent (timestamps, UUIDs) as strings, maps as objects, NaN/Inf as
 null. Errors in the query are 400 with DuckDB's message. Table and CTE names
 must be plain identifiers; `SHOW`/`DESCRIBE`/`SUMMARIZE` and a few functions
 (`repeat`, `lpad`, `rpad`, file/settings/env access) are refused. See
-[ADR 0005](adr/0005-sql-endpoint.md).
+[ADR 0005](adr/0005-sql-endpoint.md). An answer holds at most `limit` rows
+(default 1000, max 100000) and 32 MiB of row data; `truncated` is true when
+either cut it short ([mallard ADR 0015](../adr/0015-sql-resource-limits.md)).
 
 ## Examples
 

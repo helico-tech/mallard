@@ -211,6 +211,12 @@ impl Server {
         self.state.ready().await
     }
 
+    /// Run maintenance once, now: flush inlined data, apply retention and
+    /// compact (the same as `POST /v1/maintenance`).
+    pub async fn run_maintenance(&self) -> Result<()> {
+        self.state.db.call(|reply| db::WriteCmd::Maintenance { reply }).await
+    }
+
     /// Wait for `shutdown` to resolve, then stop cleanly (see [`Server::shutdown`]).
     /// Same shape as `odl_server::Server::run_background`.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {

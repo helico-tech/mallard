@@ -5,8 +5,8 @@
 //! side (ADR 0005 here, mallard ADR 0011): one SELECT over the lake tables
 //! (`spans`, `logs`, `metric_*`), no file or network access, no settings.
 //!
-//! Resource use (memory, CPU) is bounded by the query timeout and DuckDB's
-//! memory limit only partly; treat SQL access as admin access.
+//! Resource limits: mallard ADR 0015 (rows, answer size, `query.timeout`,
+//! DuckDB's global memory limit); treat SQL access as admin access.
 
 use mallard_duck::duckdb::Connection;
 use mallard_duck::sql::SqlError;
@@ -15,7 +15,7 @@ use odl_api::{SqlColumn, SqlResponse};
 use super::{QResult, QueryError};
 use crate::store::schema::TABLES;
 
-/// Validate and run; returns at most `limit` rows.
+/// Validate and run; returns at most `limit` rows and 32 MiB of row data.
 pub fn run(conn: &Connection, schema: &str, query: &str, limit: u32) -> QResult<SqlResponse> {
     let tables: Vec<&str> = TABLES.iter().map(|t| t.name).collect();
     let r = mallard_duck::sql::run(conn, schema, &tables, query, limit).map_err(|e| match e {

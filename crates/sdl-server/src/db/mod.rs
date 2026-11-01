@@ -359,16 +359,20 @@ impl Db {
 }
 
 impl Drop for Db {
-    /// Call `shutdown().await` before dropping. Without it, dropping `tx`
-    /// disconnects the queue: the writer writes what is queued, flushes and
-    /// stops on its own thread (it owns its connection, so DuckDB stays up
-    /// until then). Drop does not wait for that: it may run on an async
-    /// worker thread.
+    /// Call `shutdown().await` before dropping: it does not block an async
+    /// thread. Without it (a dropped server future, a failed start) stop the
+    /// writer here and wait: it writes what is queued and flushes. It must
+    /// not outlive us detached: when the process then exits, C++ static
+    /// destructors run under a thread that is still inside DuckDB (SIGSEGV,
+    /// issue 0018). Like the otel side's `Flusher`.
     fn drop(&mut self) {
-        let running = self.writer_thread.get_mut().map(|h| h.is_some()).unwrap_or(false);
-        if running {
-            tracing::warn!("Db dropped without shutdown(); the writer finishes in the background");
-        }
+        let handle = self.writer_thread.get_mut().unwrap_or_else(|p| p.into_inner()).take();
+        let Some(handle) = handle else { return };
+        tracing::warn!("Db dropped without shutdown(); waiting for the writer");
+        let (reply, _) = oneshot::channel();
+        // Fails only when the writer is gone already.
+        let _ = self.tx.send(WriteCmd::Shutdown { reply });
+        let _ = handle.join();
     }
 }
 
@@ -411,6 +415,18 @@ pub(crate) mod tests {
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let maintenance = writer::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
         Db::with_connection(conn, &cfg, maintenance, "test".into()).unwrap()
+    }
+
+    /// Dropping without `shutdown()` stops the writer and waits for it
+    /// (issue 0018): the writer's reference to the caches is gone by then.
+    #[tokio::test]
+    async fn drop_stops_the_writer_and_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let caches = db.caches.clone();
+        assert!(Arc::strong_count(&caches) > 2, "Db and the writer hold it too");
+        drop(db);
+        assert_eq!(Arc::strong_count(&caches), 1);
     }
 
     async fn select_one(db: &Db) -> Result<i32> {
