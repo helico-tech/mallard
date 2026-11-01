@@ -117,7 +117,9 @@ Ingress notes:
 - `/metrics`, `/docs` and `/openapi.json` are on the same port and need no
   token. Block `/metrics` at the ingress if it must not be public.
 - If the ingress sets `X-Forwarded-For`, set `SDL_TRUST_FORWARDED_FOR=true`
-  (via `extraEnv`) so client IPs are recorded correctly.
+  (via `extraEnv`) so client IPs are recorded correctly. The server uses the
+  last address in the header (the one the ingress adds), so this is right
+  for exactly one proxy hop.
 - When the server is mounted below a path, put that path in `publicUrl`
   (`https://host/sentry`) and route the prefix with a rewrite.
 
@@ -151,7 +153,7 @@ Every flag has an environment variable. The most used:
 | `SDL_QUEUE_CAPACITY` | `20000` | Queued events before ingest answers 429. |
 | `SDL_MAX_EVENT_BYTES` / `SDL_MAX_BODY_BYTES` | 1 MiB / 20 MiB | Size limits (after decompression). Requests with the key only inside the envelope are limited to 2 MiB. |
 | `SDL_SOURCEMAP_CACHE_MB` | `256` | Sourcemap cache. |
-| `SDL_TRUST_FORWARDED_FOR` | `false` | Use `X-Forwarded-For` as client IP. |
+| `SDL_TRUST_FORWARDED_FOR` | `false` | Use the last `X-Forwarded-For` address as client IP. |
 | `SDL_LISTEN` | `0.0.0.0:8000` | Listen address. |
 | `SDL_LOG_JSON`, `RUST_LOG` | | Logging. |
 

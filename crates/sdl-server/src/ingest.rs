@@ -25,7 +25,7 @@ use sdl_protocol::envelope::Envelope;
 use sdl_protocol::event::parse_uuid;
 use sdl_protocol::{NormalizeContext, ProcessedEvent, auth, normalize_event, symbolicate};
 use serde_json::{Value, json};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -93,14 +93,8 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
     let project_id: u32 =
         project_id.parse().map_err(|_| sentry_error(StatusCode::BAD_REQUEST, "invalid project id"))?;
     let (parts, body) = req.into_parts();
-    let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip().to_string());
-    let forwarded = state
-        .cfg
-        .trust_forwarded_for
-        .then(|| parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()))
-        .flatten()
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string());
+    let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+    let forwarded = state.cfg.trust_forwarded_for.then(|| forwarded_ip(&parts.headers)).flatten();
     // Authenticate before reading (and decompressing) the body whenever the
     // key is in a header or the query string, so unauthenticated clients
     // cannot make us inflate large bodies. Requests that carry the key only
@@ -121,7 +115,14 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
             sentry_error(StatusCode::BAD_REQUEST, "could not read request body (bad compression?)")
         }
     })?;
-    Ok(Incoming { project_id, header_key, client_ip: forwarded.or(peer), body })
+    Ok(Incoming { project_id, header_key, client_ip: forwarded.or(peer).map(|ip| ip.to_string()), body })
+}
+
+/// The address the proxy in front of us appended to `X-Forwarded-For`: the
+/// last entry. Earlier entries come from the client and can be forged.
+fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    let last_header = headers.get_all("x-forwarded-for").iter().next_back()?.to_str().ok()?;
+    last_header.rsplit(',').next()?.trim().parse().ok()
 }
 
 /// Whether reading a body failed because it hit the size limit.
@@ -427,6 +428,35 @@ mod tests {
         }));
         let e = axum::body::to_bytes(failing, 10).await.unwrap_err();
         assert!(!is_length_limit(&e));
+    }
+
+    #[test]
+    fn forwarded_ip_is_the_last_valid_entry() {
+        let h = |values: &[&str]| {
+            let mut m = HeaderMap::new();
+            for v in values {
+                m.append("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+            }
+            forwarded_ip(&m)
+        };
+        assert_eq!(h(&["6.6.6.6, 1.2.3.4"]), Some("1.2.3.4".parse().unwrap()));
+        assert_eq!(h(&["6.6.6.6", " 2001:db8::1 "]), Some("2001:db8::1".parse().unwrap()));
+        assert_eq!(h(&["1.2.3.4, not-an-ip"]), None);
+        assert_eq!(h(&[]), None);
+    }
+
+    #[test]
+    fn key_from_headers_precedence() {
+        let mut m = HeaderMap::new();
+        assert_eq!(key_from_headers(&m, Some("sentry_key=q")).as_deref(), Some("q"));
+        m.insert(header::AUTHORIZATION, HeaderValue::from_static("Sentry sentry_key=a, sentry_version=7"));
+        assert_eq!(key_from_headers(&m, Some("sentry_key=q")).as_deref(), Some("a"));
+        m.insert("x-sentry-auth", HeaderValue::from_static("Sentry sentry_key=x, sentry_version=7"));
+        assert_eq!(key_from_headers(&m, Some("sentry_key=q")).as_deref(), Some("x"));
+        // A bearer token is not a Sentry key.
+        let mut m = HeaderMap::new();
+        m.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer sentry_key=a"));
+        assert_eq!(key_from_headers(&m, None), None);
     }
 
     #[test]

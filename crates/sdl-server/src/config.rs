@@ -150,7 +150,9 @@ pub struct Config {
     #[arg(long, env = "SDL_EXTENSION_DIR")]
     pub extension_dir: Option<PathBuf>,
 
-    /// Use the first `X-Forwarded-For` address as client IP.
+    /// Use the last `X-Forwarded-For` address (the one the proxy in front of
+    /// this server adds) as client IP. Earlier addresses come from the client
+    /// and are ignored. Enable only behind exactly one proxy hop.
     #[arg(long, env = "SDL_TRUST_FORWARDED_FOR", default_value_t = false)]
     pub trust_forwarded_for: bool,
 
