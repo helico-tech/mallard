@@ -30,6 +30,17 @@ pub struct EventWrite {
     pub reply: oneshot::Sender<Result<(), String>>,
 }
 
+/// Errors of writer commands that callers answer differently.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("a project with slug {0:?} already exists")]
+    SlugTaken(String),
+    #[error("issue not found")]
+    IssueNotFound,
+    #[error(transparent)]
+    Db(#[from] anyhow::Error),
+}
+
 pub struct NewBundleFile {
     pub debug_id: Option<uuid::Uuid>,
     pub url: Option<String>,
@@ -54,14 +65,14 @@ pub enum WriteCmd {
         name: String,
         slug: String,
         platform: Option<String>,
-        reply: oneshot::Sender<Result<ProjectRow>>,
+        reply: oneshot::Sender<Result<ProjectRow, WriteError>>,
     },
     SetStatus {
         project_id: u32,
         group_hash: u64,
         status: IssueStatus,
         reason: &'static str,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), WriteError>>,
     },
     AddBundle {
         bundle: Box<NewBundle>,
@@ -492,12 +503,17 @@ impl Writer {
         Ok(())
     }
 
-    fn create_project(&mut self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow> {
+    fn create_project(
+        &mut self,
+        name: String,
+        slug: String,
+        platform: Option<String>,
+    ) -> Result<ProjectRow, WriteError> {
         let ns = &self.ns.clone();
         let id = {
             let projects = self.caches.projects.read().expect("lock");
             if projects.values().any(|p| p.slug == slug) {
-                return Err(anyhow!("a project with slug {slug:?} already exists"));
+                return Err(WriteError::SlugTaken(slug));
             }
             projects.keys().max().copied().unwrap_or(0) + 1
         };
@@ -522,10 +538,16 @@ impl Writer {
         Ok(row)
     }
 
-    fn set_status(&mut self, project_id: u32, group_hash: u64, status: IssueStatus, reason: &str) -> Result<()> {
+    fn set_status(
+        &mut self,
+        project_id: u32,
+        group_hash: u64,
+        status: IssueStatus,
+        reason: &str,
+    ) -> Result<(), WriteError> {
         let ns = &self.ns.clone();
         if !self.caches.issues.read().expect("lock").contains_key(&(project_id, group_hash)) {
-            return Err(anyhow!("issue not found"));
+            return Err(WriteError::IssueNotFound);
         }
         self.in_tx(|c| {
             c.execute(

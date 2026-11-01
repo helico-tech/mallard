@@ -20,7 +20,7 @@ use sdl_types::IssueStatus;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{Semaphore, oneshot};
-pub use writer::{EventWrite, NewBundle, NewBundleFile, WriteCmd};
+pub use writer::{EventWrite, NewBundle, NewBundleFile, WriteCmd, WriteError};
 
 #[derive(Debug, Clone)]
 pub struct ProjectRow {
@@ -269,12 +269,18 @@ impl Db {
     }
 
     /// Send a command and wait for its reply (management operations).
-    pub async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<Result<T>>) -> WriteCmd) -> Result<T> {
+    pub async fn call<T, E: From<anyhow::Error>>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, E>>) -> WriteCmd,
+    ) -> Result<T, E> {
         let (tx, rx) = oneshot::channel();
         let cmd = make(tx);
         let sender = self.tx.clone();
         // Management calls may wait for queue space instead of failing.
-        tokio::task::spawn_blocking(move || sender.send(cmd)).await?.map_err(|_| anyhow!("writer stopped"))?;
+        let sent = tokio::task::spawn_blocking(move || sender.send(cmd).is_ok()).await.map_err(anyhow::Error::from)?;
+        if !sent {
+            return Err(anyhow!("writer stopped").into());
+        }
         rx.await.map_err(|_| anyhow!("writer stopped"))?
     }
 

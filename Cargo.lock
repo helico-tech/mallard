@@ -4066,6 +4066,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "http-body-util",
  "humantime",
  "humantime-serde",
  "metrics",

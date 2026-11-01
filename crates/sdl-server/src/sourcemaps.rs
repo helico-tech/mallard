@@ -37,6 +37,21 @@ pub const MAX_MANIFEST_SIZE: u64 = 16 * 1024 * 1024;
 /// Max distinct minified files looked up per event.
 pub const MAX_REFS_PER_EVENT: usize = 50;
 
+/// Errors of the upload endpoints, by who is at fault.
+#[derive(Debug, thiserror::Error)]
+pub enum SourcemapError {
+    #[error("sourcemap storage is not configured")]
+    NotConfigured,
+    #[error("{0}")]
+    BadRequest(String),
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+fn bad_request(msg: impl Into<String>) -> SourcemapError {
+    SourcemapError::BadRequest(msg.into())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AssembleRequest {
     pub checksum: String,
@@ -179,44 +194,44 @@ impl SourceMaps {
         self.storage.is_some()
     }
 
-    fn storage(&self) -> Result<&Storage> {
-        self.storage.as_ref().ok_or_else(|| anyhow!("sourcemap storage is not configured"))
+    fn storage(&self) -> Result<&Storage, SourcemapError> {
+        self.storage.as_ref().ok_or(SourcemapError::NotConfigured)
     }
 
     /// Store uploaded chunks (already decompressed) after checking checksums.
-    pub async fn store_chunk(&self, claimed: &str, data: Bytes) -> Result<()> {
+    pub async fn store_chunk(&self, claimed: &str, data: Bytes) -> Result<(), SourcemapError> {
+        let storage = self.storage()?;
         if !is_sha1_hex(claimed) {
-            bail!("chunk filename must be a sha1 checksum");
+            return Err(bad_request("chunk filename must be a sha1 checksum"));
         }
         if data.len() > CHUNK_SIZE {
-            bail!("Chunk size too large");
+            return Err(bad_request("Chunk size too large"));
         }
         if sha1_hex(&data) != claimed {
-            bail!("Checksum mismatch");
+            return Err(bad_request("Checksum mismatch"));
         }
-        self.storage()?.put(&format!("chunks/{claimed}"), data).await
+        Ok(storage.put(&format!("chunks/{claimed}"), data).await?)
     }
 
-    pub async fn assemble(&self, db: &Db, req: AssembleRequest) -> Result<AssembleResponse> {
+    pub async fn assemble(&self, db: &Db, req: AssembleRequest) -> Result<AssembleResponse, SourcemapError> {
         let storage = self.storage()?;
         if !is_sha1_hex(&req.checksum) || !req.chunks.iter().all(|c| is_sha1_hex(c)) {
-            bail!("checksum and chunks must be sha1 hex strings");
+            return Err(bad_request("checksum and chunks must be sha1 hex strings"));
         }
         if req.projects.is_empty() {
-            bail!("You need to specify at least one project");
+            return Err(bad_request("You need to specify at least one project"));
         }
         if req.dist.is_some() && req.version.is_none() {
-            bail!("You need to specify a release together with a dist");
+            return Err(bad_request("You need to specify a release together with a dist"));
         }
         let mut project_ids = Vec::new();
         for p in &req.projects {
-            let r = match p {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => bail!("One or more projects are invalid"),
+            let proj = match p {
+                Value::String(s) => db.caches.project_by_ref(s),
+                Value::Number(n) => db.caches.project_by_ref(&n.to_string()),
+                _ => None,
             };
-            let proj = db.caches.project_by_ref(&r).ok_or_else(|| anyhow!("One or more projects are invalid"))?;
-            project_ids.push(proj.id);
+            project_ids.push(proj.ok_or_else(|| bad_request("One or more projects are invalid"))?.id);
         }
         let object_key = format!("bundles/{}.zip", req.checksum);
 
@@ -242,11 +257,15 @@ impl SourceMaps {
         }
         // Removed on drop, also when the client disconnects mid-assembly.
         let _guard = AssemblingGuard { set: self.assembling.clone(), checksum: req.checksum.clone() };
-        let result = self.do_assemble(db, storage, &req, project_ids, &object_key).await;
-        match result {
+        // The protocol reports assembly failures in the body (state "error").
+        match self.do_assemble(db, storage, &req, project_ids, &object_key).await {
             Ok(()) => Ok(AssembleResponse::state("ok")),
+            Err(SourcemapError::Internal(e)) => {
+                tracing::error!(checksum = %req.checksum, error = format!("{e:#}"), "assembling bundle failed");
+                Ok(AssembleResponse::error("internal error (see server log)"))
+            }
             Err(e) => {
-                tracing::warn!(checksum = %req.checksum, error = format!("{e:#}"), "assembling bundle failed");
+                tracing::warn!(checksum = %req.checksum, error = %e, "rejected bundle");
                 Ok(AssembleResponse::error(e.to_string()))
             }
         }
@@ -259,32 +278,35 @@ impl SourceMaps {
         req: &AssembleRequest,
         project_ids: Vec<u32>,
         object_key: &str,
-    ) -> Result<()> {
+    ) -> Result<(), SourcemapError> {
         let mut data = Vec::new();
         let mut hasher = Sha1::new();
         for c in &req.chunks {
             let chunk = storage
                 .get(&format!("chunks/{c}"))
                 .await?
-                .ok_or_else(|| anyhow!("Not all chunks available for assembling"))?;
+                .ok_or_else(|| bad_request("Not all chunks available for assembling"))?;
             hasher.update(&chunk);
             data.extend_from_slice(&chunk);
             if data.len() > MAX_BUNDLE_SIZE {
-                bail!("bundle is too large");
+                return Err(bad_request("bundle is too large"));
             }
         }
         if hex::encode(hasher.finalize()) != req.checksum {
-            bail!("Reported checksum mismatch");
+            return Err(bad_request("Reported checksum mismatch"));
         }
         let zip_bytes = Bytes::from(bundle_zip(&data).to_vec());
         let (files, m_release, m_dist) = {
             let z = zip_bytes.clone();
-            tokio::task::spawn_blocking(move || index_bundle(&z)).await??
+            tokio::task::spawn_blocking(move || index_bundle(&z))
+                .await
+                .map_err(anyhow::Error::from)?
+                .map_err(|e| bad_request(format!("{e:#}")))?
         };
         let release = req.version.clone().filter(|v| v != "undefined" && !v.is_empty()).or(m_release);
         let dist = req.dist.clone().or(m_dist);
         if files.iter().all(|f| f.debug_id.is_none()) && release.is_none() {
-            bail!("uploading a bundle without debug ids or release is prohibited");
+            return Err(bad_request("uploading a bundle without debug ids or release is prohibited"));
         }
         storage.put(object_key, zip_bytes.clone()).await?;
         let size_bytes = zip_bytes.len() as u64;

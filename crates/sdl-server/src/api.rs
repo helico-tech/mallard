@@ -4,9 +4,9 @@
 
 use crate::AppState;
 use crate::db::read::{self, Window, parse_group_id};
-use crate::db::{ProjectRow, WriteCmd};
+use crate::db::{ProjectRow, WriteCmd, WriteError};
 use crate::ingest::constant_time_eq;
-use crate::sourcemaps::{self, AssembleRequest};
+use crate::sourcemaps::{self, AssembleRequest, AssembleResponse, SourcemapError};
 use axum::extract::{Multipart, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
@@ -37,6 +37,16 @@ impl From<anyhow::Error> for ApiErr {
     fn from(e: anyhow::Error) -> Self {
         tracing::error!(error = format!("{e:#}"), "api error");
         ApiErr(StatusCode::INTERNAL_SERVER_ERROR, "internal error (see server log)".into())
+    }
+}
+
+impl From<WriteError> for ApiErr {
+    fn from(e: WriteError) -> Self {
+        match e {
+            WriteError::SlugTaken(_) => ApiErr(StatusCode::CONFLICT, e.to_string()),
+            WriteError::IssueNotFound => not_found("issue"),
+            WriteError::Db(e) => e.into(),
+        }
     }
 }
 
@@ -214,9 +224,7 @@ async fn create_project(
     }
     let name = req.name.trim().to_string();
     let platform = req.platform.clone();
-    let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await.map_err(|e| {
-        if e.to_string().contains("already exists") { ApiErr(StatusCode::CONFLICT, e.to_string()) } else { e.into() }
-    })?;
+    let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await?;
     Ok((StatusCode::CREATED, Json(to_project(&state, row))))
 }
 
@@ -268,8 +276,7 @@ async fn update_issue(
     state
         .db
         .call(|reply| WriteCmd::SetStatus { project_id: pid, group_hash: g, status: req.status, reason: "user", reply })
-        .await
-        .map_err(|e| if e.to_string().contains("not found") { not_found("issue") } else { e.into() })?;
+        .await?;
     let w = Window::parse(None, "14d", Utc::now()).map_err(bad)?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
@@ -357,7 +364,7 @@ async fn list_sourcemaps(State(state): S, Path(p): Path<String>) -> ApiResult<Ve
     description = "Flush inlined data to Parquet, apply retention, compact files and expire snapshots now.",
     responses((status = 204), (status = 500, body = ApiError)))]
 async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
-    state.db.call(|reply| WriteCmd::Maintenance { reply }).await?;
+    state.db.call(|reply| WriteCmd::Maintenance { reply }).await.map_err(ApiErr::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -368,6 +375,19 @@ async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
 fn sentry_err(status: StatusCode, msg: impl Into<String>) -> Response {
     let msg = msg.into();
     (status, Json(json!({ "error": msg, "detail": msg }))).into_response()
+}
+
+impl IntoResponse for SourcemapError {
+    fn into_response(self) -> Response {
+        match self {
+            SourcemapError::NotConfigured => sentry_err(StatusCode::NOT_IMPLEMENTED, self.to_string()),
+            SourcemapError::BadRequest(msg) => sentry_err(StatusCode::BAD_REQUEST, msg),
+            SourcemapError::Internal(e) => {
+                tracing::error!(error = format!("{e:#}"), "sourcemap request failed");
+                sentry_err(StatusCode::INTERNAL_SERVER_ERROR, "internal error (see server log)")
+            }
+        }
+    }
 }
 
 async fn chunk_options(State(state): S, Path(org): Path<String>) -> Response {
@@ -425,20 +445,14 @@ async fn chunk_upload(State(state): S, mut form: Multipart) -> Response {
             return sentry_err(StatusCode::BAD_REQUEST, "Request too large");
         }
         if let Err(e) = state.sourcemaps.store_chunk(&checksum, data).await {
-            let msg = e.to_string();
-            let status =
-                if msg.contains("not configured") { StatusCode::NOT_IMPLEMENTED } else { StatusCode::BAD_REQUEST };
-            return sentry_err(status, msg);
+            return e.into_response();
         }
     }
     StatusCode::OK.into_response()
 }
 
-async fn assemble(State(state): S, Json(req): Json<AssembleRequest>) -> Response {
-    match state.sourcemaps.assemble(&state.db, req).await {
-        Ok(r) => Json(r).into_response(),
-        Err(e) => sentry_err(StatusCode::BAD_REQUEST, e.to_string()),
-    }
+async fn assemble(State(state): S, Json(req): Json<AssembleRequest>) -> Result<Json<AssembleResponse>, SourcemapError> {
+    Ok(Json(state.sourcemaps.assemble(&state.db, req).await?))
 }
 
 /// Releases are not stored; we answer so bundler plugins don't log errors.
@@ -473,6 +487,26 @@ mod tests {
     fn slugs() {
         assert_eq!(super::slugify("My Web App!"), "my-web-app");
         assert_eq!(super::slugify("  API  "), "api");
+    }
+
+    #[test]
+    fn write_errors_map_by_variant_not_text() {
+        use super::*;
+        let status = |e: WriteError| ApiErr::from(e).0;
+        assert_eq!(status(WriteError::SlugTaken("x".into())), StatusCode::CONFLICT);
+        assert_eq!(status(WriteError::IssueNotFound), StatusCode::NOT_FOUND);
+        // A database error whose text happens to say "not found" is a 500.
+        assert_eq!(status(WriteError::Db(anyhow::anyhow!("table not found"))), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status(WriteError::Db(anyhow::anyhow!("x already exists"))), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn sourcemap_errors_map_by_variant() {
+        use super::*;
+        let status = |e: SourcemapError| e.into_response().status();
+        assert_eq!(status(SourcemapError::NotConfigured), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(status(SourcemapError::BadRequest("bad".into())), StatusCode::BAD_REQUEST);
+        assert_eq!(status(SourcemapError::Internal(anyhow::anyhow!("disk"))), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

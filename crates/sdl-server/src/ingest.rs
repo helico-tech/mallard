@@ -115,14 +115,19 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
         None => state.cfg.max_body_bytes.min(UNAUTHENTICATED_BODY_LIMIT),
     };
     let body = axum::body::to_bytes(body, limit).await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("length limit") {
+        if is_length_limit(&e) {
             sentry_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
         } else {
             sentry_error(StatusCode::BAD_REQUEST, "could not read request body (bad compression?)")
         }
     })?;
     Ok(Incoming { project_id, header_key, client_ip: forwarded.or(peer), body })
+}
+
+/// Whether reading a body failed because it hit the size limit.
+fn is_length_limit(e: &axum::Error) -> bool {
+    std::iter::successors(Some(e as &(dyn std::error::Error + 'static)), |e| e.source())
+        .any(|e| e.is::<http_body_util::LengthLimitError>())
 }
 
 /// Body limit for requests whose key is only inside the envelope.
@@ -410,6 +415,18 @@ mod tests {
         c.keep = true;
         drop(c);
         assert!(Claim::new(&cache, key).is_none(), "kept after a stored event");
+    }
+
+    #[tokio::test]
+    async fn body_limit_is_detected_by_type() {
+        let big = axum::body::Body::from(vec![0u8; 100]);
+        let e = axum::body::to_bytes(big, 10).await.unwrap_err();
+        assert!(is_length_limit(&e));
+        let failing = axum::body::Body::from_stream(futures::stream::once(async {
+            Err::<Bytes, _>(std::io::Error::other("length limit exceeded (but not really)"))
+        }));
+        let e = axum::body::to_bytes(failing, 10).await.unwrap_err();
+        assert!(!is_length_limit(&e));
     }
 
     #[test]
