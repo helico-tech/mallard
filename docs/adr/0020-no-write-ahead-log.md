@@ -1,4 +1,4 @@
-# 0013 — No local write-ahead log; a Collector with a persistent queue gives at-least-once
+# 0020 — No local write-ahead log; a Collector with a persistent queue gives at-least-once
 
 ## Status
 accepted (answers the last consequence of otel ADR 0003)
