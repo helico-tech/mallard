@@ -11,7 +11,7 @@
 # OTLP/HTTP span with the same trace id end up in `mallard trace`, OTLP/gRPC
 # through the Service (telemetrygen), /metrics, `mallard status` in the pod.
 # Needs: kubectl, helm, curl, jq. Used by CI (.github/workflows/ci.yml).
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/../../.."
 
 image=${1:?usage: $0 <image:tag>}
@@ -23,8 +23,9 @@ pf=
 last_trace=
 
 log() { printf '\n== %s\n' "$*"; }
-cleanup() { [ -n "$pf" ] && kill "$pf" 2>/dev/null || true; }
+cleanup() { if [ -n "$pf" ]; then kill "$pf" 2>/dev/null || true; wait "$pf" 2>/dev/null || true; pf=; fi; }
 trap cleanup EXIT
+trap 'echo "failed at line $LINENO" >&2; dump' ERR
 
 # Retry "$@" every 2 s for up to $tries times.
 retry() {
@@ -48,14 +49,15 @@ install() {
     --set logJson=false \
     --set-string extraConfig=$'[otel.ingest]\nflush_interval = "1s"' \
     "$@"
-  if ! kubectl rollout status deploy/mallard --timeout=5m; then dump; return 1; fi
+  kubectl rollout status deploy/mallard --timeout=5m
 }
 
 port_forward() {
   cleanup
-  kubectl port-forward svc/mallard 8080:80 4318:4318 9090:9090 >/dev/null &
+  # Local ports apart from the usual ones, so nothing else on the host answers.
+  kubectl port-forward svc/mallard 18080:80 19090:9090 &
   pf=$!
-  retry 30 curl -fsS localhost:8080/readyz >/dev/null
+  retry 30 curl -fsS localhost:18080/readyz >/dev/null
 }
 
 # Errors and spans that share a trace id, over HTTP; spans over gRPC.
@@ -69,7 +71,7 @@ check() {
   log "sentry project + event in trace $trace"
   local p id key now
   p=$(curl -fsS -XPOST -H "Authorization: Bearer $token" -H 'content-type: application/json' \
-    localhost:8080/sentry/v1/projects -d '{"name":"kind"}')
+    localhost:18080/sentry/v1/projects -d '{"name":"kind"}')
   id=$(jq -r .id <<<"$p")
   key=$(jq -r .public_key <<<"$p")
   now=$(date +%s)
@@ -79,10 +81,10 @@ check() {
     "{\"timestamp\":$now,\"platform\":\"python\",\"level\":\"error\",\"exception\":{\"values\":[{\"type\":\"KindError\",\"value\":\"from kind\"}]},\"contexts\":{\"trace\":{\"trace_id\":\"$trace\",\"span_id\":\"$span\"}}}" |
     curl -fsS -XPOST -H "x-sentry-auth: Sentry sentry_version=7, sentry_key=$key" \
       -H 'content-type: application/x-sentry-envelope' --data-binary @- \
-      "localhost:8080/sentry/api/$id/envelope/" >/dev/null
+      "localhost:18080/sentry/api/$id/envelope/" >/dev/null
 
   log "OTLP/HTTP span"
-  curl -fsS -XPOST "${auth[@]}" -H 'content-type: application/json' localhost:8080/v1/traces -d "{\"resourceSpans\":[{
+  curl -fsS -XPOST "${auth[@]}" -H 'content-type: application/json' localhost:18080/v1/traces -d "{\"resourceSpans\":[{
     \"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"kind-http\"}}]},
     \"scopeSpans\":[{\"spans\":[{\"traceId\":\"$trace\",\"spanId\":\"$span\",\"name\":\"GET /kind\",\"kind\":2,
       \"startTimeUnixNano\":\"${now}000000000\",\"endTimeUnixNano\":\"${now}050000000\",\"status\":{\"code\":2}}]}]}]}" >/dev/null
@@ -100,10 +102,10 @@ check() {
   }
   retry 30 has_trace
   log "gRPC spans arrived"
-  retry 30 sh -c "curl -fsS -H 'Authorization: Bearer $token' 'localhost:8080/otel/api/v1/traces?service=kind-grpc&since=1h' | jq -e '(.traces // .items // .) | length > 0' >/dev/null"
+  retry 30 sh -c "curl -fsS -H 'Authorization: Bearer $token' 'localhost:18080/otel/api/v1/traces?service=kind-grpc&since=1h' | jq -e '(.traces // .items // .) | length > 0' >/dev/null"
 
   log "metrics and status"
-  curl -fsS localhost:9090/metrics | grep -q '^# TYPE'
+  curl -fsS localhost:19090/metrics | grep -q '^# TYPE'
   kubectl exec deploy/mallard -- mallard --url http://localhost:8080 --token "$token" status
   last_trace=$trace
 }
@@ -115,16 +117,15 @@ uninstall() {
 }
 
 # --- duckdb: everything on the PVC -----------------------------------------
-install duckdb -f "$chart/ci/duckdb-values.yaml" || exit 1
+install duckdb -f "$chart/ci/duckdb-values.yaml"
 port_forward
-check || { dump; exit 1; }
+check
 
 log "restart keeps the data (PVC, Recreate)"
 kubectl rollout restart deploy/mallard
-kubectl rollout status deploy/mallard --timeout=5m || { dump; exit 1; }
+kubectl rollout status deploy/mallard --timeout=5m
 port_forward
-retry 15 sh -c "kubectl exec deploy/mallard -- mallard --url http://localhost:8080 --token $token --format json trace $last_trace | jq -e '.spans | length >= 1' >/dev/null" ||
-  { dump; exit 1; }
+retry 15 sh -c "kubectl exec deploy/mallard -- mallard --url http://localhost:8080 --token $token --format json trace $last_trace | jq -e '.spans | length >= 1' >/dev/null"
 uninstall
 
 # --- s3: RustFS + Postgres catalog, ingest token ---------------------------
@@ -138,9 +139,8 @@ kubectl create secret generic s3-keys \
 
 install s3 -f "$chart/ci/minio-values.yaml" \
   --set storage.s3.endpoint=http://rustfs.storage:9000 \
-  --set catalog.postgres.connectionString="host=postgres.storage port=5432 dbname=ducklake user=mallard password=kind-pw" \
-  || exit 1
+  --set catalog.postgres.connectionString="host=postgres.storage port=5432 dbname=ducklake user=mallard password=kind-pw"
 port_forward
-check ingest-token || { dump; exit 1; }
+check ingest-token
 uninstall
 log "ok"
