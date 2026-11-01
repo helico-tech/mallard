@@ -28,6 +28,7 @@
 mod api;
 mod config;
 mod db;
+mod hooks;
 mod ingest;
 mod sourcemaps;
 mod standalone;
@@ -36,6 +37,7 @@ mod storage;
 pub use config::{
     Artifacts, Config, Host, IngestConfig, MaintenanceConfig, QueryConfig, RetentionConfig, SourcemapConfig,
 };
+pub use hooks::{EventObserver, IngestError, Transaction, TransactionSink};
 pub use standalone::{Secret, Standalone};
 
 use anyhow::{Context, Result};
@@ -43,7 +45,7 @@ use db::Db;
 use mallard_common::auth::{AuthPolicy, Tokens};
 use sourcemaps::SourceMaps;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use storage::Storage;
 
 /// DuckLake schema that holds the tables.
@@ -58,6 +60,10 @@ struct AppState {
     tokens: Tokens,
     /// Recently stored event ids per project, to drop SDK retries.
     recent_events: moka::sync::Cache<(u32, uuid::Uuid), ()>,
+    /// Gets transactions instead of dropping them (set by the host).
+    transaction_sink: OnceLock<Arc<dyn TransactionSink>>,
+    /// Told about stored SDK events (set by the host).
+    event_observer: OnceLock<Arc<dyn EventObserver>>,
 }
 
 /// A running server: the database writer plus HTTP routers to mount.
@@ -119,6 +125,8 @@ impl Server {
                 sourcemaps,
                 tokens,
                 recent_events,
+                transaction_sink: OnceLock::new(),
+                event_observer: OnceLock::new(),
             }),
         })
     }
@@ -140,6 +148,52 @@ impl Server {
 
     pub fn openapi() -> utoipa::openapi::OpenApi {
         api::openapi()
+    }
+
+    /// Hand transaction items to `sink` instead of dropping them. Set it
+    /// once, before serving; a second call is an error.
+    pub fn set_transaction_sink(&self, sink: Arc<dyn TransactionSink>) -> Result<()> {
+        self.state.transaction_sink.set(sink).map_err(|_| anyhow::anyhow!("transaction sink already set"))
+    }
+
+    /// Report stored SDK events to `observer`. Set it once; a second call
+    /// is an error.
+    pub fn set_event_observer(&self, observer: Arc<dyn EventObserver>) -> Result<()> {
+        self.state.event_observer.set(observer).map_err(|_| anyhow::anyhow!("event observer already set"))
+    }
+
+    /// Store an event built in-process (not from an SDK request): the same
+    /// normalizing, grouping and write path as ingest, without auth or HTTP.
+    /// Returns the event id. A repeated `event_id` is stored once. The
+    /// [`EventObserver`] is not told.
+    pub async fn ingest_event(&self, project_id: u32, payload: serde_json::Value) -> Result<String, IngestError> {
+        if self.state.db.caches.project(project_id).is_none() {
+            return Err(IngestError::UnknownProject);
+        }
+        let source = ingest::Source { project_id, client_ip: None, from_sdk: false };
+        ingest::process_event(&self.state, &source, payload, None).await
+    }
+
+    /// The id of the project with this slug.
+    pub fn project_by_slug(&self, slug: &str) -> Option<u32> {
+        self.state.db.caches.projects.read().expect("lock").values().find(|p| p.slug == slug).map(|p| p.id)
+    }
+
+    /// Create a project (same rules as `POST /v1/projects`) and return its
+    /// id. When the slug is taken, the existing project's id.
+    pub async fn create_project(&self, name: &str, slug: &str, platform: Option<&str>) -> Result<u32> {
+        api::check_slug(slug).map_err(anyhow::Error::msg)?;
+        let (name, slug2, platform) = (name.trim().to_string(), slug.to_string(), platform.map(str::to_string));
+        anyhow::ensure!(!name.is_empty(), "name is required");
+        let r: Result<db::ProjectRow, db::WriteError> =
+            self.state.db.call(|reply| db::WriteCmd::CreateProject { name, slug: slug2, platform, reply }).await;
+        match r {
+            Ok(p) => Ok(p.id),
+            Err(db::WriteError::SlugTaken(_)) => {
+                self.project_by_slug(slug).ok_or_else(|| anyhow::anyhow!("project {slug} vanished"))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Ready to serve: the writer runs and the catalog answers. The error
