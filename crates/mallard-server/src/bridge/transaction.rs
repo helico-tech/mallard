@@ -93,16 +93,16 @@ pub fn to_otlp(tx: &Value, project_slug: &str) -> Option<ExportTraceServiceReque
 }
 
 /// A non-empty string field.
-fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+pub(super) fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// Attributes with unique keys; a later value for a key wins.
 #[derive(Default)]
-struct Attrs(BTreeMap<String, AnyValue>);
+pub(super) struct Attrs(pub(super) BTreeMap<String, AnyValue>);
 
 impl Attrs {
-    fn set(&mut self, key: &str, v: Option<&Value>) {
+    pub(super) fn set(&mut self, key: &str, v: Option<&Value>) {
         if let Some(v) = v.and_then(any_value) {
             self.0.insert(key.to_string(), v);
         }
@@ -122,13 +122,13 @@ impl Attrs {
         }
     }
 
-    fn finish(self) -> Vec<KeyValue> {
+    pub(super) fn finish(self) -> Vec<KeyValue> {
         self.0.into_iter().map(|(key, v)| KeyValue { key, value: Some(v), ..Default::default() }).collect()
     }
 }
 
 /// Scalars keep their type; arrays and objects become JSON text.
-fn any_value(v: &Value) -> Option<AnyValue> {
+pub(super) fn any_value(v: &Value) -> Option<AnyValue> {
     use any_value::Value as V;
     let value = match v {
         Value::Null => return None,
@@ -144,17 +144,17 @@ fn any_value(v: &Value) -> Option<AnyValue> {
     Some(AnyValue { value: Some(value) })
 }
 
-fn trace_id_bytes(v: Option<&Value>) -> Option<Vec<u8>> {
+pub(super) fn trace_id_bytes(v: Option<&Value>) -> Option<Vec<u8>> {
     Some(parse_trace_id(v?.as_str()?)?.as_bytes().to_vec())
 }
 
-fn span_id_bytes(v: Option<&Value>) -> Option<Vec<u8>> {
+pub(super) fn span_id_bytes(v: Option<&Value>) -> Option<Vec<u8>> {
     Some(parse_span_id(v?.as_str()?)?.to_be_bytes().to_vec())
 }
 
 /// Seconds (float) or RFC 3339 → Unix nanoseconds. Float seconds are
 /// rounded to microseconds (what is stored), so float noise does not show.
-fn nanos(v: Option<&Value>) -> Option<u64> {
+pub(super) fn nanos(v: Option<&Value>) -> Option<u64> {
     let ns = match v? {
         Value::Number(n) => (n.as_f64()? * 1e6).round() as i64 * 1000,
         other => parse_timestamp(other)?.timestamp_nanos_opt()?,
@@ -164,7 +164,11 @@ fn nanos(v: Option<&Value>) -> Option<u64> {
 
 /// `data["otel.kind"]` when the SDK sends it (OTel-based SDKs), else from `op`.
 fn kind(data: Option<&Value>, op: &str) -> SpanKind {
-    let named = data.and_then(|d| d.get("otel.kind")).and_then(Value::as_str);
+    op_kind(data.and_then(|d| d.get("otel.kind")).and_then(Value::as_str), op)
+}
+
+/// The kind the SDK named (`server`, `CLIENT`, …), else from `op`.
+pub(super) fn op_kind(named: Option<&str>, op: &str) -> SpanKind {
     if let Some(k) = named.and_then(|k| SpanKind::from_str_name(&format!("SPAN_KIND_{}", k.to_ascii_uppercase()))) {
         return k;
     }

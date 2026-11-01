@@ -37,7 +37,8 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BridgeConfig {
-    /// Store Sentry transactions and their spans as OTel traces.
+    /// Store Sentry transactions and streamed spans (`span` items, ADR
+    /// 0013) as OTel traces.
     pub transactions: bool,
     /// Turn exceptions recorded by OTel SDKs (span events, logs) into
     /// Sentry events and issues.
@@ -47,8 +48,8 @@ pub struct BridgeConfig {
     pub default_project: String,
     /// How long a bridged item waits for its copy from the other side
     /// (dedupe, ADR 0009 and 0010): an OTel exception for a Sentry SDK
-    /// event of the same trace + span, a Sentry transaction for OTLP spans
-    /// with its span ids. Copies that came are not stored twice.
+    /// event of the same trace + span, a Sentry transaction or span item for
+    /// OTLP spans with its span ids. Copies that came are not stored twice.
     #[serde(with = "duration")]
     pub dedupe_window: Duration,
 }

@@ -1,8 +1,8 @@
-//! The bridge (docs/adr/0009-bridge.md) end to end: Sentry transactions
-//! become spans in the OTel API, OTel exceptions become Sentry issues
-//! linked to their trace, and an exception a Sentry SDK also reported is
-//! stored once, like a span an app sends both as a Sentry transaction and
-//! over OTLP (ADR 0010).
+//! The bridge (docs/adr/0009-bridge.md) end to end: Sentry transactions and
+//! streamed span items (ADR 0013) become spans in the OTel API, OTel
+//! exceptions become Sentry issues linked to their trace, and an exception a
+//! Sentry SDK also reported is stored once, like a span an app sends both
+//! through a Sentry SDK and over OTLP (ADR 0010).
 
 use std::time::Duration;
 
@@ -47,6 +47,62 @@ fn transaction(trace: &str) -> Value {
              "data": {"db.system": "postgresql"}, "start_timestamp": t + 0.01, "timestamp": t + 0.24}
         ]
     })
+}
+
+/// The same three spans as [`transaction`], as a span streaming envelope.
+fn span_envelope(trace: &str) -> String {
+    let t = now_secs() - 1.0;
+    let attr = |v: &str| json!({"type": "string", "value": v});
+    let common = |op: &str| {
+        json!({"sentry.op": attr(op), "sentry.segment.name": attr("GET /users/:id"),
+            "sentry.segment.id": attr("a1b2c3d4e5f60718"), "sentry.release": attr("shop@1.2.3"),
+            "sentry.environment": attr("production"), "sentry.sdk.name": attr("sentry.javascript.node"),
+            "sentry.sdk.version": attr("11.10.0")})
+    };
+    let payload = json!({"version": 2, "items": [
+        {"trace_id": trace, "span_id": "1111111111111111", "parent_span_id": "a1b2c3d4e5f60718",
+         "name": "query", "status": "ok", "is_segment": false,
+         "start_timestamp": t + 0.001, "end_timestamp": t + 0.002, "attributes": common("middleware.express")},
+        {"trace_id": trace, "span_id": "2222222222222222", "parent_span_id": "a1b2c3d4e5f60718",
+         "name": "SELECT * FROM users WHERE id = $1", "status": "error", "is_segment": false,
+         "start_timestamp": t + 0.01, "end_timestamp": t + 0.24, "attributes": common("db")},
+        {"trace_id": trace, "span_id": "a1b2c3d4e5f60718", "name": "GET /users/:id", "status": "error",
+         "is_segment": true, "start_timestamp": t, "end_timestamp": t + 0.25, "attributes": common("http.server")}
+    ]});
+    let header = json!({"trace": {"trace_id": trace, "public_key": "x", "release": "shop@1.2.3"}});
+    let item = json!({"type": "span", "item_count": 3, "content_type": "application/vnd.sentry.items.span.v2+json"});
+    format!("{header}\n{item}\n{payload}\n")
+}
+
+/// A span envelope captured from @sentry/node 11.10 running
+/// `e2e/sentry/fixtures/node-tracing-app.mjs` (only host details and most
+/// request headers removed), moved to `trace` and to the last few seconds.
+fn captured_span_envelope(trace: &str) -> String {
+    let text =
+        include_str!("fixtures/sentry-node-11-spans.envelope").replace("96840ee330eb4f48adfeda513ab13381", trace);
+    let mut lines = text.lines();
+    let (header, item) = (lines.next().unwrap(), lines.next().unwrap());
+    let mut payload: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    let spans = payload["items"].as_array_mut().unwrap();
+    let last = spans.iter().map(|s| s["end_timestamp"].as_f64().unwrap()).fold(0.0, f64::max);
+    let shift = now_secs() - 1.0 - last;
+    for s in spans {
+        for k in ["start_timestamp", "end_timestamp"] {
+            s[k] = json!(s[k].as_f64().unwrap() + shift);
+        }
+    }
+    format!("{header}\n{item}\n{payload}\n")
+}
+
+async fn post_envelope(http: &reqwest::Client, url: &str, project: &Project, body: String) {
+    let r = http
+        .post(format!("{url}/sentry/api/{}/envelope/", project.id))
+        .header("X-Sentry-Auth", format!("Sentry sentry_version=7, sentry_key={}", project.public_key))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "sentry ingest: {}", r.status());
 }
 
 fn error_event(trace: &str, span: &str, ty: &str) -> Value {
@@ -133,6 +189,78 @@ async fn sentry_transactions_become_traces() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sentry_span_items_become_traces() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| c.bridge.dedupe_window = Duration::from_millis(200)).await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let shop = project(&client, "shop").await;
+    let http = reqwest::Client::new();
+    let trace = "abf92f3577b34da6a3ce929d0e0e4742";
+
+    // A standalone span of older SDKs (no v2 content type) is not stored.
+    let old_trace = "bbf92f3577b34da6a3ce929d0e0e4743";
+    let old = json!({"trace_id": old_trace, "span_id": "1111111111111111", "description": "INP",
+        "start_timestamp": now_secs() - 1.0, "timestamp": now_secs()});
+    send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "span", &old).await;
+    // Garbage in a span item does not fail the request.
+    let v2 = json!({"type": "span", "content_type": "application/vnd.sentry.items.span.v2+json"});
+    post_envelope(&http, &srv.url, &shop, format!("{{}}\n{v2}\nnot json\n")).await;
+
+    post_envelope(&http, &srv.url, &shop, captured_span_envelope(trace)).await;
+    // The error the SDK captured in the charge span.
+    let err = error_event(trace, "88bd0a55715169b9", "Error");
+    send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "event", &err).await;
+
+    let t = eventually("the five spans and the error", || async {
+        let t = client.trace_overview(trace, None).await.unwrap();
+        (t.spans.len() == 5 && t.errors.len() == 1).then_some(t)
+    })
+    .await;
+    let span = |id: &str| t.spans.iter().find(|s| s.span_id == id).unwrap();
+
+    let root = span("adaa534ad3e8ef99");
+    assert_eq!(root.name, "checkout client");
+    assert_eq!(root.parent_span_id, None);
+    assert_eq!(root.service_name, "shop", "service = project slug");
+    assert_eq!(root.kind, SpanKind::Internal);
+    assert_eq!(root.status_code, SpanStatus::Ok);
+    assert_eq!(root.resource_attributes.get("service.version").map(String::as_str), Some("tracing-app@1.0.0"));
+    assert_eq!(root.resource_attributes.get("deployment.environment.name").map(String::as_str), Some("e2e"));
+    assert_eq!(root.scope_name, "sentry.javascript.node");
+    assert_eq!(root.scope_version, "11.10.0");
+
+    let fetch = span("95c5b31c975f2037");
+    assert_eq!(fetch.kind, SpanKind::Client, "sentry.kind");
+    assert_eq!(fetch.parent_span_id.as_deref(), Some("adaa534ad3e8ef99"));
+    assert_eq!(fetch.attributes.get("sentry.segment.name").map(String::as_str), Some("checkout client"));
+
+    let server = span("bc2f788536782290");
+    assert_eq!(server.name, "GET");
+    assert_eq!(server.kind, SpanKind::Server);
+    assert_eq!(server.parent_span_id.as_deref(), Some("95c5b31c975f2037"));
+    assert_eq!(server.status_code, SpanStatus::Error);
+    assert_eq!(server.status_message, "internal_error");
+    assert_eq!(server.attributes.get("sentry.op").map(String::as_str), Some("http.server"));
+    assert_eq!(server.attributes.get("http.response.status_code").map(String::as_str), Some("500"));
+    assert_eq!(server.attributes.get("http.request.header.accept").map(String::as_str), Some(r#"["*/*"]"#));
+    assert!(!server.attributes.contains_key("sentry.release"), "on the resource");
+
+    assert_eq!(span("8074ae85bb09e3f5").kind, SpanKind::Client, "from op db.query");
+    let charge = span("88bd0a55715169b9");
+    assert_eq!(charge.name, "charge card");
+    assert_eq!(charge.kind, SpanKind::Internal);
+    assert_eq!(charge.parent_span_id.as_deref(), Some("bc2f788536782290"));
+    assert_eq!(
+        t.errors[0].span_id.as_deref(),
+        Some("88bd0a55715169b9"),
+        "the error sits under the span it was thrown in"
+    );
+
+    assert!(client.trace_overview(old_trace, None).await.unwrap().spans.is_empty(), "v1 span items are dropped");
+    srv.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn otel_exceptions_become_issues_once() {
     let dir = tempfile::tempdir().unwrap();
     let srv = start_with(dir.path(), |c| c.bridge.dedupe_window = Duration::from_secs(1)).await;
@@ -205,20 +333,26 @@ async fn otel_exceptions_become_issues_once() {
 /// An app on @sentry/node 8+ that also exports OTLP sends its root span and
 /// one child both ways (same ids); its db span only goes to Sentry. Each
 /// span is stored once, the OTLP copy where there is one, whichever copy
-/// arrives first.
-async fn spans_sent_both_ways_are_stored_once(sentry_first: bool) {
+/// arrives first and whether the Sentry copy is a transaction or streamed.
+async fn spans_sent_both_ways_are_stored_once(trace: &str, sentry_first: bool, streamed: bool) {
     let dir = tempfile::tempdir().unwrap();
     let srv = start_with(dir.path(), |c| c.bridge.dedupe_window = Duration::from_secs(1)).await;
     let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
     let shop = project(&client, "shop").await;
     let http = reqwest::Client::new();
-    let trace = if sentry_first { "8bf92f3577b34da6a3ce929d0e0e4740" } else { "9bf92f3577b34da6a3ce929d0e0e4741" };
+    let send_sentry = async || {
+        if streamed {
+            post_envelope(&http, &srv.url, &shop, span_envelope(trace)).await;
+        } else {
+            send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "transaction", &transaction(trace)).await;
+        }
+    };
     let otlp = vec![
         otel_span(trace, "a1b2c3d4e5f60718", "GET /users/:id", None),
         otel_span(trace, "1111111111111111", "query", None),
     ];
     if sentry_first {
-        send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "transaction", &transaction(trace)).await;
+        send_sentry().await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         post_spans(&http, &srv.otlp_url, otlp).await;
     } else {
@@ -227,7 +361,7 @@ async fn spans_sent_both_ways_are_stored_once(sentry_first: bool) {
             (client.trace_overview(trace, None).await.unwrap().spans.len() == 2).then_some(())
         })
         .await;
-        send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "transaction", &transaction(trace)).await;
+        send_sentry().await;
     }
 
     eventually("three spans", || async {
@@ -250,12 +384,22 @@ async fn spans_sent_both_ways_are_stored_once(sentry_first: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spans_sent_both_ways_otlp_first() {
-    spans_sent_both_ways_are_stored_once(false).await;
+    spans_sent_both_ways_are_stored_once("9bf92f3577b34da6a3ce929d0e0e4741", false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spans_sent_both_ways_sentry_first() {
-    spans_sent_both_ways_are_stored_once(true).await;
+    spans_sent_both_ways_are_stored_once("8bf92f3577b34da6a3ce929d0e0e4740", true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streamed_spans_sent_both_ways_otlp_first() {
+    spans_sent_both_ways_are_stored_once("cbf92f3577b34da6a3ce929d0e0e4744", false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streamed_spans_sent_both_ways_sentry_first() {
+    spans_sent_both_ways_are_stored_once("dbf92f3577b34da6a3ce929d0e0e4745", true, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -270,7 +414,9 @@ async fn the_bridge_can_be_switched_off() {
     let shop = project(&client, "shop").await;
     let http = reqwest::Client::new();
     let (tx_trace, otel_trace) = ("6bf92f3577b34da6a3ce929d0e0e4738", "7bf92f3577b34da6a3ce929d0e0e4739");
+    let streamed_trace = "ebf92f3577b34da6a3ce929d0e0e4746";
     send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "transaction", &transaction(tx_trace)).await;
+    post_envelope(&http, &srv.url, &shop, span_envelope(streamed_trace)).await;
     post_spans(&http, &srv.otlp_url, vec![otel_span(otel_trace, "000000000000000a", "POST /checkout", Some("E"))])
         .await;
     // The OTLP span itself is stored; nothing crosses over.
@@ -280,6 +426,7 @@ async fn the_bridge_can_be_switched_off() {
     .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(client.trace_overview(tx_trace, None).await.unwrap().spans.is_empty());
+    assert!(client.trace_overview(streamed_trace, None).await.unwrap().spans.is_empty());
     assert!(client.trace_overview(otel_trace, None).await.unwrap().errors.is_empty());
     assert_eq!(client.sentry.projects().await.unwrap().len(), 1, "no project for service checkout");
     srv.stop().await;

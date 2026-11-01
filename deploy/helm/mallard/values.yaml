@@ -89,7 +89,7 @@ retention:
 
 # Between the two sides (docs/adr/0009-bridge.md).
 bridge:
-  # Store Sentry transactions and their spans as OTel traces.
+  # Store Sentry transactions and streamed spans as OTel traces.
   transactions: true
   # Exceptions recorded by OTel SDKs become Sentry events and issues.
   exceptions: true
@@ -98,8 +98,8 @@ bridge:
   defaultProject: ""
   # How long a bridged item waits for its copy from the other side: an
   # OTel exception for a Sentry SDK event of the same span, a Sentry
-  # transaction for OTLP spans with the same ids (ADR 0010). Copies that
-  # came are dropped. At most 10m.
+  # transaction or span item for OTLP spans with the same ids (ADR 0010).
+  # Copies that came are dropped. At most 10m.
   dedupeWindow: 10s
 
 duckdb:
