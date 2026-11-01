@@ -154,6 +154,7 @@ fn short_error(e: &odl_client::Error) -> String {
     match e {
         odl_client::Error::Http(e) if e.is_connect() => "cannot connect to the server".to_string(),
         odl_client::Error::Http(e) if e.is_timeout() => "request timed out".to_string(),
+        odl_client::Error::Http(e) => format!("request failed: {e}"),
         other => other.to_string(),
     }
 }

@@ -123,7 +123,7 @@ async fn status(c: &Client, json: bool) -> Result<()> {
     if json {
         let v = serde_json::json!({
             "sentry": s.as_ref().map(|x| serde_json::to_value(x).unwrap()).map_err(|e| e.to_string()),
-            "otel": o.as_ref().map(|x| serde_json::to_value(x).unwrap()).map_err(|e| e.to_string()),
+            "otel": o.as_ref().map(|x| serde_json::to_value(x).unwrap()).map_err(|e| error_chain(e)),
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -150,7 +150,19 @@ async fn status(c: &Client, json: bool) -> Result<()> {
                 st.ingest.flush_errors
             );
         }
-        Err(e) => println!("otel     ERROR {e}"),
+        Err(e) => println!("otel     ERROR {}", error_chain(&e)),
     }
     Ok(())
+}
+
+/// An error and its causes on one line (`a: b: c`).
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        cause = c.source();
+    }
+    s
 }

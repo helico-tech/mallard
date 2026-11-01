@@ -15,10 +15,14 @@ use odl_api::*;
 use serde::{Serialize, de::DeserializeOwned};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
-    #[error("invalid base URL {0:?}")]
+    #[error("invalid base URL {0:?}: must start with http:// or https://")]
     BadUrl(String),
-    #[error("request failed: {0}")]
+    #[error("invalid trace id {0:?}: must be 32 hex characters")]
+    BadTraceId(String),
+    /// Connection, timeout or decoding error; the cause is in `source()`.
+    #[error("request failed")]
     Http(#[from] reqwest::Error),
     #[error("{status}: {message}")]
     Api { status: u16, error: String, message: String },
@@ -33,6 +37,15 @@ impl Error {
             _ => None,
         }
     }
+
+    /// The server refused the time window because it is larger than its
+    /// `query.max_window`.
+    ///
+    /// The server reports this as a generic `bad_request`, so this matches
+    /// its message. It is the only place that does.
+    pub fn is_window_too_large(&self) -> bool {
+        matches!(self, Error::Api { status: 400, message, .. } if message.contains("max_window"))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -42,6 +55,15 @@ pub struct Client {
     http: reqwest::Client,
     base: String,
     token: Option<String>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base", &self.base)
+            .field("token", &self.token.as_ref().map(|_| "***"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
@@ -80,7 +102,7 @@ impl Client {
         let text = resp.text().await.unwrap_or_default();
         let (error, message) = match serde_json::from_str::<ApiError>(&text) {
             Ok(e) => (e.error, e.message),
-            Err(_) => ("http".to_string(), if text.is_empty() { status.to_string() } else { text }),
+            Err(_) => ("http".to_string(), fallback_message(&text, status)),
         };
         Err(Error::Api { status: status.as_u16(), error, message })
     }
@@ -107,8 +129,12 @@ impl Client {
     pub async fn traces(&self, q: &TraceQuery) -> Result<Vec<TraceSummary>> {
         self.get("/api/v1/traces", q).await
     }
+    /// `trace_id`: 32 hex characters; dashes (UUID form) are ignored.
     pub async fn trace(&self, trace_id: &str, q: &TraceGetQuery) -> Result<Trace> {
-        let id: String = trace_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let id = trace_id.replace('-', "");
+        if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::BadTraceId(trace_id.to_string()));
+        }
         self.get(&format!("/api/v1/traces/{id}"), q).await
     }
     pub async fn logs(&self, q: &LogQuery) -> Result<Vec<LogRecord>> {
@@ -129,17 +155,35 @@ impl Client {
     }
 }
 
+/// Message for an error response that is not an [`ApiError`] (e.g. a
+/// proxy's HTML page): its first line, at most 200 characters.
+fn fallback_message(body: &str, status: reqwest::StatusCode) -> String {
+    let line = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    if line.is_empty() {
+        return status.to_string();
+    }
+    let mut msg: String = line.chars().take(200).collect();
+    if msg.len() < line.len() {
+        msg.push('…');
+    }
+    msg
+}
+
 /// Follows new log records ("tail -f") by polling.
 ///
 /// Records become visible only after the server's flush interval and may
 /// arrive late, so each poll looks back a little (`lookback`, default 30 s)
-/// and drops what it returned before. The window of each poll is relative to
-/// the server's clock (`since`), so client clock skew does not matter and the
-/// window stays small even when nothing matches for a long time.
+/// and drops what it returned before. From the second poll on, the window is
+/// relative to the server's clock (`since`), so client clock skew does not
+/// matter and the window stays small even when nothing matches for a long
+/// time. The first poll starts at the `start` given to [`LogTail::new`],
+/// which is on the caller's clock.
 ///
 /// When more than `limit` records arrive between two polls only the newest
 /// `limit` are returned (a tail shows what is happening now);
 /// [`LogTail::last_poll_truncated`] then reports that some may be missing.
+/// The same happens after a long pause or outage: a poll never looks back
+/// more than [`MAX_GAP`] (or the look-back, when that is longer).
 pub struct LogTail {
     client: Client,
     query: LogQuery,
@@ -153,7 +197,30 @@ pub struct LogTail {
     truncated: bool,
 }
 
+impl std::fmt::Debug for LogTail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogTail")
+            .field("query", &self.query)
+            .field("lookback", &self.lookback)
+            .field("start", &self.start)
+            .field("seen", &self.seen.len())
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
 const MAX_SEEN: usize = 200_000;
+
+/// Longest gap a poll tries to fill after a pause or outage.
+pub const MAX_GAP: Duration = Duration::from_secs(10 * 60);
+
+/// The `since` window of a poll that follows `elapsed` after the previous
+/// one, and whether it had to be capped (records may be missing).
+fn poll_window(elapsed: Duration, lookback: Duration) -> (Duration, bool) {
+    let want = elapsed + lookback + Duration::from_secs(1);
+    let cap = MAX_GAP.max(lookback + Duration::from_secs(1));
+    if want > cap { (cap, true) } else { (want, false) }
+}
 
 impl LogTail {
     /// Start tailing from `start` (e.g. now minus a few minutes). Filters in
@@ -190,8 +257,9 @@ impl LogTail {
         }
     }
 
-    /// True when the last poll returned a full page: older new records may
-    /// have been skipped.
+    /// True when records between the last two polls may be missing: the
+    /// page was full and did not reach back to records returned before, or
+    /// the gap since the previous poll was longer than [`MAX_GAP`].
     pub fn last_poll_truncated(&self) -> bool {
         self.truncated
     }
@@ -201,11 +269,13 @@ impl LogTail {
         let started = std::time::Instant::now();
         let mut q = self.query.clone();
         q.to = None;
+        let mut capped = false;
         match self.last_poll {
             // Relative to the server's now: everything since the previous
             // poll, plus the look-back for late records.
             Some(prev) => {
-                let back = prev.elapsed() + self.lookback.to_std().unwrap_or_default() + Duration::from_secs(1);
+                let (back, c) = poll_window(prev.elapsed(), self.lookback.to_std().unwrap_or_default());
+                capped = c;
                 q.from = None;
                 q.since = Some(format!("{}ms", back.as_millis()));
             }
@@ -217,9 +287,23 @@ impl LogTail {
         q.order = Some("desc".into());
         let limit = q.limit.unwrap_or(500).clamp(1, 5000);
         q.limit = Some(limit);
-        let mut records = self.client.logs(&q).await?;
-        self.truncated = records.len() as u32 >= limit;
+        let records = self.client.logs(&q).await?;
+        // No await below this point: a cancelled poll changes nothing.
+        let out = self.accept(records, limit);
+        self.truncated |= capped;
+        self.last_poll = Some(started);
+        Ok(out)
+    }
+
+    /// Take one response (newest first, at most `limit` records): return the
+    /// records not returned before, oldest first, and update `seen` and the
+    /// truncation flag.
+    fn accept(&mut self, mut records: Vec<LogRecord>, limit: u32) -> Vec<LogRecord> {
+        let full = records.len() >= limit as usize;
         records.reverse();
+        // A full page that still reaches back to a record returned before
+        // overlaps the previous poll: nothing was skipped.
+        self.truncated = full && records.first().is_some_and(|r| !self.seen.contains_key(&key(r)));
         // Multiset difference: a record identical to one seen before is new
         // when it occurs more often in this response than seen so far.
         let mut in_response: HashMap<(i64, u64), usize> = HashMap::new();
@@ -236,7 +320,6 @@ impl LogTail {
             let e = self.seen.entry(k).or_default();
             *e = (*e).max(n);
         }
-        self.last_poll = Some(started);
         // Forget identities far older than any future poll window.
         if let Some(newest) = self.seen.keys().map(|k| k.0).max() {
             let horizon = newest - (self.lookback * 2 + TimeDelta::minutes(5)).num_microseconds().unwrap_or(i64::MAX);
@@ -248,7 +331,7 @@ impl LogTail {
             let cut = times[times.len() - MAX_SEEN / 2];
             self.seen.retain(|k, _| k.0 >= cut);
         }
-        Ok(out)
+        out
     }
 }
 
@@ -283,5 +366,116 @@ mod tests {
         let c = Client::new("http://x:8080/otel/", Some(String::new())).unwrap();
         assert_eq!(c.base_url(), "http://x:8080/otel");
         assert!(c.token.is_none());
+    }
+
+    #[test]
+    fn debug_hides_token() {
+        let c = Client::new("http://x", Some("secret".into())).unwrap();
+        let d = format!("{c:?}");
+        assert!(!d.contains("secret") && d.contains("***"), "{d}");
+    }
+
+    #[tokio::test]
+    async fn trace_id_is_validated() {
+        let c = Client::new("http://127.0.0.1:9", None).unwrap();
+        let q = TraceGetQuery::default();
+        assert!(matches!(c.trace("xyz", &q).await, Err(Error::BadTraceId(_))));
+        assert!(matches!(c.trace("0af7651916cd43dd8448eb211c80319c/x", &q).await, Err(Error::BadTraceId(_))));
+        // Dashes are fine; this one fails only because nothing listens.
+        assert!(matches!(c.trace("0af76519-16cd-43dd-8448-eb211c80319c", &q).await, Err(Error::Http(_))));
+    }
+
+    #[test]
+    fn error_messages() {
+        let html = "<html>\n<body>502 Bad Gateway</body></html>";
+        assert_eq!(fallback_message(html, reqwest::StatusCode::BAD_GATEWAY), "<html>");
+        let long = "x".repeat(500);
+        assert_eq!(fallback_message(&long, reqwest::StatusCode::BAD_GATEWAY).chars().count(), 201);
+        assert_eq!(fallback_message("", reqwest::StatusCode::BAD_GATEWAY), "502 Bad Gateway");
+        let e = Error::Api {
+            status: 400,
+            error: "bad_request".into(),
+            message: "time window larger than query.max_window (1day)".into(),
+        };
+        assert!(e.is_window_too_large());
+        let e = Error::Api { status: 400, error: "bad_request".into(), message: "invalid since".into() };
+        assert!(!e.is_window_too_large());
+    }
+
+    fn rec(micros: i64, body: &str) -> LogRecord {
+        let t = DateTime::from_timestamp_micros(1_700_000_000_000_000 + micros).unwrap();
+        LogRecord {
+            time: t,
+            observed_time: t,
+            service_name: "api".into(),
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: body.into(),
+            trace_id: None,
+            span_id: None,
+            event_name: String::new(),
+            scope_name: String::new(),
+            attributes: Default::default(),
+            resource_attributes: Default::default(),
+        }
+    }
+
+    fn tail() -> LogTail {
+        LogTail::new(Client::new("http://127.0.0.1:9", None).unwrap(), LogQuery::default(), Utc::now())
+    }
+
+    /// Newest first, like the server returns them.
+    fn page(range: std::ops::Range<i64>) -> Vec<LogRecord> {
+        range.rev().map(|i| rec(i, &format!("r{i}"))).collect()
+    }
+
+    // Finding 1: a full page that overlaps what was returned before is not
+    // a gap; only a full page with nothing seen before is.
+    #[test]
+    fn truncated_only_when_page_does_not_overlap() {
+        let mut t = tail();
+        assert_eq!(t.accept(page(0..10), 10).len(), 10);
+        // Busy stream: the full page re-reads 5 old records (look-back).
+        assert_eq!(t.accept(page(5..15), 10).len(), 5);
+        assert!(!t.last_poll_truncated(), "overlapping full page reported as truncated");
+        // A burst: the full page starts after everything seen.
+        assert_eq!(t.accept(page(100..110), 10).len(), 10);
+        assert!(t.last_poll_truncated());
+        // A page that is not full is never truncated.
+        t.accept(page(200..203), 10);
+        assert!(!t.last_poll_truncated());
+    }
+
+    #[test]
+    fn identical_records_and_mark_seen() {
+        let mut t = tail();
+        t.mark_seen(&[rec(1, "same")]);
+        let out = t.accept(vec![rec(1, "same"), rec(1, "same")], 10);
+        assert_eq!(out.len(), 1, "one more identical record");
+        assert!(t.accept(vec![rec(1, "same"), rec(1, "same")], 10).is_empty());
+    }
+
+    #[test]
+    fn seen_is_pruned_by_age() {
+        let mut t = tail();
+        t.accept(vec![rec(0, "old")], 10);
+        // 10 minutes later: far beyond 2 x look-back + 5 min.
+        t.accept(vec![rec(600_000_000, "new")], 10);
+        assert_eq!(t.seen.len(), 1);
+        // The old record would be returned again, but it is outside any
+        // future window.
+        assert!(t.seen.keys().all(|k| k.0 == key(&rec(600_000_000, "new")).0));
+    }
+
+    // Finding 8: after a long pause the window is capped (and reported as a
+    // gap) instead of growing past the server's max_window.
+    #[test]
+    fn poll_window_is_capped() {
+        let lb = Duration::from_secs(30);
+        assert_eq!(poll_window(Duration::from_secs(2), lb), (Duration::from_secs(33), false));
+        assert_eq!(poll_window(Duration::from_secs(48 * 3600), lb), (MAX_GAP, true));
+        // A look-back longer than the cap still fits.
+        let long = Duration::from_secs(3600);
+        assert_eq!(poll_window(Duration::ZERO, long).1, false);
     }
 }

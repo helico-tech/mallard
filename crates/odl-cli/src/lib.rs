@@ -342,7 +342,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                                 }
                             }
                         }
-                        Err(e) => eprintln!("{} {e}", paint_err("poll failed:")),
+                        Err(e) => eprintln!("{} {:#}", paint_err("poll failed:"), anyhow::Error::new(e)),
                     },
                     _ = &mut ctrl_c => return Ok(()),
                 }
