@@ -59,7 +59,7 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
     a path), `SENTRY_ORG=default` (the server ignores the org),
     `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` = the CLI's token. Found: mallard
     has no `/api/0` at the root, so sentry-cli cannot upload yet →
-    [issue 0007](0007-sentry-cli-needs-root-url.md).
+    [issue 0008](0008-sentry-cli-needs-root-url.md).
   - `--quiet` (global; no `-q`: that is `--query` on `issues list`, `logs`,
     `metrics list`): drops `note:` lines (`Output::note`): truncation,
     waiting, the 24h fallback, `setup`'s "project exists".
