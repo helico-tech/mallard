@@ -9,6 +9,7 @@
 mod errors;
 mod find;
 mod help;
+mod series;
 mod setup;
 mod status;
 mod trace;
@@ -22,6 +23,7 @@ use mallard_client::Client;
 use mallard_term::color::ColorChoice;
 use mallard_term::error::{Described, Hints, Kind};
 use mallard_term::output::{Format, Output};
+use mallard_term::wait::WaitArgs;
 use mallard_term::window::WindowArgs;
 
 #[derive(Parser)]
@@ -57,6 +59,10 @@ struct Cli {
     /// Colour: auto (a terminal without NO_COLOR), always or never.
     #[arg(long, global = true, value_enum, default_value_t)]
     color: ColorChoice,
+    /// No notes on stderr (truncation, progress, fallbacks); data, warnings
+    /// and errors still print. (No `-q`: it is `--query` on several commands.)
+    #[arg(long, global = true)]
+    quiet: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -74,6 +80,8 @@ enum Cmd {
         /// Where to look for traces and events (default 7d).
         #[command(flatten)]
         window: WindowArgs,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// Error issues: list, show, resolve, ignore, unresolve.
     #[command(subcommand)]
@@ -93,8 +101,11 @@ enum Cmd {
     Logs(odl_cli::LogArgs),
     /// Services with request rate, error rate and latency (default window 1h).
     Services(odl_cli::ServiceArgs),
-    /// Operations (span names) with request rate, error rate and latency.
+    /// Operations (span names) with request rate, error rate and latency; --compare 1d for before/after.
     Ops(odl_cli::OpsArgs),
+    /// Counts per time bucket: spans (with p95), logs, Sentry errors (default window 1h).
+    #[command(subcommand)]
+    Series(series::SeriesCmd),
     /// Metrics: list, show (values over time).
     #[command(subcommand)]
     Metrics(MetricsCmd),
@@ -148,6 +159,8 @@ struct TraceShowArgs {
     /// Where to look (default 7d).
     #[command(flatten)]
     window: WindowArgs,
+    #[command(flatten)]
+    wait: WaitArgs,
 }
 
 #[derive(Subcommand)]
@@ -237,23 +250,26 @@ fn wants_json(args: &[std::ffi::OsString]) -> bool {
 
 async fn run(cli: Cli) -> Result<()> {
     let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
-    let output =
-        Output::new(Format::pick(cli.format, cli.json), cli.color).with_fields(cli.fields.as_deref()).with_raw(cli.raw);
+    let output = Output::new(Format::pick(cli.format, cli.json), cli.color)
+        .with_fields(cli.fields.as_deref())
+        .with_raw(cli.raw)
+        .with_quiet(cli.quiet);
     let r = Run { client, project: cli.project, output };
     match cli.cmd {
         Cmd::Status => status::run(&r).await,
         Cmd::Setup(a) => setup::run(&r, a).await,
-        Cmd::Find { id, window } => find::run(&r, &id, &window).await,
+        Cmd::Find { id, window, wait } => find::run(&r, &id, &window, &wait).await,
         Cmd::Issues(c) => sdl_cli::run(sdl_cli::Command::Issues(c), &r.sentry()).await,
         Cmd::Events(c) => sdl_cli::run(sdl_cli::Command::Events(c), &r.sentry()).await,
         Cmd::Projects(c) => sdl_cli::run(sdl_cli::Command::Projects(c), &r.sentry()).await,
         Cmd::Sourcemaps(c) => sdl_cli::run(sdl_cli::Command::Sourcemaps(c), &r.sentry()).await,
         Cmd::SendTest { dsn, message } => sdl_cli::run(sdl_cli::Command::SendTest { dsn, message }, &r.sentry()).await,
         Cmd::Traces(TracesCmd::List(a)) => odl_cli::run(odl_cli::Command::Traces(a), &r.otel()).await,
-        Cmd::Traces(TracesCmd::Show(a)) | Cmd::Trace(a) => trace::run(&r, &a.trace_id, &a.window).await,
+        Cmd::Traces(TracesCmd::Show(a)) | Cmd::Trace(a) => trace::run(&r, &a.trace_id, &a.window, &a.wait).await,
         Cmd::Logs(a) => odl_cli::run(odl_cli::Command::Logs(a), &r.otel()).await,
         Cmd::Services(a) => odl_cli::run(odl_cli::Command::Services(a), &r.otel()).await,
         Cmd::Ops(a) => odl_cli::run(odl_cli::Command::Ops(a), &r.otel()).await,
+        Cmd::Series(c) => series::run(&r, c).await,
         Cmd::Metrics(MetricsCmd::List(a)) => odl_cli::run(odl_cli::Command::Metrics(a), &r.otel()).await,
         Cmd::Metrics(MetricsCmd::Show(a)) => odl_cli::run(odl_cli::Command::Metric(a), &r.otel()).await,
         Cmd::Sql(a) => odl_cli::run(odl_cli::Command::Sql(a), &r.otel()).await,
@@ -330,6 +346,19 @@ mod tests {
             &["tui"],
             &["help", "agents"],
             &["help", "issues", "list"],
+            &["events", "list", "--trace", "0af7651916cd43dd8448eb211c80319c", "--wait", "30s"],
+            &["traces", "list", "--wait", "1m"],
+            &["traces", "show", "0af7651916cd43dd8448eb211c80319c", "--wait", "30s"],
+            &["trace", "0af7651916cd43dd8448eb211c80319c", "--wait", "30s"],
+            &["find", "85fede14250ec6be", "--wait", "10s"],
+            &["logs", "-t", "0af7651916cd43dd8448eb211c80319c", "--wait", "30s"],
+            &["logs", "-f", "--for", "2m", "--until-match", "ready"],
+            &["ops", "-S", "checkout", "--since", "1h", "--compare", "1d"],
+            &["series", "spans", "-S", "checkout", "-O", "POST /pay", "--since", "6h", "--step", "5m"],
+            &["series", "logs", "-S", "checkout", "-q", "timeout"],
+            &["series", "errors", "--since", "1d", "--step", "1h"],
+            &["setup", "checkout", "--sentry-cli"],
+            &["--quiet", "issues", "list"],
         ] {
             if let Err(e) = try_parse(args) {
                 panic!("{args:?}: {e}");
@@ -374,6 +403,21 @@ mod tests {
         let cli = parse_ok(&["logs", "--format", "ndjson", "--raw"]);
         assert_eq!((cli.format, cli.raw), (Some(Format::Ndjson), true));
         assert!(try_parse(&["logs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn wait_and_follow_flags_are_checked() {
+        for args in [
+            &["traces", "list", "--wait", "soon"][..],
+            &["logs", "-f", "--wait", "10s"],
+            &["logs", "--for", "1m"],
+            &["logs", "--until-match", "x"],
+            &["ops", "--compare", "0s"],
+            &["-q", "issues", "list"],
+        ] {
+            assert!(try_parse(args).is_err(), "{args:?}");
+        }
+        assert!(parse_ok(&["status", "--quiet"]).quiet);
     }
 
     #[test]
