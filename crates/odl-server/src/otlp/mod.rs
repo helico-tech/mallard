@@ -164,14 +164,21 @@ impl Ingest {
     }
 
     /// Reserve memory for a request about to be read, or `None` when too
-    /// much is in flight already (the client should retry). `body_len` is
-    /// the exact size of an uncompressed body, if known; otherwise the
-    /// maximum request size is reserved.
-    pub fn admit(&self, body_len: Option<u64>) -> Option<InFlight> {
+    /// much is in flight already (the client should retry; counted as a
+    /// throttled request of `signal`). `body_len` is the exact size of an
+    /// uncompressed body, if known; otherwise the maximum request size is
+    /// reserved.
+    pub fn admit(&self, signal: Signal, body_len: Option<u64>) -> Option<InFlight> {
         let max = self.max_request_bytes as u64;
         let bytes = body_len.map_or(max, |n| n.min(max));
         let kib = bytes.div_ceil(1024).clamp(1, self.inflight_kib as u64) as u32;
-        self.inflight.clone().try_acquire_many_owned(kib).ok().map(|p| InFlight(Arc::new(p)))
+        let permit = self.inflight.clone().try_acquire_many_owned(kib).ok();
+        if permit.is_none() {
+            // Refused before the body is read: its items are unknown.
+            self.stats.record_request(signal, 0, 0, 0);
+            self.stats.throttled_request(signal);
+        }
+        permit.map(|p| InFlight(Arc::new(p)))
     }
 
     /// Convert and buffer a request. Runs on a blocking thread because
@@ -219,6 +226,7 @@ impl Ingest {
             return Err(match e {
                 Backpressure::Full { .. } => {
                     self.stats.record_request(signal, 0, items, 0);
+                    self.stats.throttled_request(signal);
                     IngestError::Backpressure(e.to_string())
                 }
                 Backpressure::TooLarge { .. } => {
@@ -255,12 +263,15 @@ mod tests {
             32 * 1024,
             64 * 1024,
         );
-        let a = ingest.admit(None).expect("first request fits");
-        let _b = ingest.admit(Some(40 * 1024)).expect("sizes are capped at max_request_bytes");
-        assert!(ingest.admit(Some(1)).is_none(), "budget used up");
+        let a = ingest.admit(Signal::Logs, None).expect("first request fits");
+        let _b = ingest.admit(Signal::Logs, Some(40 * 1024)).expect("sizes are capped at max_request_bytes");
+        assert!(ingest.admit(Signal::Logs, Some(1)).is_none(), "budget used up");
         drop(a);
-        let _small = ingest.admit(Some(100)).expect("released when dropped");
-        let _small2 = ingest.admit(Some(100)).expect("small requests take little");
+        let _small = ingest.admit(Signal::Logs, Some(100)).expect("released when dropped");
+        let _small2 = ingest.admit(Signal::Logs, Some(100)).expect("small requests take little");
+        // Only the refused request counts as throttled (issue 0013).
+        let s = &ingest.stats.ingest(0).signals[1];
+        assert_eq!((s.signal, s.requests, s.throttled_requests, s.throttled), (Signal::Logs, 1, 1, 0));
     }
 
     fn one_span() -> ExportTraceServiceRequest {
@@ -330,5 +341,6 @@ mod tests {
         assert!(matches!(err, IngestError::Backpressure(_)), "{err}");
         let s = &stats.ingest(0).signals[0];
         assert_eq!((s.requests, s.accepted, s.throttled, s.invalid), (ok + 2, ok + 1, 1, 1));
+        assert_eq!(s.throttled_requests, 1);
     }
 }

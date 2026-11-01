@@ -1105,3 +1105,99 @@ async fn attributes_and_schema() {
     assert!(spans.columns.iter().any(|c| c.name == "attributes" && c.data_type.starts_with("MAP")), "{spans:?}");
     h.stop().await;
 }
+
+/// One metric with a delta and a cumulative series: each series is handled
+/// by its own temporality (otel issue 0008).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mixed_temporality_in_one_metric() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    let start = t0 - 600_000_000_000;
+    let src = |s: &str| vec![kv("src", s)];
+    let (mut delta, mut cum, mut hdelta, mut hcum) = (vec![], vec![], vec![], vec![]);
+    for i in 0..10u64 {
+        let t = t0 - (9 - i) * 60_000_000_000;
+        // 30 per minute as deltas.
+        delta.push(NumberDataPoint {
+            attributes: src("delta"),
+            start_time_unix_nano: t - 60_000_000_000,
+            time_unix_nano: t,
+            value: Some(number_data_point::Value::AsInt(30)),
+            ..Default::default()
+        });
+        // 60 per minute, cumulative, restarting after the fifth minute.
+        let n = if i < 5 { i + 1 } else { i - 4 };
+        cum.push(NumberDataPoint {
+            attributes: src("cumulative"),
+            start_time_unix_nano: if i < 5 { start } else { t - 60_000_000_000 },
+            time_unix_nano: t,
+            value: Some(number_data_point::Value::AsInt(60 * n as i64)),
+            ..Default::default()
+        });
+        // Histograms: 10 observations per minute in each series.
+        hdelta.push(HistogramDataPoint {
+            attributes: src("delta"),
+            start_time_unix_nano: t - 60_000_000_000,
+            time_unix_nano: t,
+            count: 10,
+            bucket_counts: vec![10, 0],
+            explicit_bounds: vec![10.0],
+            ..Default::default()
+        });
+        hcum.push(HistogramDataPoint {
+            attributes: src("cumulative"),
+            start_time_unix_nano: start,
+            time_unix_nano: t,
+            count: 10 * (i + 1),
+            bucket_counts: vec![10 * (i + 1), 0],
+            explicit_bounds: vec![10.0],
+            ..Default::default()
+        });
+    }
+    let sum = |data_points, t: AggregationTemporality| {
+        Data::Sum(Sum { data_points, aggregation_temporality: t as i32, is_monotonic: true })
+    };
+    let hist = |data_points, t: AggregationTemporality| {
+        Data::Histogram(Histogram { data_points, aggregation_temporality: t as i32 })
+    };
+    let metric = |name: &str, data: Data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: resource("worker"),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    metric("jobs.mixed", sum(delta, AggregationTemporality::Delta)),
+                    metric("jobs.mixed", sum(cum, AggregationTemporality::Cumulative)),
+                    metric("latency.mixed", hist(hdelta, AggregationTemporality::Delta)),
+                    metric("latency.mixed", hist(hcum, AggregationTemporality::Cumulative)),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", req.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        (v.iter().map(|m| m.point_count).sum::<u64>() == 40).then_some(())
+    })
+    .await;
+
+    let per_src = |r: MetricQueryResult, want: [(&str, f64); 2]| {
+        assert_eq!(r.series.len(), 2, "{r:?}");
+        for (src, v) in want {
+            let s = r.series.iter().find(|s| s.labels["src"] == src).unwrap();
+            assert!(s.points.len() >= 9, "{} {src}: {:?}", r.name, s.points);
+            for p in &s.points {
+                assert!((p.value - v).abs() < 1e-6, "{} {} {src}: {} != {v}", r.name, r.agg, p.value);
+            }
+        }
+    };
+    let q =
+        |name: &str, agg: &str| format!("/api/v1/metrics/query?name={name}&since=15m&step=1m&agg={agg}&group_by=src");
+    per_src(h.get(&q("jobs.mixed", "increase")).await, [("delta", 30.0), ("cumulative", 60.0)]);
+    per_src(h.get(&q("jobs.mixed", "rate")).await, [("delta", 0.5), ("cumulative", 1.0)]);
+    per_src(h.get(&q("latency.mixed", "count")).await, [("delta", 10.0), ("cumulative", 10.0)]);
+    h.stop().await;
+}

@@ -17,6 +17,7 @@ struct SignalCounters {
     requests: AtomicU64,
     accepted: AtomicU64,
     throttled: AtomicU64,
+    throttled_requests: AtomicU64,
     invalid: AtomicU64,
 }
 
@@ -59,6 +60,13 @@ impl Stats {
             .increment(throttled);
         metrics::counter!("odl_ingest_rejected_items_total", "signal" => signal, "reason" => "invalid")
             .increment(invalid);
+    }
+
+    /// One request refused with back-pressure (HTTP 429 / gRPC
+    /// UNAVAILABLE), in addition to [`Stats::record_request`].
+    pub fn throttled_request(&self, s: Signal) {
+        self.signal(s).throttled_requests.fetch_add(1, Relaxed);
+        metrics::counter!("odl_ingest_throttled_requests_total", "signal" => s.as_str()).increment(1);
     }
 
     pub fn set_buffered(&self, rows: u64, bytes: u64) {
@@ -116,6 +124,7 @@ impl Stats {
                 requests: c.requests.load(Relaxed),
                 accepted: c.accepted.load(Relaxed),
                 throttled: c.throttled.load(Relaxed),
+                throttled_requests: c.throttled_requests.load(Relaxed),
                 invalid: c.invalid.load(Relaxed),
             }
         };
@@ -144,6 +153,7 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             let s = Stats::default();
             s.record_request(Signal::Logs, 3, 2, 1);
+            s.throttled_request(Signal::Logs);
             s.flush_ok(4, 12.0);
             s.flush_err("boom".into());
             s.set_buffered(5, 500);
@@ -154,6 +164,7 @@ mod tests {
             "odl_ingest_items_total{signal=\"logs\"} 3",
             "odl_ingest_rejected_items_total{signal=\"logs\",reason=\"throttled\"} 2",
             "odl_ingest_rejected_items_total{signal=\"logs\",reason=\"invalid\"} 1",
+            "odl_ingest_throttled_requests_total{signal=\"logs\"} 1",
             "odl_flush_errors_total 1",
             "odl_buffered_rows 5",
         ] {

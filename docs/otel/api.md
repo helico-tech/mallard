@@ -107,6 +107,8 @@ and other sums, `p95` for histograms and summaries.
 | `p50`, `p95`, `p99.9`, … | – | – | percentile of the merged bucket increase within the time bucket (linear interpolation within a bucket) | average across series of the reported quantile closest to the requested one |
 
 - Delta temporality is supported: the increase is the sum of the values.
+  Temporality is taken per series, so one metric can mix delta and
+  cumulative series.
 - `group_by=route,service.name` splits series by attribute values
   (`service.name` maps to the service column). At most 5 keys, 500 series and
   200,000 points per response.

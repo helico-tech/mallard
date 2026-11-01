@@ -23,6 +23,7 @@ use tonic::{
 };
 
 use super::{Accepted, InFlight, Ingest, IngestError, Request};
+use crate::store::schema::Signal;
 
 #[derive(Clone)]
 struct Otlp(Arc<Ingest>);
@@ -30,13 +31,14 @@ struct Otlp(Arc<Ingest>);
 /// Runs on the request metadata, before the message is decompressed and
 /// decoded: check the token, then reserve memory for the message. The
 /// reservation travels in the request extensions.
-fn admit(ingest: &Ingest, mut req: TReq<()>) -> Result<TReq<()>, Status> {
+fn admit(ingest: &Ingest, signal: Signal, mut req: TReq<()>) -> Result<TReq<()>, Status> {
     let header = req.metadata().get("authorization").and_then(|v| v.to_str().ok());
     if !ingest.tokens.allows(header) {
         return Err(Status::unauthenticated("invalid or missing bearer token"));
     }
     // The message size is not known yet: reserve the maximum.
-    let inflight = ingest.admit(None).ok_or_else(|| Status::unavailable("too many requests in flight; retry later"))?;
+    let inflight =
+        ingest.admit(signal, None).ok_or_else(|| Status::unavailable("too many requests in flight; retry later"))?;
     req.extensions_mut().insert(inflight);
     Ok(req)
 }
@@ -112,30 +114,32 @@ impl MetricsService for Otlp {
 /// The three OTLP services, ready to serve or to merge into another tonic server.
 pub fn routes(ingest: Arc<Ingest>) -> Routes {
     let max = ingest.max_request_bytes;
-    let i = ingest.clone();
-    let check = move |req| admit(&i, req);
-    let svc = Otlp(ingest);
+    let svc = Otlp(ingest.clone());
+    let check = |signal| {
+        let i = ingest.clone();
+        move |req| admit(&i, signal, req)
+    };
     let mut b = Routes::builder();
     b.add_service(InterceptedService::new(
         TraceServiceServer::new(svc.clone())
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
             .max_decoding_message_size(max),
-        check.clone(),
+        check(Signal::Traces),
     ));
     b.add_service(InterceptedService::new(
         LogsServiceServer::new(svc.clone())
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
             .max_decoding_message_size(max),
-        check.clone(),
+        check(Signal::Logs),
     ));
     b.add_service(InterceptedService::new(
         MetricsServiceServer::new(svc)
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
             .max_decoding_message_size(max),
-        check,
+        check(Signal::Metrics),
     ));
     b.routes()
 }
