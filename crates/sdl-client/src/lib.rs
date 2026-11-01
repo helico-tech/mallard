@@ -173,6 +173,19 @@ impl Client {
         self.send(self.http.get(self.url(path)).query(a).query(b)).await
     }
 
+    /// [`Client::get2`] plus repeated `tag` parameters (`key:value`), which
+    /// the query structs can't carry.
+    async fn get_tagged<T: DeserializeOwned, A: Serialize + ?Sized, B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        a: &A,
+        b: &B,
+        tags: &[String],
+    ) -> Result<T, Error> {
+        let tags: Vec<(&str, &str)> = tags.iter().map(|t| ("tag", t.as_str())).collect();
+        self.send(self.http.get(self.url(path)).query(a).query(b).query(&tags)).await
+    }
+
     pub async fn info(&self) -> Result<ServerInfo, Error> {
         self.get("/v1/info", &()).await
     }
@@ -191,7 +204,7 @@ impl Client {
     }
 
     pub async fn issues(&self, project: &str, q: &IssueQuery) -> Result<IssueList, Error> {
-        self.get(&format!("/v1/projects/{}/issues", segment(project)?), q).await
+        self.issues_in(project, q, &WindowRange::default()).await
     }
 
     pub async fn issue(&self, project: &str, issue_id: &str, q: &WindowQuery) -> Result<IssueDetail, Error> {
@@ -200,7 +213,7 @@ impl Client {
 
     /// [`Client::issues`] with an absolute window (`from`/`to` win over `since`).
     pub async fn issues_in(&self, project: &str, q: &IssueQuery, w: &WindowRange) -> Result<IssueList, Error> {
-        self.get2(&format!("/v1/projects/{}/issues", segment(project)?), q, w).await
+        self.get_tagged(&format!("/v1/projects/{}/issues", segment(project)?), q, w, &q.tag).await
     }
 
     /// [`Client::issue`] with an absolute window.
@@ -233,12 +246,12 @@ impl Client {
 
     /// Newest events first; set `q.issue` to restrict to one issue.
     pub async fn events(&self, project: &str, q: &EventQuery) -> Result<EventList, Error> {
-        self.get(&format!("/v1/projects/{}/events", segment(project)?), q).await
+        self.events_in(project, q, &WindowRange::default()).await
     }
 
     /// [`Client::events`] with an absolute window.
     pub async fn events_in(&self, project: &str, q: &EventQuery, w: &WindowRange) -> Result<EventList, Error> {
-        self.get2(&format!("/v1/projects/{}/events", segment(project)?), q, w).await
+        self.get_tagged(&format!("/v1/projects/{}/events", segment(project)?), q, w, &q.tag).await
     }
 
     /// Events of one trace across all projects (last 30 days by default).
@@ -286,6 +299,17 @@ impl Client {
     /// [`Client::stats`] with an absolute window.
     pub async fn stats_in(&self, project: &str, q: &WindowQuery, w: &WindowRange) -> Result<ProjectStats, Error> {
         self.get2(&format!("/v1/projects/{}/stats", segment(project)?), q, w).await
+    }
+
+    /// Releases named by the project's events in the window.
+    pub async fn releases(&self, project: &str, q: &ReleaseQuery, w: &WindowRange) -> Result<ReleaseList, Error> {
+        self.get2(&format!("/v1/projects/{}/releases", segment(project)?), q, w).await
+    }
+
+    /// Read-only SQL over the error tables (the server must enable it).
+    pub async fn sql(&self, query: &str, limit: Option<u32>) -> Result<SqlResponse, Error> {
+        let req = SqlRequest { query: query.to_string(), limit };
+        self.send(self.http.post(self.url("/v1/sql")).json(&req)).await
     }
 
     pub async fn sourcemaps(&self, project: &str) -> Result<Vec<ArtifactBundle>, Error> {
@@ -432,6 +456,28 @@ mod tests {
         // No ids: no request (this client could not reach anything).
         let c = Client::new("http://127.0.0.1:9", None).unwrap();
         assert_eq!(block_on(c.errors_by_trace(&[], &w)).unwrap(), EventsByTrace::default());
+    }
+
+    #[tokio::test]
+    async fn tags_are_repeated_parameters() {
+        let body = r#"{"issues":[],"window_start":"2026-11-01T10:00:00Z","window_end":"2026-11-01T11:00:00Z"}"#;
+        let (url, head) = serve_once(200, "application/json", body.into());
+        let q = IssueQuery {
+            tag: vec!["url:/a?b".into(), "user:u-1".into()],
+            cursor: Some("c".into()),
+            ..Default::default()
+        };
+        let list = Client::new(&url, None).unwrap().issues("web", &q).await.unwrap();
+        assert_eq!(list.next_cursor, None, "older servers send no cursor");
+        let line = head.recv().unwrap().lines().next().unwrap().to_string();
+        assert!(line.starts_with("GET /v1/projects/web/issues?cursor=c&tag=url%3A%2Fa%3Fb&tag=user%3Au-1 "), "{line}");
+
+        let body = r#"{"events":[],"next_cursor":null}"#;
+        let (url, head) = serve_once(200, "application/json", body.into());
+        let q = EventQuery { tag: vec!["k:v".into()], release: Some("1.0".into()), ..Default::default() };
+        Client::new(&url, None).unwrap().events("web", &q).await.unwrap();
+        let line = head.recv().unwrap().lines().next().unwrap().to_string();
+        assert!(line.starts_with("GET /v1/projects/web/events?release=1.0&tag=k%3Av "), "{line}");
     }
 
     #[test]

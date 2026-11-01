@@ -45,6 +45,11 @@ pub enum Command {
         #[arg(long)]
         interval: Option<String>,
     },
+    /// Releases seen in events: first/last seen, events, issues, new issues.
+    #[command(subcommand)]
+    Releases(ReleasesCmd),
+    /// Read-only SQL over events, issues and issue_activity (the server must enable it).
+    Sql(SqlArgs),
     /// Uploaded sourcemap artifact bundles.
     #[command(subcommand)]
     Sourcemaps(SourcemapsCmd),
@@ -166,9 +171,24 @@ pub struct IssueListArgs {
     /// Only issues with events in this release.
     #[arg(long)]
     pub release: Option<String>,
+    /// Only issues with events that have this tag, `key=value`; repeat for more (all must match).
+    #[arg(long, value_name = "KEY=VALUE", value_parser = parse_tag)]
+    pub tag: Vec<String>,
     /// Max issues (server default 50, max 500).
     #[arg(short = 'n', long)]
     pub limit: Option<u32>,
+    /// Continue a list: the `next_cursor` of the previous page (same
+    /// filters; the cursor keeps the window and the sort).
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
+/// `--tag key=value` → the API's `key:value`. Keys can't contain `:`.
+pub fn parse_tag(s: &str) -> Result<String, String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.trim().is_empty() && !k.contains(':') => Ok(format!("{k}:{v}")),
+        _ => Err(format!("expected key=value (key without ':'), got {s:?}")),
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -218,6 +238,21 @@ pub enum EventsCmd {
         /// Only events in this window (default: all; with --trace 30d).
         #[command(flatten)]
         window: WindowArgs,
+        /// Only events with this tag, `key=value`; repeat for more (all must match).
+        #[arg(long, value_name = "KEY=VALUE", value_parser = parse_tag, conflicts_with = "trace")]
+        tag: Vec<String>,
+        /// Only this release.
+        #[arg(long, conflicts_with = "trace")]
+        release: Option<String>,
+        /// Only this environment.
+        #[arg(long, conflicts_with = "trace")]
+        env: Option<String>,
+        /// Text search in title and message.
+        #[arg(short = 'q', long, conflicts_with = "trace")]
+        query: Option<String>,
+        /// Continue a list: the `next_cursor` of the previous page.
+        #[arg(long, conflicts_with = "trace")]
+        cursor: Option<String>,
     },
     /// One event: exception, stack trace, breadcrumbs, tags, user, request
     /// (JSON: concise; --raw adds the Sentry payload).
@@ -227,6 +262,29 @@ pub enum EventsCmd {
         #[arg(long)]
         issue: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum ReleasesCmd {
+    /// Releases named by events in the window (default 14d), newest first.
+    List {
+        #[command(flatten)]
+        window: WindowArgs,
+        /// Max releases (default 50, max 500).
+        #[arg(short = 'n', long)]
+        limit: Option<u32>,
+    },
+}
+
+/// `sql`.
+#[derive(Args, Debug, Clone)]
+pub struct SqlArgs {
+    /// One SELECT over `events`, `issues` and `issue_activity`.
+    pub query: String,
+    /// Max rows.
+    #[arg(short = 'n', long, default_value_t = 100)]
+    pub limit: u32,
 }
 
 #[derive(Subcommand, Debug)]

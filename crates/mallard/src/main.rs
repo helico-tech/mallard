@@ -84,6 +84,9 @@ enum Cmd {
     /// Sentry projects: list, show, create.
     #[command(subcommand)]
     Projects(sdl_cli::ProjectsCmd),
+    /// Releases seen in error events: first/last seen, events, issues, new issues.
+    #[command(subcommand)]
+    Releases(sdl_cli::ReleasesCmd),
     /// Traces: list (search), show (spans, errors and logs of one trace).
     #[command(subcommand)]
     Traces(TracesCmd),
@@ -98,8 +101,8 @@ enum Cmd {
     /// Metrics: list, show (values over time).
     #[command(subcommand)]
     Metrics(MetricsCmd),
-    /// Read-only SQL over the telemetry tables (the server must enable it).
-    Sql(odl_cli::SqlArgs),
+    /// Read-only SQL over the telemetry tables, or the error tables with --errors (the server must enable it).
+    Sql(SqlCmd),
     /// Uploaded sourcemap bundles.
     #[command(subcommand)]
     Sourcemaps(sdl_cli::SourcemapsCmd),
@@ -148,6 +151,17 @@ struct TraceShowArgs {
     /// Where to look (default 7d).
     #[command(flatten)]
     window: WindowArgs,
+}
+
+/// `sql`: one command for both sides' tables (ADR 0010).
+#[derive(clap::Args)]
+struct SqlCmd {
+    #[command(flatten)]
+    sql: odl_cli::SqlArgs,
+    /// Query the error tables (events, issues, issue_activity) instead of the
+    /// telemetry tables (spans, logs, metric_*).
+    #[arg(long)]
+    errors: bool,
 }
 
 #[derive(Subcommand)]
@@ -247,6 +261,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Issues(c) => sdl_cli::run(sdl_cli::Command::Issues(c), &r.sentry()).await,
         Cmd::Events(c) => sdl_cli::run(sdl_cli::Command::Events(c), &r.sentry()).await,
         Cmd::Projects(c) => sdl_cli::run(sdl_cli::Command::Projects(c), &r.sentry()).await,
+        Cmd::Releases(c) => sdl_cli::run(sdl_cli::Command::Releases(c), &r.sentry()).await,
         Cmd::Sourcemaps(c) => sdl_cli::run(sdl_cli::Command::Sourcemaps(c), &r.sentry()).await,
         Cmd::SendTest { dsn, message } => sdl_cli::run(sdl_cli::Command::SendTest { dsn, message }, &r.sentry()).await,
         Cmd::Traces(TracesCmd::List(a)) => odl_cli::run(odl_cli::Command::Traces(a), &r.otel()).await,
@@ -256,7 +271,11 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Ops(a) => odl_cli::run(odl_cli::Command::Ops(a), &r.otel()).await,
         Cmd::Metrics(MetricsCmd::List(a)) => odl_cli::run(odl_cli::Command::Metrics(a), &r.otel()).await,
         Cmd::Metrics(MetricsCmd::Show(a)) => odl_cli::run(odl_cli::Command::Metric(a), &r.otel()).await,
-        Cmd::Sql(a) => odl_cli::run(odl_cli::Command::Sql(a), &r.otel()).await,
+        Cmd::Sql(SqlCmd { sql, errors: true }) => {
+            let a = sdl_cli::SqlArgs { query: sql.query, limit: sql.limit };
+            sdl_cli::run(sdl_cli::Command::Sql(a), &r.sentry()).await
+        }
+        Cmd::Sql(SqlCmd { sql, errors: false }) => odl_cli::run(odl_cli::Command::Sql(sql), &r.otel()).await,
         Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
         Cmd::Help { topic } => help::run(&topic, &r.output),
         Cmd::Errors { cmd } => sdl_cli::run(cmd, &r.sentry()).await,
@@ -313,6 +332,11 @@ mod tests {
             &["issues", "ignore", "a", "b"],
             &["events", "list", "--issue", "85fede14250ec6be", "--since", "1d"],
             &["events", "show", "0af7651916cd43dd8448eb211c80319c", "--raw"],
+            &["issues", "list", "--tag", "url=/checkout", "--tag", "user=u-42", "--cursor", "c"],
+            &["events", "list", "--since", "1h", "--tag", "user=u-42", "--release", "web@1", "--env", "prod"],
+            &["events", "list", "-q", "timeout", "--cursor", "c", "-n", "5"],
+            &["releases", "list", "--since", "30d", "-n", "5"],
+            &["sql", "--errors", "SELECT count(*) FROM events"],
             &["projects", "create", "web", "--if-not-exists"],
             &["traces", "list", "-S", "checkout", "--errors", "--since", "15m"],
             &["traces", "show", "0af7651916cd43dd8448eb211c80319c", "--from", "1d"],
@@ -374,6 +398,26 @@ mod tests {
         let cli = parse_ok(&["logs", "--format", "ndjson", "--raw"]);
         assert_eq!((cli.format, cli.raw), (Some(Format::Ndjson), true));
         assert!(try_parse(&["logs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn tags_cursor_and_sql_side() {
+        let Cmd::Issues(sdl_cli::IssuesCmd::List(a)) = parse_ok(&["issues", "list", "--tag", "url=/a=b"]).cmd else {
+            panic!("issues list")
+        };
+        assert_eq!(a.tag, ["url:/a=b"], "split at the first =; sent as key:value");
+        for bad in [
+            &["issues", "list", "--tag", "novalue"][..],
+            &["issues", "list", "--tag", "=v"],
+            &["issues", "list", "--tag", "a:b=c"],
+        ] {
+            assert!(try_parse(bad).is_err(), "{bad:?}");
+        }
+        assert!(try_parse(&["events", "list", "--trace", "0af7651916cd43dd8448eb211c80319c", "--tag", "a=b"]).is_err());
+        let Cmd::Sql(s) = parse_ok(&["sql", "--errors", "SELECT 1", "-n", "5"]).cmd else { panic!("sql") };
+        assert!(s.errors && s.sql.limit == 5 && s.sql.query == "SELECT 1");
+        let Cmd::Sql(s) = parse_ok(&["sql", "SELECT 1"]).cmd else { panic!("sql") };
+        assert!(!s.errors, "telemetry by default");
     }
 
     #[test]

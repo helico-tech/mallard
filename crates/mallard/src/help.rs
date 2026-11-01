@@ -37,7 +37,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["issues"], "mallard issues list --since 1h\n  mallard issues show 85fede14250ec6be"),
     (
         &["issues", "list"],
-        "mallard issues list --since 1h --sort count -n 10 --fields id,title,count,last_seen\n  mallard issues list --new --since 1d\n  mallard issues list --first-release web@1.4.0 --status all",
+        "mallard issues list --since 1h --sort count -n 10 --fields id,title,count,last_seen\n  mallard issues list --new --since 1d\n  mallard issues list --first-release web@1.4.0 --status all\n  mallard issues list --tag url=/checkout --env production\n  mallard issues list --cursor <next_cursor>   # the next page",
     ),
     (
         &["issues", "show"],
@@ -49,7 +49,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["events"], "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events show <event-id>"),
     (
         &["events", "list"],
-        "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events list --trace 0af7651916cd43dd8448eb211c80319c\n  mallard events list --since 15m",
+        "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events list --trace 0af7651916cd43dd8448eb211c80319c\n  mallard events list --since 1h --tag user=u-42 --release web@1.4.0\n  mallard events list --cursor <next_cursor>   # the next page",
     ),
     (
         &["events", "show"],
@@ -59,6 +59,8 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["projects", "list"], "mallard projects list --fields slug,dsn"),
     (&["projects", "create"], "mallard projects create web --platform node --if-not-exists"),
     (&["projects", "show"], "mallard projects show web"),
+    (&["releases"], "mallard releases list --since 30d"),
+    (&["releases", "list"], "mallard releases list --since 30d -n 10 --fields version,new_issues,last_seen"),
     (&["traces"], "mallard traces list -S checkout --errors --since 15m\n  mallard traces show <trace-id>"),
     (
         &["traces", "list"],
@@ -81,7 +83,10 @@ const EXAMPLES: &[(&[&str], &str)] = &[
         &["metrics", "show"],
         "mallard metrics show http.server.request.duration -g p95 -b http.route --since 6h --step 5m",
     ),
-    (&["sql"], "mallard sql \"SELECT service_name, count(*) FROM spans GROUP BY 1\"   # exit 7 when SQL is off"),
+    (
+        &["sql"],
+        "mallard sql \"SELECT service_name, count(*) FROM spans GROUP BY 1\"   # exit 7 when SQL is off\n  mallard sql --errors \"SELECT release, count(*) FROM events GROUP BY 1\"",
+    ),
     (&["sourcemaps"], "mallard sourcemaps list"),
     (&["sourcemaps", "list"], "mallard sourcemaps list -p web"),
     (&["send-test"], "mallard send-test --dsn \"$SENTRY_DSN\""),

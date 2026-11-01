@@ -5,7 +5,7 @@ use crate::concise::ConciseEvent;
 use crate::event_view as ev;
 use crate::fmt;
 use crate::paint as p;
-use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SetStatusArgs};
+use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SetStatusArgs, SqlArgs};
 use anyhow::Result;
 use chrono::Utc;
 use comfy_table::{Attribute, Cell, Color, Table, presets};
@@ -182,6 +182,8 @@ fn issue_query(a: &IssueListArgs) -> IssueQuery {
         limit: a.limit,
         new: a.new.then_some(true),
         first_release: a.first_release.clone(),
+        tag: a.tag.clone(),
+        cursor: a.cursor.clone(),
     }
 }
 
@@ -213,7 +215,7 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if !ctx.output.text() {
                 let w = Window { from: list.window_start, to: list.window_end };
                 let limit = Some(a.limit.unwrap_or(50).clamp(1, 500));
-                return ctx.output.list(&List::new(list.issues).limit(limit).window(w));
+                return ctx.output.list(&List::new(list.issues).limit(limit).cursor(list.next_cursor).window(w));
             }
             let list = fmt::sanitize(list, true)?;
             if list.issues.is_empty() {
@@ -253,6 +255,9 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
                 "{}",
                 p::dim(&format!("{} issues · window {} .. now", list.issues.len(), fmt::timestamp(list.window_start)))
             );
+            if let Some(c) = &list.next_cursor {
+                out!(o, "{}", p::dim(&format!("more: add --cursor {c}")));
+            }
             Ok(())
         }
         IssuesCmd::Show { id, window } => {
@@ -395,7 +400,7 @@ async fn set_status(ctx: &Ctx, project: &str, a: SetStatusArgs, status: IssueSta
 pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
     let o = ctx.out;
     match cmd {
-        EventsCmd::List { issue, trace, limit, window } => {
+        EventsCmd::List { issue, trace, limit, window, tag, release, env, query, cursor } => {
             let by_trace = trace.is_some();
             // Trace ids are searched in the last 30 days by default.
             let w = if by_trace {
@@ -409,7 +414,17 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 ctx.client.events_by_trace_in(&q, &r).await
             } else {
                 let project = ctx.resolve_project().await?;
-                ctx.client.events_in(&project, &EventQuery { issue, limit, ..Default::default() }, &r).await
+                let q = EventQuery {
+                    issue,
+                    limit,
+                    tag,
+                    release,
+                    environment: env,
+                    query,
+                    before: cursor,
+                    ..Default::default()
+                };
+                ctx.client.events_in(&project, &q, &r).await
             }
             .map_err(|e| ctx.err(e))?;
             if !ctx.output.text() {
@@ -449,8 +464,8 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 t.add_row(row);
             }
             out!(o, "{t}");
-            if list.next_cursor.is_some() {
-                out!(o, "{}", p::dim("more events available (use --limit)"));
+            if let Some(c) = &list.next_cursor {
+                out!(o, "{}", p::dim(&format!("more: add --cursor {c}")));
             }
             Ok(())
         }
@@ -635,6 +650,65 @@ pub(super) async fn stats(ctx: &Ctx, window: WindowArgs, interval: Option<String
     }
     out!(o);
     out!(o, "  {} errors  {} warnings/other", p::red("█"), p::yellow("█"));
+    Ok(())
+}
+
+pub(super) async fn releases(ctx: &Ctx, window: WindowArgs, limit: Option<u32>) -> Result<()> {
+    let o = ctx.out;
+    let project = ctx.resolve_project().await?;
+    let w = window.resolve(ISSUE_WINDOW)?;
+    let list = ctx
+        .client
+        .releases(&project, &ReleaseQuery { since: None, limit }, &range(&w))
+        .await
+        .map_err(|e| ctx.err(e))?;
+    if !ctx.output.text() {
+        let w = Window { from: list.window_start, to: list.window_end };
+        let limit = Some(limit.unwrap_or(50).clamp(1, 500));
+        return ctx.output.list(&List::new(list.releases).limit(limit).window(w));
+    }
+    let list = fmt::sanitize(list, true)?;
+    if list.releases.is_empty() {
+        out!(o, "no releases in events (window {} .. now)", fmt::timestamp(list.window_start));
+        return Ok(());
+    }
+    let now = Utc::now();
+    let mut t = table(&["RELEASE", "EVENTS", "ISSUES", "NEW ISSUES", "FIRST SEEN", "LAST SEEN"]);
+    for r in &list.releases {
+        t.add_row(vec![
+            Cell::new(&r.version).add_attribute(Attribute::Bold),
+            right(fmt::compact(r.events)),
+            right(fmt::compact(r.issues)),
+            right(fmt::compact(r.new_issues)),
+            Cell::new(fmt::relative_time(r.first_seen, now)),
+            Cell::new(fmt::relative_time(r.last_seen, now)),
+        ]);
+    }
+    out!(o, "{t}");
+    Ok(())
+}
+
+pub(super) async fn sql(ctx: &Ctx, a: SqlArgs) -> Result<()> {
+    let o = ctx.out;
+    let r = ctx.client.sql(&a.query, Some(a.limit)).await.map_err(|e| ctx.err(e))?;
+    if !ctx.output.text() {
+        return ctx.print_json(&r);
+    }
+    let headers: Vec<String> = r.columns.iter().map(|c| fmt::clean(&c.name).into_owned()).collect();
+    let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let mut t = table(&headers);
+    for row in &r.rows {
+        t.add_row(row.iter().map(|v| match v {
+            serde_json::Value::String(s) => Cell::new(fmt::clean(s)),
+            serde_json::Value::Null => Cell::new("NULL").fg(Color::DarkGrey),
+            serde_json::Value::Number(n) => right(n),
+            // Nested values print as JSON: strings in it are escaped.
+            other => Cell::new(mallard_term::text::json_safe(&other.to_string())),
+        }));
+    }
+    out!(o, "{t}");
+    let more = if r.truncated { " (truncated; raise --limit)" } else { "" };
+    out!(o, "{}", p::dim(&format!("{} rows{more} in {:.1}ms", r.rows.len(), r.elapsed_ms)));
     Ok(())
 }
 
