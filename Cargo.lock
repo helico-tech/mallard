@@ -2343,6 +2343,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mallard-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "comfy-table 8.0.1",
+ "ratatui",
+ "unicode-width",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

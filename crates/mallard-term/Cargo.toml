@@ -1,0 +1,15 @@
+[package]
+name = "mallard-term"
+description = "Terminal output shared by mallard's CLIs and TUIs: cleaning untrusted text, tables, formatting, colour, errors, TUI theme and keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true
