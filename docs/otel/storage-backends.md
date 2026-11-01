@@ -48,7 +48,7 @@ real cloud services were not part of the automated tests.
 
 Sourcemap bundles have their own setting, `storage.artifacts_path`, which takes fewer
 schemes (no `r2://`, no `abfss://`): see
-[sentry/deployment.md](../sentry/deployment.md#storage).
+[deployment.md](../deployment.md#storage).
 
 ### Examples
 

@@ -136,6 +136,8 @@ catalog.
 
 ## More
 
+- [`docs/deployment.md`](docs/deployment.md) — how to deploy: Docker, compose, storage,
+  catalog, backups.
 - `docs/architecture.md` and `docs/adr/` — how it fits together.
 - `docs/sentry/`, `docs/otel/` — each side in depth (data model, capacity,
   compatibility, API).

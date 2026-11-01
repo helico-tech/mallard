@@ -1,7 +1,7 @@
 # Deployment: telemetry
 
 How to run the server (Docker, compose, Helm, storage, catalog) is one page for both
-sides: [sentry/deployment.md](../sentry/deployment.md). This page has what is specific
+sides: [deployment.md](../deployment.md). This page has what is specific
 to telemetry.
 
 > **Security:** the query API always needs a token (`server.api_tokens`). OTLP ingest

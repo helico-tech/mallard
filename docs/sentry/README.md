@@ -63,7 +63,7 @@ SDKs ──envelope──> ingest ──> normalize ─> symbolicate ─> group 
 |---|---|
 | Inside the Sentry side | [architecture.md](architecture.md) |
 | Tables and why | [data-model.md](data-model.md) |
-| Docker, compose, Helm, storage, catalog, replicas, backups | [deployment.md](deployment.md) |
+| Docker, compose, Helm, storage, catalog, replicas, backups | [../deployment.md](../deployment.md) |
 | What of the Sentry protocol is supported | [compatibility.md](compatibility.md) |
 | Sourcemaps with `sentry-cli` or the Vite plugin | [sourcemaps.md](sourcemaps.md) |
 | Load test results | [capacity.md](capacity.md) |
@@ -79,7 +79,7 @@ SDKs ──envelope──> ingest ──> normalize ─> symbolicate ─> group 
   spans through the bridge (ADR 0009, 0013, 0022). Sessions, replays, profiles and
   attachments are accepted and dropped ([compatibility.md](compatibility.md)).
 - Several processes can share a PostgreSQL catalog
-  ([deployment.md](deployment.md#running-more-than-one-pod)).
+  ([deployment.md](../deployment.md#running-more-than-one-pod)).
 - Not there: alerts, user accounts (only API tokens), PII scrubbing.
 
 The commands for tests, lint and the load generator are in the repo

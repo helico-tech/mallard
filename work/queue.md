@@ -8,5 +8,4 @@
 6. [issue 0070 Web UI in compose and Helm](issues/0070-web-deploy-and-mallard-web-command.md)
 7. [issue 0123 chart memory defaults below the rule](issues/0123-chart-memory-defaults-below-the-rule.md)
 8. [issue 0124 no published image or chart](issues/0124-no-published-image-or-chart.md)
-9. [issue 0126 move the deployment page out of docs/sentry](issues/0126-move-deployment-page-out-of-sentry.md)
-10. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)
+9. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)

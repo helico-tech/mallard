@@ -44,7 +44,7 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
 | `bench/otel/` | reproducible experiments and capacity runs |
-| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/), [Web UI guidelines and parity](docs/web/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
+| `docs/` | [architecture](docs/architecture.md), [deployment](docs/deployment.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/), [Web UI guidelines and parity](docs/web/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 Only `mallard` is built as a product binary (plus the load generators

@@ -1,9 +1,8 @@
 # Deployment
 
-How to run mallard: Docker, compose, Helm, storage, catalog and backups. This page
-covers the whole server; it sits here because the chart's notes point at it.
-Telemetry extras (pointing SDKs at it, a Collector in front, TLS) are in
-[otel/deployment.md](../otel/deployment.md).
+How to run mallard: Docker, compose, Helm, storage, catalog and backups, for the whole
+server. Telemetry extras (pointing SDKs at it, a Collector in front, TLS) are in
+[otel/deployment.md](otel/deployment.md).
 
 mallard is one binary, `mallard`, with two moving parts around it:
 
@@ -29,7 +28,7 @@ Ports: 8080 (Sentry ingest, both APIs, OTLP/HTTP on `/v1/*`, `/metrics`), 4318
 (OTLP/HTTP), 4317 (OTLP/gRPC).
 
 CI builds and smoke-tests the image but does not publish it, so build it yourself
-([issue 0124](../../work/issues/0124-no-published-image-or-chart.md)).
+([issue 0124](../work/issues/0124-no-published-image-or-chart.md)).
 
 ## Docker
 
@@ -108,7 +107,7 @@ helm install mallard deploy/helm/mallard \
 
 `NOTES.txt` (printed after install) shows how to read the token, create a project
 to get a DSN, and point OTel SDKs at the service. Key values (see
-[values.yaml](../../deploy/helm/mallard/values.yaml) for all):
+[values.yaml](../deploy/helm/mallard/values.yaml) for all):
 
 | Value | Meaning |
 |---|---|
@@ -163,7 +162,7 @@ Ingress notes:
 ## Configuration
 
 One TOML file plus `MALLARD_<SECTION>__<KEY>` variables.
-[config/mallard.example.toml](../../config/mallard.example.toml) lists the keys with
+[config/mallard.example.toml](../config/mallard.example.toml) lists the keys with
 their defaults; check a config with `mallard check -c <file> [--connect]`.
 The only required one is `server.api_tokens`. The Sentry settings are the
 `[sentry.*]` sections. What the example does not say:
@@ -178,7 +177,7 @@ The only required one is `server.api_tokens`. The Sentry settings are the
 - `duckdb.memory_limit` defaults to DuckDB's own, 80% of RAM. Accepts `1GB`, or `1GiB`
   for powers of 1024.
 - Snapshot expiry is catalog-wide and telemetry's:
-  `otel.maintenance.snapshot_retention` ([otel/configuration.md](../otel/configuration.md)).
+  `otel.maintenance.snapshot_retention` ([otel/configuration.md](otel/configuration.md)).
 
 The tables live in the DuckLake schema `sentry` of the catalog attached as `lake`
 (both fixed).
@@ -187,7 +186,7 @@ The tables live in the DuckLake schema `sentry` of the catalog attached as `lake
 
 Prefer a dedicated bucket (or prefix) per deployment. The server needs list,
 read, write and delete on `<prefix>/*`. These examples show both locations, with
-what sourcemap storage needs; [otel/storage-backends.md](../otel/storage-backends.md)
+what sourcemap storage needs; [otel/storage-backends.md](otel/storage-backends.md)
 has more on the data path. `artifacts_path` takes a local path, `s3://`, `gs://` or
 `az://`, and must not be inside `data_path`. It does not take `r2://` or `abfss://`, which
 work for `data_path` only; for R2, use `s3://` as shown below. `mallard check --connect`
@@ -311,7 +310,7 @@ example the same PVC as the DuckDB catalog). Not usable with several pods.
 
 ## Catalog: DuckDB file or PostgreSQL
 
-SQLite is also possible; see [otel/storage-backends.md](../otel/storage-backends.md).
+SQLite is also possible; see [otel/storage-backends.md](otel/storage-backends.md).
 
 | | DuckDB file (`MALLARD_STORAGE__CATALOG=/data/catalog.ducklake`) | PostgreSQL (`MALLARD_STORAGE__CATALOG='postgres:host=... dbname=...'`) |
 |---|---|---|
@@ -327,7 +326,7 @@ hundred MB). Give the PVC 5-10 GiB; most of it is DuckDB spill space.
 ### Running more than one pod
 
 With the PostgreSQL catalog several pods can share one catalog
-([ADR 0021](../adr/0021-sentry-several-processes.md)). Ingest and API work on every
+([ADR 0021](adr/0021-sentry-several-processes.md)). Ingest and API work on every
 pod. Sentry maintenance runs on one of them: the holder of a lease in the catalog
 (valid for 3 flush intervals, so a replacement takes over within about 15 minutes by
 default).
@@ -349,14 +348,14 @@ What to expect:
 Storage must be object storage, not a local path. Tested with two processes on one
 Postgres catalog and on one SQLite file (`db::tests::two_processes_*`). OTel
 maintenance uses the same kind of lease, with its own row in `otel.meta`
-([operations](../otel/operations.md#several-replicas)).
+([operations](otel/operations.md#several-replicas)).
 
 ## Upgrades
 
 - Read the release notes. The server records its schema version in the catalog and
   creates new tables and columns at start; there is no separate migration step.
 - Back up the catalog first (see below). Telemetry details:
-  [otel/operations.md](../otel/operations.md#upgrades).
+  [otel/operations.md](otel/operations.md#upgrades).
 - DuckDB file catalog: the pod is replaced (`Recreate`); expect a short gap.
 - Postgres catalog: a rolling update starts the new pod before stopping the
   old one; both write for a moment, as any two pods do.
@@ -380,8 +379,8 @@ What to back up: the **catalog** and the **bucket**, together.
 
 ## Sizing
 
-Measured numbers are in [capacity.md](capacity.md) and
-[otel/capacity.md](../otel/capacity.md). Set `duckdb.memory_limit` to about half the
+Measured numbers are in [sentry/capacity.md](sentry/capacity.md) and
+[otel/capacity.md](otel/capacity.md). Set `duckdb.memory_limit` to about half the
 container memory: DuckDB uses some memory outside its limit, and the telemetry write
 buffer needs room too. Do not set a CPU limit below 1 core, or compaction throttles.
 
@@ -394,7 +393,7 @@ buffer needs room too. Do not set a CPU limit below 1 core, or compaction thrott
   `mallard_sentry_write_batch_seconds`, `mallard_sentry_ingest_rejected_total`,
   `mallard_sentry_write_errors_total`, `mallard_sentry_maintenance_errors_total` and
   `mallard_sentry_issue_overflow_events_total`. Telemetry:
-  [otel/operations.md](../otel/operations.md).
+  [otel/operations.md](otel/operations.md).
 - `mallard status`: both sides. `mallard errors info` or `GET /sentry/v1/info`: queue
   depth.
 - `POST /sentry/v1/maintenance` (token) or `mallard errors maintenance`: flush inlined
