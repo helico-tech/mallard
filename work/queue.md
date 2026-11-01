@@ -1,6 +1,6 @@
 # Queue
 
-1. [issue 0012 OTLP/JSON doubles: report upstream](issues/0012-otlp-json-doubles-upstream.md)
+1. [issue 0138 OTLP/JSON quoted doubles](issues/0138-otlp-json-quoted-doubles.md)
 2. [issue 0060 store sentry-cli releases](issues/0060-store-sentry-cli-releases.md)
 3. [issue 0094 capture a real SDK 10 standalone span](issues/0094-capture-sdk-10-standalone-span.md)
 4. [issue 0120 Sentry compaction threads in mallard](issues/0120-sentry-compaction-threads-in-mallard.md)

@@ -1,5 +1,5 @@
 ---
-status: todo
+status: wontfix
 type: debt
 created: 2026-11-01
 ---
@@ -23,3 +23,6 @@ Report both upstream (opentelemetry-rust, `opentelemetry-proto/src/proto.rs`,
 `serializers::deserialize_from_value` and the `asDouble` oneofs), with the
 regression tests from `otlp/json.rs`. When a release fixes them, bump the
 version and delete `otlp/json.rs`.
+
+The owner decided on 2026-11-01 not to report this upstream. `otlp/json.rs` stays.
+The cases it still misses are in [issue 0138](0138-otlp-json-quoted-doubles.md).
