@@ -232,6 +232,34 @@ impl Platform {
     }
 }
 
+/// Run both sides' maintenance once on the lake of `cfg` (`mallard-server
+/// maintenance`). Sentry: flush inlined rows, retention, compaction. Otel:
+/// the same for the telemetry tables (`full`: merge all files below the
+/// target size), then the catalog-wide snapshot expiry and file cleanup, so
+/// otel goes last (ADR 0001). Returns one line per step. With a DuckDB-file
+/// or SQLite catalog, stop the server first.
+pub async fn run_maintenance(cfg: Config, full: bool) -> Result<Vec<String>> {
+    let (st, db) = (cfg.storage.clone(), cfg.duckdb.clone());
+    let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
+        .await?
+        .context("opening the DuckLake catalog")?;
+    let sentry = sdl_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
+        .await
+        .context("starting sentry")?;
+    let result = sentry.run_maintenance().await;
+    sentry.shutdown().await;
+    // All of its connections must be gone before otel opens the catalog.
+    drop(sentry);
+    result.context("sentry maintenance")?;
+    let mut done = vec!["sentry: flushed inlined rows, applied retention, compacted".to_string()];
+    let ocfg = cfg.otel_config();
+    let otel = tokio::task::spawn_blocking(move || odl_server::run_maintenance(&ocfg, full))
+        .await?
+        .context("otel maintenance")?;
+    done.extend(otel.into_iter().map(|line| format!("otel: {line}")));
+    Ok(done)
+}
+
 /// The listening sockets. Bind them up front so a busy port fails
 /// start-up instead of leaving the server half running.
 pub struct Listeners {

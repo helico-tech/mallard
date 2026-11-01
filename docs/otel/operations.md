@@ -31,6 +31,15 @@ What to watch:
 | `inlined_rows` keeps growing | compaction not running | `maintenance.enabled` |
 | queries return 503 | all `query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |
 
+## One-shot maintenance
+
+`mallard-server maintenance [--full]` runs both sides' maintenance once and
+exits: Sentry's flush, retention and compaction, then otel's flush and merge
+of small files (`--full`: all files below the target size), retention, snapshot
+expiry and file cleanup. Stop the server first with a DuckDB-file or SQLite
+catalog (a running server holds the file; the command then fails). Handy to
+compact a backfilled lake before timing queries.
+
 ## Sizing
 
 See [capacity.md](capacity.md). Short version: 1-2 vCPU and 2 GiB RAM
