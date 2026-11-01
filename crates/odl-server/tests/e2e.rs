@@ -627,3 +627,24 @@ async fn refuses_expansion_bombs() {
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
     h.stop().await;
 }
+
+/// If the background jobs cannot start, `serve` must stop the receivers and
+/// return the error instead of accepting data that is never flushed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serve_stops_when_background_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
+    cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
+    cfg.server.otlp_grpc_addr = "127.0.0.1:0".into();
+    cfg.server.otlp_http_addr = "127.0.0.1:0".into();
+    cfg.server.api_addr = "127.0.0.1:0".into();
+    let conn = store::open_connection(&cfg).unwrap();
+    let server = Server::with_connection(cfg, conn.try_clone().unwrap()).await.unwrap();
+    // New connections can no longer select the lake schema, so the flusher fails to start.
+    conn.execute_batch("DETACH lake").unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(20), server.serve(CancellationToken::new()))
+        .await
+        .expect("serve must return when the background jobs fail");
+    assert!(r.is_err());
+}

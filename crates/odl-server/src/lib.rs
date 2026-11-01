@@ -203,7 +203,16 @@ impl Server {
             })
         };
         let rd = receivers_down.clone();
-        let background = self.run_background(async move { rd.cancelled().await });
+        let sd = shutdown.clone();
+        let background = async move {
+            let r = self.run_background(async move { rd.cancelled().await }).await;
+            // If the flusher or maintenance cannot start, stop the receivers:
+            // they would accept data that is never written.
+            if r.is_err() {
+                sd.cancel();
+            }
+            r
+        };
         let receivers = async {
             let (a, b, c) = tokio::join!(t1, t2, t3);
             receivers_down.cancel();
