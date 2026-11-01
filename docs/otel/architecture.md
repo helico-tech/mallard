@@ -94,7 +94,7 @@ that talks HTTP only.
   On shutdown the buffer is drained (3 attempts).
 - Durability: data is acknowledged when it is in memory. See
   [ADR 0003](adr/0003-ingest-durability.md) and
-  [ADR 0013](../adr/0013-no-write-ahead-log.md) for why there is no queue or
+  [ADR 0020](../adr/0020-no-write-ahead-log.md) for why there is no queue or
   WAL, and [deployment.md](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss)
   for at-least-once delivery with a Collector.
 

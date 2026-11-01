@@ -133,7 +133,7 @@ export OTEL_SERVICE_NAME=checkout
 The server keeps acknowledged data in memory until the next flush
 ([ADR 0003](adr/0003-ingest-durability.md)). A hard crash (SIGKILL, OOM, power
 loss) loses at most `ingest.flush_interval` (5 s) of it. There is no built-in
-write-ahead log, and none is planned ([ADR 0013](../adr/0013-no-write-ahead-log.md)).
+write-ahead log, and none is planned ([ADR 0020](../adr/0020-no-write-ahead-log.md)).
 If you can't lose those seconds, put a Collector with a persistent queue in
 front. It keeps data on disk until the server has accepted it, also while the
 server is down for an upgrade. You also get tail sampling, attribute scrubbing,
