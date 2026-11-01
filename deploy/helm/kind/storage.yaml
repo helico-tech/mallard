@@ -1,0 +1,90 @@
+# Throwaway S3 (RustFS) and Postgres for deploy/helm/kind/test.sh.
+# Test-only credentials; never use these anywhere else.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  namespace: storage
+spec:
+  selector: {matchLabels: {app: rustfs}}
+  template:
+    metadata: {labels: {app: rustfs}}
+    spec:
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:1.0.4
+          env:
+            - {name: RUSTFS_ACCESS_KEY, value: kind-access-key}
+            - {name: RUSTFS_SECRET_KEY, value: kind-secret-key}
+            - {name: RUSTFS_VOLUMES, value: /data}
+            - {name: RUSTFS_ADDRESS, value: ":9000"}
+          ports: [{containerPort: 9000}]
+          readinessProbe:
+            httpGet: {path: /health/ready, port: 9000}
+            periodSeconds: 3
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes: [{name: data, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+  namespace: storage
+spec:
+  selector: {app: rustfs}
+  ports: [{port: 9000, targetPort: 9000}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-bucket
+  namespace: storage
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: curlimages/curl:8.16.0
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              sign="--aws-sigv4 aws:amz:us-east-1:s3 --user kind-access-key:kind-secret-key"
+              curl -fsS -o /dev/null -I $sign http://rustfs:9000/mallard || curl -fsS -X PUT $sign http://rustfs:9000/mallard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: storage
+spec:
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18.6-alpine
+          env:
+            - {name: POSTGRES_DB, value: ducklake}
+            - {name: POSTGRES_USER, value: mallard}
+            - {name: POSTGRES_PASSWORD, value: kind-pw}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: [pg_isready, -U, mallard, -d, ducklake]}
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: storage
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432, targetPort: 5432}]

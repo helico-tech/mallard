@@ -34,5 +34,5 @@ Public URL: {{ .Values.publicUrl }}
 
 WARNING: replicaCount={{ .Values.replicaCount }}. Each pod runs its own background
 maintenance and the Sentry side keeps per-pod project caches. Read the
-"Running more than one pod" notes in sentry-ducklake's docs/deployment.md.
+"Running more than one pod" notes in docs/sentry/deployment.md.
 {{- end }}
