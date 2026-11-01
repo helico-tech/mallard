@@ -1,5 +1,5 @@
 ---
-status: todo
+status: in-progress
 created: 2026-11-01
 ---
 # 11 — Crate cleanup: one naming scheme, no standalone leftovers
@@ -30,6 +30,22 @@ reader should see one product.
 Run after story 10, as one mechanical change per step, and before the docs
 rewrite in issue 0016.
 
+1. Rename packages, directories and Rust paths with `git mv` and a scripted
+   replace; no behaviour change (one commit, `cargo fmt` included).
+2. Replace `standalone.rs`, `Server::new` and `storage::lake` with a small helper
+   in `tests/integration.rs`; drop `clap` from the server crate.
+3. `SDL_*`/`ODL_*` out of the code: default CLI hints, `Config::load` of the otel
+   crate (no callers), test switches become `MALLARD_TEST_POSTGRES`.
+4. Metric names: `sdl_*` to `mallard_sentry_*`, `odl_*` to `mallard_otel_*`.
+5. Product names in code, then regenerate both OpenAPI snapshots (same paths).
+6. Mechanical docs pass: crate, env var, metric and binary names; no rewrite.
+7. ADR 0024 with the full mapping. Verify: workspace, slim build, e2e, Helm,
+   Docker, and an upgrade run from a build made before the rename.
+
+Must not change: the `meta` lease, schemas, table names, anything on disk, and
+wire names that SDKs or sentry-cli rely on.
+
 ## Progress log
+- 2026-11-01: baseline binary and test count taken from `d9218d6` before any edit.
 
 ## Follow-ups
