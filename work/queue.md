@@ -8,3 +8,4 @@
 6. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)
 7. [issue 0144 OTLP flushes conflict with Sentry ingest](issues/0144-otel-flush-conflicts-with-sentry-ingest.md)
 8. [issue 0148 suggestions insert cleaned names](issues/0148-suggestions-insert-cleaned-names.md)
+9. [issue 0149 setup opens a second project](issues/0149-setup-opens-a-second-project-beside-underscore.md)
