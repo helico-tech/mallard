@@ -348,7 +348,8 @@ pub struct OperationQuery {
     pub since: Option<String>,
     /// Only operations of this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     /// Only entry spans (kind SERVER/CONSUMER or root spans). Default true.
     pub entry_only: Option<bool>,
 }
@@ -395,7 +396,8 @@ pub struct SpanSeriesQuery {
     pub since: Option<String>,
     /// Only this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     pub operation: Option<String>,
     /// Bucket width, e.g. `30s`, `5m`. Default picks ~60 buckets.
     pub step: Option<String>,
@@ -434,7 +436,8 @@ pub struct TraceQuery {
     pub since: Option<String>,
     /// Match traces with a span from this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     /// Match traces with a span with this name.
     pub operation: Option<String>,
     /// Only traces that contain an error span.
@@ -534,7 +537,8 @@ pub struct LogQuery {
     pub since: Option<String>,
     /// Only this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     /// Minimum severity number (1-24). 9=INFO, 13=WARN, 17=ERROR, 21=FATAL.
     pub min_severity: Option<u8>,
     /// Case-insensitive substring match on the body.
@@ -579,7 +583,8 @@ pub struct LogSeriesQuery {
     pub since: Option<String>,
     /// Only this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     pub q: Option<String>,
     pub step: Option<String>,
 }
@@ -620,7 +625,8 @@ pub struct MetricListQuery {
     pub since: Option<String>,
     /// Only this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     /// Substring filter on the metric name.
     pub q: Option<String>,
 }
@@ -651,7 +657,8 @@ pub struct MetricQuery {
     pub since: Option<String>,
     /// Only this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     /// Aggregation: `avg` (default for gauges), `min`, `max`, `sum`,
     /// `rate` (per-second increase, default for monotonic sums), `increase`,
     /// `p50`/`p90`/`p95`/`p99` (histograms and summaries; default `p95`), `count`.
@@ -735,7 +742,8 @@ pub struct AttributeQuery {
     pub since: Option<String>,
     /// Only this service; repeat for several (at most 50).
     #[param(value_type = Option<Vec<String>>, style = Form, explode)]
-    pub service: Option<String>,
+    #[serde(default, skip_serializing_if = "always")]
+    pub service: Vec<String>,
     /// Only this metric (signal `metrics` only).
     pub metric: Option<String>,
     /// Top values of this key instead of the keys.
@@ -820,6 +828,13 @@ pub struct SqlColumn {
     pub name: String,
     #[serde(rename = "type")]
     pub data_type: String,
+}
+
+/// The query string format can't hold a list, so the structs' `service` is left out when
+/// they are serialized: the client adds one parameter per value, and the server reads them
+/// apart. Not `skip_serializing`: the OpenAPI derive would drop the parameter from the document.
+fn always<T>(_: &T) -> bool {
+    true
 }
 
 /// Most `service` parameters in one request.
@@ -914,8 +929,8 @@ mod tests {
 
     #[test]
     fn window_query_roundtrip() {
-        let q: TraceQuery = serde_json::from_str(r#"{"since":"15m","service":"api"}"#).unwrap();
+        let q: TraceQuery = serde_json::from_str(r#"{"since":"15m"}"#).unwrap();
         assert_eq!(q.window().since.as_deref(), Some("15m"));
-        assert_eq!(q.service.as_deref(), Some("api"));
+        assert!(q.service.is_empty());
     }
 }

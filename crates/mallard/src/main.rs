@@ -12,6 +12,7 @@ mod errors;
 mod find;
 mod help;
 mod schema;
+mod scope;
 mod series;
 mod server;
 mod setup;
@@ -22,7 +23,8 @@ mod tui;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{FromArgMatches, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, FromArgMatches, Parser, Subcommand};
 use mallard_client::Client;
 use mallard_term::color::ColorChoice;
 use mallard_term::error::{Described, Kind};
@@ -48,6 +50,9 @@ struct Cli {
     /// Sentry project id or slug (issues, events, …); optional with one project.
     #[arg(short, long, env = "MALLARD_PROJECT", global = true)]
     project: Option<String>,
+    /// An app (see `mallard apps`): its project and services, in place of -p and -S.
+    #[arg(long, global = true, value_name = "SLUG")]
+    app: Option<String>,
     /// Output format: text, json (compact when piped) or ndjson (one item per line).
     #[arg(long, env = "MALLARD_FORMAT", value_enum, global = true)]
     format: Option<Format>,
@@ -225,6 +230,8 @@ enum SchemaCmd {
 struct Run {
     client: Client,
     project: Option<String>,
+    /// From `--app`: commands without `-S` are scoped to these.
+    services: Vec<String>,
     output: Output,
 }
 
@@ -239,7 +246,13 @@ impl Run {
     fn otel(&self) -> mallard_otel_cli::Ctx {
         mallard_otel_cli::Ctx::new(self.client.otel.clone())
             .with_output(self.output.clone())
+            .with_services(self.services.clone())
             .with_error_lookup(std::sync::Arc::new(errors::SentryErrors(self.client.clone())))
+    }
+
+    /// What to send as `service`: the `-S` of the command, or the `--app`'s services.
+    fn services(&self, service: Option<String>) -> Vec<String> {
+        service.map_or_else(|| self.services.clone(), |s| vec![s])
     }
 }
 
@@ -258,7 +271,7 @@ async fn main() -> ExitCode {
 /// line on stderr, like every other error.
 fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Cli, ExitCode> {
     let args: Vec<std::ffi::OsString> = args.into_iter().collect();
-    let res = help::command().try_get_matches_from(&args).and_then(|m| Cli::from_arg_matches(&m));
+    let res = help::command().try_get_matches_from(&args).and_then(|m| cli_from(&m));
     match res {
         Ok(cli) => Ok(cli),
         // --help and --version.
@@ -278,6 +291,26 @@ fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Cli, Exi
             Err(ExitCode::from(Kind::Usage.exit_code()))
         }
     }
+}
+
+/// The arguments as a [`Cli`]. `--app` replaces `-p`, so both on the command line is a
+/// usage error; `MALLARD_PROJECT` is only a default, and gives way to the flag. An empty
+/// `--app` means no app, as in the web UI ("All apps").
+fn cli_from(m: &ArgMatches) -> Result<Cli, clap::Error> {
+    let mut cli = Cli::from_arg_matches(m)?;
+    cli.app = cli.app.filter(|a| !a.trim().is_empty());
+    if cli.app.is_some() {
+        match m.value_source("project") {
+            Some(ValueSource::CommandLine) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--app already chooses the project: use --app or -p, not both\n",
+                ));
+            }
+            _ => cli.project = None,
+        }
+    }
+    Ok(cli)
 }
 
 /// Whether the raw arguments (or `MALLARD_FORMAT`) ask for JSON output.
@@ -300,7 +333,11 @@ async fn run(cli: Cli) -> Result<()> {
         cmd => cmd,
     };
     let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
-    let r = Run { client, project: cli.project, output };
+    let scope = match &cli.app {
+        Some(slug) => scope::resolve(&client, slug, &cmd).await?,
+        None => scope::Scope { project: cli.project, services: vec![] },
+    };
+    let r = Run { client, project: scope.project, services: scope.services, output };
     match cmd {
         Cmd::Server(_) => unreachable!("handled above"),
         Cmd::Status => status::run(&r).await,
@@ -378,7 +415,7 @@ mod tests {
 
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
         let args: Vec<&str> = std::iter::once("mallard").chain(args.iter().copied()).collect();
-        help::command().try_get_matches_from(args).and_then(|m| Cli::from_arg_matches(&m))
+        help::command().try_get_matches_from(args).and_then(|m| cli_from(&m))
     }
 
     #[test]
@@ -495,6 +532,39 @@ mod tests {
         let cli = parse_ok(&["logs", "--format", "ndjson", "--raw"]);
         assert_eq!((cli.format, cli.raw), (Some(Format::Ndjson), true));
         assert!(try_parse(&["logs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn app_replaces_project_and_services() {
+        for args in [
+            &["--app", "web", "issues", "list"][..],
+            &["issues", "list", "--app", "web"],
+            &["logs", "--app", "web", "--since", "5m"],
+            &["tui", "--app", "web"],
+        ] {
+            assert_eq!(parse_ok(args).app.as_deref(), Some("web"), "{args:?}");
+        }
+        assert_eq!(parse_ok(&["--app", "", "-p", "x", "issues", "list"]).app, None, "empty: no app");
+        for args in [&["--app", "web", "-p", "x", "issues", "list"][..], &["issues", "list", "-p", "x", "--app", "web"]]
+        {
+            let e = try_parse(args).err().expect("a conflict");
+            assert!(e.to_string().contains("--app or -p"), "{e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_is_a_usage_error_where_it_cannot_apply() {
+        for args in [
+            &["--url", "http://127.0.0.1:9", "--app", "web", "status"][..],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "services"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "logs", "-S", "x"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "ops", "-S", "x"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "events", "list", "--trace", "abc"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "telemetry", "health"],
+        ] {
+            let res = run(parse_ok(args)).await;
+            assert_eq!(mallard_term::error::exit_code(&res), 2, "{args:?}");
+        }
     }
 
     #[test]

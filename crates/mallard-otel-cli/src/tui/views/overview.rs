@@ -83,14 +83,14 @@ impl Embedded {
         }
         self.overview.refreshed = Some(Instant::now());
         let c = self.client.clone();
-        let q = SpanSeriesQuery { since: since.clone(), ..Default::default() };
+        let q = SpanSeriesQuery { since: since.clone(), service: self.scoped(None), ..Default::default() };
         self.loader.load(Kind::SpanSeries, force, async move { c.span_series(&q).await }, Data::SpanSeries);
         let c = self.client.clone();
-        let q = LogSeriesQuery { since: since.clone(), ..Default::default() };
+        let q = LogSeriesQuery { since: since.clone(), service: self.scoped(None), ..Default::default() };
         self.loader.load(Kind::LogSeries, force, async move { c.log_series(&q).await }, Data::LogSeries);
         if let Some((svc, _)) = &self.overview.ops {
             let c = self.client.clone();
-            let q = OperationQuery { since, service: Some(svc.clone()), ..Default::default() };
+            let q = OperationQuery { since, service: vec![svc.clone()], ..Default::default() };
             self.loader.load(Kind::Operations, force, async move { c.operations(&q).await }, Data::Operations);
         }
     }

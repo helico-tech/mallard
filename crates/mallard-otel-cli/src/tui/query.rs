@@ -26,35 +26,7 @@ pub struct LogFilter {
     pub attrs: Vec<String>,
 }
 
-/// Split on whitespace, keeping `"quoted strings"` (also inside `key="v w"`).
-pub fn tokenize(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut had = false;
-    for c in s.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
-                had = true;
-            }
-            c if c.is_whitespace() && !quoted => {
-                if had || !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                had = false;
-            }
-            c => {
-                cur.push(c);
-                had = true;
-            }
-        }
-    }
-    if had || !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
+pub use mallard_term::tui::suggest::tokenize;
 
 /// `250` (ms), `250ms`, `1.5s`, `2m`, `100us`.
 pub fn parse_ms(s: &str) -> Option<f64> {

@@ -701,9 +701,11 @@ fn shared_keys_mean_the_same_as_on_the_errors_tab() {
 
     let _ = e.handle_event(&ch('?'));
     let s = render(&mut e, 140, 50);
-    for (_, what) in mallard_term::tui::keys::SHARED {
+    // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
+    for (_, what) in mallard_term::tui::keys::SHARED.iter().filter(|(k, _)| *k != "p") {
         assert!(s.contains(what), "missing {what:?} in\n{s}");
     }
+    assert!(!s.contains("choose the app"), "{s}");
     assert!(s.contains("All times are UTC."), "{s}");
 }
 
@@ -788,4 +790,344 @@ async fn sentry_errors_in_trace_list_and_waterfall() {
         Outcome::JumpEvent { trace_id: TID.into(), event_id: "e1".into() },
         "the newest event of the span"
     );
+}
+
+/// A server that accepts connections and never answers.
+async fn silent_server() -> (Client, tokio::net::TcpListener) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let c = Client::new(&format!("http://{}", l.local_addr().unwrap()), None).unwrap();
+    (c, l)
+}
+
+/// A server that answers every request with `[]` or `{}` (by path), and keeps the
+/// request lines.
+async fn recording_server() -> (Client, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let c = Client::new(&format!("http://{}", l.local_addr().unwrap()), None).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let s = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut conn, _) = l.accept().await.unwrap();
+            let s = s.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let Ok(n) = conn.read(&mut buf).await else { return };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let line = req.lines().next().unwrap_or("").to_string();
+                let body = if line.contains("/attributes") {
+                    r#"{"total_rows":1,"sampled_rows":1,"counted_from":"2026-01-01T00:00:00Z","items":[{"key":"http.route","count":3}]}"#.to_string()
+                } else if line.contains("/series") {
+                    r#"{"step_secs":60,"points":[]}"#.to_string()
+                } else {
+                    "[]".to_string()
+                };
+                s.lock().unwrap().push(line);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = conn.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (c, seen)
+}
+
+fn app_scope(services: &[&str]) -> Scope {
+    Scope::App { slug: "checkout".into(), project: None, services: services.iter().map(|s| s.to_string()).collect() }
+}
+
+fn typed(e: &mut Embedded, text: &str) {
+    for c in text.chars() {
+        assert_eq!(e.handle_event(&ch(c)), Outcome::Consumed, "{c:?} is typed");
+    }
+}
+
+fn prompt_text(e: &Embedded) -> String {
+    e.prompt.as_ref().unwrap().input.value.clone()
+}
+
+fn draw_to_string(e: &mut Embedded, w: u16, h: u16) -> String {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| e.draw(f, f.area())).unwrap();
+    t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+}
+
+/// The server never answers: keys are handled at once and no text is lost.
+#[tokio::test]
+async fn typing_never_waits_on_a_server_that_never_answers() {
+    let (client, _listener) = silent_server().await;
+    let mut e = Embedded::new(client);
+    e.view = View::Traces;
+    e.tick();
+    let started = Instant::now();
+    assert_eq!(e.handle_event(&ch('/')), Outcome::Consumed);
+    typed(&mut e, "serv");
+    assert!(draw_to_string(&mut e, 100, 30).contains("service="), "built-in keys show at once");
+    // Tab accepts; the fetch for its values starts on a tick and never comes back.
+    assert_eq!(e.handle_event(&key(KeyCode::Tab)), Outcome::Consumed);
+    assert_eq!(prompt_text(&e), "service=");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    e.tick();
+    assert!(e.loader.is_pending(Kind::Suggest), "fetching");
+    assert!(!e.loader.any_pending() || e.loader.is_pending(Kind::Traces), "no spinner of its own");
+    typed(&mut e, "chec");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    e.tick();
+    typed(&mut e, "kout");
+    assert_eq!(prompt_text(&e), "service=checkout");
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert_eq!(e.handle_event(&key(KeyCode::Enter)), Outcome::Consumed);
+    assert_eq!(e.traces.filter.service.as_deref(), Some("checkout"), "applied without an answer");
+    assert!(!e.loader.is_pending(Kind::Suggest), "closing the bar drops the fetch");
+}
+
+/// A failed fetch costs a small note and nothing else.
+#[tokio::test]
+async fn a_failed_fetch_keeps_the_text_and_stays_quiet() {
+    // Nothing listens here.
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    e.view = View::Logs;
+    assert_eq!(e.handle_event(&ch('/')), Outcome::Consumed);
+    typed(&mut e, "service=");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    e.tick();
+    for _ in 0..100 {
+        e.tick();
+        if e.log_suggest.note().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(e.log_suggest.note(), Some("suggestions unavailable"));
+    assert_eq!(prompt_text(&e), "service=");
+    assert!(draw_to_string(&mut e, 100, 30).contains("suggestions unavailable"));
+    typed(&mut e, "x");
+    assert_eq!(prompt_text(&e), "service=x");
+    assert!(!e.flash.as_ref().is_some_and(|f| f.0.contains("suggest")), "no flash about it");
+}
+
+#[tokio::test]
+async fn suggestions_come_from_the_attributes_and_the_scope() {
+    let (client, seen) = recording_server().await;
+    let mut e = Embedded::new(client);
+    e.set_scope(&app_scope(&["Checkout", "checkout"]));
+    e.view = View::Logs;
+    let _ = e.handle_event(&ch('/'));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    e.tick();
+    for _ in 0..200 {
+        e.tick();
+        if e.log_suggest.items().iter().any(|i| i.label == "http.route=") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let labels: Vec<_> = e.log_suggest.items().iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, ["service=", "level=", "trace=", "http.route="]);
+    let line = seen.lock().unwrap().iter().find(|l| l.contains("/attributes")).cloned().unwrap();
+    assert!(line.contains("signal=logs"), "{line}");
+    assert!(line.contains("service=Checkout&service=checkout"), "both names: {line}");
+    // The values of service= inside an app need no server, and are that app's.
+    typed(&mut e, "service=");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    e.tick();
+    let labels: Vec<_> = e.log_suggest.items().iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, ["Checkout", "checkout"]);
+    // Other window, other scope: the list asks again.
+    let before = e.log_suggest.scope().to_string();
+    let _ = e.handle_event(&key(KeyCode::Esc));
+    e.set_since("6h").unwrap();
+    let _ = e.handle_event(&ch('/'));
+    e.tick();
+    assert_ne!(e.log_suggest.scope(), before);
+}
+
+/// `op=` reads at most 24h, whatever the window.
+#[tokio::test]
+async fn operation_suggestions_read_at_most_a_day() {
+    let (client, seen) = recording_server().await;
+    let mut e = Embedded::new(client);
+    e.set_since("7d").unwrap();
+    e.view = View::Status;
+    e.start_prompt(PromptTarget::TraceFilter, "filter traces", "", "op=");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    e.tick();
+    for _ in 0..200 {
+        if seen.lock().unwrap().iter().any(|l| l.contains("/operations")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let lines = seen.lock().unwrap().clone();
+    let line = lines.iter().find(|l| l.contains("/operations")).unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(line.contains("since=24h"), "{line}");
+}
+
+/// The picker works on every screen, also over the log detail popup.
+#[test]
+fn p_is_the_hosts_on_the_log_detail_too() {
+    let mut e = fixture();
+    e.view = View::Logs;
+    e.logs.detail = Some(0);
+    assert_eq!(e.handle_event(&ch('p')), Outcome::Consumed, "on its own: the popup's");
+    e.set_hosted(true);
+    assert_eq!(e.handle_event(&ch('p')), Outcome::Ignored);
+    assert_eq!(e.logs.detail, Some(0), "the popup stays until the choice changes something");
+}
+
+#[tokio::test]
+async fn an_app_scopes_every_query() {
+    let (client, seen) = recording_server().await;
+    let mut e = Embedded::new(client);
+    e.set_hosted(true);
+    e.set_scope(&app_scope(&["a", "b"]));
+    for view in [View::Overview, View::Traces, View::Logs, View::Metrics] {
+        e.view = view;
+        e.tick();
+    }
+    for _ in 0..200 {
+        if seen.lock().unwrap().iter().any(|l| l.contains("/metrics")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let lines = seen.lock().unwrap().clone();
+    for path in ["/spans/series", "/logs/series", "/traces", "/logs?", "/metrics"] {
+        let line = lines.iter().find(|l| l.contains(path)).unwrap_or_else(|| panic!("{path}: {lines:?}"));
+        assert!(line.contains("service=a&service=b"), "{line}");
+    }
+}
+
+/// All apps: one service value for a filter, none otherwise; as it always was.
+#[tokio::test]
+async fn without_an_app_queries_are_as_before() {
+    let (client, seen) = recording_server().await;
+    let mut e = Embedded::new(client);
+    e.set_trace_filter("service=checkout");
+    e.view = View::Traces;
+    e.tick();
+    e.view = View::Overview;
+    e.tick();
+    for _ in 0..200 {
+        if seen.lock().unwrap().iter().any(|l| l.contains("/spans/series")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let lines = seen.lock().unwrap().clone();
+    let trace = lines.iter().find(|l| l.contains("/traces")).unwrap();
+    assert!(trace.contains("service=checkout") && !trace.contains("service=checkout&service"), "{trace}");
+    let series = lines.iter().find(|l| l.contains("/spans/series")).unwrap();
+    assert!(!series.contains("service="), "{series}");
+}
+
+#[tokio::test]
+async fn an_app_without_telemetry_says_so_instead_of_showing_everything() {
+    let (client, seen) = recording_server().await;
+    let mut e = Embedded::new(client);
+    e.set_hosted(true);
+    e.set_scope(&app_scope(&[]));
+    e.tick();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let s = draw_to_string(&mut e, 100, 30);
+    assert!(s.contains("App checkout has no telemetry in the last 1h"), "{s}");
+    assert!(s.contains("OTEL_SERVICE_NAME=checkout"), "{s}");
+    let lines = seen.lock().unwrap().clone();
+    assert!(lines.iter().all(|l| l.contains("/stats")), "only the status of the server: {lines:?}");
+    // A trace opened by id is not scoped.
+    assert!(e.open_trace(TID));
+    assert!(!draw_to_string(&mut e, 100, 30).contains("has no telemetry"));
+    e.tick();
+    // Back to all apps.
+    e.traces.detail = None;
+    e.set_scope(&Scope::All);
+    assert!(!draw_to_string(&mut e, 100, 30).contains("has no telemetry"));
+}
+
+/// In a host, `t`, `T` and `p` are the host's; on its own the tab keeps them.
+#[tokio::test]
+async fn hosted_window_and_picker_keys_go_to_the_host() {
+    for view in [View::Overview, View::Traces, View::Logs, View::Metrics, View::Status] {
+        let mut e = fixture();
+        e.view = view;
+        let since = e.since().to_string();
+        assert_eq!(e.handle_event(&ch('p')), Outcome::Ignored, "{view:?}");
+        e.set_hosted(true);
+        for c in ['t', 'T', 'p'] {
+            assert_eq!(e.handle_event(&ch(c)), Outcome::Ignored, "{view:?} {c}");
+        }
+        assert_eq!(e.since(), since, "the host sets it");
+        e.set_hosted(false);
+        assert_eq!(e.handle_event(&ch('t')), Outcome::Consumed, "{view:?}: standalone keeps t");
+        assert_ne!(e.since(), since);
+    }
+    // In a filter these are text.
+    let mut e = fixture();
+    e.set_hosted(true);
+    e.view = View::Traces;
+    let _ = e.handle_event(&ch('/'));
+    typed(&mut e, "tTp");
+    assert_eq!(prompt_text(&e), "tTp");
+    assert!(e.set_since("14d").is_ok());
+    assert_eq!(e.since(), "14d", "the host's list is wider than this tab's");
+}
+
+#[test]
+fn a_filter_cannot_disagree_with_the_picker() {
+    let mut e = fixture();
+    e.set_scope(&app_scope(&["checkout"]));
+    e.set_trace_filter("service=other");
+    assert_eq!(e.traces.filter.service, None, "refused");
+    assert!(e.flash.as_ref().unwrap().0.contains("not in this app"));
+    e.set_trace_filter("service=checkout errors");
+    assert_eq!(e.traces.filter.service.as_deref(), Some("checkout"));
+    e.set_log_filter("service=other");
+    assert_eq!(e.logs.filter.service, None);
+    e.set_log_filter("service=checkout level=warn \"two words\"");
+    // Another app: the filter's service goes, the rest stays.
+    e.set_scope(&app_scope(&["web"]));
+    assert_eq!(e.traces.filter.service, None);
+    assert!(e.traces.filter.errors_only);
+    assert_eq!(e.logs.filter.service, None);
+    assert_eq!(e.logs.query, "level=warn \"two words\"");
+}
+
+/// Services can't be filtered by the endpoint: the tab filters them.
+#[test]
+fn the_services_list_is_limited_to_the_app() {
+    let mut e = fixture();
+    e.set_scope(&app_scope(&["checkout"]));
+    let summary = |n: &str| ServiceSummary { name: n.into(), red: red(1, 0) };
+    e.apply(Kind::Services, Data::Services(vec![summary("checkout"), summary("frontend")]));
+    let names: Vec<_> = e.overview.services.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["checkout"]);
+}
+
+/// Help shows the picker only where it works.
+#[test]
+fn help_names_the_app_key_when_hosted() {
+    let mut e = fixture();
+    let _ = e.handle_event(&ch('?'));
+    assert!(!draw_to_string(&mut e, 120, 40).contains("choose the app"));
+    e.set_hosted(true);
+    assert!(draw_to_string(&mut e, 120, 40).contains("choose the app"));
+}
+
+/// A suggestion's hostile text never reaches the frame.
+#[test]
+fn suggestion_text_is_cleaned_on_screen() {
+    let mut e = fixture();
+    e.view = View::Traces;
+    let _ = e.handle_event(&ch('/'));
+    let scope = e.trace_suggest.scope().to_string();
+    let want = mallard_term::tui::suggest::Want { key: None, prefix: String::new() };
+    e.trace_suggest.answer(&scope, &want, Some(vec![("k\u{202e}\x1b[2Jx".to_string(), 2)]), Instant::now());
+    let s = draw_to_string(&mut e, 100, 30);
+    assert!(!s.contains('\u{202e}') && !s.contains('\x1b'), "{s}");
+    assert!(s.contains("k\\u{202e}"), "{s}");
 }

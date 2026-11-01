@@ -79,7 +79,7 @@ async fn client_against_server() {
 
     let mut tail = LogTail::new(
         c.clone(),
-        LogQuery { service: Some("web".into()), ..Default::default() },
+        LogQuery { service: vec!["web".into()], ..Default::default() },
         chrono::Utc::now() - chrono::TimeDelta::minutes(5),
     );
     let mut got = Vec::new();
@@ -105,6 +105,16 @@ async fn client_against_server() {
         .await
         .unwrap();
     assert_eq!(errs.len(), 3);
+    // Several service values: the client sends them all (ADR 0028).
+    let of = |service: &[&str]| LogQuery {
+        since: Some("10m".into()),
+        service: service.iter().map(|s| s.to_string()).collect(),
+        limit: Some(1),
+        ..Default::default()
+    };
+    assert_eq!(c.logs(&of(&["web", "nope"])).await.unwrap().len(), 1, "any of them");
+    assert_eq!(c.logs(&of(&["nope", "also-not"])).await.unwrap().len(), 0);
+    assert_eq!(c.logs_page(&of(&["nope", "web"])).await.unwrap().0.len(), 1);
     // Pages over inlined rows (the default inlining keeps these in the catalog).
     let mut q = LogQuery { since: Some("10m".into()), limit: Some(3), ..Default::default() };
     let mut seen = Vec::new();
@@ -132,7 +142,7 @@ async fn client_against_server() {
             from: None,
             to: None,
             since: Some("10m".into()),
-            service: None,
+            service: vec![],
             metric: None,
             key: None,
             prefix: None,

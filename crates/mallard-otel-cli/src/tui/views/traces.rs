@@ -212,7 +212,7 @@ impl Embedded {
         let f = &self.traces.filter;
         let q = TraceQuery {
             since: Some(self.since().to_string()),
-            service: f.service.clone(),
+            service: self.scoped(f.service.as_deref()),
             operation: f.operation.clone(),
             errors_only: Some(f.errors_only),
             min_duration_ms: f.min_ms,
@@ -265,6 +265,9 @@ impl Embedded {
 
     pub(crate) fn set_trace_filter(&mut self, q: &str) {
         match parse_trace_filter(q) {
+            Ok(f) if !self.filter_fits(f.service.as_deref()) => {
+                self.flash_error(format!("service {} is not in this app", clean(f.service.as_deref().unwrap_or(""))));
+            }
             Ok(f) => {
                 self.traces.filter = f;
                 self.traces.refreshed = None;
@@ -273,6 +276,11 @@ impl Embedded {
             }
             Err(e) => self.flash_error(e),
         }
+    }
+
+    /// A `service=` filter must not disagree with the picker (ADR 0028).
+    pub(crate) fn filter_fits(&self, service: Option<&str>) -> bool {
+        service.is_none_or(|s| self.in_scope(s))
     }
 
     fn logs_for_trace(&mut self, id: &str) {
