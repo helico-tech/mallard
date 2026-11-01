@@ -182,18 +182,6 @@ async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
     Ok(Json(state.db.caches.projects().into_iter().map(|p| to_project(&state, p)).collect::<Result<_, _>>()?))
 }
 
-fn slugify(name: &str) -> String {
-    let mut s = String::new();
-    for c in name.trim().chars() {
-        if c.is_ascii_alphanumeric() {
-            s.push(c.to_ascii_lowercase());
-        } else if !s.ends_with('-') && !s.is_empty() {
-            s.push('-');
-        }
-    }
-    s.trim_end_matches('-').to_string()
-}
-
 #[utoipa::path(post, path = "/v1/projects", request_body = CreateProject,
     responses((status = 201, body = Project), (status = 400, body = ApiError), (status = 409, body = ApiError)))]
 async fn create_project(State(state): S, J(req): J<CreateProject>) -> Result<(StatusCode, Json<Project>), ApiErr> {
@@ -512,12 +500,6 @@ fn release_info(version: &str) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn slugs() {
-        assert_eq!(super::slugify("My Web App!"), "my-web-app");
-        assert_eq!(super::slugify("  API  "), "api");
-    }
-
     #[test]
     fn write_errors_map_by_variant_not_text() {
         use super::*;

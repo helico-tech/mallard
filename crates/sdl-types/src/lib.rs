@@ -72,6 +72,20 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
 }
 
+/// The slug the server derives from a project name when none is given:
+/// lowercase ASCII letters and digits, other runs as one `-`.
+pub fn slugify(name: &str) -> String {
+    let mut s = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_lowercase());
+        } else if !s.ends_with('-') && !s.is_empty() {
+            s.push('-');
+        }
+    }
+    s.trim_end_matches('-').to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateProject {
@@ -348,6 +362,12 @@ mod tests {
             assert_eq!(s.to_string().parse::<IssueStatus>(), Ok(s));
         }
         assert_eq!("all".parse::<IssueStatus>(), Err(UnknownStatus("all".into())));
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slugify("My Web App!"), "my-web-app");
+        assert_eq!(slugify("  API  "), "api");
     }
 
     #[test]
