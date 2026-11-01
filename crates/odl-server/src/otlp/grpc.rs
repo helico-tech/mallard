@@ -38,9 +38,14 @@ impl Otlp {
 
     async fn export(&self, req: Request) -> Result<Accepted, Status> {
         self.0.handle(req).await.map_err(|e| match e {
-            // RESOURCE_EXHAUSTED is retryable for OTLP exporters.
-            IngestError::Backpressure(m) => Status::resource_exhausted(m),
+            // UNAVAILABLE is retried by every OTLP exporter. RESOURCE_EXHAUSTED
+            // is only retried when it carries RetryInfo, which the Collector
+            // and the Go SDK require.
+            IngestError::Backpressure(m) => Status::unavailable(m),
             IngestError::BadRequest(m) => Status::invalid_argument(m),
+            // Not retryable: the request will never fit.
+            IngestError::TooLarge(m) => Status::invalid_argument(m),
+            IngestError::Internal(m) => Status::internal(m),
         })
     }
 }

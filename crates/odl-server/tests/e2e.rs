@@ -672,6 +672,41 @@ async fn auth_sql_stats_and_maintenance() {
     let resp = h
         .api
         .clone()
+        .oneshot(sql("SELECT 1 AS x -- trailing comment"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "trailing comments must not break the wrapper"
+    );
+    let resp = h
+        .api
+        .clone()
+        .oneshot(sql("SELECT no_such_column FROM spans"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "user SQL errors are 400"
+    );
+    let e: ApiError =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        !e.message.contains("DESCRIBE"),
+        "wrapper not leaked: {}",
+        e.message
+    );
+    let (s, body) = h
+        .get_raw("/api/v1/logs?min_severity=300", Some("s3cret"))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let e: ApiError = serde_json::from_str(&body).expect("JSON error body for bad query params");
+    assert_eq!(e.error, "bad_request");
+    let resp = h
+        .api
+        .clone()
         .oneshot(sql("SELECT * FROM range(10)"))
         .await
         .unwrap();
@@ -744,4 +779,96 @@ async fn compaction_and_retention() {
         )
         .unwrap();
     assert_eq!(deletes, 0, "day-aligned retention drops whole files");
+}
+
+/// A newer version added a column (rolling upgrade): this version must still
+/// start, write and read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tolerates_columns_added_by_newer_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
+    cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
+    cfg.ingest.flush_interval = "100ms".into();
+    cfg.maintenance.enabled = false;
+    {
+        let lake = store::Lake::open(&cfg).unwrap();
+        lake.connect()
+            .unwrap()
+            .execute_batch("ALTER TABLE spans ADD COLUMN future_column VARCHAR")
+            .unwrap();
+    }
+    let server = Arc::new(Server::new(cfg).await.unwrap());
+    let shutdown = CancellationToken::new();
+    let (s2, sd) = (server.clone(), shutdown.clone());
+    let bg = tokio::spawn(async move {
+        s2.run_background(async move { sd.cancelled().await })
+            .await
+            .unwrap()
+    });
+    let req = Request::post("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(
+            traces_req(now_ns() - 1_000_000_000).encode_to_vec(),
+        ))
+        .unwrap();
+    assert_eq!(
+        server
+            .otlp_http_router()
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let api = server.api_router();
+    let mut found = false;
+    for _ in 0..50 {
+        let resp = api
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/traces/{TRACE_HEX}?since=1h"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "spans written despite the extra column");
+    shutdown.cancel();
+    bg.await.unwrap();
+}
+
+/// A tiny request that would expand enormously is refused before allocating.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refuses_expansion_bombs() {
+    let h = harness(None).await;
+    let mut req = traces_req(now_ns());
+    let big = "x".repeat(64 * 1024);
+    let span = req.resource_spans[0].scope_spans[0].spans[0].clone();
+    req.resource_spans[0]
+        .resource
+        .as_mut()
+        .unwrap()
+        .attributes
+        .push(kv("big", &big));
+    req.resource_spans[0].scope_spans[0].spans = (0..20_000)
+        .map(|i| {
+            let mut s = span.clone();
+            s.span_id = (i as u64 + 1).to_be_bytes().to_vec();
+            s.events.clear();
+            s.attributes.clear();
+            s
+        })
+        .collect();
+    let body = req.encode_to_vec();
+    assert!(body.len() < 32_000_000);
+    let (s, _) = h.post("/v1/traces", "application/x-protobuf", body).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    h.stop().await;
 }

@@ -27,12 +27,13 @@ impl Tokens {
             return true;
         }
         let Some(h) = header else { return false };
-        let Some(token) = h
-            .strip_prefix("Bearer ")
-            .or_else(|| h.strip_prefix("bearer "))
-        else {
+        // The scheme is case-insensitive (RFC 7235).
+        let Some((scheme, token)) = h.trim_start().split_once(' ') else {
             return false;
         };
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            return false;
+        }
         let token = token.trim().as_bytes();
         // Compare against every token without early exit to avoid timing leaks.
         self.0
@@ -57,6 +58,7 @@ mod tests {
         assert!(Tokens::new(&[]).allows(None));
         let t = Tokens::new(&["abc".into(), "def".into()]);
         assert!(t.allows(Some("Bearer def")));
+        assert!(t.allows(Some("BEARER def")));
         assert!(!t.allows(Some("Bearer xyz")));
         assert!(!t.allows(Some("def")));
         assert!(!t.allows(None));

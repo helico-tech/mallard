@@ -92,11 +92,12 @@ impl From<QueryError> for ApiErr {
                 e.to_string(),
             ),
             QueryError::Internal(e) => {
-                tracing::error!(error = %format!("{e:#}"), "query failed");
+                // Details (paths, bucket names, connection strings) stay in the log.
+                tracing::error!(error = %crate::store::redact(&format!("{e:#}")), "query failed");
                 ApiErr(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal".into(),
-                    format!("{e:#}"),
+                    "internal error; see the server log".into(),
                 )
             }
         }
@@ -117,6 +118,45 @@ impl IntoResponse for ApiErr {
 }
 
 type R<T> = Result<Json<T>, ApiErr>;
+
+/// `Query` extractor whose errors use the API's JSON error body.
+pub struct Q<T>(pub T);
+
+impl<T, S> axum::extract::FromRequestParts<S> for Q<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiErr;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, ApiErr> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(v)| Q(v))
+            .map_err(|e| ApiErr(StatusCode::BAD_REQUEST, "bad_request".into(), e.body_text()))
+    }
+}
+
+/// `Json` extractor whose errors use the API's JSON error body.
+pub struct J<T>(pub T);
+
+impl<T, S> axum::extract::FromRequest<S> for J<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiErr;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiErr> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(v)| J(v))
+            .map_err(|e| ApiErr(e.status(), "bad_request".into(), e.body_text()))
+    }
+}
 
 fn window<Q: HasWindow>(st: &ApiState, q: &Q) -> Result<Window, ApiErr> {
     Ok(Window::resolve(&q.window(), HOUR, st.reader.max_window)?)
@@ -170,13 +210,15 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         .1
 }
 
-/// API reference page. Loads the spec from a relative URL so it works when nested.
+/// API reference page. Loads the spec from a relative URL so it works when
+/// nested. The page script comes from a CDN (pinned with SRI), so `/docs` needs
+/// internet access in the browser; `/openapi.json` does not.
 fn scalar_html() -> String {
     r#"<!doctype html>
 <html><head><title>otel-ducklake API</title><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/></head>
 <body><script id="api-reference" data-url="openapi.json"></script>
-<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.25.0"></script></body></html>"#
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.25.0" integrity="sha384-VPR3QD7bdyIR9EHf6dRrFXz7NO0yJV7/UCVTLQ6e7a0wgzot5WaxvciVrrYOKEpU" crossorigin="anonymous"></script></body></html>"#
         .to_string()
 }
 
@@ -228,7 +270,7 @@ async fn stats(State(st): S) -> R<odl_api::Stats> {
 #[utoipa::path(get, path = "/api/v1/services", tag = "traces", params(ServiceQuery), security(("bearer" = [])),
     responses((status = 200, description = "RED metrics per service", body = Vec<ServiceSummary>),
               (status = 400, body = ApiError)))]
-async fn services(State(st): S, Query(q): Query<ServiceQuery>) -> R<Vec<ServiceSummary>> {
+async fn services(State(st): S, Q(q): Q<ServiceQuery>) -> R<Vec<ServiceSummary>> {
     let w = window(&st, &q)?;
     let entry = q.entry_only.unwrap_or(true);
     Ok(Json(
@@ -241,7 +283,7 @@ async fn services(State(st): S, Query(q): Query<ServiceQuery>) -> R<Vec<ServiceS
 #[utoipa::path(get, path = "/api/v1/operations", tag = "traces", params(OperationQuery), security(("bearer" = [])),
     responses((status = 200, description = "RED metrics per operation", body = Vec<OperationSummary>),
               (status = 400, body = ApiError)))]
-async fn operations(State(st): S, Query(q): Query<OperationQuery>) -> R<Vec<OperationSummary>> {
+async fn operations(State(st): S, Q(q): Q<OperationQuery>) -> R<Vec<OperationSummary>> {
     let w = window(&st, &q)?;
     let entry = q.entry_only.unwrap_or(true);
     Ok(Json(
@@ -254,7 +296,7 @@ async fn operations(State(st): S, Query(q): Query<OperationQuery>) -> R<Vec<Oper
 #[utoipa::path(get, path = "/api/v1/spans/series", tag = "traces", params(SpanSeriesQuery), security(("bearer" = [])),
     responses((status = 200, description = "Request rate, errors and latency over time", body = SpanSeries),
               (status = 400, body = ApiError)))]
-async fn span_series(State(st): S, Query(q): Query<SpanSeriesQuery>) -> R<SpanSeries> {
+async fn span_series(State(st): S, Q(q): Q<SpanSeriesQuery>) -> R<SpanSeries> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
     let entry = q.entry_only.unwrap_or(true);
@@ -277,7 +319,7 @@ async fn span_series(State(st): S, Query(q): Query<SpanSeriesQuery>) -> R<SpanSe
 #[utoipa::path(get, path = "/api/v1/traces", tag = "traces", params(TraceQuery), security(("bearer" = [])),
     responses((status = 200, description = "Matching traces, newest first", body = Vec<TraceSummary>),
               (status = 400, body = ApiError)))]
-async fn search_traces(State(st): S, Query(q): Query<TraceQuery>) -> R<Vec<TraceSummary>> {
+async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> R<Vec<TraceSummary>> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 50, 1000)?;
     Ok(Json(
@@ -304,11 +346,7 @@ async fn search_traces(State(st): S, Query(q): Query<TraceQuery>) -> R<Vec<Trace
 #[utoipa::path(get, path = "/api/v1/traces/{trace_id}", tag = "traces",
     params(("trace_id" = String, Path, description = "32 hex chars"), TraceGetQuery), security(("bearer" = [])),
     responses((status = 200, body = Trace), (status = 404, body = ApiError)))]
-async fn get_trace(
-    State(st): S,
-    Path(trace_id): Path<String>,
-    Query(q): Query<TraceGetQuery>,
-) -> R<Trace> {
+async fn get_trace(State(st): S, Path(trace_id): Path<String>, Q(q): Q<TraceGetQuery>) -> R<Trace> {
     // Without a window, look back a week.
     let w = Window::resolve(
         &q.window(),
@@ -324,7 +362,7 @@ async fn get_trace(
 
 #[utoipa::path(get, path = "/api/v1/logs", tag = "logs", params(LogQuery), security(("bearer" = [])),
     responses((status = 200, body = Vec<LogRecord>), (status = 400, body = ApiError)))]
-async fn search_logs(State(st): S, Query(q): Query<LogQuery>) -> R<Vec<LogRecord>> {
+async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> R<Vec<LogRecord>> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 100, 5000)?;
     let ascending = match q.order.as_deref() {
@@ -359,7 +397,7 @@ async fn search_logs(State(st): S, Query(q): Query<LogQuery>) -> R<Vec<LogRecord
 
 #[utoipa::path(get, path = "/api/v1/logs/series", tag = "logs", params(LogSeriesQuery), security(("bearer" = [])),
     responses((status = 200, body = LogSeries), (status = 400, body = ApiError)))]
-async fn log_series(State(st): S, Query(q): Query<LogSeriesQuery>) -> R<LogSeries> {
+async fn log_series(State(st): S, Q(q): Q<LogSeriesQuery>) -> R<LogSeries> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
     Ok(Json(
@@ -371,7 +409,7 @@ async fn log_series(State(st): S, Query(q): Query<LogSeriesQuery>) -> R<LogSerie
 
 #[utoipa::path(get, path = "/api/v1/metrics", tag = "metrics", params(MetricListQuery), security(("bearer" = [])),
     responses((status = 200, body = Vec<MetricInfo>), (status = 400, body = ApiError)))]
-async fn list_metrics(State(st): S, Query(q): Query<MetricListQuery>) -> R<Vec<MetricInfo>> {
+async fn list_metrics(State(st): S, Q(q): Q<MetricListQuery>) -> R<Vec<MetricInfo>> {
     let w = window(&st, &q)?;
     Ok(Json(
         st.reader
@@ -382,7 +420,7 @@ async fn list_metrics(State(st): S, Query(q): Query<MetricListQuery>) -> R<Vec<M
 
 #[utoipa::path(get, path = "/api/v1/metrics/query", tag = "metrics", params(MetricQuery), security(("bearer" = [])),
     responses((status = 200, body = MetricQueryResult), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
-async fn query_metric(State(st): S, Query(q): Query<MetricQuery>) -> R<MetricQueryResult> {
+async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
     Ok(Json(
@@ -407,7 +445,7 @@ async fn query_metric(State(st): S, Query(q): Query<MetricQuery>) -> R<MetricQue
 
 #[utoipa::path(post, path = "/api/v1/sql", tag = "sql", request_body = SqlRequest, security(("bearer" = [])),
     responses((status = 200, body = SqlResponse), (status = 400, body = ApiError), (status = 403, body = ApiError)))]
-async fn run_sql(State(st): S, Json(req): Json<SqlRequest>) -> R<SqlResponse> {
+async fn run_sql(State(st): S, J(req): J<SqlRequest>) -> R<SqlResponse> {
     if !st.enable_sql {
         return Err(ApiErr(
             StatusCode::FORBIDDEN,

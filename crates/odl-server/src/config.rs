@@ -345,6 +345,41 @@ impl Config {
             parse_bytes(v).with_context(|| format!("{name} = {v:?}"))?;
         }
         // Empty strings are ignored as tokens, so they do not count.
+        for (name, v) in [
+            ("ingest.flush_interval", &self.ingest.flush_interval),
+            (
+                "maintenance.compact_interval",
+                &self.maintenance.compact_interval,
+            ),
+            (
+                "maintenance.full_compact_interval",
+                &self.maintenance.full_compact_interval,
+            ),
+            (
+                "maintenance.retention_interval",
+                &self.maintenance.retention_interval,
+            ),
+            ("query.timeout", &self.query.timeout),
+        ] {
+            if parse_duration(v)?.is_zero() {
+                bail!("{name} must be greater than 0");
+            }
+        }
+        if self.ingest.flush_rows == 0 {
+            bail!("ingest.flush_rows must be greater than 0");
+        }
+        // An empty token is almost always a missing secret; refuse it instead
+        // of silently running without authentication.
+        for (name, list) in [
+            ("auth.api_tokens", &self.auth.api_tokens),
+            ("auth.ingest_tokens", &self.auth.ingest_tokens),
+        ] {
+            if list.iter().any(|t| t.trim().is_empty()) {
+                bail!(
+                    "{name} contains an empty token (is the secret/env var set?); remove it or set a value"
+                );
+            }
+        }
         if self.query.enable_sql && self.auth.api_tokens.iter().all(|t| t.trim().is_empty()) {
             bail!("query.enable_sql requires auth.api_tokens to be set");
         }
@@ -570,6 +605,19 @@ mod tests {
         assert!(cfg.validate().is_err(), "empty token must not enable SQL");
         cfg.auth.api_tokens = vec!["t".into()];
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn zero_intervals_and_empty_tokens_are_rejected() {
+        let mut cfg = Config::default();
+        cfg.ingest.flush_interval = "0".into();
+        assert!(cfg.validate().is_err());
+        let mut cfg = Config::default();
+        cfg.ingest.flush_rows = 0;
+        assert!(cfg.validate().is_err());
+        let mut cfg = Config::default();
+        cfg.auth.ingest_tokens = vec!["ok".into(), " ".into()];
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

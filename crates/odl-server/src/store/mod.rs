@@ -24,6 +24,37 @@ pub struct Lake {
     pub data_path: String,
 }
 
+/// Remove credentials from error text. DuckDB's postgres/mysql extensions
+/// echo the full connection string (including `password=...`) in errors.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let lower = text.to_ascii_lowercase();
+    let mut i = 0;
+    while i < text.len() {
+        let hit = ["password=", "passwd=", "secret=", "key_id="]
+            .iter()
+            .filter_map(|k| lower[i..].find(k).map(|p| (i + p, k.len())))
+            .min_by_key(|(p, _)| *p);
+        let Some((pos, klen)) = hit else {
+            out.push_str(&text[i..]);
+            break;
+        };
+        out.push_str(&text[i..pos + klen]);
+        let rest = &text[pos + klen..];
+        let quoted = rest.starts_with('\'') || rest.starts_with('"');
+        let end = if quoted {
+            let q = rest.as_bytes()[0] as char;
+            rest[1..].find(q).map(|e| e + 2).unwrap_or(rest.len())
+        } else {
+            rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ';')
+                .unwrap_or(rest.len())
+        };
+        out.push_str("***");
+        i = pos + klen + end;
+    }
+    out
+}
+
 /// Quote a string literal for SQL.
 pub fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -109,28 +140,24 @@ impl Lake {
             let existing: Vec<String> = stmt
                 .query_map([CATALOG, self.schema.as_str(), t.name], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
-            for (i, (name, ty)) in t.columns.iter().enumerate() {
-                match existing.get(i) {
-                    Some(e) if e == name => {}
-                    Some(e) => bail!(
-                        "table {} column {i} is {e:?} but the schema expects {name:?}; \
-                         the table was changed outside otel-ducklake",
-                        t.name
-                    ),
-                    None => {
-                        info!(table = t.name, column = name, "adding column");
-                        conn.execute_batch(&format!(
-                            "ALTER TABLE {CATALOG}.{}.{} ADD COLUMN {name} {ty}",
-                            self.schema, t.name
-                        ))?;
-                    }
+            // Columns are matched by name: we only ever add missing ones.
+            // Extra columns come from a newer version (rolling upgrade or
+            // rollback); we leave them NULL.
+            for (name, ty) in t.columns.iter() {
+                if !existing.iter().any(|e| e == name) {
+                    info!(table = t.name, column = name, "adding column");
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE {CATALOG}.{}.{} ADD COLUMN {name} {ty}",
+                        self.schema, t.name
+                    ))?;
                 }
             }
-            if existing.len() > t.columns.len() {
-                bail!(
-                    "table {} has more columns than this version knows; refusing to write",
-                    t.name
-                );
+            let extra: Vec<&String> = existing
+                .iter()
+                .filter(|e| !t.columns.iter().any(|c| c.0 == e.as_str()))
+                .collect();
+            if !extra.is_empty() {
+                warn!(table = t.name, columns = ?extra, "table has columns this version does not know; they stay NULL for rows written here");
             }
         }
         Ok(())
@@ -333,7 +360,7 @@ fn attach(conn: &Connection, cfg: &Config) -> Result<()> {
         sql_str(&format!("ducklake:{}", st.catalog)),
         sql_str(&st.data_path),
     );
-    conn.execute_batch(&sql).with_context(|| {
+    conn.execute_batch(&sql).map_err(|e| anyhow::anyhow!(redact(&e.to_string()))).with_context(|| {
         let hint = match st.catalog_kind() {
             CatalogKind::DuckDb | CatalogKind::Sqlite => {
                 "; note: a DuckDB-file or SQLite catalog can be opened by only one process at a time"
@@ -389,6 +416,16 @@ mod tests {
         );
         cfg.storage.data_path = "abfss://c@acct.dfs.core.windows.net/x/".into();
         assert!(required_extensions(&cfg).contains(&"azure".to_string()));
+    }
+
+    #[test]
+    fn redacts_credentials() {
+        let e = r#"Unable to connect to Postgres at "host=pg user=odl password=SuperSecret123x dbname=d": refused"#;
+        let r = redact(e);
+        assert!(!r.contains("SuperSecret"), "{r}");
+        assert!(r.contains("host=pg") && r.contains("dbname=d"));
+        assert_eq!(redact("password='a b' x"), "password=*** x");
+        assert_eq!(redact("no secrets here"), "no secrets here");
     }
 
     #[test]

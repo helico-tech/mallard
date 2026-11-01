@@ -49,12 +49,17 @@ pub struct WriteBuffer {
     stats: Arc<Stats>,
 }
 
-/// Returned when the buffer is full.
+/// Why a push was refused.
 #[derive(Debug, thiserror::Error)]
-#[error("write buffer full ({buffered} of {max} bytes); retry later")]
-pub struct Backpressure {
-    pub buffered: u64,
-    pub max: u64,
+pub enum Backpressure {
+    /// Temporary: retry later.
+    #[error("write buffer full ({buffered} of {max} bytes); retry later")]
+    Full { buffered: u64, max: u64 },
+    /// Permanent: this request alone is larger than the whole buffer.
+    #[error(
+        "request expands to {bytes} bytes in memory, more than ingest.max_buffer_bytes ({max}); send smaller batches"
+    )]
+    TooLarge { bytes: u64, max: u64 },
 }
 
 impl WriteBuffer {
@@ -79,10 +84,16 @@ impl WriteBuffer {
                 b + batch.get_array_memory_size() as u64,
             )
         });
+        if bytes > self.max_bytes {
+            return Err(Backpressure::TooLarge {
+                bytes,
+                max: self.max_bytes,
+            });
+        }
         let mut st = self.state.lock().unwrap();
         let used = st.bytes + st.inflight_bytes;
-        if used + bytes > self.max_bytes && used > 0 {
-            return Err(Backpressure {
+        if used + bytes > self.max_bytes {
+            return Err(Backpressure::Full {
                 buffered: used,
                 max: self.max_bytes,
             });
@@ -108,6 +119,15 @@ impl WriteBuffer {
     pub fn shutdown(&self) {
         self.state.lock().unwrap().shutdown = true;
         self.cv.notify_all();
+    }
+
+    /// Sleep for `d`, but wake up early when shutdown starts.
+    fn sleep_unless_shutdown(&self, d: Duration) {
+        let st = self.state.lock().unwrap();
+        if st.shutdown {
+            return;
+        }
+        let _ = self.cv.wait_timeout_while(st, d, |s| !s.shutdown);
     }
 
     /// Wait until there is something to flush or the interval passed.
@@ -158,9 +178,13 @@ fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Res
         if batches.is_empty() {
             continue;
         }
-        let name = id.def().name;
+        let def = id.def();
+        let name = def.name;
+        // Append by column name, so a table that a newer version extended
+        // with extra columns (rolling upgrade) still accepts our batches.
+        let cols: Vec<&str> = def.columns.iter().map(|c| c.0).collect();
         let mut app = conn
-            .appender_to_catalog_and_db(name, CATALOG, schema)
+            .appender_with_columns_to_catalog_and_db(name, CATALOG, schema, &cols)
             .with_context(|| format!("opening appender for {name}"))?;
         for b in batches {
             app.append_record_batch(b.clone())
@@ -223,6 +247,8 @@ fn run(
     stats: Arc<Stats>,
 ) {
     let mut failures: u32 = 0;
+    // Attempts after shutdown started (failures before that don't count).
+    let mut shutdown_attempts: u32 = 0;
     loop {
         let (tables, rows, bytes, shutdown) = buf.take(interval);
         if rows == 0 {
@@ -250,20 +276,32 @@ fn run(
             }
             Err(e) => {
                 failures += 1;
-                let msg = format!("{e:#}");
-                error!(rows, failures, error = %msg, "flush failed; will retry");
+                let msg = super::redact(&format!("{e:#}"));
+                if msg.contains("Transaction conflict") || msg.contains("conflict") {
+                    // e.g. retention or another replica touched the table; retried.
+                    warn!(rows, failures, error = %msg, "flush conflicted with another transaction; will retry");
+                } else {
+                    error!(rows, failures, error = %msg, "flush failed; will retry");
+                }
                 stats.flush_err(msg);
                 buf.settle(Some((tables, rows)), bytes);
-                if shutdown && failures >= 3 {
-                    warn!(
-                        rows,
-                        "giving up flushing at shutdown; buffered data is lost"
-                    );
-                    break;
+                if shutdown {
+                    shutdown_attempts += 1;
+                    if shutdown_attempts >= 3 {
+                        warn!(
+                            rows,
+                            "giving up flushing at shutdown; buffered data is lost"
+                        );
+                        break;
+                    }
                 }
-                let backoff = Duration::from_millis(500 * 2u64.pow(failures.min(6)))
-                    .min(Duration::from_secs(30));
-                std::thread::sleep(backoff);
+                let backoff = if shutdown {
+                    Duration::from_millis(500)
+                } else {
+                    Duration::from_millis(500 * 2u64.pow(failures.min(6)))
+                        .min(Duration::from_secs(30))
+                };
+                buf.sleep_unless_shutdown(backoff);
             }
         }
     }
@@ -300,8 +338,11 @@ mod tests {
     }
 
     #[test]
-    fn single_oversized_batch_is_accepted_when_empty() {
+    fn single_oversized_batch_is_rejected_permanently() {
         let buf = WriteBuffer::new(10, 1_000_000, Arc::new(Stats::default()));
-        assert!(buf.push(vec![(TableId::Logs, b(1000))]).is_ok());
+        assert!(matches!(
+            buf.push(vec![(TableId::Logs, b(1000))]),
+            Err(Backpressure::TooLarge { .. })
+        ));
     }
 }

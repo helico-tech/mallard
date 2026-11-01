@@ -54,6 +54,8 @@ impl Stats {
 
     pub fn flush_ok(&self, rows: u64, duration_ms: f64) {
         self.flushes.fetch_add(1, Relaxed);
+        // A success clears the alarm; `flush_errors` keeps the count.
+        *self.last_flush_error.lock().unwrap() = None;
         *self.last_flush.lock().unwrap() = Some(FlushInfo {
             at: Utc::now(),
             rows,

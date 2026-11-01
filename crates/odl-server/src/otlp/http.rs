@@ -86,7 +86,7 @@ fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, 
     let mut out = Vec::new();
     let reader: Box<dyn Read> = match enc.trim().to_ascii_lowercase().as_str() {
         "" | "identity" => return Ok(body.to_vec()),
-        "gzip" => Box::new(flate2::read::GzDecoder::new(&body[..])),
+        "gzip" => Box::new(flate2::read::MultiGzDecoder::new(&body[..])),
         "deflate" => Box::new(flate2::read::ZlibDecoder::new(&body[..])),
         "zstd" => Box::new(zstd::stream::read::Decoder::new(&body[..]).map_err(|e| e.to_string())?),
         other => return Err(format!("unsupported content encoding {other}")),
@@ -201,6 +201,8 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
         },
         Err(IngestError::Backpressure(m)) => error(StatusCode::TOO_MANY_REQUESTS, fmt, m),
         Err(IngestError::BadRequest(m)) => error(StatusCode::BAD_REQUEST, fmt, m),
+        Err(IngestError::TooLarge(m)) => error(StatusCode::PAYLOAD_TOO_LARGE, fmt, m),
+        Err(IngestError::Internal(m)) => error(StatusCode::INTERNAL_SERVER_ERROR, fmt, m),
     }
 }
 

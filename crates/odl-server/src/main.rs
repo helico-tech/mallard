@@ -52,7 +52,11 @@ enum Cmd {
 fn init_tracing(format: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,tower_http=warn,h2=warn,tonic=warn".into());
-    let b = tracing_subscriber::fmt().with_env_filter(filter);
+    // No ANSI colors when logs go to a file or a container log driver.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let b = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(ansi);
     if format == "json" {
         b.json().init()
     } else {

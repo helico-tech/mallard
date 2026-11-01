@@ -160,6 +160,9 @@ impl Server {
         };
         shutdown.await;
         info!("shutting down: flushing buffered data");
+        // Start the final flush right away; stopping maintenance may take a
+        // moment (it finishes its current statement).
+        self.buffer.shutdown();
         tokio::task::spawn_blocking(move || {
             if let Some(m) = maintenance {
                 m.stop();
@@ -180,10 +183,10 @@ impl Server {
         let api_l = TcpListener::bind(&s.api_addr)
             .await
             .with_context(|| format!("binding {}", s.api_addr))?;
-        let grpc_addr = s
-            .otlp_grpc_addr
-            .parse()
-            .with_context(|| format!("parsing {}", s.otlp_grpc_addr))?;
+        // Bind all listeners up front so a busy port fails start-up.
+        let grpc_l = TcpListener::bind(&s.otlp_grpc_addr)
+            .await
+            .with_context(|| format!("binding {}", s.otlp_grpc_addr))?;
         info!(grpc = %s.otlp_grpc_addr, http = %s.otlp_http_addr, api = %s.api_addr, "listening");
 
         let receivers_down = CancellationToken::new();
@@ -197,24 +200,35 @@ impl Server {
         let t1 = {
             let sd = shutdown.clone();
             tokio::spawn(async move {
-                axum::serve(http_l, otlp_http)
-                    .with_graceful_shutdown(async move { sd.cancelled().await })
+                let r = axum::serve(http_l, otlp_http)
+                    .with_graceful_shutdown(sd.clone().cancelled_owned())
                     .await
+                    .map_err(anyhow::Error::from);
+                sd.cancel(); // one listener failing stops the others
+                r
             })
         };
         let t2 = {
             let sd = shutdown.clone();
             tokio::spawn(async move {
-                axum::serve(api_l, api)
-                    .with_graceful_shutdown(async move { sd.cancelled().await })
+                let r = axum::serve(api_l, api)
+                    .with_graceful_shutdown(sd.clone().cancelled_owned())
                     .await
+                    .map_err(anyhow::Error::from);
+                sd.cancel();
+                r
             })
         };
         let t3 = {
             let sd = shutdown.clone();
             tokio::spawn(async move {
-                grpc.serve_with_shutdown(grpc_addr, async move { sd.cancelled().await })
+                let incoming = tonic::transport::server::TcpIncoming::from(grpc_l);
+                let r = grpc
+                    .serve_with_incoming_shutdown(incoming, sd.clone().cancelled_owned())
                     .await
+                    .map_err(anyhow::Error::from);
+                sd.cancel();
+                r
             })
         };
         let rd = receivers_down.clone();

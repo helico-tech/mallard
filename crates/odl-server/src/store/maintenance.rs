@@ -28,7 +28,7 @@ use anyhow::Result;
 use chrono::{DateTime, DurationRound, TimeDelta, Utc};
 use duckdb::Connection;
 use odl_api::MaintenanceInfo;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{CATALOG, Lake, schema::TABLES, sql_str};
 use crate::{
@@ -160,8 +160,9 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
         }
         Err(e) => {
             // Conflicts with a concurrent writer are expected occasionally; next run retries.
-            warn!(task = name, ms, error = %format!("{e:#}"), "maintenance failed");
-            (false, format!("{e:#}"))
+            let msg = super::redact(&format!("{e:#}"));
+            warn!(task = name, ms, error = %msg, "maintenance failed");
+            (false, msg)
         }
     };
     stats.maintenance(MaintenanceInfo {
@@ -187,8 +188,8 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
             |r| r.get(0),
         )
         .unwrap_or_else(|e| {
-            debug!(error = %e, "flush_inlined_data failed");
-            0
+            warn!(error = %super::redact(&e.to_string()), "flushing inlined rows failed; will retry");
+            -1
         });
     let mut merged = 0i64;
     let mut created = 0i64;
@@ -207,8 +208,13 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
         merged += p;
         created += c;
     }
+    let flushed = if flushed < 0 {
+        "FAILED to flush".to_string()
+    } else {
+        format!("flushed {flushed}")
+    };
     Ok(format!(
-        "flushed {flushed} inlined rows; merged {merged} files into {created}"
+        "{flushed} inlined rows; merged {merged} files into {created}"
     ))
 }
 
@@ -248,25 +254,50 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
     }
     let mut detail = format!("deleted {deleted} expired rows");
     if s.catalog_wide {
-        let snap_cut = (now - TimeDelta::from_std(s.snapshot_retention)?).naive_utc();
+        // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
+        // time zone can't shift the cut-off.
+        let epoch = |d: Duration| -> f64 {
+            (now - TimeDelta::from_std(d).unwrap_or(TimeDelta::zero())).timestamp_micros() as f64
+                / 1e6
+        };
+        let snap_cut = epoch(s.snapshot_retention);
         let expired: i64 = conn.query_row(
             &format!(
-                "SELECT count(*) FROM ducklake_expire_snapshots({}, older_than => ?::TIMESTAMPTZ)",
+                "SELECT count(*) FROM ducklake_expire_snapshots({}, older_than => to_timestamp(?::DOUBLE))",
                 sql_str(CATALOG)
             ),
             [snap_cut],
             |r| r.get(0),
         )?;
-        let file_cut = (now - TimeDelta::from_std(s.file_cleanup_delay)?).naive_utc();
+        let file_cut = epoch(s.file_cleanup_delay);
         let cleaned: i64 = conn.query_row(
             &format!(
-                "SELECT count(*) FROM ducklake_cleanup_old_files({}, older_than => ?::TIMESTAMPTZ)",
+                "SELECT count(*) FROM ducklake_cleanup_old_files({}, older_than => to_timestamp(?::DOUBLE))",
                 sql_str(CATALOG)
             ),
             [file_cut],
             |r| r.get(0),
         )?;
-        detail += &format!("; expired {expired} snapshots; removed {cleaned} files");
+        // Files no snapshot references, e.g. from a flush that failed after
+        // writing Parquet. Only older than a day, so files that another
+        // replica is writing right now (not yet committed) are never touched.
+        let orphan_cut = epoch(Duration::from_secs(86_400).max(s.file_cleanup_delay));
+        let orphans: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM ducklake_delete_orphaned_files({}, older_than => to_timestamp(?::DOUBLE))",
+                    sql_str(CATALOG)
+                ),
+                [orphan_cut],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| {
+                warn!(error = %super::redact(&e.to_string()), "deleting orphaned files failed");
+                0
+            });
+        detail += &format!(
+            "; expired {expired} snapshots; removed {cleaned} old and {orphans} orphaned files"
+        );
     }
     Ok(detail)
 }
