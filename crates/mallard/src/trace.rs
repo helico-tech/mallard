@@ -1,6 +1,7 @@
 //! Text view of a trace: the span tree, with each Sentry error and log
 //! record shown under the span it happened in.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 
@@ -50,21 +51,33 @@ pub fn render(t: &TraceOverview) -> String {
         let _ = writeln!(
             out,
             "{pad}{mark} {}  {}  {:.1} ms  (+{offset:.1} ms)  {}",
-            s.service_name,
-            s.name,
+            clean(&s.service_name),
+            clean(&s.name),
             s.duration_ns as f64 / 1e6,
             s.span_id
         );
         for (k, e) in t.errors.iter().enumerate() {
             if e.span_id.as_deref() == Some(s.span_id.as_str()) {
                 shown_errors.insert(k);
-                let _ = writeln!(out, "{pad}    ⚠ error  {}  (issue {}, event {})", e.title, e.issue_id, e.event_id);
+                let _ = writeln!(
+                    out,
+                    "{pad}    ⚠ error  {}  (issue {}, event {})",
+                    clean(&e.title),
+                    e.issue_id,
+                    e.event_id
+                );
             }
         }
         for (k, l) in t.logs.iter().enumerate() {
             if l.span_id.as_deref() == Some(s.span_id.as_str()) {
                 shown_logs.insert(k);
-                let _ = writeln!(out, "{pad}    ▏{} {}  {}", l.time.format("%H:%M:%S%.3f"), l.severity_text, l.body);
+                let _ = writeln!(
+                    out,
+                    "{pad}    ▏{} {}  {}",
+                    l.time.format("%H:%M:%S%.3f"),
+                    clean(&l.severity_text),
+                    clean(&l.body)
+                );
             }
         }
         if let Some(kids) = children.get(&Some(s.span_id.as_str())) {
@@ -80,7 +93,7 @@ pub fn render(t: &TraceOverview) -> String {
                 out,
                 "  ⚠ {}  {}  (project {}, issue {}, event {})",
                 e.timestamp.format("%H:%M:%S%.3f"),
-                e.title,
+                clean(&e.title),
                 e.project_id,
                 e.issue_id,
                 e.event_id
@@ -95,11 +108,38 @@ pub fn render(t: &TraceOverview) -> String {
                 out,
                 "  ▏{} {} {}  {}",
                 l.time.format("%H:%M:%S%.3f"),
-                l.service_name,
-                l.severity_text,
-                l.body
+                clean(&l.service_name),
+                clean(&l.severity_text),
+                clean(&l.body)
             );
         }
     }
+    if t.logs_truncated {
+        let _ = writeln!(out, "\n(only the first {} log records are shown)", t.logs.len());
+    }
+    for w in &t.warnings {
+        let _ = writeln!(out, "\nwarning: {}", clean(w));
+    }
     out
+}
+
+/// Server text comes from instrumented apps: drop control characters so it
+/// cannot send escape sequences to the terminal.
+pub fn clean(s: &str) -> Cow<'_, str> {
+    if s.chars().any(char::is_control) {
+        Cow::Owned(s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect())
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean;
+
+    #[test]
+    fn control_characters_are_removed() {
+        assert_eq!(clean("plain"), "plain");
+        assert_eq!(clean("a\x1b]52;c;ZXZpbA==\x07b\nc"), "a ]52;c;ZXZpbA== b c");
+    }
 }

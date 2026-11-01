@@ -10,7 +10,7 @@ http_addr = "0.0.0.0:8080"        # Sentry ingest (/sentry), APIs (/sentry/v1, /
 otlp_http_addr = "0.0.0.0:4318"   # OTLP/HTTP on the standard port
 otlp_grpc_addr = "0.0.0.0:4317"   # OTLP/gRPC
 public_url = "http://localhost:8080"   # how SDKs reach http_addr; Sentry DSNs use <public_url>/sentry
-api_tokens = []                   # bearer tokens for both query APIs; Sentry's API needs at least one
+api_tokens = ["${MALLARD_API_TOKEN}"]   # required: bearer tokens for both query APIs (comma separated in the env var)
 ingest_tokens = []                # bearer tokens for OTLP ingest; empty = open
 log_format = "text"               # text | json
 

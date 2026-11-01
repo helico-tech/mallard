@@ -46,7 +46,7 @@ pub struct ServerConfig {
     pub otlp_grpc_addr: String,
     /// How clients reach `http_addr`; used to build Sentry DSNs.
     pub public_url: String,
-    /// Bearer tokens for the query/management APIs of both libraries.
+    /// Bearer tokens for the query/management APIs of both sides. Required.
     pub api_tokens: Vec<String>,
     /// Bearer tokens for OTLP ingest; empty = open. (Sentry ingest uses DSN keys.)
     pub ingest_tokens: Vec<String>,
@@ -97,6 +97,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // The Sentry API rejects every request without a token, and the OTel
+        // API would be open to anyone: require one so both sides behave alike.
+        anyhow::ensure!(
+            !self.server.api_tokens.is_empty(),
+            "server.api_tokens must contain at least one token (e.g. MALLARD_SERVER__API_TOKENS='[\"secret\"]')"
+        );
         anyhow::ensure!(
             self.server.public_url.starts_with("http://") || self.server.public_url.starts_with("https://"),
             "server.public_url must start with http:// or https://"
@@ -185,9 +191,33 @@ fn expand_env(text: &str) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn with_token() -> Config {
+        let mut c = Config::default();
+        c.server.api_tokens = vec!["t".into()];
+        c
+    }
+
     #[test]
-    fn defaults_are_valid() {
-        Config::default().validate().unwrap();
+    fn defaults_plus_a_token_are_valid() {
+        with_token().validate().unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // figment's Jail API returns figment::Error
+    fn example_config_loads() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("MALLARD_API_TOKEN", "t");
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/mallard.example.toml");
+            Config::load(Some(Path::new(path))).map_err(|e| e.to_string())?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_api_token_is_required() {
+        // Without one, the OTel query API would be open while Sentry's is closed.
+        let err = Config::default().validate().unwrap_err();
+        assert!(err.to_string().contains("api_tokens"), "{err}");
     }
 
     #[test]
@@ -241,7 +271,7 @@ mod tests {
 
     #[test]
     fn artifacts_must_not_live_inside_the_lake() {
-        let mut cfg = Config::default();
+        let mut cfg = with_token();
         cfg.storage.data_path = "s3://bucket/lake/".into();
         cfg.sentry.storage_url = Some("s3://bucket/lake/artifacts".into());
         assert!(cfg.validate().is_err());
