@@ -862,6 +862,50 @@ pub(crate) mod tests {
         db.read(|c, ns| Ok(c.query_row(&ns.sql("SELECT count(*) FROM $S.events"), [], |r| r.get(0))?)).await.unwrap()
     }
 
+    /// Issue 0132, with a real allocation error. Memory that comes back within the retries
+    /// costs no event; memory that stays short fails the batch once the retries run out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn short_memory_does_not_fail_a_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: dir.path().join("lake").display().to_string(),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let limits = conn.try_clone().unwrap();
+        let mut cfg = Config::default();
+        cfg.ingest.batch_window = Duration::from_millis(10);
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let db = Db::with_connection(conn, &cfg, settings, "test".into()).unwrap();
+        // The lowest limit DuckDB takes: about what it uses right now.
+        let short = || {
+            [4, 8, 16, 32, 64, 128]
+                .into_iter()
+                .find(|mb| limits.execute_batch(&format!("SET memory_limit = '{mb}MB'")).is_ok())
+                .expect("a limit near what is in use");
+        };
+        let enough = || limits.execute_batch("SET memory_limit = '1GB'").unwrap();
+
+        short();
+        let reply = queue_event(&db, "comes back", Utc::now());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        enough();
+        reply.await.unwrap().unwrap();
+        assert_eq!(count_events(&db).await, 1);
+
+        short();
+        let t0 = Instant::now();
+        let failed = queue_event(&db, "stays short", Utc::now()).await.unwrap();
+        let waited = t0.elapsed();
+        enough();
+        assert!(mallard_duck::is_out_of_memory(&failed.unwrap_err()));
+        assert!(waited >= Duration::from_secs(2), "tried again for about 2.5 s, not {waited:?}");
+        queue_event(&db, "later", Utc::now()).await.unwrap().unwrap();
+        assert_eq!(count_events(&db).await, 2);
+        db.shutdown().await;
+    }
+
     /// Sentry issue 0003: compaction and flushes run next to the writer. Events
     /// are committed while they run, none get lost, and retention (on the
     /// writer thread) removes old days without failing a batch.

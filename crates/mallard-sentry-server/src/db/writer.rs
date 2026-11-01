@@ -11,7 +11,8 @@
 //! two databases, so the staging append runs before the lake transaction.
 //!
 //! Flush and compaction run next to this thread ([`super::maintenance`]).
-//! A commit that conflicts with another process is tried again.
+//! A commit that conflicts with another process is tried again, and so is a
+//! batch that fails because memory is short.
 
 use super::maintenance::{MaintCmd, flush_inlined};
 use super::schema::{OVERFLOW_GROUP, OVERFLOW_TITLE};
@@ -149,10 +150,32 @@ const SYNC_INTERVAL: Duration = if cfg!(test) { Duration::from_millis(100) } els
 /// process carry its clock. Reading a row twice is harmless.
 const SYNC_CLOCK_SLACK: Duration = Duration::from_secs(300);
 
-/// Commits tried again after a conflict with another process. Doubling from
+/// Tries after a conflict with another process, or when memory is short (compaction
+/// uses the same `duckdb.memory_limit`; it comes back within seconds). Doubling from
 /// 20 ms, this waits at most about 2.5 s; then the batch fails and the SDK
 /// retries it.
 const MAX_COMMIT_RETRIES: u32 = 7;
+
+/// Run `f` again while its error passes `retry`, at most [`MAX_COMMIT_RETRIES`] times.
+fn retrying<T>(retry: impl Fn(&anyhow::Error) -> bool, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut attempt = 0;
+    loop {
+        match f() {
+            Err(e) if attempt < MAX_COMMIT_RETRIES && retry(&e) => {
+                if mallard_duck::is_out_of_memory(&e) {
+                    metrics::counter!("mallard_sentry_write_memory_retries_total").increment(1);
+                    tracing::warn!(attempt, error = format!("{e:#}"), "memory is short, trying again");
+                } else {
+                    metrics::counter!("mallard_sentry_write_conflicts_total").increment(1);
+                    tracing::debug!(attempt, error = format!("{e:#}"), "commit conflict, trying again");
+                }
+                std::thread::sleep(Duration::from_millis(20 << attempt));
+                attempt += 1;
+            }
+            r => return r,
+        }
+    }
+}
 
 const STAGING: &str = "CREATE TABLE IF NOT EXISTS $T.staging_events (
     project_id INTEGER, received_us BIGINT, ts_us BIGINT, event_id VARCHAR, group_hash UBIGINT,
@@ -438,20 +461,10 @@ impl Writer {
     }
 
     /// Run `f` in one transaction. Again when the commit conflicts with
-    /// another process (or its retention): nothing was written then.
+    /// another process (or its retention), or memory is short: nothing was written then.
     fn in_tx<T>(&self, f: impl Fn(&Connection) -> Result<T>) -> Result<T> {
-        let mut attempt = 0;
-        loop {
-            match self.try_tx(&f) {
-                Err(e) if attempt < MAX_COMMIT_RETRIES && mallard_duck::is_conflict(&e) => {
-                    metrics::counter!("mallard_sentry_write_conflicts_total").increment(1);
-                    tracing::debug!(attempt, error = format!("{e:#}"), "commit conflict, trying again");
-                    std::thread::sleep(Duration::from_millis(20 << attempt));
-                    attempt += 1;
-                }
-                r => return r,
-            }
-        }
+        let retry = |e: &anyhow::Error| mallard_duck::is_conflict(e) || mallard_duck::is_out_of_memory(e);
+        retrying(retry, || self.try_tx(&f))
     }
 
     fn try_tx<T>(&self, f: &impl Fn(&Connection) -> Result<T>) -> Result<T> {
@@ -474,7 +487,8 @@ impl Writer {
     fn write_events(&mut self, mut batch: Vec<EventWrite>) {
         let started = Instant::now();
         let n = batch.len();
-        let result = self.try_write_events(&mut batch);
+        // All of it: reading issues and staging need memory as much as the commit does.
+        let result = retrying(mallard_duck::is_out_of_memory, || self.try_write_events(&mut batch));
         let elapsed = started.elapsed();
         metrics::histogram!("mallard_sentry_write_batch_seconds").record(elapsed.as_secs_f64());
         metrics::histogram!("mallard_sentry_write_batch_events").record(n as f64);
@@ -647,40 +661,47 @@ impl Writer {
         }
 
         let now_us = Utc::now().timestamp_micros();
-        let result = self.in_tx(|c| {
-            c.execute_batch(&ns.sql(MOVE_STAGED))?;
-            if !new_issues.is_empty() {
-                let mut stmt = c.prepare(
-                    &ns.sql("INSERT INTO $S.issues VALUES (?, ?, make_timestamp(?), ?::UUID, ?, ?, ?, ?, ?, ?)"),
-                )?;
-                for w in &new_issues {
-                    let e = &w.event;
-                    // The overflow issue does not take after its first event.
-                    let overflow = e.group_hash == OVERFLOW_GROUP;
-                    stmt.execute(params![
-                        w.project_id as i32,
-                        e.group_hash,
-                        e.timestamp.timestamp_micros(),
-                        e.event_id.to_string(),
-                        e.release,
-                        if overflow { OVERFLOW_TITLE } else { e.title.as_str() },
-                        if overflow { None } else { e.culprit.as_deref() },
-                        if overflow { "warning" } else { e.level.as_str() },
-                        e.platform,
-                        if overflow { None } else { e.exception_type.as_deref() },
-                    ])?;
+        // Only conflicts here: `write_events` tries the batch again when memory is short.
+        let result = retrying(mallard_duck::is_conflict, || {
+            self.try_tx(&|c: &Connection| {
+                c.execute_batch(&ns.sql(MOVE_STAGED))?;
+                if !new_issues.is_empty() {
+                    let mut stmt = c.prepare(
+                        &ns.sql("INSERT INTO $S.issues VALUES (?, ?, make_timestamp(?), ?::UUID, ?, ?, ?, ?, ?, ?)"),
+                    )?;
+                    for w in &new_issues {
+                        let e = &w.event;
+                        // The overflow issue does not take after its first event.
+                        let overflow = e.group_hash == OVERFLOW_GROUP;
+                        stmt.execute(params![
+                            w.project_id as i32,
+                            e.group_hash,
+                            e.timestamp.timestamp_micros(),
+                            e.event_id.to_string(),
+                            e.release,
+                            if overflow { OVERFLOW_TITLE } else { e.title.as_str() },
+                            if overflow { None } else { e.culprit.as_deref() },
+                            if overflow { "warning" } else { e.level.as_str() },
+                            e.platform,
+                            if overflow { None } else { e.exception_type.as_deref() },
+                        ])?;
+                    }
                 }
-            }
-            if !activity.is_empty() {
-                let mut stmt =
-                    c.prepare(&ns.sql("INSERT INTO $S.issue_activity VALUES (?, ?, make_timestamp(?), ?, ?)"))?;
-                for (p, g, s, reason) in &activity {
-                    stmt.execute(params![*p as i32, *g, now_us, s.as_str(), *reason])?;
+                if !activity.is_empty() {
+                    let mut stmt =
+                        c.prepare(&ns.sql("INSERT INTO $S.issue_activity VALUES (?, ?, make_timestamp(?), ?, ?)"))?;
+                    for (p, g, s, reason) in &activity {
+                        stmt.execute(params![*p as i32, *g, now_us, s.as_str(), *reason])?;
+                    }
                 }
-            }
-            Ok(())
+                Ok(())
+            })
         });
-        self.conn.execute_batch(&ns.sql("DELETE FROM $T.staging_events"))?;
+        // Must not fail the batch: after a commit a retry would store the events twice, and the
+        // client would be told they failed. The next batch starts by clearing it too.
+        if let Err(e) = self.conn.execute_batch(&ns.sql("DELETE FROM $T.staging_events")) {
+            tracing::warn!(error = format!("{e:#}"), "clearing the staging table failed");
+        }
         result?;
 
         for w in new_issues {

@@ -378,7 +378,8 @@ A 2 GiB container runs `1GB`, a `128MB` buffer and 4 threads, as compose does; 4
   telemetry flush state and the catalog.
 - `GET /metrics`: Prometheus metrics (no token). For this side watch
   `mallard_sentry_write_batch_seconds`, `mallard_sentry_ingest_rejected_total`,
-  `mallard_sentry_write_errors_total`, `mallard_sentry_maintenance_errors_total` and
+  `mallard_sentry_write_errors_total`, `mallard_sentry_write_memory_retries_total` (a batch waited
+  because memory was short), `mallard_sentry_maintenance_errors_total` and
   `mallard_sentry_issue_overflow_events_total`. Telemetry:
   [otel/operations.md](otel/operations.md).
 - `mallard status`: both sides. `mallard errors info` or `GET /sentry/v1/info`: queue
