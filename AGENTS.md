@@ -29,7 +29,7 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | path | what |
 |---|---|
 | `crates/mallard` | the `mallard` CLI/TUI: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases |
-| `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, readiness, shutdown; `src/bridge/`: Sentry transactions → spans, OTel exceptions → issues (ADR 0009) |
+| `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, readiness, shutdown; `src/bridge/`: Sentry transactions and streamed spans → OTel spans, OTel exceptions → issues (ADR 0009, 0013) |
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
