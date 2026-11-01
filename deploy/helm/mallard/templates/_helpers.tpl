@@ -80,6 +80,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and (eq .Values.catalog.type "postgres") (not .Values.catalog.postgres.connectionString) (not .Values.catalog.postgres.existingSecret) -}}
 {{- fail "catalog.type=postgres needs catalog.postgres.connectionString or catalog.postgres.existingSecret" -}}
 {{- end -}}
+{{- if and .Values.extraConfig (not (regexMatch "^\\s*\\[" .Values.extraConfig)) -}}
+{{- fail "extraConfig must start with a table header such as [otel.ingest]" -}}
+{{- end -}}
+{{- if hasKey .Values.retention "errorsDays" -}}
+{{- fail "retention.errorsDays was replaced by retention.errors (a duration, e.g. 90d)" -}}
+{{- end -}}
 {{- if not .Values.storage.dataPath -}}
 {{- fail "storage.dataPath is required" -}}
 {{- end -}}

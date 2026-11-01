@@ -64,6 +64,9 @@ spec:
             - name: otlp-grpc
               containerPort: 4317
               protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
           env:
             - name: MALLARD_CONFIG
               value: /etc/mallard/mallard.toml

@@ -13,6 +13,7 @@ data:
     http_addr = "0.0.0.0:8080"
     otlp_http_addr = "0.0.0.0:4318"
     otlp_grpc_addr = "0.0.0.0:4317"
+    metrics_addr = "0.0.0.0:9090"
     public_url = {{ .Values.publicUrl | quote }}
     api_tokens = ["${MALLARD_API_TOKEN}"]
     ingest_tokens = ["${MALLARD_INGEST_TOKEN}"]
@@ -21,6 +22,9 @@ data:
     [storage]
     # catalog comes from MALLARD_STORAGE__CATALOG
     data_path = {{ .Values.storage.dataPath | quote }}
+    {{- with .Values.storage.artifactsUrl }}
+    artifacts_path = {{ . | quote }}
+    {{- end }}
     {{- if include "mallard.usesS3" . }}
 
     [[storage.secrets]]
@@ -57,17 +61,10 @@ data:
     logs = {{ .Values.retention.logs | quote }}
     metrics = {{ .Values.retention.metrics | quote }}
 
-    [sentry]
-    retention_days = {{ .Values.retention.errorsDays | int }}
-    {{- with .Values.storage.artifactsUrl }}
-    storage_url = {{ . | quote }}
-    {{- end }}
-    {{- with $s3.endpoint }}
-    s3_endpoint = {{ . | quote }}
-    {{- end }}
-    s3_region = {{ $s3.region | quote }}
-    s3_path_style = {{ $s3.pathStyle }}
+    [sentry.retention]
+    events = {{ .Values.retention.errors | quote }}
     {{- with .Values.extraConfig }}
 
+    # extraConfig
     {{- . | nindent 4 }}
     {{- end }}
