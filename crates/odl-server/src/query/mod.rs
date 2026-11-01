@@ -2,6 +2,7 @@
 //! behind the HTTP API. All user input reaches SQL as bound parameters; only
 //! fixed identifiers are formatted into SQL text.
 
+pub mod exemplars;
 pub mod logs;
 pub mod metrics;
 pub mod sql;

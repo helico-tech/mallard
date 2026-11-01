@@ -21,7 +21,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`), follow (`-f`, stops by itself with `--for 2m` or `--until-match <text>`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation; `ops --compare 1d` adds p95 and error rate of the same window a day earlier, and the change |
 | `mallard series spans\|logs\|errors` | counts per time bucket (`--step 5m`): spans with errors and p50/p95/p99, logs per severity band, Sentry events (errors, warnings, other) |
-| `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`) |
+| `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`; `--exemplars` adds trace ids of the highest samples) |
 | `mallard sql "<select>"` | read-only SQL over the telemetry tables (exit 7 when off) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
 | `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |

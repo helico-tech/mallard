@@ -18,9 +18,9 @@ use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value},
     logs::v1::{LogRecord as OtlpLog, ResourceLogs, ScopeLogs},
     metrics::v1::{
-        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram,
+        AggregationTemporality, Exemplar, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram,
         HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint,
-        exponential_histogram_data_point::Buckets, metric::Data, number_data_point,
+        exemplar, exponential_histogram_data_point::Buckets, metric::Data, number_data_point,
         summary_data_point::ValueAtQuantile,
     },
     resource::v1::Resource,
@@ -650,6 +650,166 @@ async fn tolerates_columns_added_by_newer_version() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(found, "spans written despite the extra column");
+    shutdown.cancel();
+    bg.await.unwrap();
+}
+
+/// One histogram series (route /a) with exemplars on two points a minute
+/// apart, and a counter with one exemplar.
+fn exemplars_req(t0: u64) -> ExportMetricsServiceRequest {
+    let ex = |value: f64, trace: Option<[u8; 16]>, span: u64| Exemplar {
+        // zero time: the point's time
+        time_unix_nano: 0,
+        value: Some(exemplar::Value::AsDouble(value)),
+        trace_id: trace.map(|t| t.to_vec()).unwrap_or_default(),
+        span_id: span.to_be_bytes().to_vec(),
+        filtered_attributes: vec![kv("user.id", "u7")],
+    };
+    let mut other = TRACE;
+    other[15] = 0x01;
+    let hist = |t: u64, count: u64, exemplars: Vec<Exemplar>| HistogramDataPoint {
+        attributes: vec![kv("route", "/a")],
+        start_time_unix_nano: t0 - 600_000_000_000,
+        time_unix_nano: t,
+        count,
+        sum: Some(count as f64),
+        bucket_counts: vec![count, 0],
+        explicit_bounds: vec![10.0],
+        exemplars,
+        ..Default::default()
+    };
+    let metric = |name: &str, data: Data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+    ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: resource("checkout"),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    metric(
+                        "http.duration",
+                        Data::Histogram(Histogram {
+                            data_points: vec![
+                                hist(t0 - 60_000_000_000, 1, vec![ex(3.0, Some(TRACE), 1)]),
+                                // The highest value with a trace wins; 100 has no trace.
+                                hist(t0, 3, vec![ex(5.0, Some(TRACE), 1), ex(9.0, Some(other), 2), ex(100.0, None, 3)]),
+                            ],
+                            aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                        }),
+                    ),
+                    metric(
+                        "http.requests",
+                        Data::Sum(Sum {
+                            data_points: vec![NumberDataPoint {
+                                time_unix_nano: t0,
+                                value: Some(number_data_point::Value::AsInt(1)),
+                                exemplars: vec![ex(1.0, Some(TRACE), 1)],
+                                ..Default::default()
+                            }],
+                            aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                            is_monotonic: true,
+                        }),
+                    ),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    }
+}
+
+/// Exemplars are stored per point and returned by `metrics/query` on request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exemplars_link_metrics_to_traces() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", exemplars_req(t0).encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        (v.len() == 2).then_some(())
+    })
+    .await;
+    let q = "/api/v1/metrics/query?name=http.duration&since=15m&step=1m&group_by=route";
+    let plain: MetricQueryResult = h.get(q).await;
+    assert!(plain.exemplars.is_empty(), "only on request");
+    let r: MetricQueryResult = h.get(&format!("{q}&exemplars=true")).await;
+    let got: Vec<(f64, &str, Option<&str>)> =
+        r.exemplars.iter().map(|e| (e.value, e.trace_id.as_str(), e.span_id.as_deref())).collect();
+    assert_eq!(
+        got,
+        vec![
+            (3.0, TRACE_HEX, Some("0000000000000001")),
+            (9.0, "0af7651916cd43dd8448eb211c803101", Some("0000000000000002"))
+        ]
+    );
+    let e = &r.exemplars[1];
+    assert_eq!(e.labels["route"], "/a");
+    assert_eq!(e.attributes["user.id"], "u7");
+    assert_eq!(e.time.timestamp_micros(), (t0 / 1000) as i64);
+    // Filters apply to exemplars too.
+    let none: MetricQueryResult = h.get(&format!("{q}&exemplars=true&attributes=route=/b")).await;
+    assert!(none.exemplars.is_empty());
+    let c: MetricQueryResult =
+        h.get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&agg=increase&exemplars=true").await;
+    assert_eq!(c.exemplars.len(), 1);
+    assert!(c.exemplars[0].labels.is_empty());
+    h.stop().await;
+}
+
+/// A catalog created before exemplars were stored: start-up adds the
+/// column, old rows read as no exemplars, and new rows keep theirs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upgrade_adds_exemplars_to_an_old_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = lake_config(dir.path());
+    let t0 = now_ns() - 1_000_000_000;
+    {
+        // metric_points as created by versions without exemplars, with one row.
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
+        conn.execute_batch(
+            "CREATE SCHEMA lake.otel;
+             CREATE TABLE lake.otel.metric_points (
+                time TIMESTAMP, start_time TIMESTAMP, service_name VARCHAR, metric_name VARCHAR,
+                metric_description VARCHAR, metric_unit VARCHAR, temporality VARCHAR, series_id UBIGINT,
+                flags UINTEGER, scope_name VARCHAR, scope_version VARCHAR,
+                resource_attributes MAP(VARCHAR, VARCHAR), attributes MAP(VARCHAR, VARCHAR),
+                metric_type VARCHAR, is_monotonic BOOLEAN, value DOUBLE)
+             PARTITIONED BY (epoch_day(time)) SORTED BY (metric_name, series_id, time);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lake.otel.metric_points VALUES (make_timestamp(?) - INTERVAL 2 MINUTE, NULL, 'checkout', \
+             'http.requests', '', '', 'cumulative', 42, 0, '', '', MAP {}, MAP {}, 'sum', true, 0)",
+            [(t0 / 1000) as i64],
+        )
+        .unwrap();
+    }
+    let server = Arc::new(Server::new(cfg.clone()).await.unwrap());
+    let shutdown = CancellationToken::new();
+    let (s2, sd) = (server.clone(), shutdown.clone());
+    let bg = tokio::spawn(async move { s2.run_background(async move { sd.cancelled().await }).await.unwrap() });
+    let req = Request::post("/v1/metrics")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(exemplars_req(t0).encode_to_vec()))
+        .unwrap();
+    assert_eq!(server.otlp_http_router().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let api = server.api_router();
+    let path = "/api/v1/metrics/query?name=http.requests&since=15m&step=1m&agg=max&exemplars=true";
+    let mut result = None;
+    for _ in 0..50 {
+        let resp = api.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        if let Ok(r) = serde_json::from_slice::<MetricQueryResult>(&body)
+            && !r.exemplars.is_empty()
+        {
+            result = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let r = result.expect("new rows with exemplars are written to the old table");
+    assert_eq!(r.exemplars.len(), 1);
+    let points: Vec<f64> = r.series[0].points.iter().map(|p| p.value).collect();
+    assert_eq!(points, vec![0.0, 1.0], "the old row is still read");
     shutdown.cancel();
     bg.await.unwrap();
 }

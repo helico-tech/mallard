@@ -344,6 +344,20 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
         t.add_row(row);
     }
     put!(out, "{t}");
+    if !r.exemplars.is_empty() {
+        let mut t = table(&["time", "series", "value", "trace", "span"]);
+        for e in &r.exemplars {
+            let label = if e.labels.is_empty() { "(all)".to_string() } else { fmt_attrs(&e.labels) };
+            t.add_row(vec![
+                Cell::new(e.time.format("%H:%M:%S")),
+                Cell::new(label),
+                num(e.value),
+                Cell::new(clean(&e.trace_id)),
+                Cell::new(clean(e.span_id.as_deref().unwrap_or("-"))),
+            ]);
+        }
+        put!(out, "exemplars\n{t}");
+    }
     out
 }
 
@@ -450,6 +464,29 @@ mod tests {
             },
         };
         assert!(only_sgr(&services_text(&[svc])));
+        let labels: Attributes = [(EVIL.to_string(), EVIL.to_string())].into();
+        let m = MetricQueryResult {
+            name: EVIL.into(),
+            metric_type: MetricType::Histogram,
+            unit: EVIL.into(),
+            agg: "p95".into(),
+            step_secs: 60,
+            series: vec![MetricSeries {
+                labels: labels.clone(),
+                points: vec![MetricPoint { time: chrono::Utc::now(), value: 1.0 }],
+            }],
+            exemplars: vec![MetricExemplar {
+                labels,
+                time: chrono::Utc::now(),
+                value: 2.0,
+                trace_id: EVIL.into(),
+                span_id: Some(EVIL.into()),
+                attributes: Default::default(),
+            }],
+        };
+        let text = metric_text(&m);
+        assert!(text.contains("exemplars"), "{text}");
+        assert!(only_sgr(&text), "{text}");
     }
 
     #[test]

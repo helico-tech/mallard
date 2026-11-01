@@ -24,7 +24,7 @@ are the same as on the errors side: [../cli.md](../cli.md).
 | `odl trace <id> [-A]` | waterfall of one trace (`-A`: attributes and events) |
 | `odl logs [-S svc] [-l warn] [-q text] [-t trace] [-a k=v] [-n 100] [-f]` | search logs; `-f` follows like `tail -f` |
 | `odl metrics [-S svc] [-q name]` | metric catalog |
-| `odl metric <name> [-g p95] [-b route,service.name] [--step 1m]` | a metric over time, with sparklines |
+| `odl metric <name> [-g p95] [-b route,service.name] [--step 1m] [--exemplars]` | a metric over time, with sparklines; `--exemplars` lists trace ids of the highest samples |
 | `odl sql "<select>"` | read-only SQL (server must enable it) |
 | `odl tui [-s 1h]` | interactive UI |
 

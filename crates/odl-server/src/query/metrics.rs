@@ -216,7 +216,7 @@ fn detect(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Kind> {
 }
 
 /// SELECT expression producing a JSON array of group label values, plus its params.
-fn labels_expr(group_by: &[String]) -> (String, Vec<Value>) {
+pub(super) fn labels_expr(group_by: &[String]) -> (String, Vec<Value>) {
     if group_by.is_empty() {
         return ("'[]'".into(), vec![]);
     }
@@ -356,6 +356,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
         agg: agg.name(),
         step_secs: req.step,
         series: col.finish()?,
+        exemplars: Vec::new(),
     })
 }
 

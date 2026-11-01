@@ -26,6 +26,11 @@ pub use odl_api::Signal;
 
 const ATTRS: &str = "MAP(VARCHAR, VARCHAR)";
 
+/// Metric exemplars of one data point: sample measurements that link the
+/// point to a trace. `attributes` are the exemplar's filtered attributes.
+const EXEMPLARS: &str =
+    "STRUCT(time TIMESTAMP, value DOUBLE, trace_id UUID, span_id UBIGINT, attributes MAP(VARCHAR, VARCHAR))[]";
+
 pub const SPANS: TableDef = TableDef {
     name: "spans",
     time_column: "start_time",
@@ -104,7 +109,12 @@ pub const METRIC_POINTS: TableDef = TableDef {
     time_column: "time",
     signal: Signal::Metrics,
     sort_by: "metric_name, series_id, time",
-    columns: metric_columns![("metric_type", "VARCHAR"), ("is_monotonic", "BOOLEAN"), ("value", "DOUBLE"),],
+    columns: metric_columns![
+        ("metric_type", "VARCHAR"),
+        ("is_monotonic", "BOOLEAN"),
+        ("value", "DOUBLE"),
+        ("exemplars", EXEMPLARS),
+    ],
 };
 
 pub const METRIC_HISTOGRAMS: TableDef = TableDef {
@@ -119,6 +129,7 @@ pub const METRIC_HISTOGRAMS: TableDef = TableDef {
         ("max", "DOUBLE"),
         ("bucket_counts", "UBIGINT[]"),
         ("explicit_bounds", "DOUBLE[]"),
+        ("exemplars", EXEMPLARS),
     ],
 };
 
@@ -139,6 +150,7 @@ pub const METRIC_EXP_HISTOGRAMS: TableDef = TableDef {
         ("positive_bucket_counts", "UBIGINT[]"),
         ("negative_offset", "INTEGER"),
         ("negative_bucket_counts", "UBIGINT[]"),
+        ("exemplars", EXEMPLARS),
     ],
 };
 

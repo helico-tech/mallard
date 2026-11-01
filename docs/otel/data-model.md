@@ -235,7 +235,24 @@ read in ad-hoc SQL.
 - Non-finite values (`NaN`, `±Infinity`; in OTLP/JSON the strings `"NaN"`,
   `"Infinity"`, `"-Infinity"`) are stored as the DOUBLE values `nan` and
   `±inf`. JSON has no such numbers: the query API returns them as `null`.
-- **Not stored:** exemplars, and metric `metadata`. Exponential histogram
+- **Exemplars** (sample measurements that link a point to a trace) are kept
+  per point in `exemplars STRUCT(time TIMESTAMP, value DOUBLE, trace_id UUID,
+  span_id UBIGINT, attributes MAP(VARCHAR, VARCHAR))[]`, the last column of
+  `metric_points`, `metric_histograms` and `metric_exp_histograms` (OTLP
+  summaries have none). Same conventions as span links: ids as `UUID` /
+  `UBIGINT` (invalid → `NULL`), `attributes` are the exemplar's filtered
+  attributes, a zero time falls back to the point's time. Nested like span
+  events, so queries that don't touch exemplars don't read them
+  ([ADR 0012](../adr/0012-store-metric-exemplars.md)). Jump to the traces:
+
+  ```sql
+  SELECT e.time, e.value, replace(e.trace_id::VARCHAR, '-', '') AS trace_id
+  FROM metric_histograms, unnest(exemplars) AS u(e)
+  WHERE metric_name = 'http.server.request.duration'
+    AND time > now()::TIMESTAMP - INTERVAL 1 HOUR AND e.trace_id IS NOT NULL
+  ORDER BY e.value DESC LIMIT 10;
+  ```
+- **Not stored:** metric `metadata`. Exponential histogram
   negative buckets are kept as stored, but folded into one "≤ 0" bucket when
   computing percentiles.
 
