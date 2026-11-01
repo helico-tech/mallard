@@ -32,8 +32,8 @@ pub struct Platform {
     cfg: Arc<Config>,
     otel: Arc<odl_server::Server>,
     sentry: sdl_server::Server,
-    /// Stores OTel exceptions as Sentry events (`bridge.exceptions`).
-    bridge: Option<bridge::Worker>,
+    /// The bridge's workers (Sentry transactions, OTel exceptions).
+    bridge: bridge::Workers,
     metrics: Option<PrometheusHandle>,
 }
 
@@ -96,7 +96,8 @@ impl Platform {
     /// Serve on already bound listeners until `shutdown` is cancelled or
     /// any listener fails. Then stop the receivers first and flush both
     /// libraries, so nothing arrives after the final flush. The bridge
-    /// stores the OTel exceptions it still holds before Sentry stops.
+    /// stores the Sentry transactions it still holds before otel stops,
+    /// and the OTel exceptions it still holds before Sentry stops.
     pub async fn serve_on(mut self, listeners: Listeners, shutdown: CancellationToken) -> Result<()> {
         let Listeners { http, otlp_http, otlp_grpc, metrics } = listeners;
         info!(
@@ -150,24 +151,33 @@ impl Platform {
         });
 
         let receivers_down = CancellationToken::new();
-        // If a background job ends early (e.g. fails to start), stop the
-        // receivers too: data they accept would never be written.
-        let otel_bg = async {
-            let r = self.otel.run_background(receivers_down.clone().cancelled_owned()).await;
-            shutdown.cancel();
-            r
-        };
-        let bridge_done = CancellationToken::new();
-        let bridge = self.bridge.take();
-        let bridge_bg = async {
-            match bridge {
+        let bridge::Workers { transactions, exceptions } = std::mem::take(&mut self.bridge);
+        // The bridge buffers the transactions it holds before otel's final flush.
+        let spans_done = CancellationToken::new();
+        let transactions_bg = async {
+            match transactions {
                 Some(w) => w.run(receivers_down.clone()).await,
                 None => receivers_down.cancelled().await,
             }
-            bridge_done.cancel();
+            spans_done.cancel();
+        };
+        // If a background job ends early (e.g. fails to start), stop the
+        // receivers too: data they accept would never be written.
+        let otel_bg = async {
+            let r = self.otel.run_background(spans_done.clone().cancelled_owned()).await;
+            shutdown.cancel();
+            r
+        };
+        let events_done = CancellationToken::new();
+        let exceptions_bg = async {
+            match exceptions {
+                Some(w) => w.run(receivers_down.clone()).await,
+                None => receivers_down.cancelled().await,
+            }
+            events_done.cancel();
         };
         let sentry_bg = async {
-            let r = self.sentry.run_background(bridge_done.clone().cancelled_owned()).await;
+            let r = self.sentry.run_background(events_done.clone().cancelled_owned()).await;
             shutdown.cancel();
             r
         };
@@ -180,7 +190,7 @@ impl Platform {
             d??;
             anyhow::Ok(())
         };
-        let (r, o, s, ()) = tokio::join!(receivers, otel_bg, sentry_bg, bridge_bg);
+        let (r, o, s, (), ()) = tokio::join!(receivers, otel_bg, sentry_bg, transactions_bg, exceptions_bg);
         info!("stopped");
         r?;
         o?;

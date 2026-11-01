@@ -45,8 +45,10 @@ pub struct BridgeConfig {
     /// Project slug for OTel exceptions whose `service.name` matches no
     /// project (created when missing). Empty: one new project per service.
     pub default_project: String,
-    /// How long an OTel exception waits for a Sentry SDK event of the same
-    /// trace + span before it becomes an event itself (dedupe).
+    /// How long a bridged item waits for its copy from the other side
+    /// (dedupe, ADR 0009 and 0010): an OTel exception for a Sentry SDK
+    /// event of the same trace + span, a Sentry transaction for OTLP spans
+    /// with its span ids. Copies that came are not stored twice.
     #[serde(with = "duration")]
     pub dedupe_window: Duration,
 }
@@ -74,7 +76,7 @@ impl BridgeConfig {
         );
         anyhow::ensure!(
             self.dedupe_window <= Duration::from_secs(600),
-            "bridge.dedupe_window must be at most 10m (exceptions wait in memory)"
+            "bridge.dedupe_window must be at most 10m (exceptions and transactions wait in memory)"
         );
         Ok(())
     }

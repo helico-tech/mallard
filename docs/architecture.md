@@ -36,18 +36,22 @@
 
 - Each side owns its domain (ingest, storage schema, maintenance).
   `mallard-*` never writes into their schemas directly.
-- The bridge (ADR 0009) crosses sides in process through small library
+- The bridge (ADR 0009, 0010) crosses sides in process through small library
   hooks: `sdl_server::Server::{set_transaction_sink, set_event_observer,
   ingest_event}` and `odl_server::Server::{set_ingest_hook,
   ingest_traces}`. The libraries do not know each other; a library run
   alone leaves the hooks unset.
 
 ```
- Sentry SDK ─ transaction ─▶ sdl ingest ─ TransactionSink ─▶ bridge ─ ingest_traces ─▶ otel buffer
+ Sentry SDK ─ transaction ─▶ sdl ingest ─ TransactionSink ─▶ bridge queue
+     ─ (dedupe_window, minus spans seen over OTLP) ─ ingest_traces ─▶ otel buffer
+ OTel SDK ─ spans ─▶ otel ingest ─ IngestHook ─▶ bridge "OTLP spans"
  OTel SDK ─ span event / log "exception" ─▶ otel ingest ─ IngestHook ─▶ bridge queue
      ─ (dedupe_window, no SDK event for trace+span) ─ ingest_event ─▶ sentry writer
  Sentry SDK ─ error event ─▶ sdl ingest ─ EventObserver ─▶ bridge "seen spans"
 ```
+  Shutdown: receivers stop, the bridge stores what it holds (transactions
+  before otel's final flush, exceptions before Sentry's), then both flush.
 - One `duckdb` crate version for the workspace (it is bundled and linked
   once): only `mallard-duck` depends on it; everything else uses
   `mallard_duck::duckdb`.
