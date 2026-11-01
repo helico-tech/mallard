@@ -4,7 +4,7 @@ pub mod convert;
 pub mod grpc;
 pub mod http;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -81,6 +81,14 @@ pub fn estimate_expanded_bytes(req: &Request) -> u64 {
     per_resource + encoded as u64 * 3
 }
 
+/// Sees OTLP requests after they were buffered for writing, e.g. to derive
+/// other data from them (mallard turns exceptions into Sentry issues). Runs
+/// on the ingest thread: return quickly and never block.
+pub trait IngestHook: Send + Sync + 'static {
+    fn traces(&self, _req: &ExportTraceServiceRequest) {}
+    fn logs(&self, _req: &ExportLogsServiceRequest) {}
+}
+
 /// Shared ingest state for both receivers.
 pub struct Ingest {
     pub buffer: Arc<WriteBuffer>,
@@ -90,6 +98,7 @@ pub struct Ingest {
     /// Bounds the memory of requests being received and decoded, in KiB.
     inflight: Arc<Semaphore>,
     inflight_kib: u32,
+    pub hook: OnceLock<Arc<dyn IngestHook>>,
 }
 
 /// A request's share of the in-flight budget; released when dropped.
@@ -149,6 +158,7 @@ impl Ingest {
             max_request_bytes,
             inflight: Arc::new(Semaphore::new(kib as usize)),
             inflight_kib: kib,
+            hook: OnceLock::new(),
         }
     }
 
@@ -173,7 +183,14 @@ impl Ingest {
         })?
     }
 
+    /// Convert and buffer a request received over OTLP; the hook sees it
+    /// once it is buffered.
     pub fn handle_blocking(&self, req: Request) -> Result<Accepted, IngestError> {
+        self.buffer_request(req, true)
+    }
+
+    /// Convert and buffer a request; `notify`: show it to the hook.
+    pub fn buffer_request(&self, req: Request, notify: bool) -> Result<Accepted, IngestError> {
         let signal = req.signal();
         // Resource attributes are repeated on every row, so a small request
         // can expand a lot. Refuse it before allocating.
@@ -191,7 +208,9 @@ impl Ingest {
             Request::Logs(r) => convert::convert_logs(r),
             Request::Metrics(r) => convert::convert_metrics(r),
         };
-        drop(req);
+        // Keep the request only when the hook will look at it.
+        let hook = self.hook.get().filter(|_| notify);
+        let kept = hook.map(|_| req);
         let (accepted, rejected) = (c.accepted, c.rejected);
         if let Err(e) = self.buffer.push(c.batches) {
             self.stats.record_request(signal, 0, accepted + rejected);
@@ -201,6 +220,14 @@ impl Ingest {
             });
         }
         self.stats.record_request(signal, accepted, rejected);
+        // Only buffered requests: a rejected one comes back as a retry.
+        if let (Some(h), Some(req)) = (hook, &kept) {
+            match req {
+                Request::Traces(r) => h.traces(r),
+                Request::Logs(r) => h.logs(r),
+                Request::Metrics(_) => {}
+            }
+        }
         Ok(Accepted { rejected, message: c.reject_reason.unwrap_or_default() })
     }
 }
@@ -226,5 +253,47 @@ mod tests {
         drop(a);
         let _small = ingest.admit(Some(100)).expect("released when dropped");
         let _small2 = ingest.admit(Some(100)).expect("small requests take little");
+    }
+
+    fn one_span() -> ExportTraceServiceRequest {
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+        let span = Span { trace_id: vec![1; 16], span_id: vec![2; 8], name: "s".into(), ..Default::default() };
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans { spans: vec![span], ..Default::default() }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[derive(Default)]
+    struct Count(std::sync::atomic::AtomicUsize);
+    impl IngestHook for Count {
+        fn traces(&self, req: &ExportTraceServiceRequest) {
+            assert_eq!(req.resource_spans.len(), 1);
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn the_hook_sees_buffered_otlp_requests_only() {
+        let stats = Arc::new(Stats::default());
+        let tokens = Tokens::new([""], mallard_common::auth::AuthPolicy::OpenIfEmpty);
+        let buffer = Arc::new(WriteBuffer::new(1 << 20, 1000, stats.clone()));
+        let ingest = Ingest::new(buffer, stats.clone(), tokens.clone(), 1 << 20, 1 << 20);
+        let count = Arc::new(Count::default());
+        assert!(ingest.hook.set(count.clone()).is_ok());
+        let seen = || count.0.load(std::sync::atomic::Ordering::Relaxed);
+        ingest.handle_blocking(Request::Traces(one_span())).unwrap();
+        assert_eq!(seen(), 1, "OTLP requests are shown");
+        ingest.buffer_request(Request::Traces(one_span()), false).unwrap();
+        assert_eq!(seen(), 1, "in-process requests are not");
+
+        // A full buffer rejects the request: the client retries, so no hook.
+        let tiny = Arc::new(WriteBuffer::new(1, 1000, stats.clone()));
+        let full = Ingest::new(tiny, stats, tokens, 1 << 20, 1 << 20);
+        assert!(full.hook.set(count.clone()).is_ok());
+        assert!(full.handle_blocking(Request::Traces(one_span())).is_err());
+        assert_eq!(seen(), 1);
     }
 }
