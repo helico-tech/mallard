@@ -1,0 +1,9 @@
+# Minimal: DuckDB-file catalog on a PVC, S3 with static keys.
+publicUrl: https://sentry.example.com
+apiToken: test-token
+storage:
+  url: s3://my-bucket/sentry
+  credentials:
+    env:
+      AWS_ACCESS_KEY_ID: AKIAEXAMPLE
+      AWS_SECRET_ACCESS_KEY: secret

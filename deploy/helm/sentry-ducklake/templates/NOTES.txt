@@ -1,0 +1,52 @@
+sentry-ducklake is installed as {{ include "sdl.fullname" . }} in namespace {{ .Release.Namespace }}.
+Catalog: {{ .Values.catalog.type }}{{ if eq .Values.catalog.type "duckdb" }} (one pod, PVC {{ include "sdl.pvcName" . }}){{ end }}
+Storage: {{ .Values.storage.url }}
+Public URL (used in DSNs): {{ .Values.publicUrl }}
+
+1. Wait until the pod is ready:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "sdl.fullname" . }}
+
+2. Reach the API. Through the ingress ({{ .Values.publicUrl }}) or a port-forward:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sdl.fullname" . }} 8000:{{ .Values.service.port }}
+   export SDL_URL=http://localhost:8000
+
+3. Read the API token:
+
+{{- if .Values.existingSecret }}
+   export SDL_TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.{{ .Values.existingSecretKey }}}' | base64 -d | cut -d, -f1)
+{{- else }}
+   export SDL_TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ include "sdl.fullname" . }} -o jsonpath='{.data.api-token}' | base64 -d | cut -d, -f1)
+{{- end }}
+
+4. Create a project. The answer contains the DSN to put in your Sentry SDK:
+
+   curl -s -XPOST "$SDL_URL/v1/projects" \
+     -H "Authorization: Bearer $SDL_TOKEN" -H 'content-type: application/json' \
+     -d '{"name":"web"}'
+
+   List projects and their DSNs later with: curl -s -H "Authorization: Bearer $SDL_TOKEN" "$SDL_URL/v1/projects"
+   API docs: $SDL_URL/docs
+
+Browser SDKs: the server answers CORS itself; do not add CORS rules at the ingress.
+{{- if .Values.ingress.enabled }}
+/metrics is served on the same port as the ingress. Block it there if it must not be public.
+{{- end }}
+{{- if and (eq .Values.catalog.type "postgres") (gt (int .Values.replicaCount) 1) }}
+
+WARNING: replicaCount={{ .Values.replicaCount }}. Each pod keeps its own in-memory project and
+issue-status cache, loaded at start. A project created through one pod is not
+accepted by the others until they restart, and every pod runs catalog-wide
+maintenance. Read "Running more than one pod" in docs/deployment.md.
+{{- end }}
+{{- if and (not (include "sdl.storageSecret" .)) (regexMatch "^(s3a?|az|azure)://" .Values.storage.url) }}
+
+No storage credentials Secret is set: the server uses the pod's cloud identity
+(IRSA / EKS Pod Identity / Azure workload identity via serviceAccount.annotations).
+{{- end }}
+{{- if and (not (include "sdl.storageSecret" .)) (regexMatch "^(gs|gcs)://" .Values.storage.url) }}
+
+WARNING: gs:// storage needs HMAC keys (GCS_HMAC_KEY_ID, GCS_HMAC_SECRET) in
+storage.credentials. GKE workload identity alone is not supported.
+{{- end }}

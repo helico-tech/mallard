@@ -135,10 +135,7 @@ fn frame_components(st: Option<&Value>) -> Vec<String> {
                 .and_then(Value::as_str)
                 .map(normalize_module)
                 .or_else(|| {
-                    f.get("filename")
-                        .or_else(|| f.get("abs_path"))
-                        .and_then(Value::as_str)
-                        .map(normalize_filename)
+                    f.get("filename").or_else(|| f.get("abs_path")).and_then(Value::as_str).map(normalize_filename)
                 })
                 .unwrap_or_default();
             let function = f.get("function").and_then(Value::as_str).and_then(normalize_function);
@@ -155,7 +152,8 @@ fn frame_components(st: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-static RE_HASH_SEGMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[.\-_]([0-9a-fA-F]{6,}|[0-9a-zA-Z_-]{8})\.").unwrap());
+static RE_HASH_SEGMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[.\-_]([0-9a-fA-F]{6,}|[0-9a-zA-Z_-]{8})\.").unwrap());
 static RE_HEXISH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9a-f]{8,}\b").unwrap());
 
 fn normalize_filename(f: &str) -> String {
@@ -215,10 +213,8 @@ pub fn metadata(ev: &Value) -> Metadata {
     let exc = last_exception(ev);
     let exception_type = exc.and_then(|e| e.get("type")).and_then(Value::as_str).map(str::to_string);
     let exception_value = exc.and_then(|e| e.get("value")).and_then(Value::as_str).map(|v| truncate(v, 1024));
-    let message = ev
-        .get("logentry")
-        .and_then(|l| l.get("formatted").or_else(|| l.get("message")))
-        .and_then(Value::as_str);
+    let message =
+        ev.get("logentry").and_then(|l| l.get("formatted").or_else(|| l.get("message"))).and_then(Value::as_str);
     let title = match (&exception_type, &exception_value) {
         (Some(t), Some(v)) if !t.is_empty() && !v.is_empty() => format!("{t}: {}", first_line(v)),
         (Some(t), _) if !t.is_empty() => t.clone(),
@@ -228,12 +224,8 @@ pub fn metadata(ev: &Value) -> Metadata {
             _ => "<unlabeled event>".to_string(),
         },
     };
-    let culprit = ev
-        .get("transaction")
-        .and_then(Value::as_str)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
+    let culprit =
+        ev.get("transaction").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string).or_else(|| {
             let st = exc.and_then(|e| e.get("stacktrace")).or_else(|| ev.get("stacktrace"));
             let frame = grouping_frames(st).into_iter().last()?;
             let place = frame
@@ -249,7 +241,12 @@ pub fn metadata(ev: &Value) -> Metadata {
                 (None, None) => None,
             }
         });
-    Metadata { title: truncate(&title, 200), culprit: culprit.map(|c| truncate(&c, 200)), exception_type, exception_value }
+    Metadata {
+        title: truncate(&title, 200),
+        culprit: culprit.map(|c| truncate(&c, 200)),
+        exception_type,
+        exception_value,
+    }
 }
 
 fn first_line(s: &str) -> &str {

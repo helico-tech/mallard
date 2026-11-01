@@ -54,14 +54,18 @@ mod tests {
 
     #[test]
     fn chrome_mac() {
-        let p = parse("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36");
+        let p = parse(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        );
         assert_eq!(p.browser, Some(("Chrome".into(), "130.0".into())));
         assert_eq!(p.os, Some(("macOS".into(), "10.15".into())));
     }
 
     #[test]
     fn safari_ios_and_firefox_linux() {
-        let p = parse("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1");
+        let p = parse(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        );
         assert_eq!(p.browser, Some(("Safari".into(), "17.4".into())));
         assert_eq!(p.os, Some(("iOS".into(), "17.4".into())));
         let p = parse("Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0");
@@ -71,7 +75,9 @@ mod tests {
 
     #[test]
     fn edge_windows() {
-        let p = parse("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0");
+        let p = parse(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+        );
         assert_eq!(p.browser.unwrap().0, "Edge");
         assert_eq!(p.os.unwrap().0, "Windows");
     }

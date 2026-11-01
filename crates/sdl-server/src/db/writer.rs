@@ -88,7 +88,11 @@ pub struct Writer {
     compact_interval: Duration,
     retention_days: u32,
     catalog_wide_maintenance: bool,
+    snapshot_retention: Duration,
     last_flush: Instant,
+    last_commit: Instant,
+    inlined_since_flush: usize,
+    flush_rows: usize,
     last_compact: Instant,
 }
 
@@ -146,12 +150,12 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     }
     drop(projects);
 
-    let mut stmt = conn.prepare(
-        &ns.sql("SELECT i.project_id, i.group_hash, coalesce(a.status, 'unresolved')
+    let mut stmt = conn.prepare(&ns.sql(
+        "SELECT i.project_id, i.group_hash, coalesce(a.status, 'unresolved')
          FROM $S.issues i
          LEFT JOIN (SELECT project_id, group_hash, arg_max(status, changed_at) AS status
-                    FROM $S.issue_activity GROUP BY ALL) a USING (project_id, group_hash)"),
-    )?;
+                    FROM $S.issue_activity GROUP BY ALL) a USING (project_id, group_hash)",
+    ))?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, u64>(1)?, r.get::<_, String>(2)?)))?;
     let mut issues = caches.issues.write().expect("lock");
     for row in rows {
@@ -190,8 +194,12 @@ impl Writer {
             compact_interval: cfg.compact_interval,
             retention_days: cfg.retention_days,
             catalog_wide_maintenance: cfg.catalog_wide_maintenance,
+            snapshot_retention: cfg.snapshot_retention,
             last_flush: Instant::now(),
             last_compact: Instant::now(),
+            last_commit: Instant::now(),
+            inlined_since_flush: 0,
+            flush_rows: cfg.flush_rows.max(1),
         })
     }
 
@@ -210,11 +218,21 @@ impl Writer {
             };
             match cmd {
                 WriteCmd::Event(e) => {
+                    // Group commit: take what is queued now; wait for more only
+                    // until `batch_window` has passed since the last commit
+                    // started. Under load commits run back to back (latency =
+                    // commit time); at low load there are at most
+                    // 1/batch_window commits (= DuckLake snapshots) per second.
                     let mut batch = vec![*e];
-                    let deadline = Instant::now() + self.batch_window;
+                    let deadline = self.last_commit + self.batch_window;
                     let mut pending = None;
                     while batch.len() < self.batch_max {
-                        match self.rx.recv_deadline(deadline) {
+                        let next = match self.rx.try_recv() {
+                            Ok(cmd) => Ok(cmd),
+                            Err(_) if Instant::now() >= deadline => break,
+                            Err(_) => self.rx.recv_deadline(deadline),
+                        };
+                        match next {
                             Ok(WriteCmd::Event(e)) => batch.push(*e),
                             Ok(other) => {
                                 pending = Some(other);
@@ -223,6 +241,7 @@ impl Writer {
                             Err(_) => break,
                         }
                     }
+                    self.last_commit = Instant::now();
                     self.write_events(batch);
                     match pending {
                         Some(WriteCmd::Shutdown { reply }) => shutdown_reply = Some(reply),
@@ -268,7 +287,7 @@ impl Writer {
     }
 
     fn periodic_maintenance(&mut self) {
-        if self.last_flush.elapsed() >= self.flush_interval {
+        if self.last_flush.elapsed() >= self.flush_interval || self.inlined_since_flush >= self.flush_rows {
             if let Err(e) = self.flush_inlined() {
                 tracing::error!(error = %e, "flushing inlined data failed");
             }
@@ -333,6 +352,9 @@ impl Writer {
         metrics::histogram!("sdl_write_batch_events").record(n as f64);
         match &result {
             Ok(()) => {
+                if n <= super::schema::EVENTS_INLINE_ROWS {
+                    self.inlined_since_flush += n;
+                }
                 metrics::counter!("sdl_events_stored_total").increment(n as u64);
                 tracing::debug!(events = n, ms = elapsed.as_millis() as u64, "batch committed");
             }
@@ -432,7 +454,8 @@ impl Writer {
                 }
             }
             if !activity.is_empty() {
-                let mut stmt = c.prepare(&ns.sql("INSERT INTO $S.issue_activity VALUES (?, ?, make_timestamp(?), ?, ?)"))?;
+                let mut stmt =
+                    c.prepare(&ns.sql("INSERT INTO $S.issue_activity VALUES (?, ?, make_timestamp(?), ?, ?)"))?;
                 for (p, g, s, reason) in &activity {
                     stmt.execute(params![*p as i32, *g, now_us, s.as_str(), *reason])?;
                 }
@@ -467,7 +490,14 @@ impl Writer {
         self.in_tx(|c| {
             c.execute(
                 &ns.sql("INSERT INTO $S.projects VALUES (?, ?, ?, ?, ?, make_timestamp(?))"),
-                params![row.id as i32, row.slug, row.name, row.platform, row.public_key, row.created_at.timestamp_micros()],
+                params![
+                    row.id as i32,
+                    row.slug,
+                    row.name,
+                    row.platform,
+                    row.public_key,
+                    row.created_at.timestamp_micros()
+                ],
             )?;
             Ok(())
         })?;
@@ -503,8 +533,10 @@ impl Writer {
             if existing > 0 {
                 return Ok(());
             }
-            let mut sb = c.prepare(&ns.sql("INSERT INTO $S.artifact_bundles VALUES (?, ?, ?, ?, ?, ?, ?, make_timestamp(?))"))?;
-            let mut sf = c.prepare(&ns.sql("INSERT INTO $S.artifact_files VALUES (?, ?, ?::UUID, ?, ?, ?, ?, ?, ?)"))?;
+            let mut sb =
+                c.prepare(&ns.sql("INSERT INTO $S.artifact_bundles VALUES (?, ?, ?, ?, ?, ?, ?, make_timestamp(?))"))?;
+            let mut sf =
+                c.prepare(&ns.sql("INSERT INTO $S.artifact_files VALUES (?, ?, ?::UUID, ?, ?, ?, ?, ?, ?)"))?;
             for p in &b.project_ids {
                 sb.execute(params![
                     b.bundle_id,
@@ -539,7 +571,6 @@ impl Writer {
         Ok(())
     }
 
-
     fn flush_inlined(&mut self) -> Result<()> {
         let started = Instant::now();
         let sql = self.ns.sql("CALL ducklake_flush_inlined_data($C, schema_name => $N)");
@@ -554,7 +585,9 @@ impl Writer {
         let started = Instant::now();
         if self.retention_days > 0 {
             let cutoff = (Utc::now() - chrono::Duration::days(self.retention_days as i64)).timestamp_micros();
-            let deleted = self.conn.execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])?;
+            let deleted = self
+                .conn
+                .execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])?;
             if deleted > 0 {
                 tracing::info!(deleted, "retention removed old events");
             }
@@ -567,10 +600,20 @@ impl Writer {
             self.conn.execute_batch(&sql).with_context(|| format!("compacting {table}"))?;
         }
         if self.catalog_wide_maintenance {
-            self.conn.execute_batch(&ns.sql(
-                "CALL ducklake_expire_snapshots($C, older_than => now()::TIMESTAMP - INTERVAL 1 HOUR);
-                 CALL ducklake_cleanup_old_files($C, older_than => now()::TIMESTAMP - INTERVAL 1 HOUR);",
-            )).context("expiring snapshots")?;
+            let cutoff = (Utc::now() - chrono::Duration::from_std(self.snapshot_retention).unwrap_or_default())
+                .timestamp_micros();
+            self.conn
+                .execute(
+                    &ns.sql("CALL ducklake_expire_snapshots($C, older_than => make_timestamp(?))"),
+                    params![cutoff],
+                )
+                .context("expiring snapshots")?;
+            self.conn
+                .execute(
+                    &ns.sql("CALL ducklake_cleanup_old_files($C, older_than => make_timestamp(?))"),
+                    params![cutoff],
+                )
+                .context("cleaning up old files")?;
         }
         metrics::histogram!("sdl_compact_seconds").record(started.elapsed().as_secs_f64());
         tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");

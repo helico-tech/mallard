@@ -7,6 +7,10 @@
 //! by the writer), so `200` means stored. When the write queue is full we
 //! answer `429` with `Retry-After`, which SDKs respect.
 
+// Handlers return a ready `Response` as their error: idiomatic in axum and
+// only on the (cold) rejection path, so its size does not matter.
+#![allow(clippy::result_large_err)]
+
 use crate::AppState;
 use crate::db::{EnqueueError, EventWrite, WriteCmd};
 use axum::Router;
@@ -79,7 +83,8 @@ struct Incoming {
 }
 
 async fn read_request(state: &AppState, project_id: &str, req: Request) -> Result<Incoming, Response> {
-    let project_id: u32 = project_id.parse().map_err(|_| sentry_error(StatusCode::BAD_REQUEST, "invalid project id"))?;
+    let project_id: u32 =
+        project_id.parse().map_err(|_| sentry_error(StatusCode::BAD_REQUEST, "invalid project id"))?;
     let (parts, body) = req.into_parts();
     let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip().to_string());
     let forwarded = state
@@ -97,7 +102,13 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
             sentry_error(StatusCode::BAD_REQUEST, "could not read request body (bad compression?)")
         }
     })?;
-    Ok(Incoming { project_id, query: parts.uri.query().map(str::to_string), headers: parts.headers, client_ip: forwarded.or(peer), body })
+    Ok(Incoming {
+        project_id,
+        query: parts.uri.query().map(str::to_string),
+        headers: parts.headers,
+        client_ip: forwarded.or(peer),
+        body,
+    })
 }
 
 /// Find the public key in headers, query or envelope DSN and check it.
@@ -238,11 +249,16 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     }
     let payload_json = processed.payload.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let cmd = WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event: processed, payload_json, reply: tx }));
+    let cmd =
+        WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event: processed, payload_json, reply: tx }));
     match state.db.try_send(cmd) {
         Ok(()) => {}
-        Err(EnqueueError::Full) => return Err(sentry_error(StatusCode::TOO_MANY_REQUESTS, "write queue full, retry later")),
-        Err(EnqueueError::Stopped) => return Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")),
+        Err(EnqueueError::Full) => {
+            return Err(sentry_error(StatusCode::TOO_MANY_REQUESTS, "write queue full, retry later"));
+        }
+        Err(EnqueueError::Stopped) => {
+            return Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"));
+        }
     }
     match rx.await {
         Ok(Ok(())) => {

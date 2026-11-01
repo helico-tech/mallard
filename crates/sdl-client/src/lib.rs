@@ -99,7 +99,12 @@ impl Client {
         self.get(&format!("/v1/projects/{}/issues/{}", Self::enc(project), Self::enc(issue_id)), q).await
     }
 
-    pub async fn set_issue_status(&self, project: &str, issue_id: &str, status: IssueStatus) -> Result<IssueDetail, Error> {
+    pub async fn set_issue_status(
+        &self,
+        project: &str,
+        issue_id: &str,
+        status: IssueStatus,
+    ) -> Result<IssueDetail, Error> {
         let url = self.url(&format!("/v1/projects/{}/issues/{}", Self::enc(project), Self::enc(issue_id)));
         self.send(self.http.patch(url).json(&UpdateIssue { status })).await
     }

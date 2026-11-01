@@ -99,11 +99,15 @@ pub const CREATE: &[&str] = &[
 ];
 
 /// Table options applied after creation (idempotent).
-pub fn table_options(batch_max: usize) -> Vec<String> {
+/// Batches up to this many events are inlined into the catalog; bigger ones
+/// (only under heavy load) are written straight to Parquet.
+pub const EVENTS_INLINE_ROWS: usize = 1000;
+
+pub fn table_options() -> Vec<String> {
     vec![
-        // Normal batches stay inlined in the catalog until the periodic flush
-        // writes them out as one well-sorted Parquet file per day.
-        format!("ALTER TABLE $S.events SET (data_inlining_row_limit = {})", batch_max.max(10) * 2),
+        // Small batches stay inlined in the catalog until a flush (by time or
+        // row count) writes them out as one well-sorted Parquet file per day.
+        format!("ALTER TABLE $S.events SET (data_inlining_row_limit = {EVENTS_INLINE_ROWS})"),
         "ALTER TABLE $S.events SET (parquet_compression = 'zstd')".into(),
         // Payloads are large and never filtered on: no min/max stats.
         "ALTER TABLE $S.events SET (skip_stats_columns = ['payload', 'message', 'exception_value'])".into(),

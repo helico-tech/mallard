@@ -34,14 +34,7 @@ impl Dsn {
         let segs: Vec<&str> = u.path().trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
         let (last, prefix) = segs.split_last().ok_or(DsnError::MissingProject)?;
         let project_id = last.parse().map_err(|_| DsnError::MissingProject)?;
-        Ok(Dsn {
-            scheme: u.scheme().to_string(),
-            public_key,
-            host,
-            port: u.port(),
-            path: prefix.join("/"),
-            project_id,
-        })
+        Ok(Dsn { scheme: u.scheme().to_string(), public_key, host, port: u.port(), path: prefix.join("/"), project_id })
     }
 
     /// Build a DSN string for a project on a public base url such as

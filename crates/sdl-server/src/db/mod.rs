@@ -92,6 +92,9 @@ fn configure(conn: &Connection, cfg: &Config) -> Result<()> {
     if let Some(t) = cfg.duckdb_threads {
         conn.execute_batch(&format!("SET threads = {t}"))?;
     }
+    if let Some(d) = &cfg.duckdb_temp_dir {
+        conn.execute_batch(&format!("SET temp_directory = {}", sql_str(&d.display().to_string())))?;
+    }
     if let Some(m) = &cfg.duckdb_memory_limit {
         conn.execute_batch(&format!("SET memory_limit = {}", sql_str(m)))?;
     }
@@ -116,7 +119,9 @@ fn catalog_extensions(catalog: &str) -> &'static [&'static str] {
 pub fn install_all_extensions(cfg: &Config) -> Result<()> {
     let conn = Connection::open_in_memory()?;
     configure(&conn, cfg)?;
-    for ext in ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite", "mysql", "json", "parquet"] {
+    // json and parquet are linked in; mysql is not pre-installed (DuckLake
+    // advises against it as a catalog) and is downloaded on first use.
+    for ext in ["ducklake", "httpfs", "aws", "azure", "postgres", "sqlite"] {
         conn.execute_batch(&format!("INSTALL {ext}")).with_context(|| format!("installing extension {ext}"))?;
         tracing::info!(ext, "installed");
     }
@@ -164,12 +169,11 @@ impl Db {
             conn.execute_batch(&secret).context("creating storage secret")?;
         }
 
-        if catalog_extensions(&cfg.catalog).is_empty() {
-            if let Some(parent) = std::path::Path::new(&cfg.catalog).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                }
-            }
+        if catalog_extensions(&cfg.catalog).is_empty()
+            && let Some(parent) = std::path::Path::new(&cfg.catalog).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let attach = format!(
             "ATTACH {} AS {} (DATA_PATH {})",
@@ -177,7 +181,8 @@ impl Db {
             cfg.lake_alias,
             sql_str(&storage.lake_data_path())
         );
-        conn.execute_batch(&attach).with_context(|| format!("attaching DuckLake catalog {:?}", redact(&cfg.catalog)))?;
+        conn.execute_batch(&attach)
+            .with_context(|| format!("attaching DuckLake catalog {:?}", redact(&cfg.catalog)))?;
         Self::with_connection(conn, cfg, redact(&cfg.catalog))
     }
 
@@ -189,7 +194,7 @@ impl Db {
         for stmt in schema::CREATE {
             conn.execute_batch(&ns.sql(stmt)).with_context(|| format!("creating schema: {stmt}"))?;
         }
-        for stmt in schema::table_options(cfg.batch_max) {
+        for stmt in schema::table_options() {
             conn.execute_batch(&ns.sql(&stmt)).with_context(|| format!("setting table option: {stmt}"))?;
         }
         writer::record_schema_version(&conn, &ns)?;

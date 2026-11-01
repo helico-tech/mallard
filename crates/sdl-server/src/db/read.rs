@@ -154,7 +154,13 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
     Ok(IssueList { issues, window_start: w.start, window_end: w.end })
 }
 
-pub fn issue_detail(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Window) -> Result<Option<IssueDetail>> {
+pub fn issue_detail(
+    conn: &Connection,
+    ns: &Ns,
+    project_id: u32,
+    group: u64,
+    w: &Window,
+) -> Result<Option<IssueDetail>> {
     let base = conn
         .query_row(
             &ns.sql(
@@ -318,7 +324,8 @@ pub fn list_events(
         p.push(Box::new(g));
     }
     if let Some(t) = q.trace_id.as_deref() {
-        let t = sdl_protocol::event::parse_trace_id(t).ok_or_else(|| anyhow::anyhow!("trace_id must be 32 hex characters"))?;
+        let t = sdl_protocol::event::parse_trace_id(t)
+            .ok_or_else(|| anyhow::anyhow!("trace_id must be 32 hex characters"))?;
         sql.push_str(" AND trace_id = ?::UUID");
         p.push(Box::new(t.to_string()));
     }
@@ -347,9 +354,8 @@ pub fn events_by_trace(
     w: &Window,
     limit: u32,
 ) -> Result<EventList> {
-    let mut sql = format!(
-        "SELECT {EVENT_COLUMNS} FROM $S.events WHERE received_at >= make_timestamp(?) AND trace_id = ?::UUID"
-    );
+    let mut sql =
+        format!("SELECT {EVENT_COLUMNS} FROM $S.events WHERE received_at >= make_timestamp(?) AND trace_id = ?::UUID");
     let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(w.start_us()), Box::new(trace_id.to_string())];
     if let Some(s) = span_id {
         sql.push_str(" AND span_id = ?");
@@ -358,7 +364,8 @@ pub fn events_by_trace(
     sql.push_str(" ORDER BY received_at DESC LIMIT ?");
     p.push(Box::new(limit.clamp(1, 500) as i64));
     let mut stmt = conn.prepare(&ns.sql(&sql))?;
-    let events = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), event_summary)?.collect::<Result<_, _>>()?;
+    let events =
+        stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), event_summary)?.collect::<Result<_, _>>()?;
     Ok(EventList { events, next_cursor: None })
 }
 
@@ -381,7 +388,12 @@ pub fn event_detail(
     sql.push_str(" LIMIT 1");
     let row = conn
         .query_row(&ns.sql(&sql), params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
-            Ok((event_summary(r)?, r.get::<_, Option<String>>(14)?, r.get::<_, Option<String>>(15)?, r.get::<_, String>(16)?))
+            Ok((
+                event_summary(r)?,
+                r.get::<_, Option<String>>(14)?,
+                r.get::<_, Option<String>>(15)?,
+                r.get::<_, String>(16)?,
+            ))
         })
         .optional()?;
     Ok(row.map(|(summary, culprit, tags, payload)| {
@@ -497,7 +509,12 @@ pub struct ArtifactLocation {
     pub minified_path: Option<String>,
 }
 
-pub fn find_by_debug_id(conn: &Connection, ns: &Ns, project_id: u32, debug_id: uuid::Uuid) -> Result<Option<ArtifactLocation>> {
+pub fn find_by_debug_id(
+    conn: &Connection,
+    ns: &Ns,
+    project_id: u32,
+    debug_id: uuid::Uuid,
+) -> Result<Option<ArtifactLocation>> {
     let row = conn
         .query_row(
             &ns.sql(
@@ -546,7 +563,14 @@ pub fn find_by_url(
                      ORDER BY b.created_at DESC LIMIT 1",
                 ),
                 params![project_id as i32, release, dist, url],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()?;
         let Some((bundle_id, object_key, minified_path, sourcemap_ref)) = row else { continue };
@@ -570,7 +594,13 @@ pub fn find_by_url(
             )
             .optional()?;
         if let Some((map_path, map_url)) = map {
-            return Ok(Some(ArtifactLocation { bundle_id, object_key, map_path, map_url, minified_path: Some(minified_path) }));
+            return Ok(Some(ArtifactLocation {
+                bundle_id,
+                object_key,
+                map_path,
+                map_url,
+                minified_path: Some(minified_path),
+            }));
         }
     }
     Ok(None)

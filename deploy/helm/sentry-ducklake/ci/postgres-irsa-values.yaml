@@ -1,0 +1,27 @@
+# Stateless pods: Postgres catalog from a Secret, S3 through IRSA, everything on.
+publicUrl: https://sentry.example.com
+existingSecret: sdl-token
+existingSecretKey: token
+replicaCount: 2
+catalog:
+  type: postgres
+  postgres:
+    existingSecret: sdl-catalog
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/sentry-ducklake
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+  tls:
+    - secretName: sentry-tls
+      hosts: [sentry.example.com]
+serviceMonitor:
+  enabled: true
+podDisruptionBudget:
+  enabled: true
+extraEnv:
+  - name: SDL_FLUSH_INTERVAL
+    value: 2m

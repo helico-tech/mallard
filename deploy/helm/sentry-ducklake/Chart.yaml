@@ -1,0 +1,15 @@
+apiVersion: v2
+name: sentry-ducklake
+description: Sentry-compatible error tracking server backed by DuckLake (DuckDB + Parquet on object storage).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/helico-tech/sentry-ducklake
+sources:
+  - https://github.com/helico-tech/sentry-ducklake
+keywords:
+  - sentry
+  - error-tracking
+  - duckdb
+  - ducklake

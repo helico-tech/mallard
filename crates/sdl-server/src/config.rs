@@ -77,8 +77,9 @@ pub struct Config {
     #[arg(long, env = "SDL_BATCH_MAX", default_value_t = 2000)]
     pub batch_max: usize,
 
-    /// Max time an event waits for its batch to be written.
-    #[arg(long, env = "SDL_BATCH_WINDOW", value_parser = humantime::parse_duration, default_value = "200ms")]
+    /// Minimum time between two commits (group commit). Bounds the number of
+    /// DuckLake snapshots at low load; under load commits run back to back.
+    #[arg(long, env = "SDL_BATCH_WINDOW", value_parser = humantime::parse_duration, default_value = "100ms")]
     #[serde(with = "humantime_serde")]
     pub batch_window: Duration,
 
@@ -91,10 +92,20 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub flush_interval: Duration,
 
+    /// Also flush once this many events are inlined (bounds catalog size).
+    #[arg(long, env = "SDL_FLUSH_ROWS", default_value_t = 50_000)]
+    pub flush_rows: usize,
+
     /// How often to compact files, apply retention and expire snapshots.
     #[arg(long, env = "SDL_COMPACT_INTERVAL", value_parser = humantime::parse_duration, default_value = "1h")]
     #[serde(with = "humantime_serde")]
     pub compact_interval: Duration,
+
+    /// Keep DuckLake snapshots (and the files they reference) this long.
+    /// Must exceed the age of your oldest catalog backup you may restore.
+    #[arg(long, env = "SDL_SNAPSHOT_RETENTION", value_parser = humantime::parse_duration, default_value = "1h")]
+    #[serde(with = "humantime_serde")]
+    pub snapshot_retention: Duration,
 
     /// Max size of one event after decompression.
     #[arg(long, env = "SDL_MAX_EVENT_BYTES", default_value_t = 1024 * 1024)]
@@ -115,6 +126,11 @@ pub struct Config {
     /// DuckDB memory limit, e.g. `2GB` (default: DuckDB's 80% of RAM).
     #[arg(long, env = "SDL_DUCKDB_MEMORY_LIMIT")]
     pub duckdb_memory_limit: Option<String>,
+
+    /// DuckDB spill directory for large queries (default: `.tmp` in the
+    /// working directory).
+    #[arg(long, env = "SDL_DUCKDB_TEMP_DIR")]
+    pub duckdb_temp_dir: Option<PathBuf>,
 
     /// Directory with DuckDB extensions (the Docker image pre-installs them).
     #[arg(long, env = "SDL_EXTENSION_DIR")]
@@ -145,15 +161,18 @@ impl Default for Config {
             retention_days: 90,
             catalog_wide_maintenance: true,
             batch_max: 2000,
-            batch_window: Duration::from_millis(200),
+            batch_window: Duration::from_millis(100),
             queue_capacity: 20000,
             flush_interval: Duration::from_secs(300),
+            flush_rows: 50_000,
             compact_interval: Duration::from_secs(3600),
+            snapshot_retention: Duration::from_secs(3600),
             max_event_bytes: 1024 * 1024,
             max_body_bytes: 50 * 1024 * 1024,
             readers: 4,
             duckdb_threads: None,
             duckdb_memory_limit: None,
+            duckdb_temp_dir: None,
             extension_dir: None,
             trust_forwarded_for: false,
             sourcemap_cache_mb: 256,

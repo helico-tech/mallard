@@ -57,7 +57,11 @@ pub fn sql_str(s: &str) -> String {
 impl Storage {
     pub fn new(url: &str, cfg: &Config) -> Result<Self> {
         let url = url.trim().trim_end_matches('/').to_string();
-        let s3 = S3Settings { endpoint: cfg.s3_endpoint.clone(), region: cfg.s3_region.clone(), path_style: cfg.s3_path_style };
+        let s3 = S3Settings {
+            endpoint: cfg.s3_endpoint.clone(),
+            region: cfg.s3_region.clone(),
+            path_style: cfg.s3_path_style,
+        };
         let (kind, root, store, prefix): (Kind, String, Arc<dyn ObjectStore>, String) =
             if let Some(rest) = url.strip_prefix("s3://").or_else(|| url.strip_prefix("s3a://")) {
                 let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
@@ -219,7 +223,11 @@ fn with_slash(p: &str) -> String {
     if p.is_empty() { String::new() } else { format!("{p}/") }
 }
 
-fn s3_store(bucket: &str, s: &S3Settings, keys: Option<(Option<String>, Option<String>)>) -> Result<Arc<dyn ObjectStore>> {
+fn s3_store(
+    bucket: &str,
+    s: &S3Settings,
+    keys: Option<(Option<String>, Option<String>)>,
+) -> Result<Arc<dyn ObjectStore>> {
     let mut b = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket).with_region(&s.region);
     if let Some((Some(k), Some(sec))) = keys {
         b = b.with_access_key_id(k).with_secret_access_key(sec);
@@ -227,7 +235,8 @@ fn s3_store(bucket: &str, s: &S3Settings, keys: Option<(Option<String>, Option<S
     if let Some(ep) = &s.endpoint {
         b = b.with_endpoint(ep).with_allow_http(ep.starts_with("http://"));
     }
-    b = b.with_virtual_hosted_style_request(!s.path_style && s.endpoint.is_none());
+    // Same URL style as DuckDB's secret (URL_STYLE 'path' only when asked).
+    b = b.with_virtual_hosted_style_request(!s.path_style);
     Ok(Arc::new(b.build().context("configuring S3 storage")?))
 }
 
@@ -250,12 +259,9 @@ mod tests {
 
     #[test]
     fn s3_urls_and_secret() {
-        let s = Storage::new("s3://bucket/some/prefix/", &cfg(&[
-            "--s3-endpoint",
-            "http://minio:9000",
-            "--s3-path-style",
-        ]))
-        .unwrap();
+        let s =
+            Storage::new("s3://bucket/some/prefix/", &cfg(&["--s3-endpoint", "http://minio:9000", "--s3-path-style"]))
+                .unwrap();
         assert_eq!(s.kind, Kind::S3);
         assert_eq!(s.lake_data_path(), "s3://bucket/some/prefix/lake/");
         assert_eq!(s.artifact_path_multi("chunks/ab").as_ref(), "some/prefix/artifacts/chunks/ab");

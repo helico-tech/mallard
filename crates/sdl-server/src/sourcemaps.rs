@@ -57,6 +57,16 @@ pub fn strip_bundle_header(data: &[u8]) -> &[u8] {
     if data.len() >= 8 && &data[..4] == b"SYSB" { &data[8..] } else { data }
 }
 
+/// The zip part of an uploaded bundle. sentry-cli (symbolic) writes the
+/// `SYSB` header and then the zip into the same stream, so the zip offsets
+/// count from the start of the file: such a file must be opened whole (zip
+/// readers skip leading data). Cutting the header off would shift every
+/// offset by 8 bytes. Writers whose offsets count from the zip start need
+/// the header cut, so fall back to that.
+pub fn bundle_zip(data: &[u8]) -> &[u8] {
+    if zip::ZipArchive::new(std::io::Cursor::new(data)).is_ok() { data } else { strip_bundle_header(data) }
+}
+
 #[derive(Debug, Deserialize)]
 struct ManifestFile {
     #[serde(rename = "type", default)]
@@ -85,7 +95,8 @@ pub fn index_bundle(zip_bytes: &[u8]) -> Result<(Vec<NewBundleFile>, Option<Stri
     let m: Manifest = serde_json::from_str(&manifest).context("invalid manifest.json")?;
     let mut files = Vec::new();
     for (path, f) in m.files {
-        let headers: HashMap<String, String> = f.headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+        let headers: HashMap<String, String> =
+            f.headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
         let debug_id = headers.get("debug-id").and_then(|d| uuid::Uuid::try_parse(d).ok());
         let sourcemap_url = headers.get("sourcemap").or_else(|| headers.get("x-sourcemap")).cloned();
         let file_type = f.ty.unwrap_or_else(|| "source".into());
@@ -143,7 +154,8 @@ impl SourceMaps {
                 // A parsed map costs roughly 4x its token count in bytes; we
                 // only know the source size cheaply, so weigh by tokens.
                 .weigher(|_k: &(String, String), v: &Option<ParsedMap>| {
-                    v.as_ref().map_or(64, |m| (m.map.get_token_count() as usize * 24 + 1024).try_into().unwrap_or(u32::MAX))
+                    v.as_ref()
+                        .map_or(64, |m| (m.map.get_token_count() as usize * 24 + 1024).try_into().unwrap_or(u32::MAX))
                 })
                 .time_to_idle(Duration::from_secs(3600))
                 .build(),
@@ -255,7 +267,7 @@ impl SourceMaps {
         if hex::encode(hasher.finalize()) != req.checksum {
             bail!("Reported checksum mismatch");
         }
-        let zip_bytes = Bytes::from(strip_bundle_header(&data).to_vec());
+        let zip_bytes = Bytes::from(bundle_zip(&data).to_vec());
         let (files, m_release, m_dist) = {
             let z = zip_bytes.clone();
             tokio::task::spawn_blocking(move || index_bundle(&z)).await??
@@ -335,10 +347,12 @@ impl SourceMaps {
         let abs_path = abs_path.to_string();
         self.maps
             .get_with(key, async move {
-                let zip = match self.bundles.try_get_with(loc.object_key.clone(), async {
-                    storage.get(&loc.object_key).await?.ok_or_else(|| anyhow!("bundle object missing"))
-                })
-                .await
+                let zip = match self
+                    .bundles
+                    .try_get_with(loc.object_key.clone(), async {
+                        storage.get(&loc.object_key).await?.ok_or_else(|| anyhow!("bundle object missing"))
+                    })
+                    .await
                 {
                     Ok(z) => z,
                     Err(e) => {
@@ -346,7 +360,8 @@ impl SourceMaps {
                         return None;
                     }
                 };
-                let parsed = tokio::task::spawn_blocking(move || parse_from_bundle(&zip, &loc, resolved_with, &abs_path)).await;
+                let parsed =
+                    tokio::task::spawn_blocking(move || parse_from_bundle(&zip, &loc, resolved_with, &abs_path)).await;
                 match parsed {
                     Ok(Ok(m)) => Some(Arc::new(m)),
                     Ok(Err(e)) => {
@@ -368,10 +383,10 @@ impl SourceMaps {
         let release = event.get("release").and_then(Value::as_str);
         let dist = event.get("dist").and_then(Value::as_str);
         for r in symbolicate::collect_refs(event) {
-            if let Some((loc, how)) = self.locate(db, project_id, &r, release, dist).await {
-                if let Some(m) = self.load_map(&loc, how, &r.abs_path).await {
-                    out.insert(r.abs_path.clone(), m);
-                }
+            if let Some((loc, how)) = self.locate(db, project_id, &r, release, dist).await
+                && let Some(m) = self.load_map(&loc, how, &r.abs_path).await
+            {
+                out.insert(r.abs_path.clone(), m);
             }
         }
         out
@@ -385,12 +400,19 @@ fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, path: &str) -> 
     Ok(buf)
 }
 
-fn parse_from_bundle(zip_bytes: &Bytes, loc: &ArtifactLocation, how: &'static str, abs_path: &str) -> Result<ResolvedSourceMap> {
+fn parse_from_bundle(
+    zip_bytes: &Bytes,
+    loc: &ArtifactLocation,
+    how: &'static str,
+    abs_path: &str,
+) -> Result<ResolvedSourceMap> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..]))?;
     let map_bytes = read_entry(&mut zip, &loc.map_path)?;
     let map = symbolicate::parse_sourcemap(&map_bytes)?;
     let minified = match &loc.minified_path {
-        Some(p) => read_entry(&mut zip, p).ok().and_then(|b| String::from_utf8(b).ok()).map(|s| SourceView::new(Arc::from(s))),
+        Some(p) => {
+            read_entry(&mut zip, p).ok().and_then(|b| String::from_utf8(b).ok()).map(|s| SourceView::new(Arc::from(s)))
+        }
         None => None,
     };
     // Relative `sources` resolve against the map's location. With `~/x.map`
@@ -411,7 +433,10 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    pub fn make_bundle(files: &[(&str, &str, &str, &[(&str, &str)], &[u8])], release: Option<&str>) -> Vec<u8> {
+    /// (zip path, type, url, headers, content)
+    type BundleFile<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a str)], &'a [u8]);
+
+    pub fn make_bundle(files: &[BundleFile<'_>], release: Option<&str>) -> Vec<u8> {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut z = zip::ZipWriter::new(&mut buf);
@@ -421,7 +446,8 @@ mod tests {
                 manifest["release"] = r.into();
             }
             for (path, ty, url, headers, content) in files {
-                let h: serde_json::Map<String, Value> = headers.iter().map(|(k, v)| (k.to_string(), Value::from(*v))).collect();
+                let h: serde_json::Map<String, Value> =
+                    headers.iter().map(|(k, v)| (k.to_string(), Value::from(*v))).collect();
                 manifest["files"][*path] = serde_json::json!({"type": ty, "url": url, "headers": h});
                 z.start_file(*path, opts).unwrap();
                 z.write_all(content).unwrap();
@@ -439,17 +465,52 @@ mod tests {
     fn indexes_manifest_with_header() {
         let b = make_bundle(
             &[
-                ("files/_/_/main.js", "minified_source", "~/main.js", &[("Debug-Id", "c941d872-af1f-4f0c-a7ff-ad3d295fe153"), ("Sourcemap", "main.js.map")], b"x"),
-                ("files/_/_/main.js.map", "source_map", "~/main.js.map", &[("debug-id", "c941d872-af1f-4f0c-a7ff-ad3d295fe153")], b"{}"),
+                (
+                    "files/_/_/main.js",
+                    "minified_source",
+                    "~/main.js",
+                    &[("Debug-Id", "c941d872-af1f-4f0c-a7ff-ad3d295fe153"), ("Sourcemap", "main.js.map")],
+                    b"x",
+                ),
+                (
+                    "files/_/_/main.js.map",
+                    "source_map",
+                    "~/main.js.map",
+                    &[("debug-id", "c941d872-af1f-4f0c-a7ff-ad3d295fe153")],
+                    b"{}",
+                ),
             ],
             Some("1.0"),
         );
-        let (files, release, _) = index_bundle(strip_bundle_header(&b)).unwrap();
+        let (files, release, _) = index_bundle(bundle_zip(&b)).unwrap();
         assert_eq!(release.as_deref(), Some("1.0"));
         assert_eq!(files.len(), 2);
         let js = files.iter().find(|f| f.file_type == "minified_source").unwrap();
         assert_eq!(js.sourcemap_url.as_deref(), Some("main.js.map"));
         assert!(js.debug_id.is_some());
+    }
+
+    /// Like sentry-cli: header and zip written to one stream, so the zip's
+    /// offsets include the 8 header bytes.
+    #[test]
+    fn opens_bundle_with_absolute_offsets() {
+        let mut buf = std::io::Cursor::new(b"SYSB\x02\x00\x00\x00".to_vec());
+        buf.set_position(8);
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("files/_/_/main.js", opts).unwrap();
+            z.write_all(b"x").unwrap();
+            z.start_file("manifest.json", opts).unwrap();
+            z.write_all(br#"{"files":{"files/_/_/main.js":{"type":"minified_source","url":"~/main.js","headers":{"debug-id":"c941d872-af1f-4f0c-a7ff-ad3d295fe153"}}}}"#).unwrap();
+            z.finish().unwrap();
+        }
+        let data = buf.into_inner();
+        assert_eq!(&data[..4], b"SYSB");
+        let (files, _, _) = index_bundle(bundle_zip(&data)).unwrap();
+        assert_eq!(files.len(), 1);
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bundle_zip(&data))).unwrap();
+        assert_eq!(read_entry(&mut zip, "files/_/_/main.js").unwrap(), b"x");
     }
 
     #[test]

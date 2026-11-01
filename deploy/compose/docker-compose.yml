@@ -1,0 +1,120 @@
+# Full local stack: sentry-ducklake + S3-compatible object store + PostgreSQL
+# as the DuckLake catalog.
+#
+#   docker compose -f deploy/compose/docker-compose.yml up -d --build
+#   curl -XPOST -H 'Authorization: Bearer dev-token' -H 'content-type: application/json' \
+#        localhost:8000/v1/projects -d '{"name":"web"}'      # returns a DSN
+#
+# Simpler mode (DuckDB-file catalog on the sdl-data volume, data still on S3;
+# one server process only):
+#
+#   SDL_CATALOG=/data/catalog.ducklake docker compose -f deploy/compose/docker-compose.yml up -d
+#
+# Settings you may want to override (shell env or a .env file next to this file):
+#   SDL_PORT (8000), SDL_API_TOKEN (dev-token), SDL_CATALOG, S3_ACCESS_KEY,
+#   S3_SECRET_KEY, SDL_IMAGE.
+# The defaults are for local use only. Change every secret before exposing it.
+#
+# Object store choice: RustFS (https://github.com/rustfs/rustfs).
+# - Apache-2.0, actively released in 2026 (1.0 GA line), official multi-arch
+#   image on Docker Hub.
+# - One container, root credentials from env vars: no extra setup commands.
+# - Its image ships curl with SigV4 support, so the bucket-init step reuses
+#   the same image instead of pulling an S3 client.
+# Not chosen: MinIO (no maintained community images since late 2025),
+# Garage (good, but needs layout + key setup through its admin CLI before
+# first use), SeaweedFS (works, but S3 credentials need a JSON config file).
+
+name: sentry-ducklake
+
+x-s3-credentials: &s3-credentials
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-sdl-access-key}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-sdl-secret-key-change-me}
+  S3_BUCKET: sentry
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-sdl-access-key}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-sdl-secret-key-change-me}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Creates the bucket once. Safe to re-run.
+  create-bucket:
+    image: rustfs/rustfs:1.0.4
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment: *s3-credentials
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        url="http://rustfs:9000/$${S3_BUCKET}"
+        sign="--aws-sigv4 aws:amz:us-east-1:s3 --user $${S3_ACCESS_KEY}:$${S3_SECRET_KEY}"
+        if curl -fs -o /dev/null -I $$sign "$$url"; then
+          echo "bucket $${S3_BUCKET} exists"
+        else
+          curl -fsS -X PUT $$sign "$$url" && echo "bucket $${S3_BUCKET} created"
+        fi
+    restart: "no"
+
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_DB: ducklake
+      POSTGRES_USER: sdl
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdl-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdl -d ducklake"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  sentry-ducklake:
+    image: ${SDL_IMAGE:-sentry-ducklake:dev}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${SDL_PORT:-8000}:8000"
+    environment:
+      SDL_PUBLIC_URL: http://localhost:${SDL_PORT:-8000}
+      SDL_API_TOKEN: ${SDL_API_TOKEN:-dev-token}
+      SDL_CATALOG: ${SDL_CATALOG:-postgres:host=postgres port=5432 dbname=ducklake user=sdl password=sdl-change-me}
+      SDL_STORAGE_URL: s3://sentry/errors
+      SDL_S3_ENDPOINT: http://rustfs:9000
+      SDL_S3_REGION: us-east-1
+      SDL_S3_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-sdl-access-key}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-sdl-secret-key-change-me}
+      SDL_RETENTION_DAYS: "90"
+      RUST_LOG: info
+    volumes:
+      # Holds the DuckDB-file catalog in simple mode and DuckDB's spill files.
+      - sdl-data:/data
+    # Long enough for the server to commit queued events and flush on stop.
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+volumes:
+  rustfs-data:
+  postgres-data:
+  sdl-data:

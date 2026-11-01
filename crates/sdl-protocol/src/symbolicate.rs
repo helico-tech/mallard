@@ -70,13 +70,8 @@ fn for_each_stacktrace_mut(ev: &mut Value, mut f: impl FnMut(&mut Value, bool)) 
     }
 }
 
-fn frames<'a>(holder: &'a Value) -> impl Iterator<Item = &'a Value> {
-    holder
-        .get("stacktrace")
-        .and_then(|s| s.get("frames"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+fn frames(holder: &Value) -> impl Iterator<Item = &Value> {
+    holder.get("stacktrace").and_then(|s| s.get("frames")).and_then(Value::as_array).into_iter().flatten()
 }
 
 fn is_symbolicatable(frame: &Value) -> bool {
@@ -202,10 +197,10 @@ fn rewrite_frame(frame: &mut Value, rm: &ResolvedSourceMap) -> bool {
     fo.insert("filename".into(), json!(filename));
     if let Some(f) = original_fn {
         fo.insert("function".into(), json!(f));
-    } else if minified_fn.is_none() {
-        if let Some(name) = token.get_name() {
-            fo.insert("function".into(), json!(name));
-        }
+    } else if minified_fn.is_none()
+        && let Some(name) = token.get_name()
+    {
+        fo.insert("function".into(), json!(name));
     }
     fo.remove("pre_context");
     fo.remove("context_line");
@@ -239,17 +234,19 @@ pub fn apply(ev: &mut Value, maps: &HashMap<String, Arc<ResolvedSourceMap>>) -> 
         {
             for f in frames.iter_mut().filter(|f| is_symbolicatable(f)) {
                 let abs = f["abs_path"].as_str().unwrap_or_default().to_string();
-                if let Some(rm) = maps.get(&abs) {
-                    if rewrite_frame(f, rm) {
-                        changed += 1;
-                    }
+                if let Some(rm) = maps.get(&abs)
+                    && rewrite_frame(f, rm)
+                {
+                    changed += 1;
                 }
             }
         }
-        if changed > 0 && keep_raw && holder.get("raw_stacktrace").is_none() {
-            if let (Some(raw), Some(o)) = (raw, holder.as_object_mut()) {
-                o.insert("raw_stacktrace".into(), raw);
-            }
+        if changed > 0
+            && keep_raw
+            && holder.get("raw_stacktrace").is_none()
+            && let (Some(raw), Some(o)) = (raw, holder.as_object_mut())
+        {
+            o.insert("raw_stacktrace".into(), raw);
         }
         total += changed;
     });

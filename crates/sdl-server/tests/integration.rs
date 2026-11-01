@@ -113,7 +113,8 @@ async fn rust_sdk_events_are_grouped_and_queryable() {
     let issues = t.get("/v1/projects/rust-api/issues").await;
     let list = issues["issues"].as_array().unwrap();
     assert_eq!(list.len(), 2, "{issues}");
-    let db = list.iter().find(|i| i["exception_type"].as_str().unwrap_or("").contains("DbError")).expect("DbError issue");
+    let db =
+        list.iter().find(|i| i["exception_type"].as_str().unwrap_or("").contains("DbError")).expect("DbError issue");
     assert_eq!(db["count"], 3, "the same error three times is one issue");
     assert_eq!(db["user_count"], 1);
     let warn = list.iter().find(|i| i["title"] == "cache miss storm").unwrap();
@@ -159,8 +160,9 @@ async fn resolve_regression_ignore_and_maintenance() {
     send("boom").await;
     let id = t.get("/v1/projects/web/issues").await["issues"][0]["id"].as_str().unwrap().to_string();
 
-    let (s, v) =
-        t.api(reqwest::Method::PATCH, &format!("/v1/projects/web/issues/{id}"), Some(json!({"status": "resolved"}))).await;
+    let (s, v) = t
+        .api(reqwest::Method::PATCH, &format!("/v1/projects/web/issues/{id}"), Some(json!({"status": "resolved"})))
+        .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["status"], "resolved");
     assert!(t.get("/v1/projects/web/issues").await["issues"].as_array().unwrap().is_empty());
@@ -251,7 +253,14 @@ async fn ingest_auth_compression_cors_and_dedupe() {
 
     // Wrong key, unknown project, garbage.
     let bad = "{}\n{\"type\":\"event\"}\n{}\n";
-    let r = t.http.post(&url).header("x-sentry-auth", "Sentry sentry_key=nope, sentry_version=7").body(bad).send().await.unwrap();
+    let r = t
+        .http
+        .post(&url)
+        .header("x-sentry-auth", "Sentry sentry_key=nope, sentry_version=7")
+        .body(bad)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 401);
     assert!(r.headers().contains_key("x-sentry-error"));
     let r = t.http.post(format!("{}/api/99/envelope/?sentry_key={key}", t.base)).body(bad).send().await.unwrap();
@@ -334,8 +343,9 @@ async fn sourcemap_upload_protocol_and_symbolication() {
     assert!(opts["accept"].as_array().unwrap().contains(&json!("artifact_bundles_v2")));
 
     let assemble = json!({"checksum": checksum, "chunks": checksums, "projects": ["web"]});
-    let (s, v) =
-        t.api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble.clone())).await;
+    let (s, v) = t
+        .api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble.clone()))
+        .await;
     assert_eq!(s, 200);
     assert_eq!(v["state"], "not_found");
     assert_eq!(v["missingChunks"].as_array().unwrap().len(), 2);
@@ -346,14 +356,7 @@ async fn sourcemap_upload_protocol_and_symbolication() {
     let form = reqwest::multipart::Form::new()
         .part("file_gzip", reqwest::multipart::Part::bytes(gz.finish().unwrap()).file_name(checksums[0].clone()))
         .part("file", reqwest::multipart::Part::bytes(chunks[1].to_vec()).file_name(checksums[1].clone()));
-    let r = t
-        .http
-        .post(opts["url"].as_str().unwrap())
-        .bearer_auth(TOKEN)
-        .multipart(form)
-        .send()
-        .await
-        .unwrap();
+    let r = t.http.post(opts["url"].as_str().unwrap()).bearer_auth(TOKEN).multipart(form).send().await.unwrap();
     assert_eq!(r.status(), 200);
 
     // A chunk whose name does not match its content is rejected.
@@ -362,12 +365,14 @@ async fn sourcemap_upload_protocol_and_symbolication() {
     let r = t.http.post(opts["url"].as_str().unwrap()).bearer_auth(TOKEN).multipart(form).send().await.unwrap();
     assert_eq!(r.status(), 400);
 
-    let (_, v) =
-        t.api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble.clone())).await;
+    let (_, v) = t
+        .api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble.clone()))
+        .await;
     assert_eq!(v["state"], "ok", "{v}");
     assert_eq!(v["missingChunks"], json!([]));
     // Idempotent poll.
-    let (_, v) = t.api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble)).await;
+    let (_, v) =
+        t.api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble)).await;
     assert_eq!(v["state"], "ok");
 
     let bundles = t.get("/v1/projects/web/sourcemaps").await;
@@ -381,13 +386,8 @@ async fn sourcemap_upload_protocol_and_symbolication() {
         "exception": {"values": [{"type": "TypeError", "value": "Cannot read properties of undefined (reading 'toUpperCase')",
             "stacktrace": {"frames": [{"abs_path": "https://cdn.test/assets/app.js", "function": "n", "lineno": 1, "colno": 22, "in_app": true}]}}]}
     });
-    let r = t
-        .http
-        .post(format!("{}/api/1/store/?sentry_key={key}", t.base))
-        .body(event.to_string())
-        .send()
-        .await
-        .unwrap();
+    let r =
+        t.http.post(format!("{}/api/1/store/?sentry_key={key}", t.base)).body(event.to_string()).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
     let ev = t.get(&format!("/v1/projects/web/events/{id}")).await;
@@ -462,9 +462,7 @@ async fn embedded_with_shared_connection_and_clean_shutdown() {
     assert!(client.flush(Some(Duration::from_secs(10))));
 
     // Errors join traces by UUID without casts.
-    probe
-        .execute("INSERT INTO lake.otel.spans VALUES (?::UUID, 'GET /checkout')", [trace])
-        .unwrap();
+    probe.execute("INSERT INTO lake.otel.spans VALUES (?::UUID, 'GET /checkout')", [trace]).unwrap();
     let (name, title): (String, String) = probe
         .query_row(
             "SELECT s.name, e.title FROM lake.sentry.events e JOIN lake.otel.spans s USING (trace_id)",

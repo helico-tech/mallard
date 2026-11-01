@@ -68,7 +68,10 @@ impl utoipa::Modify for BearerAuth {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
         let c = openapi.components.get_or_insert_with(Default::default);
-        c.add_security_scheme("bearer", SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()));
+        c.add_security_scheme(
+            "bearer",
+            SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+        );
     }
 }
 
@@ -118,7 +121,10 @@ async fn require_token(State(state): S, req: Request, next: Next) -> Response {
         .map(str::trim);
     let ok = token.is_some_and(|t| state.tokens.iter().any(|known| constant_time_eq(known.as_bytes(), t.as_bytes())));
     if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or invalid bearer token", "detail": "Invalid token"})))
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "missing or invalid bearer token", "detail": "Invalid token"})),
+        )
             .into_response();
     }
     next.run(req).await
@@ -182,9 +188,15 @@ fn slugify(name: &str) -> String {
 
 #[utoipa::path(post, path = "/v1/projects", request_body = CreateProject,
     responses((status = 201, body = Project), (status = 400, body = ApiError), (status = 409, body = ApiError)))]
-async fn create_project(State(state): S, Json(req): Json<CreateProject>) -> Result<(StatusCode, Json<Project>), ApiErr> {
+async fn create_project(
+    State(state): S,
+    Json(req): Json<CreateProject>,
+) -> Result<(StatusCode, Json<Project>), ApiErr> {
     let slug = req.slug.clone().unwrap_or_else(|| slugify(&req.name));
-    if slug.is_empty() || slug.len() > 64 || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
         return Err(bad("slug must be 1-64 chars of a-z, 0-9, - or _"));
     }
     if slug.chars().all(|c| c.is_ascii_digit()) {
@@ -195,11 +207,9 @@ async fn create_project(State(state): S, Json(req): Json<CreateProject>) -> Resu
     }
     let name = req.name.trim().to_string();
     let platform = req.platform.clone();
-    let row = state
-        .db
-        .call(|reply| WriteCmd::CreateProject { name, slug, platform, reply })
-        .await
-        .map_err(|e| if e.to_string().contains("already exists") { ApiErr(StatusCode::CONFLICT, e.to_string()) } else { e.into() })?;
+    let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await.map_err(|e| {
+        if e.to_string().contains("already exists") { ApiErr(StatusCode::CONFLICT, e.to_string()) } else { e.into() }
+    })?;
     Ok((StatusCode::CREATED, Json(to_project(&state, row))))
 }
 
@@ -214,10 +224,11 @@ async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Projec
     responses((status = 200, body = IssueList), (status = 404, body = ApiError)))]
 async fn list_issues(State(state): S, Path(p): Path<String>, Query(q): Query<IssueQuery>) -> ApiResult<IssueList> {
     let pid = project(&state, &p)?.id;
-    if let Some(s) = q.status.as_deref() {
-        if s != "all" && IssueStatus::parse(s).is_none() {
-            return Err(bad("status must be unresolved, resolved, ignored or all"));
-        }
+    if let Some(s) = q.status.as_deref()
+        && s != "all"
+        && IssueStatus::parse(s).is_none()
+    {
+        return Err(bad("status must be unresolved, resolved, ignored or all"));
     }
     let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
     Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w)).await?))
@@ -226,7 +237,11 @@ async fn list_issues(State(state): S, Path(p): Path<String>, Query(q): Query<Iss
 #[utoipa::path(get, path = "/v1/projects/{project}/issues/{issue_id}",
     params(("project" = String, Path), ("issue_id" = String, Path, description = "16 hex chars"), WindowQuery),
     responses((status = 200, body = IssueDetail), (status = 404, body = ApiError)))]
-async fn get_issue(State(state): S, Path((p, id)): Path<(String, String)>, Query(q): Query<WindowQuery>) -> ApiResult<IssueDetail> {
+async fn get_issue(
+    State(state): S,
+    Path((p, id)): Path<(String, String)>,
+    Query(q): Query<WindowQuery>,
+) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
     let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
@@ -236,7 +251,11 @@ async fn get_issue(State(state): S, Path((p, id)): Path<(String, String)>, Query
 #[utoipa::path(patch, path = "/v1/projects/{project}/issues/{issue_id}", request_body = UpdateIssue,
     params(("project" = String, Path), ("issue_id" = String, Path)),
     responses((status = 200, body = IssueDetail), (status = 404, body = ApiError)))]
-async fn update_issue(State(state): S, Path((p, id)): Path<(String, String)>, Json(req): Json<UpdateIssue>) -> ApiResult<IssueDetail> {
+async fn update_issue(
+    State(state): S,
+    Path((p, id)): Path<(String, String)>,
+    Json(req): Json<UpdateIssue>,
+) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
     state
@@ -263,7 +282,8 @@ async fn list_events(State(state): S, Path(p): Path<String>, Query(q): Query<Eve
     description = "Events of one trace across all projects (for linking errors to traces).",
     responses((status = 200, body = EventList), (status = 400, body = ApiError)))]
 async fn events_by_trace(State(state): S, Query(q): Query<TraceQuery>) -> ApiResult<EventList> {
-    let t = sdl_protocol::event::parse_trace_id(&q.trace_id).ok_or_else(|| bad("trace_id must be 32 hex characters"))?;
+    let t =
+        sdl_protocol::event::parse_trace_id(&q.trace_id).ok_or_else(|| bad("trace_id must be 32 hex characters"))?;
     let span = q
         .span_id
         .as_deref()
@@ -291,12 +311,21 @@ async fn get_event(
     let pid = project(&state, &p)?.id;
     let eid = sdl_protocol::event::parse_uuid(&id).ok_or_else(|| bad("invalid event id"))?;
     let g = q.issue.as_deref().map(issue_hash).transpose()?;
-    state.db.read(move |c, ns| read::event_detail(c, ns, pid, eid, g)).await?.map(Json).ok_or_else(|| not_found("event"))
+    state
+        .db
+        .read(move |c, ns| read::event_detail(c, ns, pid, eid, g))
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("event"))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/stats", params(("project" = String, Path), WindowQuery),
     responses((status = 200, body = ProjectStats), (status = 404, body = ApiError)))]
-async fn project_stats(State(state): S, Path(p): Path<String>, Query(q): Query<WindowQuery>) -> ApiResult<ProjectStats> {
+async fn project_stats(
+    State(state): S,
+    Path(p): Path<String>,
+    Query(q): Query<WindowQuery>,
+) -> ApiResult<ProjectStats> {
     let pid = project(&state, &p)?.id;
     let w = Window::parse(q.since.as_deref(), "24h", Utc::now()).map_err(bad)?;
     let interval = q
@@ -387,7 +416,8 @@ async fn chunk_upload(State(state): S, mut form: Multipart) -> Response {
         }
         if let Err(e) = state.sourcemaps.store_chunk(&checksum, data).await {
             let msg = e.to_string();
-            let status = if msg.contains("not configured") { StatusCode::NOT_IMPLEMENTED } else { StatusCode::BAD_REQUEST };
+            let status =
+                if msg.contains("not configured") { StatusCode::NOT_IMPLEMENTED } else { StatusCode::BAD_REQUEST };
             return sentry_err(status, msg);
         }
     }
@@ -415,7 +445,10 @@ async fn release_get(Path((_org, version)): Path<(String, String)>) -> Response 
     Json(release_info(&version)).into_response()
 }
 
-async fn release_deploy(Path((_org, _version)): Path<(String, String)>, Json(body): Json<serde_json::Value>) -> Response {
+async fn release_deploy(
+    Path((_org, _version)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
     let env = body.get("environment").cloned().unwrap_or(json!("production"));
     (StatusCode::CREATED, Json(json!({"id": "1", "environment": env, "dateFinished": Utc::now()}))).into_response()
 }

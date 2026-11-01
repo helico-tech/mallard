@@ -9,10 +9,7 @@
 /// Parse the key=value pairs of a `Sentry ...` auth header.
 pub fn parse_auth_header(value: &str) -> Option<String> {
     let rest = value.trim();
-    let rest = rest
-        .strip_prefix("Sentry ")
-        .or_else(|| rest.strip_prefix("sentry "))
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix("Sentry ").or_else(|| rest.strip_prefix("sentry ")).unwrap_or(rest);
     rest.split(',').find_map(|part| {
         let (k, v) = part.trim().split_once('=')?;
         (k.trim() == "sentry_key").then(|| v.trim().trim_matches('"').to_string())
@@ -21,9 +18,7 @@ pub fn parse_auth_header(value: &str) -> Option<String> {
 
 /// Find `sentry_key` in a raw query string.
 pub fn parse_query(query: &str) -> Option<String> {
-    url::form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "sentry_key")
-        .map(|(_, v)| v.into_owned())
+    url::form_urlencoded::parse(query.as_bytes()).find(|(k, _)| k == "sentry_key").map(|(_, v)| v.into_owned())
 }
 
 #[cfg(test)]

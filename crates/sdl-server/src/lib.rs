@@ -70,8 +70,12 @@ impl Server {
     /// `cfg.storage_url` is only used for sourcemap bundles (optional).
     pub async fn with_connection(cfg: Config, conn: duckdb::Connection) -> Result<Server> {
         cfg.validate()?;
-        if cfg.duckdb_threads.is_some() || cfg.duckdb_memory_limit.is_some() || cfg.extension_dir.is_some() {
-            tracing::warn!("duckdb_threads, duckdb_memory_limit and extension_dir are ignored with a shared connection");
+        if cfg.duckdb_threads.is_some()
+            || cfg.duckdb_memory_limit.is_some()
+            || cfg.extension_dir.is_some()
+            || cfg.duckdb_temp_dir.is_some()
+        {
+            tracing::warn!("duckdb_* settings and extension_dir are ignored with a shared connection");
         }
         let storage = cfg.storage_url.as_deref().map(|u| Storage::new(u, &cfg)).transpose()?;
         let c = cfg.clone();

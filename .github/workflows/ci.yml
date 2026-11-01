@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  helm:
+    name: helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - name: Lint and render every CI values file
+        run: |
+          set -e
+          chart=deploy/helm/sentry-ducklake
+          for f in "$chart"/ci/*.yaml; do
+            echo "::group::$f"
+            helm lint "$chart" --strict -f "$f"
+            helm template ci "$chart" -f "$f" > /dev/null
+            echo "::endgroup::"
+          done
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: false
+          load: true
+          tags: sentry-ducklake:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the image
+        run: |
+          set -e
+          docker run -d --name sdl -p 8000:8000 --read-only --tmpfs /tmp \
+            -v sdl-data:/data -e SDL_API_TOKEN=ci -e SDL_STORAGE_URL=/data/storage \
+            sentry-ducklake:ci
+          for _ in $(seq 1 60); do
+            curl -fsS localhost:8000/readyz && break
+            sleep 1
+          done
+          curl -fsS localhost:8000/readyz
+          curl -fsS -XPOST -H 'Authorization: Bearer ci' -H 'content-type: application/json' \
+            localhost:8000/v1/projects -d '{"name":"ci"}'
+      - name: Server logs
+        if: always()
+        run: docker logs sdl || true
+
+  e2e:
+    name: e2e (real Sentry SDKs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for an e2e test script
+        id: check
+        run: |
+          if [ -f e2e/package.json ] && node -e 'process.exit(require("./e2e/package.json").scripts?.test ? 0 : 1)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No test script in e2e/package.json; skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.run == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.run == 'true'
+      - name: Build server
+        if: steps.check.outputs.run == 'true'
+        run: cargo build -p sdl-server --locked
+      - uses: actions/setup-node@v5
+        if: steps.check.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: Install e2e dependencies
+        if: steps.check.outputs.run == 'true'
+        working-directory: e2e
+        run: |
+          npm ci
+          if [ -d node_modules/playwright ]; then npx playwright install --with-deps chromium; fi
+      - name: Run e2e tests
+        if: steps.check.outputs.run == 'true'
+        working-directory: e2e
+        env:
+          SDL_BIN: ${{ github.workspace }}/target/debug/sentry-ducklake
+        run: npm test
