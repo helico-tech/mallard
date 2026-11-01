@@ -1,16 +1,17 @@
-// Run the Node fixture app (fixtures/node-app.mjs) in a child process.
+// Run the Node fixture apps (fixtures/*.mjs) in a child process.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { E2E_DIR } from "./server.mjs";
 
 /**
- * Run one scenario. Resolves with `{ code, stdout, stderr, ids }` where
- * `ids` are the event ids the app printed (absent for crashing scenarios).
+ * Run `fixtures/<file>` with `args` and `DSN=dsn`. Resolves with
+ * `{ code, stdout, stderr, last }` where `last` is the last stdout line
+ * parsed as JSON (absent when it is not JSON, e.g. after a crash).
  */
-export function runNodeApp(dsn, scenario, tag = "run", { timeout = 60_000 } = {}) {
+export function runFixture(file, dsn, args = [], { timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(E2E_DIR, "fixtures", "node-app.mjs"), scenario, tag], {
+    const child = spawn(process.execPath, [path.join(E2E_DIR, "fixtures", file), ...args], {
       env: { ...process.env, DSN: dsn },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -20,18 +21,28 @@ export function runNodeApp(dsn, scenario, tag = "run", { timeout = 60_000 } = {}
     child.stderr.on("data", (d) => (stderr += d));
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`node-app ${scenario} timed out\nstdout: ${stdout}\nstderr: ${stderr}`));
+      reject(new Error(`${file} ${args.join(" ")} timed out\nstdout: ${stdout}\nstderr: ${stderr}`));
     }, timeout);
     child.on("exit", (code) => {
       clearTimeout(timer);
-      let ids;
+      let last;
       const line = stdout.trim().split("\n").filter(Boolean).pop();
       try {
-        ids = line ? JSON.parse(line).ids : undefined;
+        last = line ? JSON.parse(line) : undefined;
       } catch {
-        ids = undefined;
+        last = undefined;
       }
-      resolve({ code, stdout, stderr, ids });
+      resolve({ code, stdout, stderr, last });
     });
   });
+}
+
+/**
+ * Run one scenario of fixtures/node-app.mjs. Resolves with
+ * `{ code, stdout, stderr, ids }` where `ids` are the event ids the app
+ * printed (absent for crashing scenarios).
+ */
+export async function runNodeApp(dsn, scenario, tag = "run", opts = {}) {
+  const { last, ...r } = await runFixture("node-app.mjs", dsn, [scenario, tag], opts);
+  return { ...r, ids: last?.ids };
 }

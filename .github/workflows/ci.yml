@@ -101,7 +101,7 @@ jobs:
       - name: Drop cached DuckDB source tree
         run: rm -rf target/duckdb-sources
       - name: Build server
-        run: cargo build -p sdl-server --locked
+        run: cargo build -p mallard-server --locked
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -115,5 +115,5 @@ jobs:
       - name: Run e2e tests
         working-directory: e2e/sentry
         env:
-          SDL_BIN: ${{ github.workspace }}/target/debug/sentry-ducklake
+          MALLARD_SERVER_BIN: ${{ github.workspace }}/target/debug/mallard-server
         run: npm test

@@ -1,4 +1,4 @@
-// @sentry/node against sentry-ducklake: only the DSN changes.
+// @sentry/node against mallard: only the DSN changes.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +11,7 @@ let project;
 before(async () => {
   server = await TestServer.start("node");
   project = await server.createProject("Node App");
-  assert.match(project.dsn, /^http:\/\/[0-9a-f]{32}@127\.0\.0\.1:\d+\/\d+$/);
+  assert.match(project.dsn, /^http:\/\/[0-9a-f]{32}@127\.0\.0\.1:\d+\/sentry\/\d+$/);
 });
 
 after(async () => {

@@ -1,5 +1,5 @@
 // @sentry/vite-plugin (which uploads with the new TypeScript `sentry` CLI,
-// not the Rust one) pointed at sentry-ducklake via `url`.
+// not the Rust one) pointed at mallard via `url`.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";

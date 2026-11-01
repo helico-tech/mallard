@@ -114,9 +114,13 @@ export async function sentryCli(args, { cwd = E2E_DIR, major = 3 } = {}) {
   }
 }
 
-/** `sentry-cli sourcemaps upload` against the test server. */
+/**
+ * `sentry-cli sourcemaps upload` against the test server. The Rust
+ * sentry-cli only accepts a server on the URL root, so `--url` is the base
+ * (mallard serves `/api/0` there too).
+ */
 export function uploadSourcemaps(server, slug, dir, extra = [], { major = 3 } = {}) {
-  const args = ["--url", server.url, "--auth-token", server.token, "sourcemaps", "upload"];
+  const args = ["--url", server.base, "--auth-token", server.token, "sourcemaps", "upload"];
   args.push("--org", "default", "--project", slug, ...extra, dir);
   return sentryCli(args, { major });
 }
