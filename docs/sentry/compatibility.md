@@ -71,8 +71,16 @@ What Sentry does that we also do:
 - derived tags: level, environment, release, dist, server_name, transaction,
   logger, browser, os, runtime (+ `.name`), device, url, handled, mechanism,
   user; browser/os parsed from the User-Agent when the SDK did not send them
-- `{{auto}}` IP (uses `X-Forwarded-For` only with `sentry.ingest.trust_forwarded_for`),
-  in `user.ip_address` of an event and in `client.address` of a standalone span
+- the client's address, only when the SDK asks for it: `{{auto}}` in `user.ip_address`
+  of an event or transaction or in `client.address` of a span, or `infer_ip: auto` in
+  `sdk.settings` of an event or transaction or `ingest_settings` of a span container.
+  It is the address of the request (`X-Forwarded-For` only with
+  `sentry.ingest.trust_forwarded_for`); with no address known it is left out. Events get
+  `user.ip_address`, which counts as the user when there is no id, email or username.
+  Spans get `client.address`, on the root span of a transaction or a segment span only.
+  Differences from Relay: `infer_ip: never` stores nothing, also an address the SDK
+  sent; and without `infer_ip` or `{{auto}}` nothing is added, also for JavaScript
+  (`@sentry/browser` 8 asks for nothing, so it gets no address here)
 - JS sourcemaps: debug ids and release artifacts; original file, line, column,
   function name and source context; `raw_stacktrace` keeps the original
 - regression: a new event reopens a resolved issue

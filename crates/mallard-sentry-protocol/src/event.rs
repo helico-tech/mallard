@@ -38,7 +38,7 @@ pub struct NormalizeContext {
     pub received_at: DateTime<Utc>,
     /// `sent_at` of the envelope header: when the SDK sent it, by its clock.
     pub sent_at: Option<DateTime<Utc>>,
-    /// IP of the client, used to fill `user.ip_address = "{{auto}}"`.
+    /// IP of the client, for `user.ip_address` when the SDK asks (see [`client_address`]).
     pub client_ip: Option<String>,
     /// `event_id` from the envelope header, used when the payload has none.
     pub event_id_hint: Option<String>,
@@ -54,6 +54,25 @@ impl NormalizeContext {
     fn clock_drift(&self) -> Option<Duration> {
         let drift = self.received_at.signed_duration_since(self.sent_at?);
         (drift.num_seconds().abs() >= MIN_CLOCK_DRIFT_SECS).then_some(drift)
+    }
+}
+
+/// What an SDK says about inferring the client's address: `sdk.settings.infer_ip`
+/// of an event or transaction (`sdk` is that field).
+pub fn sdk_infer_ip(sdk: Option<&Value>) -> Option<&str> {
+    sdk?.get("settings")?.get("infer_ip")?.as_str()
+}
+
+/// The client address to store, or `None` to store none. This is personal data,
+/// so the address of the request (`request`) is only used when the SDK asks for
+/// it: `sent` is `{{auto}}`, or `infer_ip` is `auto`. With `infer_ip = never`
+/// nothing is stored, not even an address the SDK sent. An address the SDK sent
+/// is otherwise kept. Without `infer_ip` nothing is added, whatever the platform.
+pub fn client_address<'a>(sent: Option<&'a str>, infer_ip: Option<&str>, request: Option<&'a str>) -> Option<&'a str> {
+    match (infer_ip, sent) {
+        (Some("never"), _) => None,
+        (_, Some("{{auto}}")) | (Some("auto"), None) => request,
+        (_, sent) => sent,
     }
 }
 
@@ -224,14 +243,23 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
         }
     }
 
-    // user.ip_address = {{auto}}
-    if let Some(Value::Object(user)) = ev.get_mut("user")
-        && user.get("ip_address").and_then(Value::as_str) == Some("{{auto}}")
-    {
-        match &ctx.client_ip {
-            Some(ip) => user.insert("ip_address".into(), Value::String(ip.clone())),
-            None => user.remove("ip_address"),
-        };
+    // user.ip_address = {{auto}}, or sdk.settings.infer_ip
+    let sent = ev.get("user").and_then(|u| u.get("ip_address")).and_then(Value::as_str);
+    match client_address(sent, sdk_infer_ip(ev.get("sdk")), ctx.client_ip.as_deref()).map(str::to_string) {
+        Some(ip) => {
+            let user = ev.entry("user").or_insert(Value::Null);
+            if user.is_null() {
+                *user = json!({});
+            }
+            if let Value::Object(user) = user {
+                user.insert("ip_address".into(), Value::String(ip));
+            }
+        }
+        None => {
+            if let Some(Value::Object(user)) = ev.get_mut("user") {
+                user.remove("ip_address");
+            }
+        }
     }
 
     // contexts: infer browser/os from the request User-Agent when missing.
@@ -675,6 +703,57 @@ mod tests {
         assert_eq!(ev["exception"]["values"][0]["stacktrace"]["frames"][0]["lineno"], 10);
         assert_eq!(ev["breadcrumbs"]["values"][0]["message"], "x");
         assert_eq!(ev["user"]["ip_address"], "1.2.3.4");
+    }
+
+    #[test]
+    fn client_address_only_when_the_sdk_asks() {
+        const REQUEST: Option<&str> = Some("203.0.113.9");
+        const AUTO: Option<&str> = Some("{{auto}}");
+        const OWN: Option<&str> = Some("198.51.100.7");
+        // (sent, infer_ip, request) -> stored
+        let cases = [
+            (AUTO, None, REQUEST, REQUEST),
+            (AUTO, Some("auto"), REQUEST, REQUEST),
+            (AUTO, Some("never"), REQUEST, None),
+            (AUTO, None, None, None),
+            (None, Some("auto"), REQUEST, REQUEST),
+            (None, Some("auto"), None, None),
+            (None, Some("never"), REQUEST, None),
+            (None, None, REQUEST, None),
+            (None, Some("legacy"), REQUEST, None),
+            (OWN, None, REQUEST, OWN),
+            (OWN, Some("auto"), REQUEST, OWN),
+            (OWN, Some("never"), REQUEST, None),
+        ];
+        for (sent, infer_ip, request, want) in cases {
+            assert_eq!(client_address(sent, infer_ip, request), want, "{sent:?} {infer_ip:?} {request:?}");
+        }
+    }
+
+    #[test]
+    fn infer_ip_of_an_event() {
+        let user = |event: Value, client_ip: Option<&str>| {
+            let mut c = ctx();
+            c.client_ip = client_ip.map(str::to_string);
+            normalize_event(event, &c)["user"].clone()
+        };
+        let sdk = |infer_ip: &str| json!({"name": "x", "settings": {"infer_ip": infer_ip}});
+        let ip = "203.0.113.9";
+        assert_eq!(user(json!({"sdk": sdk("auto")}), Some(ip)), json!({"ip_address": ip}));
+        assert_eq!(user(json!({"sdk": sdk("auto"), "user": null}), Some(ip)), json!({"ip_address": ip}));
+        assert_eq!(
+            user(json!({"sdk": sdk("auto"), "user": {"id": "42"}}), Some(ip)),
+            json!({"id": "42", "ip_address": ip})
+        );
+        assert_eq!(user(json!({"sdk": sdk("auto")}), None), Value::Null, "no address known: no user");
+        assert_eq!(user(json!({"sdk": sdk("never")}), Some(ip)), Value::Null);
+        assert_eq!(user(json!({}), Some(ip)), Value::Null, "the SDK did not ask");
+        let auto = json!({"id": "42", "ip_address": "{{auto}}"});
+        assert_eq!(user(json!({"sdk": sdk("never"), "user": auto}), Some(ip)), json!({"id": "42"}));
+        assert_eq!(user(json!({"user": auto}), None), json!({"id": "42"}));
+        let own = json!({"ip_address": "198.51.100.7"});
+        assert_eq!(user(json!({"sdk": sdk("auto"), "user": own}), Some(ip)), own);
+        assert_eq!(user(json!({"sdk": sdk("never"), "user": own}), Some(ip)), json!({}));
     }
 
     /// The browser SDK sends only `filename` (a full URL).

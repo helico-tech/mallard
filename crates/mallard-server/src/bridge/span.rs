@@ -24,7 +24,9 @@ use opentelemetry_proto::tonic::{
 };
 use serde_json::{Map, Value};
 
-use super::transaction::{Attrs, any_value, nanos, op_kind, sentry_span, span_id_bytes, str_of, trace_id_bytes};
+use super::transaction::{
+    Attrs, any_value, nanos, not_added, op_kind, sentry_span, set_address, span_id_bytes, str_of, trace_id_bytes,
+};
 
 /// The item content type of span streaming.
 pub const V2_CONTENT_TYPE: &str = "application/vnd.sentry.items.span.v2+json";
@@ -46,7 +48,9 @@ pub struct Defaults {
     environment: Option<String>,
     sdk_name: Option<String>,
     sdk_version: Option<String>,
-    /// Fills `client.address = "{{auto}}"` of a standalone span.
+    /// For `client.address` when the SDK asks (see [`client_address`]).
+    ///
+    /// [`client_address`]: mallard_sentry_protocol::event::client_address
     pub client_ip: Option<String>,
 }
 
@@ -81,10 +85,16 @@ struct Group {
 /// skipped (the request may then hold no spans).
 pub fn to_otlp(item: &Value, defaults: &Defaults, project_slug: &str) -> Option<ExportTraceServiceRequest> {
     let spans = item.get("items")?.as_array()?;
+    let infer_ip = item.get("ingest_settings").and_then(|i| i.get("infer_ip")).and_then(Value::as_str);
+    let client_ip = defaults.client_ip.as_deref();
 
     let mut groups: BTreeMap<Group, Vec<Span>> = BTreeMap::new();
     for s in spans {
-        let Some(span) = convert(s) else { continue };
+        let Some(mut span) = convert(s) else { continue };
+        let segment = s.get("is_segment").and_then(Value::as_bool) == Some(true);
+        let inferred = if segment { infer_ip } else { not_added(infer_ip) };
+        set_address(&mut span.attributes, "client.address", inferred, client_ip);
+        set_address(&mut span.attributes, "user.ip_address", not_added(infer_ip), client_ip);
         let attr = |key: &str| s.get("attributes").and_then(|a| a.get(key)).and_then(typed).as_ref().and_then(text);
         let group = Group {
             service: attr("service.name").unwrap_or_else(|| project_slug.to_string()),
@@ -111,16 +121,10 @@ pub fn standalone_to_otlp(s: &Value, defaults: &Defaults, project_slug: &str) ->
         sdk_name: defaults.sdk_name.clone().unwrap_or_else(|| "sentry".into()),
         sdk_version: defaults.sdk_version.clone().unwrap_or_default(),
     };
-    span.attributes.retain_mut(|kv| match kv.key.as_str() {
-        "release" | "environment" => false,
-        // "Use the address of the request": with user info collection on, the
-        // SDK sends this text. Filled like `user.ip_address` of an event.
-        "client.address" if moved("client.address").as_deref() == Some("{{auto}}") => {
-            kv.value = defaults.client_ip.as_deref().map(Value::from).as_ref().and_then(any_value);
-            kv.value.is_some()
-        }
-        _ => true,
-    });
+    span.attributes.retain(|kv| !matches!(kv.key.as_str(), "release" | "environment"));
+    // With user info collection on, the SDK sends `{{auto}}` here. These items
+    // carry no `infer_ip`.
+    set_address(&mut span.attributes, "client.address", None, defaults.client_ip.as_deref());
     // Web vitals are measurements here; SDK 11 sends the same attribute.
     for (name, m) in s.get("measurements").and_then(Value::as_object).into_iter().flatten() {
         if let Some(value) = m.get("value").and_then(any_value) {
@@ -373,6 +377,47 @@ mod tests {
         assert_eq!(address(Some("{{auto}}"), None), None, "the placeholder is not an address");
         assert_eq!(address(Some("198.51.100.7"), Some("203.0.113.9")), Some(s("198.51.100.7")), "the SDK's own");
         assert_eq!(address(None, Some("203.0.113.9")), None, "user info collection off: no address");
+    }
+
+    /// `ingest_settings.infer_ip`: what a browser SDK 11 sends on its container.
+    #[test]
+    fn infer_ip_of_a_span_container() {
+        let addresses = |infer_ip: Option<&str>, client_ip: Option<&str>, own: Option<&str>| {
+            let mut item = json!({"version": 2, "items": [
+                {"name": "root", "span_id": "88bd0a55715169b9", "trace_id": "96840ee330eb4f48adfeda513ab13381",
+                 "start_timestamp": 1793538736.9, "end_timestamp": 1793538737.0, "is_segment": true, "attributes": {}},
+                {"name": "child", "span_id": "98bd0a55715169b9", "trace_id": "96840ee330eb4f48adfeda513ab13381",
+                 "start_timestamp": 1793538736.9, "end_timestamp": 1793538737.0, "is_segment": false, "attributes": {}}
+            ]});
+            if let Some(infer_ip) = infer_ip {
+                item["ingest_settings"] = json!({"infer_ip": infer_ip});
+            }
+            if let Some(own) = own {
+                for span in item["items"].as_array_mut().unwrap() {
+                    span["attributes"]["client.address"] = json!({"value": own, "type": "string"});
+                    span["attributes"]["user.ip_address"] = json!({"value": own, "type": "string"});
+                }
+            }
+            let defaults = Defaults { client_ip: client_ip.map(str::to_string), ..Default::default() };
+            let req = to_otlp(&item, &defaults, "shop").unwrap();
+            let spans = &req.resource_spans[0].scope_spans[0].spans;
+            let get =
+                |name: &str, key: &str| attr(&spans.iter().find(|s| s.name == name).unwrap().attributes, key).cloned();
+            [get("root", "client.address"), get("child", "client.address"), get("root", "user.ip_address")]
+        };
+        let ip = "203.0.113.9";
+        let want = |a: Option<&str>, b: Option<&str>, c: Option<&str>| [a.map(s), b.map(s), c.map(s)];
+        assert_eq!(addresses(Some("auto"), Some(ip), None), want(Some(ip), None, None), "on the segment span only");
+        assert_eq!(addresses(Some("auto"), None, None), want(None, None, None));
+        assert_eq!(addresses(Some("never"), Some(ip), None), want(None, None, None));
+        assert_eq!(addresses(None, Some(ip), None), want(None, None, None), "the SDK did not ask");
+        let auto = Some("{{auto}}");
+        assert_eq!(addresses(None, Some(ip), auto), want(Some(ip), Some(ip), Some(ip)));
+        assert_eq!(addresses(None, None, auto), want(None, None, None), "the placeholder is not an address");
+        assert_eq!(addresses(Some("never"), Some(ip), auto), want(None, None, None));
+        let own = Some("198.51.100.7");
+        assert_eq!(addresses(Some("auto"), Some(ip), own), want(own, own, own), "the SDK's own");
+        assert_eq!(addresses(Some("never"), Some(ip), own), want(None, None, None));
     }
 
     #[test]
