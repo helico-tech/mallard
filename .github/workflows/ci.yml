@@ -27,6 +27,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # libduckdb-sys unpacks its sources into target/duckdb-sources and fails
+      # ("Directory not empty") on a half-restored copy; it re-unpacks if needed.
+      - name: Drop cached DuckDB source tree
+        run: rm -rf target/duckdb-sources
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -92,6 +96,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # libduckdb-sys unpacks its sources into target/duckdb-sources and fails
+      # ("Directory not empty") on a half-restored copy; it re-unpacks if needed.
+      - name: Drop cached DuckDB source tree
+        run: rm -rf target/duckdb-sources
       - name: Build server
         run: cargo build -p sdl-server --locked
       - uses: actions/setup-node@v5
