@@ -76,8 +76,8 @@ pub fn __convert_traces(
 
 /// A configured collector: storage attached, ready to serve.
 pub struct Server {
-    cfg: Arc<Config>,
-    lake: Arc<Lake>,
+    cfg: Config,
+    lake: Lake,
     stats: Arc<Stats>,
     buffer: Arc<WriteBuffer>,
     ingest: Arc<Ingest>,
@@ -127,7 +127,7 @@ impl Server {
             enable_sql: cfg.query.enable_sql,
             started: Instant::now(),
         });
-        Ok(Self { cfg: Arc::new(cfg), lake: Arc::new(lake), stats, buffer, ingest, api_state })
+        Ok(Self { cfg, lake, stats, buffer, ingest, api_state })
     }
 
     pub fn config(&self) -> &Config {

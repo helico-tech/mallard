@@ -87,11 +87,11 @@ fn format(headers: &HeaderMap) -> Result<Format, String> {
 }
 
 /// Decompress (gzip/zstd/identity) with a size cap.
-fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, String> {
+fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Bytes, String> {
     let enc = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("identity");
     let mut out = Vec::new();
     let reader: Box<dyn Read> = match enc.trim().to_ascii_lowercase().as_str() {
-        "" | "identity" => return Ok(body.to_vec()),
+        "" | "identity" => return Ok(body),
         "gzip" => Box::new(flate2::read::MultiGzDecoder::new(&body[..])),
         "deflate" => Box::new(flate2::read::ZlibDecoder::new(&body[..])),
         "zstd" => Box::new(zstd::stream::read::Decoder::new(&body[..]).map_err(|e| e.to_string())?),
@@ -101,7 +101,7 @@ fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, 
     if out.len() > max {
         return Err(format!("decompressed body larger than {max} bytes"));
     }
-    Ok(out)
+    Ok(out.into())
 }
 
 fn ok_response<T: Message + serde::Serialize>(fmt: Format, msg: &T) -> Response {
@@ -130,17 +130,17 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
         let decode_err = |e: &dyn std::fmt::Display| format!("invalid OTLP {} payload: {e}", signal.as_str());
         Ok(match (signal, fmt) {
             (Signal::Traces, Format::Proto) => {
-                Request::Traces(ExportTraceServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+                Request::Traces(ExportTraceServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Traces, Format::Json) => {
                 Request::Traces(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Logs, Format::Proto) => {
-                Request::Logs(ExportLogsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+                Request::Logs(ExportLogsServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Logs, Format::Json) => Request::Logs(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?),
             (Signal::Metrics, Format::Proto) => {
-                Request::Metrics(ExportMetricsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+                Request::Metrics(ExportMetricsServiceRequest::decode(raw).map_err(|e| decode_err(&e))?)
             }
             (Signal::Metrics, Format::Json) => {
                 Request::Metrics(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
@@ -154,7 +154,12 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             ingest.stats.record_request(signal, 0, 0);
             return error(StatusCode::BAD_REQUEST, fmt, e);
         }
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, fmt, e.to_string()),
+        Err(e) => {
+            // A panic message is not for the client.
+            tracing::error!(error = %e, "OTLP decode task failed");
+            ingest.stats.record_request(signal, 0, 0);
+            return error(StatusCode::INTERNAL_SERVER_ERROR, fmt, "internal error while decoding the request".into());
+        }
     };
     match ingest.handle(req).await {
         Ok(a) => match signal {

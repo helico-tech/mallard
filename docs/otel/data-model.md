@@ -219,7 +219,11 @@ read in ad-hoc SQL.
 - `series_id UBIGINT` = xxh3 hash of (resource attributes, instrumentation
   scope, metric name, data point kind, point attributes), i.e. the OTel stream
   identity. It identifies a time series without comparing maps. Rates use
-  `lag(value) OVER (PARTITION BY series_id ORDER BY time)`.
+  `lag(value) OVER (PARTITION BY series_id ORDER BY time)`. Every string and
+  list is hashed with its length first, so no two different identities share
+  an encoding. (Versions before this rule hashed with separator bytes, which
+  crafted keys could collide; series written by them get new ids after an
+  upgrade, so a rate across the upgrade moment starts over.)
 - `temporality` is kept per point (`cumulative`, `delta`, or empty for
   gauges). The query API handles both: increase = difference of last values
   per bucket for cumulative (a drop counts as a counter reset), and sum of

@@ -155,10 +155,13 @@ fn ts_type() -> DataType {
 /// MAP(VARCHAR, VARCHAR) column.
 struct AttrCol(MapBuilder<StringBuilder, StringBuilder>);
 
-impl AttrCol {
-    fn new() -> Self {
+impl Default for AttrCol {
+    fn default() -> Self {
         Self(MapBuilder::new(None, StringBuilder::new(), StringBuilder::new()))
     }
+}
+
+impl AttrCol {
     fn append(&mut self, a: &[(String, String)]) {
         for (k, v) in a {
             self.0.keys().append_value(k);
@@ -174,10 +177,13 @@ impl AttrCol {
 /// Builds a `STRUCT(...)[]` column from per-row child values.
 struct ListOffsets(Vec<i32>);
 
-impl ListOffsets {
-    fn new() -> Self {
+impl Default for ListOffsets {
+    fn default() -> Self {
         Self(vec![0])
     }
+}
+
+impl ListOffsets {
     fn close_row(&mut self, len: usize) {
         let last = *self.0.last().unwrap();
         self.0.push(last + len as i32);
@@ -223,17 +229,17 @@ struct SpanCols {
     flags: UInt32Builder,
     scope_name: StringBuilder,
     scope_version: StringBuilder,
-    res_attrs: Option<AttrCol>,
-    attrs: Option<AttrCol>,
-    ev_offsets: Option<ListOffsets>,
+    res_attrs: AttrCol,
+    attrs: AttrCol,
+    ev_offsets: ListOffsets,
     ev_time: TimestampMicrosecondBuilder,
     ev_name: StringBuilder,
-    ev_attrs: Option<AttrCol>,
-    ln_offsets: Option<ListOffsets>,
+    ev_attrs: AttrCol,
+    ln_offsets: ListOffsets,
     ln_trace: Vec<Option<[u8; 16]>>,
     ln_span: UInt64Builder,
     ln_state: StringBuilder,
-    ln_attrs: Option<AttrCol>,
+    ln_attrs: AttrCol,
 }
 
 fn span_kind(k: i32) -> SpanKind {
@@ -274,15 +280,7 @@ fn fsb_opt(vals: &[Option<[u8; 16]>]) -> ArrayRef {
 }
 
 pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
-    let mut c = SpanCols {
-        res_attrs: Some(AttrCol::new()),
-        attrs: Some(AttrCol::new()),
-        ev_offsets: Some(ListOffsets::new()),
-        ev_attrs: Some(AttrCol::new()),
-        ln_offsets: Some(ListOffsets::new()),
-        ln_attrs: Some(AttrCol::new()),
-        ..Default::default()
-    };
+    let mut c = SpanCols::default();
     let (mut accepted, mut rejected) = (0u64, 0u64);
     let recv = now_micros();
     for rs in &req.resource_spans {
@@ -316,8 +314,8 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
                 c.flags.append_value(s.flags);
                 c.scope_name.append_value(scope_name);
                 c.scope_version.append_value(scope_version);
-                c.res_attrs.as_mut().unwrap().append(&res.attrs);
-                c.attrs.as_mut().unwrap().append(&attrs(&s.attributes));
+                c.res_attrs.append(&res.attrs);
+                c.attrs.append(&attrs(&s.attributes));
                 for e in &s.events {
                     c.ev_time.append_value(if e.time_unix_nano == 0 {
                         start
@@ -325,16 +323,16 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
                         nanos_to_micros(e.time_unix_nano)
                     });
                     c.ev_name.append_value(&e.name);
-                    c.ev_attrs.as_mut().unwrap().append(&attrs(&e.attributes));
+                    c.ev_attrs.append(&attrs(&e.attributes));
                 }
-                c.ev_offsets.as_mut().unwrap().close_row(s.events.len());
+                c.ev_offsets.close_row(s.events.len());
                 for l in &s.links {
                     c.ln_trace.push(trace_id(&l.trace_id));
                     c.ln_span.append_option(span_id(&l.span_id));
                     c.ln_state.append_value(&l.trace_state);
-                    c.ln_attrs.as_mut().unwrap().append(&attrs(&l.attributes));
+                    c.ln_attrs.append(&attrs(&l.attributes));
                 }
-                c.ln_offsets.as_mut().unwrap().close_row(s.links.len());
+                c.ln_offsets.close_row(s.links.len());
             }
         }
     }
@@ -345,24 +343,21 @@ pub fn convert_traces(req: &ExportTraceServiceRequest) -> Converted {
     if accepted == 0 {
         return out;
     }
-    let res_attrs = c.res_attrs.as_mut().unwrap().finish();
-    let span_attrs = c.attrs.as_mut().unwrap().finish();
-    let ev_attrs = c.ev_attrs.as_mut().unwrap().finish();
+    let res_attrs = c.res_attrs.finish();
+    let span_attrs = c.attrs.finish();
+    let ev_attrs = c.ev_attrs.finish();
     let ev_fields =
         Fields::from(vec![f("time", ts_type()), f("name", DataType::Utf8), map_field("attributes", &ev_attrs)]);
-    let events = c
-        .ev_offsets
-        .as_mut()
-        .unwrap()
-        .finish(ev_fields, vec![Arc::new(c.ev_time.finish()), Arc::new(c.ev_name.finish()), ev_attrs]);
-    let ln_attrs = c.ln_attrs.as_mut().unwrap().finish();
+    let events =
+        c.ev_offsets.finish(ev_fields, vec![Arc::new(c.ev_time.finish()), Arc::new(c.ev_name.finish()), ev_attrs]);
+    let ln_attrs = c.ln_attrs.finish();
     let ln_fields = Fields::from(vec![
         uuid_field("trace_id"),
         f("span_id", DataType::UInt64),
         f("trace_state", DataType::Utf8),
         map_field("attributes", &ln_attrs),
     ]);
-    let links = c.ln_offsets.as_mut().unwrap().finish(
+    let links = c.ln_offsets.finish(
         ln_fields,
         vec![fsb_opt(&c.ln_trace), Arc::new(c.ln_span.finish()), Arc::new(c.ln_state.finish()), ln_attrs],
     );
@@ -407,8 +402,8 @@ pub fn convert_logs(req: &ExportLogsServiceRequest) -> Converted {
     let mut flags = UInt32Builder::new();
     let mut scope_name = StringBuilder::new();
     let mut scope_version = StringBuilder::new();
-    let mut res_attrs = AttrCol::new();
-    let mut log_attrs = AttrCol::new();
+    let mut res_attrs = AttrCol::default();
+    let mut log_attrs = AttrCol::default();
     let mut n = 0u64;
     let recv = now_micros();
     for rl in &req.resource_logs {
@@ -514,8 +509,8 @@ impl MetricBase {
             flags: UInt32Builder::new(),
             scope_name: StringBuilder::new(),
             scope_version: StringBuilder::new(),
-            res_attrs: AttrCol::new(),
-            attrs: AttrCol::new(),
+            res_attrs: AttrCol::default(),
+            attrs: AttrCol::default(),
             rows: 0,
         }
     }
@@ -559,12 +554,17 @@ impl MetricBase {
     }
 }
 
+/// Length-prefixed, so different inputs never share an encoding.
+fn hash_str(h: &mut Xxh3, s: &str) {
+    h.update(&(s.len() as u64).to_le_bytes());
+    h.update(s.as_bytes());
+}
+
 fn hash_attrs(h: &mut Xxh3, a: &[(String, String)]) {
+    h.update(&(a.len() as u64).to_le_bytes());
     for (k, v) in a {
-        h.update(k.as_bytes());
-        h.update(&[0]);
-        h.update(v.as_bytes());
-        h.update(&[1]);
+        hash_str(h, k);
+        hash_str(h, v);
     }
 }
 
@@ -579,14 +579,9 @@ fn resource_hash(res: &ResourceCtx) -> u64 {
 fn series_id(res_hash: u64, scope: (&str, &str), name: &str, kind: &str, a: &[(String, String)]) -> u64 {
     let mut h = Xxh3::new();
     h.update(&res_hash.to_le_bytes());
-    h.update(scope.0.as_bytes());
-    h.update(&[3]);
-    h.update(scope.1.as_bytes());
-    h.update(&[3]);
-    h.update(name.as_bytes());
-    h.update(&[2]);
-    h.update(kind.as_bytes());
-    h.update(&[2]);
+    for s in [scope.0, scope.1, name, kind] {
+        hash_str(&mut h, s);
+    }
     hash_attrs(&mut h, a);
     h.digest()
 }
@@ -597,24 +592,6 @@ fn temporality(t: i32) -> Temporality {
         2 => Temporality::Cumulative,
         _ => Temporality::Unspecified,
     }
-}
-
-fn u64_list(lists: &[Vec<u64>]) -> ArrayRef {
-    let mut b = ListBuilder::new(UInt64Builder::new());
-    for l in lists {
-        b.values().append_slice(l);
-        b.append(true);
-    }
-    Arc::new(b.finish())
-}
-
-fn f64_list(lists: &[Vec<f64>]) -> ArrayRef {
-    let mut b = ListBuilder::new(Float64Builder::new());
-    for l in lists {
-        b.values().append_slice(l);
-        b.append(true);
-    }
-    Arc::new(b.finish())
 }
 
 pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
@@ -628,18 +605,19 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
     let mut h = MetricBase::new();
     let (mut h_count, mut h_sum, mut h_min, mut h_max) =
         (UInt64Builder::new(), Float64Builder::new(), Float64Builder::new(), Float64Builder::new());
-    let (mut h_buckets, mut h_bounds): (Vec<Vec<u64>>, Vec<Vec<f64>>) = (vec![], vec![]);
+    let (mut h_buckets, mut h_bounds) =
+        (ListBuilder::new(UInt64Builder::new()), ListBuilder::new(Float64Builder::new()));
     // exponential histograms
     let mut e = MetricBase::new();
     let (mut e_count, mut e_sum, mut e_min, mut e_max) =
         (UInt64Builder::new(), Float64Builder::new(), Float64Builder::new(), Float64Builder::new());
     let (mut e_scale, mut e_zero, mut e_zt) = (Int32Builder::new(), UInt64Builder::new(), Float64Builder::new());
     let (mut e_poff, mut e_noff) = (Int32Builder::new(), Int32Builder::new());
-    let (mut e_pos, mut e_neg): (Vec<Vec<u64>>, Vec<Vec<u64>>) = (vec![], vec![]);
+    let (mut e_pos, mut e_neg) = (ListBuilder::new(UInt64Builder::new()), ListBuilder::new(UInt64Builder::new()));
     // summaries
     let mut s = MetricBase::new();
     let (mut s_count, mut s_sum) = (UInt64Builder::new(), Float64Builder::new());
-    let mut s_q_off = ListOffsets::new();
+    let mut s_q_off = ListOffsets::default();
     let (mut s_q, mut s_v) = (Float64Builder::new(), Float64Builder::new());
 
     let mut rejected = 0u64;
@@ -689,8 +667,10 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                             h_sum.append_option(p.sum);
                             h_min.append_option(p.min);
                             h_max.append_option(p.max);
-                            h_buckets.push(p.bucket_counts.clone());
-                            h_bounds.push(p.explicit_bounds.clone());
+                            h_buckets.values().append_slice(&p.bucket_counts);
+                            h_buckets.append(true);
+                            h_bounds.values().append_slice(&p.explicit_bounds);
+                            h_bounds.append(true);
                         }
                     }
                     Some(Data::ExponentialHistogram(hist)) => {
@@ -708,9 +688,11 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                             let pos = p.positive.as_ref();
                             let neg = p.negative.as_ref();
                             e_poff.append_value(pos.map(|b| b.offset).unwrap_or(0));
-                            e_pos.push(pos.map(|b| b.bucket_counts.clone()).unwrap_or_default());
+                            e_pos.values().append_slice(pos.map_or(&[][..], |b| &b.bucket_counts));
+                            e_pos.append(true);
                             e_noff.append_value(neg.map(|b| b.offset).unwrap_or(0));
-                            e_neg.push(neg.map(|b| b.bucket_counts.clone()).unwrap_or_default());
+                            e_neg.values().append_slice(neg.map_or(&[][..], |b| &b.bucket_counts));
+                            e_neg.append(true);
                         }
                     }
                     Some(Data::Summary(sum)) => {
@@ -751,9 +733,9 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         cols.push((f("sum", DataType::Float64), Arc::new(h_sum.finish())));
         cols.push((f("min", DataType::Float64), Arc::new(h_min.finish())));
         cols.push((f("max", DataType::Float64), Arc::new(h_max.finish())));
-        let b = u64_list(&h_buckets);
+        let b: ArrayRef = Arc::new(h_buckets.finish());
         cols.push((f("bucket_counts", b.data_type().clone()), b));
-        let b = f64_list(&h_bounds);
+        let b: ArrayRef = Arc::new(h_bounds.finish());
         cols.push((f("explicit_bounds", b.data_type().clone()), b));
         out.batches.push((TableId::MetricHistograms, batch(cols)));
     }
@@ -768,10 +750,10 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         cols.push((f("zero_count", DataType::UInt64), Arc::new(e_zero.finish())));
         cols.push((f("zero_threshold", DataType::Float64), Arc::new(e_zt.finish())));
         cols.push((f("positive_offset", DataType::Int32), Arc::new(e_poff.finish())));
-        let b = u64_list(&e_pos);
+        let b: ArrayRef = Arc::new(e_pos.finish());
         cols.push((f("positive_bucket_counts", b.data_type().clone()), b));
         cols.push((f("negative_offset", DataType::Int32), Arc::new(e_noff.finish())));
-        let b = u64_list(&e_neg);
+        let b: ArrayRef = Arc::new(e_neg.finish());
         cols.push((f("negative_bucket_counts", b.data_type().clone()), b));
         out.batches.push((TableId::MetricExpHistograms, batch(cols)));
     }
@@ -969,5 +951,15 @@ mod tests {
         assert_ne!(series_id(rh, sc, "m", "sum", &a), series_id(rh, sc, "m", "sum", &[]));
         assert_ne!(series_id(rh, sc, "m", "sum", &a), series_id(rh, ("other", "1.0"), "m", "sum", &a));
         assert_ne!(series_id(rh, sc, "m", "sum", &a), series_id(rh, sc, "m", "gauge", &a));
+    }
+
+    /// Keys and values may contain any byte; crafted ones must not merge series.
+    #[test]
+    fn series_id_has_no_separator_collisions() {
+        let one = vec![("k".to_string(), "v\u{1}k2\u{0}v2".to_string())];
+        let two = vec![("k".to_string(), "v".to_string()), ("k2".to_string(), "v2".to_string())];
+        let sc = ("lib", "1.0");
+        assert_ne!(series_id(0, sc, "m", "sum", &one), series_id(0, sc, "m", "sum", &two));
+        assert_ne!(series_id(0, ("a\u{3}b", ""), "m", "sum", &[]), series_id(0, ("a", "b\u{3}"), "m", "sum", &[]));
     }
 }
