@@ -295,10 +295,18 @@ fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Cli, Exi
 
 /// The arguments as a [`Cli`]. `--app` replaces `-p`, so both on the command line is a
 /// usage error; `MALLARD_PROJECT` is only a default, and gives way to the flag. An empty
-/// `--app` means no app, as in the web UI ("All apps").
+/// `--app` means no app, as in the web UI ("All apps"). `-p` on a command without a project
+/// is a usage error as well; `MALLARD_PROJECT` is harmless there, and so is an empty `-p`.
 fn cli_from(m: &ArgMatches) -> Result<Cli, clap::Error> {
     let mut cli = Cli::from_arg_matches(m)?;
     cli.app = cli.app.filter(|a| !a.trim().is_empty());
+    let flag = matches!(m.value_source("project"), Some(ValueSource::CommandLine));
+    if flag
+        && cli.project.as_deref().is_some_and(|p| !p.trim().is_empty())
+        && let Some(why) = scope::project_flag_problem(&cli.cmd)
+    {
+        return Err(clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, why));
+    }
     if cli.app.is_some() {
         match m.value_source("project") {
             Some(ValueSource::CommandLine) => {
@@ -549,6 +557,46 @@ mod tests {
         {
             let e = try_parse(args).err().expect("a conflict");
             assert!(e.to_string().contains("--app or -p"), "{e}");
+        }
+    }
+
+    #[test]
+    fn project_flag_only_where_there_is_a_project() {
+        let id = "0af7651916cd43dd8448eb211c80319c";
+        for args in [
+            &["services", "-p", "web"][..],
+            &["-p", "web", "logs"],
+            &["traces", "list", "-p", "web"],
+            &["trace", id, "-p", "web"],
+            &["status", "-p", "web"],
+            &["projects", "list", "-p", "web"],
+            &["sql", "SELECT 1", "-p", "web"],
+            &["series", "spans", "-p", "web"],
+            &["telemetry", "services", "-p", "web"],
+            &["errors", "projects", "list", "-p", "web"],
+        ] {
+            let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
+            assert!(e.to_string().contains("-p does not apply to this command"), "{args:?}: {e}");
+        }
+        for args in
+            [&["events", "list", "--trace", id, "-p", "web"][..], &["errors", "events", "list", "-t", id, "-p", "web"]]
+        {
+            let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
+            assert!(e.to_string().contains("searched across all projects"), "{args:?}: {e}");
+        }
+        for args in [
+            &["issues", "list", "-p", "web"][..],
+            &["events", "list", "-p", "web"],
+            &["events", "show", "e", "-p", "web"],
+            &["releases", "list", "-p", "web"],
+            &["sourcemaps", "list", "-p", "web"],
+            &["find", id, "-p", "web"],
+            &["series", "errors", "-p", "web"],
+            &["tui", "-p", "web"],
+            &["errors", "stats", "-p", "web"],
+            &["services", "-p", ""],
+        ] {
+            parse_ok(args);
         }
     }
 

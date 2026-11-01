@@ -58,7 +58,7 @@ Global (any position):
 |---|---|---|
 | `--url` | `MALLARD_URL` | server base URL |
 | `--token` | `MALLARD_TOKEN` | API token |
-| `-p, --project` | `MALLARD_PROJECT` | Sentry project id or slug; optional with one project |
+| `-p, --project` | `MALLARD_PROJECT` | Sentry project id or slug; optional with one project. Only on `issues`, `events`, `releases`, `sourcemaps`, `find`, `series errors`, `tui`: elsewhere, and with `events list --trace`, the flag is exit 2 and the env var is ignored |
 | `--app slug` | | an app (`mallard apps`): its project and its services, in place of `-p` and `-S` |
 | `--format text\|json\|ndjson` | `MALLARD_FORMAT` | output format; `--json` = `--format json` |
 | `--fields a,b` | | keep only these top-level fields (unknown field: exit 2) |

@@ -133,7 +133,7 @@ async fn agent_contract_end_to_end() {
     let text = mallard(url, &["find", &trace]).await.ok();
     assert_eq!(text.stdout.trim_end(), format!("trace  {trace}  1 spans, 1 errors, 1 logs  → mallard trace {trace}"));
     assert_eq!(text.stderr, "");
-    let events = mallard(url, &["events", "list", "--trace", &trace, "-p", "checkout", "--json"]).await.ok().json();
+    let events = mallard(url, &["events", "list", "--trace", &trace, "--json"]).await.ok().json();
     let event = events["items"][0]["event_id"].as_str().unwrap().to_string();
     let issue = events["items"][0]["issue_id"].as_str().unwrap().to_string();
     let v = mallard(url, &["find", &event, "--json"]).await.ok().json();

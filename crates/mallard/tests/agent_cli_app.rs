@@ -204,6 +204,34 @@ async fn app_scopes_each_side() {
         assert_eq!((o.code, o.error()["code"].as_str()), (2, Some("usage")), "{args:?}: {}", o.stderr);
     }
 
+    // -p where there is no project is a usage error too, before anything is asked (issue
+    // 0147). It must not give all projects' events as if they were web's.
+    for (args, says) in [
+        (&["events", "list", "--trace", "0af7651916cd43dd8448eb211c80319c", "-p", "web", "--json"][..], "--trace"),
+        (&["services", "-p", "web", "--json"], "this command"),
+        (&["logs", "-p", "web", "--json"], "this command"),
+        (&["status", "-p", "web", "--json"], "this command"),
+    ] {
+        let o = mallard(url, args).await;
+        assert_eq!((o.code, o.error()["code"].as_str()), (2, Some("usage")), "{args:?}: {}", o.stderr);
+        assert!(o.stdout.is_empty(), "{args:?}: {}", o.stdout);
+        assert!(o.error()["message"].as_str().unwrap().contains(says), "{args:?}: {}", o.stderr);
+    }
+    let o = mallard(url, &["services", "-p", "web"]).await;
+    assert_eq!(o.code, 2);
+    assert!(o.stderr.contains("-p does not apply"), "text mode: {}", o.stderr);
+    // MALLARD_PROJECT set on every call stays harmless.
+    for args in [&["services", "--json"][..], &["logs", "-S", "worker", "--json"], &["status", "--json"]] {
+        mallard_env(url, &[("MALLARD_PROJECT", "web")], args).await.ok();
+    }
+    let o = mallard_env(
+        url,
+        &[("MALLARD_PROJECT", "web")],
+        &["events", "list", "--trace", "0af7651916cd43dd8448eb211c80319c", "--json"],
+    )
+    .await;
+    assert_eq!((o.code, o.json()["count"].as_u64()), (0, Some(0)), "{}", o.stderr);
+
     // MALLARD_PROJECT is a default: the flag wins, and -p on its own still uses it.
     let env = [("MALLARD_PROJECT", "web")];
     let o = mallard_env(url, &env, &["issues", "list", "--app", "checkout-api", "--json"]).await.ok();

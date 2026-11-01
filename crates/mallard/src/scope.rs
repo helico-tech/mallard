@@ -4,7 +4,9 @@
 //!
 //! The rule with `-p` and `-S`: `--app` replaces them, so giving one next to it is a usage
 //! error. `MALLARD_PROJECT` gives way to the flag (see `cli_from` in `main.rs`). A side the
-//! app lacks is an error, not an empty list that looks like "no errors".
+//! app lacks is an error, not an empty list that looks like "no errors". `-p` on a command
+//! without a project is a usage error too; `MALLARD_PROJECT` is only a default, so there it
+//! is ignored.
 
 use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -57,25 +59,59 @@ fn log_need(a: &mallard_otel_cli::LogArgs) -> Result<Need> {
     services_need(&a.w, a.service.as_ref(), around)
 }
 
-fn event_need(c: &mallard_sentry_cli::EventsCmd) -> Result<Need> {
-    match c {
-        mallard_sentry_cli::EventsCmd::List { trace: Some(_), .. } => {
-            Err(usage("--app does not apply with --trace: a trace is searched across all projects"))
+/// `events list --trace`: looks in all projects.
+fn across_projects(cmd: &Cmd) -> bool {
+    let list =
+        |c: &mallard_sentry_cli::EventsCmd| matches!(c, mallard_sentry_cli::EventsCmd::List { trace: Some(_), .. });
+    match cmd {
+        Cmd::Events(c) | Cmd::Errors { cmd: mallard_sentry_cli::Command::Events(c) } => list(c),
+        _ => false,
+    }
+}
+
+/// Whether the command works on one project: what `-p` chooses.
+fn takes_project(cmd: &Cmd) -> bool {
+    use mallard_sentry_cli::Command as Errors;
+    match cmd {
+        Cmd::Issues(_) | Cmd::Events(_) | Cmd::Releases(_) | Cmd::Sourcemaps(_) | Cmd::Find { .. } | Cmd::Tui => {
+            !across_projects(cmd)
         }
-        _ => Ok(Need::Project),
+        Cmd::Errors {
+            cmd:
+                Errors::Issues(_) | Errors::Events(_) | Errors::Stats { .. } | Errors::Releases(_) | Errors::Sourcemaps(_),
+        } => !across_projects(cmd),
+        Cmd::Series(c) => c.scope().is_none(),
+        _ => false,
+    }
+}
+
+/// Why `-p` on the command line means nothing for `cmd`, if so: ignoring it would give an
+/// answer that looks like one for that project.
+pub(crate) fn project_flag_problem(cmd: &Cmd) -> Option<&'static str> {
+    if takes_project(cmd) {
+        None
+    } else if across_projects(cmd) {
+        Some("-p does not apply with --trace: a trace is searched across all projects\n")
+    } else {
+        Some(
+            "-p does not apply to this command; it works on issues, events, releases, sourcemaps, find, series \
+             errors and tui. For telemetry use -S or --app\n",
+        )
     }
 }
 
 fn need(cmd: &Cmd) -> Result<Need> {
     use mallard_otel_cli::Command as Otel;
-    use mallard_sentry_cli::Command as Errors;
+    if matches!(cmd, Cmd::Tui) {
+        return Ok(Need::Picker);
+    }
+    if takes_project(cmd) {
+        return Ok(Need::Project);
+    }
+    if across_projects(cmd) {
+        return Err(usage("--app does not apply with --trace: a trace is searched across all projects"));
+    }
     match cmd {
-        Cmd::Issues(_) | Cmd::Releases(_) | Cmd::Sourcemaps(_) | Cmd::Find { .. } => Ok(Need::Project),
-        Cmd::Events(c) => event_need(c),
-        Cmd::Errors { cmd: Errors::Issues(_) | Errors::Stats { .. } | Errors::Releases(_) | Errors::Sourcemaps(_) } => {
-            Ok(Need::Project)
-        }
-        Cmd::Errors { cmd: Errors::Events(c) } => event_need(c),
         Cmd::Traces(TracesCmd::List(a)) | Cmd::Telemetry { cmd: Otel::Traces(a) } => {
             services_need(&a.w, a.service.as_ref(), None)
         }
@@ -94,7 +130,6 @@ fn need(cmd: &Cmd) -> Result<Need> {
             Some((w, service)) => services_need(w, service, None),
             None => Ok(Need::Project),
         },
-        Cmd::Tui => Ok(Need::Picker),
         _ => Err(usage(
             "--app does not apply to this command; it works where -p or -S do: issues, events, releases, sourcemaps, \
              find, traces list, logs, ops, metrics, schema attrs, series, tui",

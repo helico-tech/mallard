@@ -8,7 +8,7 @@ from one mallard server. This guide is also built in: `mallard help agents`.
 ```sh
 export MALLARD_URL=http://localhost:8080   # the server
 export MALLARD_TOKEN=…                     # one of server.api_tokens
-export MALLARD_PROJECT=web                 # Sentry project (optional with one project)
+export MALLARD_PROJECT=web                 # Sentry project (optional with one project; ignored where none applies)
 export MALLARD_FORMAT=json                 # or pass --json / --format ndjson
 mallard status                             # exit 0: both sides up
 ```
@@ -87,6 +87,10 @@ is `--app` on a command that uses neither, or `events list --trace`. An app with
 an unknown app, is exit 4, not an empty list; the message says what to do. If the list of apps
 is incomplete then it is exit 6: retry. Services count with data in the command's window or the
 last 24h, so `--wait` does not wait for an app's first data: use `-S <name> --wait` then.
+
+`-p` works on `issues`, `events`, `releases`, `sourcemaps`, `find`, `series errors` and `tui`. Elsewhere,
+and on `events list --trace`, which looks in all projects, the flag is exit 2: it never gives an
+answer for another scope. `MALLARD_PROJECT` is only a default, so those commands ignore it.
 
 **What is this id?** (pasted from a log or a bug report)
 ```sh
