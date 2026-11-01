@@ -3,7 +3,6 @@
 1. [issue 0004 agent CLI: the P1 list](issues/0004-agent-cli-p1.md)
 2. [issue 0006 JS e2e: @sentry/node tracing through mallard](issues/0006-e2e-sentry-node-tracing.md)
 3. [issue 0008 sentry-cli needs /api/0 at the URL root](issues/0008-sentry-cli-needs-root-url.md)
-4. [issue 0002 Helm on a cluster](issues/0002-helm-on-a-cluster.md)
 5. [0002/06 retire standalone binaries](epics/0002-mallard/06-retire-standalone-binaries.md)
 6. [sentry issue 0003 maintenance blocks writer](sentry/issues/0003-maintenance-blocks-writer.md)
 7. [sentry issue 0002 issue cardinality limits](sentry/issues/0002-issue-cardinality-limits.md)

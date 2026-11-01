@@ -22,6 +22,7 @@ After API changes: `cargo run -p odl-server -- openapi > docs/otel/openapi.json`
 and `cargo run -p sdl-server -- openapi > docs/sentry/openapi.json` (tests check them).
 Helm: `helm lint --strict deploy/helm/mallard -f deploy/helm/mallard/ci/<file>.yaml`;
 the rendered `mallard.toml` must pass `mallard-server check -c <file>`.
+CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 
 ## Map
 
