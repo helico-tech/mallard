@@ -232,8 +232,15 @@ pub struct SignalIngestStats {
     pub requests: u64,
     /// Spans, log records or metric data points accepted.
     pub accepted: u64,
-    /// Items refused because of back-pressure or invalid payloads.
-    pub rejected: u64,
+    /// Items refused because the write buffer was full (HTTP 429 / gRPC
+    /// UNAVAILABLE). Exporters retry them, so they usually arrive later.
+    #[serde(default)]
+    pub throttled: u64,
+    /// Items refused for good: invalid (e.g. a span without a valid trace
+    /// or span id, reported as OTLP partial success) or in a request too
+    /// large for the buffer.
+    #[serde(default)]
+    pub invalid: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

@@ -38,6 +38,11 @@ impl Embedded {
     }
 }
 
+/// A right-aligned count: faint when zero, else in `style`.
+fn count_cell(n: u64, style: Style) -> Cell<'static> {
+    Cell::from(Line::from(compact(n as f64)).right_aligned()).style(if n > 0 { style } else { theme::faint() })
+}
+
 fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
     let i = &s.ingest;
     let right = Line::from(match rate {
@@ -58,11 +63,10 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
                 Cell::from(sig.signal.as_str()).style(theme::text()),
                 Cell::from(Line::from(compact(sig.requests as f64)).right_aligned()).style(theme::dim()),
                 Cell::from(Line::from(compact(sig.accepted as f64)).right_aligned()).style(theme::bold()),
-                Cell::from(Line::from(compact(sig.rejected as f64)).right_aligned()).style(if sig.rejected > 0 {
-                    theme::error()
-                } else {
-                    theme::faint()
-                }),
+                // Throttled items are retried by exporters (a warning);
+                // invalid ones are lost (an error).
+                count_cell(sig.throttled, Style::new().fg(theme::YELLOW)),
+                count_cell(sig.invalid, theme::error()),
             ])
         })
         .collect();
@@ -70,12 +74,22 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
         Cell::from("signal"),
         Cell::from(Line::from("requests").right_aligned()),
         Cell::from(Line::from("accepted").right_aligned()),
-        Cell::from(Line::from("rejected").right_aligned()),
+        Cell::from(Line::from("throttled").right_aligned()),
+        Cell::from(Line::from("invalid").right_aligned()),
     ])
     .style(theme::header_row());
     f.render_widget(
-        Table::new(rows, [Constraint::Fill(1), Constraint::Length(10), Constraint::Length(10), Constraint::Length(10)])
-            .header(header),
+        Table::new(
+            rows,
+            [
+                Constraint::Fill(1),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(10),
+                Constraint::Length(8),
+            ],
+        )
+        .header(header),
         table_area,
     );
     let fill = (i.buffered_bytes as f64 / i.max_buffer_bytes.max(1) as f64).clamp(0.0, 1.0);

@@ -16,7 +16,8 @@ use crate::store::schema::Signal;
 struct SignalCounters {
     requests: AtomicU64,
     accepted: AtomicU64,
-    rejected: AtomicU64,
+    throttled: AtomicU64,
+    invalid: AtomicU64,
 }
 
 #[derive(Default)]
@@ -43,15 +44,21 @@ impl Stats {
         }
     }
 
-    pub fn record_request(&self, s: Signal, accepted: u64, rejected: u64) {
+    /// One request: items `accepted`, `throttled` (back-pressure; the client
+    /// retries) and `invalid` (refused for good).
+    pub fn record_request(&self, s: Signal, accepted: u64, throttled: u64, invalid: u64) {
         let c = self.signal(s);
         c.requests.fetch_add(1, Relaxed);
         c.accepted.fetch_add(accepted, Relaxed);
-        c.rejected.fetch_add(rejected, Relaxed);
+        c.throttled.fetch_add(throttled, Relaxed);
+        c.invalid.fetch_add(invalid, Relaxed);
         let signal = s.as_str();
         metrics::counter!("odl_ingest_requests_total", "signal" => signal).increment(1);
         metrics::counter!("odl_ingest_items_total", "signal" => signal).increment(accepted);
-        metrics::counter!("odl_ingest_rejected_items_total", "signal" => signal).increment(rejected);
+        metrics::counter!("odl_ingest_rejected_items_total", "signal" => signal, "reason" => "throttled")
+            .increment(throttled);
+        metrics::counter!("odl_ingest_rejected_items_total", "signal" => signal, "reason" => "invalid")
+            .increment(invalid);
     }
 
     pub fn set_buffered(&self, rows: u64, bytes: u64) {
@@ -108,7 +115,8 @@ impl Stats {
                 signal: s,
                 requests: c.requests.load(Relaxed),
                 accepted: c.accepted.load(Relaxed),
-                rejected: c.rejected.load(Relaxed),
+                throttled: c.throttled.load(Relaxed),
+                invalid: c.invalid.load(Relaxed),
             }
         };
         IngestStats {
@@ -135,7 +143,7 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             let s = Stats::default();
-            s.record_request(Signal::Logs, 3, 1);
+            s.record_request(Signal::Logs, 3, 2, 1);
             s.flush_ok(4, 12.0);
             s.flush_err("boom".into());
             s.set_buffered(5, 500);
@@ -144,7 +152,8 @@ mod tests {
         for line in [
             "odl_ingest_requests_total{signal=\"logs\"} 1",
             "odl_ingest_items_total{signal=\"logs\"} 3",
-            "odl_ingest_rejected_items_total{signal=\"logs\"} 1",
+            "odl_ingest_rejected_items_total{signal=\"logs\",reason=\"throttled\"} 2",
+            "odl_ingest_rejected_items_total{signal=\"logs\",reason=\"invalid\"} 1",
             "odl_flush_errors_total 1",
             "odl_buffered_rows 5",
         ] {

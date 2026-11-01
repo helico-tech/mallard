@@ -150,13 +150,13 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
     let req = match decoded {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            ingest.stats.record_request(signal, 0, 0);
+            ingest.stats.record_request(signal, 0, 0, 0);
             return error(StatusCode::BAD_REQUEST, fmt, e);
         }
         Err(e) => {
             // A panic message is not for the client.
             tracing::error!(error = %e, "OTLP decode task failed");
-            ingest.stats.record_request(signal, 0, 0);
+            ingest.stats.record_request(signal, 0, 0, 0);
             return error(StatusCode::INTERNAL_SERVER_ERROR, fmt, "internal error while decoding the request".into());
         }
     };
