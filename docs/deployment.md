@@ -27,8 +27,9 @@ Assets in this repo:
 Ports: 8080 (Sentry ingest, both APIs, OTLP/HTTP on `/v1/*`, `/metrics`), 4318
 (OTLP/HTTP), 4317 (OTLP/gRPC).
 
-CI builds and smoke-tests the image but does not publish it, so build it yourself
-([issue 0124](../work/issues/0124-no-published-image-or-chart.md)).
+A version tag publishes the image to `ghcr.io/helico-tech/mallard` for amd64 and arm64
+(`.github/workflows/release.yml`). No version has been tagged yet, so for now build it
+yourself.
 
 ## Docker
 

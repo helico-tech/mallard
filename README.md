@@ -81,8 +81,8 @@ to build, much smaller, no `serve`; [ADR 0023](docs/adr/0023-one-binary.md)).
 ## Production
 
 mallard ships as a Docker image. There is no Helm chart for now
-([ADR 0026](docs/adr/0026-no-helm-chart-for-now.md)), and nothing publishes the image yet,
-so build it yourself:
+([ADR 0026](docs/adr/0026-no-helm-chart-for-now.md)). A version tag publishes it to
+`ghcr.io/helico-tech/mallard`. No version has been tagged yet, so for now build it yourself:
 
 ```sh
 docker build -f deploy/docker/Dockerfile -t mallard .
