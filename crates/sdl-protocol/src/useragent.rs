@@ -7,8 +7,15 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parsed {
-    pub browser: Option<(String, String)>,
-    pub os: Option<(String, String)>,
+    pub browser: Option<Named>,
+    pub os: Option<Named>,
+}
+
+/// A browser or operating system. `version` may be empty.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Named {
+    pub name: String,
+    pub version: String,
 }
 
 static BROWSERS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
@@ -42,7 +49,10 @@ static OSES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
 pub fn parse(ua: &str) -> Parsed {
     let find = |list: &[(&'static str, Regex)]| {
         list.iter().find_map(|(name, re)| {
-            re.captures(ua).map(|c| (name.to_string(), c.get(1).map_or("", |m| m.as_str()).replace('_', ".")))
+            re.captures(ua).map(|c| Named {
+                name: name.to_string(),
+                version: c.get(1).map_or("", |m| m.as_str()).replace('_', "."),
+            })
         })
     };
     Parsed { browser: find(&BROWSERS), os: find(&OSES) }
@@ -52,13 +62,17 @@ pub fn parse(ua: &str) -> Parsed {
 mod tests {
     use super::*;
 
+    fn named(name: &str, version: &str) -> Named {
+        Named { name: name.into(), version: version.into() }
+    }
+
     #[test]
     fn chrome_mac() {
         let p = parse(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
         );
-        assert_eq!(p.browser, Some(("Chrome".into(), "130.0".into())));
-        assert_eq!(p.os, Some(("macOS".into(), "10.15".into())));
+        assert_eq!(p.browser, Some(named("Chrome", "130.0")));
+        assert_eq!(p.os, Some(named("macOS", "10.15")));
     }
 
     #[test]
@@ -66,11 +80,11 @@ mod tests {
         let p = parse(
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
         );
-        assert_eq!(p.browser, Some(("Safari".into(), "17.4".into())));
-        assert_eq!(p.os, Some(("iOS".into(), "17.4".into())));
+        assert_eq!(p.browser, Some(named("Safari", "17.4")));
+        assert_eq!(p.os, Some(named("iOS", "17.4")));
         let p = parse("Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0");
-        assert_eq!(p.browser, Some(("Firefox".into(), "131.0".into())));
-        assert_eq!(p.os, Some(("Linux".into(), "".into())));
+        assert_eq!(p.browser, Some(named("Firefox", "131.0")));
+        assert_eq!(p.os, Some(named("Linux", "")));
     }
 
     #[test]
@@ -78,7 +92,7 @@ mod tests {
         let p = parse(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
         );
-        assert_eq!(p.browser.unwrap().0, "Edge");
-        assert_eq!(p.os.unwrap().0, "Windows");
+        assert_eq!(p.browser.unwrap().name, "Edge");
+        assert_eq!(p.os.unwrap().name, "Windows");
     }
 }

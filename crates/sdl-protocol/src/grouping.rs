@@ -58,8 +58,7 @@ pub fn group_hash(ev: &Value) -> u64 {
 }
 
 fn is_default_marker(s: &str) -> bool {
-    let t: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    t == "{{default}}"
+    s.chars().filter(|c| !c.is_whitespace()).eq("{{default}}".chars())
 }
 
 /// The ordered list of strings that identify an event's "default" group.

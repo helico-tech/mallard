@@ -203,11 +203,11 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
         let parsed = useragent::parse(&ua);
         let contexts = ev.entry("contexts").or_insert_with(|| json!({}));
         if let Value::Object(c) = contexts {
-            if let (false, Some((name, version))) = (c.contains_key("browser"), parsed.browser) {
-                c.insert("browser".into(), json!({"type": "browser", "name": name, "version": version}));
+            if let (false, Some(b)) = (c.contains_key("browser"), parsed.browser) {
+                c.insert("browser".into(), json!({"type": "browser", "name": b.name, "version": b.version}));
             }
-            if let (false, Some((name, version))) = (c.contains_key("os"), parsed.os) {
-                c.insert("os".into(), json!({"type": "os", "name": name, "version": version}));
+            if let (false, Some(os)) = (c.contains_key("os"), parsed.os) {
+                c.insert("os".into(), json!({"type": "os", "name": os.name, "version": os.version}));
             }
         }
     }
@@ -282,7 +282,8 @@ pub fn parse_trace_id(s: &str) -> Option<Uuid> {
 /// 16 hex chars -> big-endian u64 (same encoding as OTLP span ids).
 pub fn parse_span_id(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.len() != 16 {
+    // `from_str_radix` alone would also accept a leading `+`.
+    if s.len() != 16 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     u64::from_str_radix(s, 16).ok().filter(|v| *v != 0)
@@ -309,8 +310,13 @@ fn derive_tags(ev: &Value, handled: Option<bool>, user_key: Option<&str>) -> Vec
     let mut out: Vec<(String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut push = |k: &str, v: &str| {
-        if !v.is_empty() && seen.insert(k.to_string()) {
-            out.push((truncate(k, MAX_TAG_KEY), truncate(v, MAX_TAG_VALUE)));
+        if v.is_empty() {
+            return;
+        }
+        // Dedupe on the stored (truncated) key.
+        let k = truncate(k, MAX_TAG_KEY);
+        if seen.insert(k.clone()) {
+            out.push((k, truncate(v, MAX_TAG_VALUE)));
         }
     };
     if let Some(Value::Object(tags)) = ev.get("tags") {
@@ -363,13 +369,17 @@ fn derive_tags(ev: &Value, handled: Option<bool>, user_key: Option<&str>) -> Vec
 }
 
 pub fn normalize_level(l: &str) -> &'static str {
-    match l.to_ascii_lowercase().as_str() {
-        "fatal" | "critical" => "fatal",
-        "warning" | "warn" => "warning",
-        "info" | "log" => "info",
-        "debug" | "trace" => "debug",
-        _ => "error",
-    }
+    const LEVELS: &[(&str, &str)] = &[
+        ("fatal", "fatal"),
+        ("critical", "fatal"),
+        ("warning", "warning"),
+        ("warn", "warning"),
+        ("info", "info"),
+        ("log", "info"),
+        ("debug", "debug"),
+        ("trace", "debug"),
+    ];
+    LEVELS.iter().find(|(name, _)| name.eq_ignore_ascii_case(l)).map_or("error", |(_, level)| level)
 }
 
 pub fn parse_timestamp(v: &Value) -> Option<DateTime<Utc>> {
@@ -713,6 +723,27 @@ mod tests {
         assert_eq!(fr.len(), MAX_FRAMES);
         assert_eq!(fr[0]["function"], "f0");
         assert_eq!(fr.last().unwrap()["function"], "f999");
+    }
+
+    #[test]
+    fn tags_dedupe_on_the_truncated_key() {
+        let long = "k".repeat(MAX_TAG_KEY);
+        let ev = json!({"tags": {format!("{long}a"): "1", format!("{long}b"): "2"}});
+        let tags = derive_tags(&ev, None, None);
+        assert_eq!(tags.iter().filter(|(k, _)| *k == long).count(), 1, "{tags:?}");
+    }
+
+    #[test]
+    fn levels() {
+        assert_eq!(normalize_level("WARN"), "warning");
+        assert_eq!(normalize_level("Critical"), "fatal");
+        assert_eq!(normalize_level("whatever"), "error");
+    }
+
+    #[test]
+    fn span_ids_are_strict_hex() {
+        assert_eq!(parse_span_id("+00f067aa0ba902b"), None);
+        assert_eq!(parse_span_id(" 00f067aa0ba902b7 "), Some(0x00f067aa0ba902b7));
     }
 
     #[test]
