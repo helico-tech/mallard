@@ -25,7 +25,7 @@ pub fn layout(spans: &[Span]) -> (Vec<Row>, i64) {
     }
     let start = spans.iter().map(|s| s.start_time).min().unwrap();
     let off = |s: &Span| (s.start_time - start).num_nanoseconds().unwrap_or(0);
-    let total = spans.iter().map(|s| off(s) + s.duration_ns.max(0)).max().unwrap_or(1).max(1);
+    let total = spans.iter().map(|s| off(s).saturating_add(s.duration_ns.max(0))).max().unwrap_or(1).max(1);
     let ids: HashSet<&str> = spans.iter().map(|s| s.span_id.as_str()).collect();
     let mut children: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
     for (i, s) in spans.iter().enumerate() {

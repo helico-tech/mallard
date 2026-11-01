@@ -75,20 +75,20 @@ impl Embedded {
         let since = Some(self.since());
         let c = self.client.clone();
         let q = ServiceQuery { since: since.clone(), ..Default::default() };
-        if !self.loader.spawn(Kind::Services, async move { c.services(&q).await }, Data::Services) {
+        if !self.loader.load(Kind::Services, force, async move { c.services(&q).await }, Data::Services) {
             return;
         }
         self.overview.refreshed = Some(Instant::now());
         let c = self.client.clone();
         let q = SpanSeriesQuery { since: since.clone(), ..Default::default() };
-        self.loader.spawn(Kind::SpanSeries, async move { c.span_series(&q).await }, Data::SpanSeries);
+        self.loader.load(Kind::SpanSeries, force, async move { c.span_series(&q).await }, Data::SpanSeries);
         let c = self.client.clone();
         let q = LogSeriesQuery { since: since.clone(), ..Default::default() };
-        self.loader.spawn(Kind::LogSeries, async move { c.log_series(&q).await }, Data::LogSeries);
+        self.loader.load(Kind::LogSeries, force, async move { c.log_series(&q).await }, Data::LogSeries);
         if let Some((svc, _)) = &self.overview.ops {
             let c = self.client.clone();
             let q = OperationQuery { since, service: Some(svc.clone()), ..Default::default() };
-            self.loader.spawn(Kind::Operations, async move { c.operations(&q).await }, Data::Operations);
+            self.loader.load(Kind::Operations, force, async move { c.operations(&q).await }, Data::Operations);
         }
     }
 
@@ -216,7 +216,7 @@ impl Embedded {
             label: "p95 latency",
             value: dash(ms(p95)),
             color: theme::WARN,
-            sub: "entry spans".into(),
+            sub: "avg of per-bucket p95".into(),
             spark: &lat_spark,
         }
         .render(f, areas[2]);
@@ -263,7 +263,7 @@ impl Embedded {
             widgets::panel_with("Throughput", widgets::legend(&throughput), false),
             &throughput,
             bounds,
-            compact,
+            &compact,
         );
         let latency = [
             Series { name: "p50".into(), color: theme::OK, points: &p50 },
@@ -276,7 +276,7 @@ impl Embedded {
             widgets::panel_with("Latency", widgets::legend(&latency), false),
             &latency,
             bounds,
-            ms,
+            &ms,
         );
     }
 

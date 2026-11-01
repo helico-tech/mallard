@@ -6,16 +6,23 @@
 //! (~4x per second). Loading runs on the tokio runtime in the background and
 //! never blocks input. [`run_standalone`] wraps it for `odl tui`.
 //!
-//! F1 and F2 are reserved for the host and always return [`Outcome::Ignored`].
+//! F1 and F2 are reserved for the host and always return [`Outcome::Ignored`],
+//! and so do keys with Ctrl or Alt (except Ctrl-C, which quits), so host
+//! shortcuts keep working.
+//!
+//! A tokio runtime must be current when `tick` is called (loads are spawned on
+//! it), and the host's event loop must not block that runtime's only thread.
 
 mod input;
 mod loader;
 mod query;
 mod theme;
 mod views;
-mod waterfall;
+pub(crate) mod waterfall;
 mod widgets;
 
+#[cfg(test)]
+mod regress;
 #[cfg(test)]
 mod tests;
 
@@ -103,7 +110,11 @@ pub struct Embedded {
     prompt: Option<Prompt>,
     flash: Option<(String, bool, Instant)>,
     spin: usize,
+    errors_enabled: bool,
 }
+
+/// Pause before retrying a failed load.
+pub(crate) const RETRY: Duration = Duration::from_secs(3);
 
 pub(crate) fn due(t: Option<Instant>, every: Duration) -> bool {
     t.is_none_or(|t| t.elapsed() >= every)
@@ -155,7 +166,15 @@ impl Embedded {
             prompt: None,
             flash: None,
             spin: 0,
+            errors_enabled: false,
         }
+    }
+
+    /// Show the `e errors` key in hints and help. The key always returns
+    /// [`Outcome::OpenErrors`]; enable this when the host can act on it
+    /// (e.g. an error tracker is connected). Off by default.
+    pub fn set_errors_enabled(&mut self, enabled: bool) {
+        self.errors_enabled = enabled;
     }
 
     /// Start with a given time window (e.g. `15m`, `6h`, `2d`).
@@ -212,13 +231,32 @@ impl Embedded {
         self.flash = Some((msg.into(), true, Instant::now()));
     }
 
-    /// Force all views to reload on the next tick.
+    /// Force all views to reload on the next tick. In-flight requests are
+    /// aborted so results for the old window are never applied.
     fn invalidate(&mut self) {
+        for k in [
+            Kind::Services,
+            Kind::Operations,
+            Kind::SpanSeries,
+            Kind::LogSeries,
+            Kind::LogVolume,
+            Kind::Traces,
+            Kind::Trace,
+            Kind::TraceLogs,
+            Kind::Logs,
+            Kind::LogTail,
+            Kind::MetricList,
+            Kind::MetricQuery,
+        ] {
+            self.loader.cancel(k);
+        }
         self.overview.refreshed = None;
         self.traces.refreshed = None;
+        if let Some(d) = &mut self.traces.detail {
+            d.requested = false;
+            d.retry_at = None;
+        }
         self.logs.reset();
-        self.loader.cancel(Kind::Logs);
-        self.loader.cancel(Kind::LogTail);
         self.metrics.refreshed = None;
         if let Some(c) = &mut self.metrics.chart {
             c.refreshed = None;
@@ -255,6 +293,9 @@ impl Embedded {
             View::Metrics => self.refresh_metrics(false),
             View::Status => {}
         }
+        if self.loader.no_runtime {
+            self.stats_error = Some("no tokio runtime: cannot load data".into());
+        }
     }
 
     fn apply(&mut self, kind: Kind, data: Data) {
@@ -282,9 +323,9 @@ impl Embedded {
             Data::Trace(t) => self.traces.set_trace(*t),
             Data::Logs(v) => match kind {
                 Kind::TraceLogs => self.traces.set_trace_logs(v),
-                Kind::LogTail => self.logs_tail_loaded(v),
                 _ => self.logs_loaded(v),
             },
+            Data::Tail((v, gap)) => self.logs_tail_loaded(v, gap),
             Data::MetricList(v) => self.metrics.set_list(v),
             Data::MetricQuery(r) => self.metrics.set_result(r),
         }
@@ -295,9 +336,20 @@ impl Embedded {
             Kind::Stats => self.stats_error = Some(e.clone()),
             Kind::Services | Kind::Operations | Kind::SpanSeries => self.overview.error = Some(e.clone()),
             Kind::LogSeries => self.overview.error = Some(e.clone()),
-            Kind::LogVolume | Kind::Logs | Kind::LogTail => self.logs.error = Some(e.clone()),
+            Kind::LogVolume | Kind::LogTail => self.logs.error = Some(e.clone()),
+            Kind::Logs => {
+                // Retry the initial load after a short pause.
+                self.logs.error = Some(e.clone());
+                self.logs.requested = false;
+                self.logs.retry_at = Some(Instant::now() + RETRY);
+            }
             Kind::Traces => self.traces.error = Some(e.clone()),
-            Kind::Trace | Kind::TraceLogs => {
+            Kind::Trace => {
+                if let Some(d) = &mut self.traces.detail {
+                    d.on_error(&e);
+                }
+            }
+            Kind::TraceLogs => {
                 if let Some(d) = &mut self.traces.detail {
                     d.error = Some(e.clone());
                 }
@@ -337,6 +389,9 @@ impl Embedded {
         if matches!(k.code, KeyCode::F(1) | KeyCode::F(2)) {
             return Outcome::Ignored;
         }
+        if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+            return Outcome::Quit;
+        }
         if self.help {
             self.help = false;
             return Outcome::Consumed;
@@ -345,8 +400,9 @@ impl Embedded {
             self.prompt_key(k);
             return Outcome::Consumed;
         }
-        if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-            return Outcome::Quit;
+        // Ctrl/Alt combinations belong to the host.
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return Outcome::Ignored;
         }
         let handled = match self.view {
             View::Overview => self.key_overview(k),
@@ -357,9 +413,6 @@ impl Embedded {
         };
         if let Some(o) = handled {
             return o;
-        }
-        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            return Outcome::Ignored;
         }
         match k.code {
             KeyCode::Char('q') => Outcome::Quit,
@@ -545,6 +598,14 @@ impl Embedded {
     }
 
     fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        let mut h = self.view_hints();
+        if !self.errors_enabled {
+            h.retain(|(k, _)| *k != "e");
+        }
+        h
+    }
+
+    fn view_hints(&self) -> Vec<(&'static str, &'static str)> {
         match self.view {
             View::Overview if self.overview.ops.is_some() => {
                 vec![("↵", "traces"), ("esc", "services"), ("t", "window")]
@@ -585,7 +646,14 @@ impl Embedded {
             ("q  ctrl-c", "quit"),
             ("", ""),
             ("Overview", "↵ service → operations → traces"),
-            ("Traces", "/ filter  E errors only  ↵ waterfall  l logs  e errors"),
+            (
+                "Traces",
+                if self.errors_enabled {
+                    "/ filter  E errors only  ↵ waterfall  l logs  e errors"
+                } else {
+                    "/ filter  E errors only  ↵ waterfall  l logs"
+                },
+            ),
             ("", "filter: service=checkout op=\"GET /\" errors min=250ms key=value"),
             ("Logs", "/ filter  s severity  space follow  ↵ details  o open trace"),
             ("", "filter: service=api level=warn trace=<id> words to find"),
@@ -613,7 +681,7 @@ impl Embedded {
     }
 }
 
-fn humantime_secs(s: &str) -> Option<f64> {
+pub(crate) fn humantime_secs(s: &str) -> Option<f64> {
     let s = s.trim();
     let idx = s.find(|c: char| !c.is_ascii_digit())?;
     let n: f64 = s[..idx].parse().ok()?;
@@ -633,37 +701,32 @@ pub async fn run_standalone(client: Client, since: String) -> Result<()> {
     let mut app = Embedded::with_since(client, &since);
     // try_init installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init()?;
-    let res = event_loop(&mut terminal, &mut app);
+    let res = event_loop(&mut terminal, &mut app).await;
     ratatui::restore();
     res
 }
 
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut Embedded) -> Result<()> {
-    let tick = Duration::from_millis(250);
-    let mut last_tick = Instant::now() - tick;
+/// Async event loop: terminal events arrive through crossterm's EventStream,
+/// so the runtime keeps running background loads (also on a current-thread
+/// runtime).
+async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut Embedded) -> Result<()> {
+    use futures_util::StreamExt;
+    let mut events = event::EventStream::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        if last_tick.elapsed() >= tick {
-            app.tick();
-            last_tick = Instant::now();
-        }
         terminal.draw(|f| app.draw(f, f.area()))?;
-        let timeout = tick.saturating_sub(last_tick.elapsed());
-        // Polling blocks this thread; on a multi-threaded runtime let it move
-        // other tasks away first.
-        let multi = tokio::runtime::Handle::try_current()
-            .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-        let ready = if multi { tokio::task::block_in_place(|| event::poll(timeout))? } else { event::poll(timeout)? };
-        if ready {
-            // Drain queued events before redrawing to stay responsive.
-            loop {
-                let ev = event::read()?;
-                if app.handle_event(&ev) == Outcome::Quit {
-                    return Ok(());
-                }
-                if !event::poll(Duration::ZERO)? {
-                    break;
-                }
-            }
+        tokio::select! {
+            _ = ticker.tick() => app.tick(),
+            ev = events.next() => match ev {
+                Some(Ok(ev)) => match app.handle_event(&ev) {
+                    Outcome::Quit => return Ok(()),
+                    Outcome::OpenErrors(_) => app.flash_error("no error tracker connected"),
+                    _ => {}
+                },
+                Some(Err(e)) => return Err(e.into()),
+                None => return Ok(()),
+            },
         }
     }
 }

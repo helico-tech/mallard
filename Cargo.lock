@@ -2908,12 +2908,14 @@ dependencies = [
  "clap",
  "comfy-table 8.0.1",
  "crossterm",
+ "futures-util",
  "odl-client",
  "owo-colors",
  "ratatui",
  "serde",
  "serde_json",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

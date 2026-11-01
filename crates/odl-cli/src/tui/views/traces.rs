@@ -48,6 +48,10 @@ pub struct Detail {
     pub logs: Vec<LogRecord>,
     pub requested: bool,
     pub error: Option<String>,
+    /// Retry a failed lookup after this time.
+    pub retry_at: Option<Instant>,
+    /// Use a 24 h window: the server rejected 7 days (query.max_window).
+    pub short_window: bool,
 }
 
 impl Detail {
@@ -63,6 +67,21 @@ impl Detail {
             logs: vec![],
             requested: false,
             error: None,
+            retry_at: None,
+            short_window: false,
+        }
+    }
+
+    /// A lookup failed: show it and retry later (a trace may not be flushed
+    /// yet), with a shorter window if the server refused the default one.
+    pub fn on_error(&mut self, e: &str) {
+        self.error = Some(e.to_string());
+        self.requested = false;
+        if e.contains("max_window") && !self.short_window {
+            self.short_window = true;
+            self.retry_at = Some(Instant::now());
+        } else {
+            self.retry_at = Some(Instant::now() + crate::tui::RETRY);
         }
     }
 
@@ -87,12 +106,22 @@ impl State {
             && d.trace_id == t.trace_id
         {
             let (rows, total) = waterfall::layout(&t.spans);
+            // Keep the selected span across refreshes.
+            let keep = d.selected_span().map(|s| s.span_id.clone());
+            let refresh = d.trace.is_some();
             d.rows = rows;
             d.total_ns = total;
             d.trace = Some(t);
             d.error = None;
-            d.sel.select(Some(0));
-            d.scroll = 0;
+            d.retry_at = None;
+            let i = keep.and_then(|id| {
+                let t = d.trace.as_ref()?;
+                d.rows.iter().position(|r| t.spans.get(r.span).is_some_and(|s| s.span_id == id))
+            });
+            d.sel.select(Some(i.unwrap_or(0)));
+            if !refresh {
+                d.scroll = 0;
+            }
         }
     }
 
@@ -106,11 +135,12 @@ impl State {
 impl Embedded {
     pub(crate) fn refresh_traces(&mut self, force: bool) {
         if let Some(d) = &mut self.traces.detail {
-            if d.requested {
+            if d.requested || d.retry_at.is_some_and(|t| Instant::now() < t) {
                 return;
             }
             let (from, to, since) = match d.hint {
                 Some(h) => (Some(h - TimeDelta::hours(1)), Some(h + TimeDelta::hours(1)), None),
+                None if d.short_window => (None, None, Some("24h".to_string())),
                 None => (None, None, Some("7d".to_string())),
             };
             let id = d.trace_id.clone();
@@ -150,7 +180,7 @@ impl Embedded {
             ..Default::default()
         };
         let c = self.client.clone();
-        if self.loader.spawn(Kind::Traces, async move { c.traces(&q).await }, Data::Traces) {
+        if self.loader.load(Kind::Traces, force, async move { c.traces(&q).await }, Data::Traces) {
             self.traces.refreshed = Some(Instant::now());
         }
     }
@@ -432,13 +462,13 @@ impl Embedded {
                 let is_err = s.status_code == "ERROR";
                 let svc_color = theme::service_color(&s.service_name);
                 let mut label: Vec<TSpan> = vec![TSpan::styled(row.prefix.clone(), theme::muted())];
-                let used = row.prefix.chars().count();
+                let used = widgets::width(&row.prefix);
                 let svc = widgets::trunc(&s.service_name, 14.min(label_w.saturating_sub(used + 2)).max(1));
-                let rest = label_w.saturating_sub(used + svc.chars().count() + 1);
+                let rest = label_w.saturating_sub(used + widgets::width(&svc) + 1);
                 label.push(TSpan::styled(svc.clone(), Style::new().fg(svc_color)));
                 label.push(TSpan::raw(" "));
                 let name = widgets::trunc(&s.name, rest);
-                let pad = rest.saturating_sub(name.chars().count());
+                let pad = rest.saturating_sub(widgets::width(&name));
                 label.push(TSpan::styled(
                     name,
                     if is_err { theme::error().add_modifier(Modifier::BOLD) } else { theme::text() },

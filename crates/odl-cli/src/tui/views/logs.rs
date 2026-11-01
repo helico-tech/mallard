@@ -1,8 +1,6 @@
 //! Logs: live tail with severity histogram, filter and record details.
 
 use std::{
-    collections::HashSet,
-    hash::{Hash, Hasher},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -44,10 +42,34 @@ pub struct State {
     pub requested: bool,
     pub tail: Option<Arc<tokio::sync::Mutex<LogTail>>>,
     pub tail_at: Option<Instant>,
-    /// Keys of recent records, to drop duplicates delivered by the tail.
-    pub recent: HashSet<(i64, u64)>,
+    /// Retry a failed initial load after this time.
+    pub retry_at: Option<Instant>,
     /// Detail popup scroll offset when open.
     pub detail: Option<u16>,
+}
+
+/// Marker row inserted where the tail skipped records (pause, burst).
+pub const GAP_EVENT: &str = "\u{0}odl.gap";
+
+pub fn is_gap(r: &LogRecord) -> bool {
+    r.event_name == GAP_EVENT
+}
+
+fn gap_record(at: chrono::DateTime<Utc>) -> LogRecord {
+    LogRecord {
+        time: at,
+        observed_time: at,
+        service_name: String::new(),
+        severity_number: 0,
+        severity_text: String::new(),
+        body: "… older records skipped (paused or too many to show) …".into(),
+        trace_id: None,
+        span_id: None,
+        event_name: GAP_EVENT.into(),
+        scope_name: String::new(),
+        attributes: Default::default(),
+        resource_attributes: Default::default(),
+    }
 }
 
 impl Default for State {
@@ -65,20 +87,10 @@ impl Default for State {
             requested: false,
             tail: None,
             tail_at: None,
-            recent: HashSet::new(),
+            retry_at: None,
             detail: None,
         }
     }
-}
-
-pub fn fingerprint(r: &LogRecord) -> (i64, u64) {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    r.service_name.hash(&mut h);
-    r.body.hash(&mut h);
-    r.span_id.hash(&mut h);
-    r.severity_number.hash(&mut h);
-    r.attributes.hash(&mut h);
-    (r.time.timestamp_micros(), h.finish())
 }
 
 /// Next severity filter in the cycle all → info → warn → error → all,
@@ -111,9 +123,9 @@ fn quote(t: &str) -> String {
 impl State {
     pub fn reset(&mut self) {
         self.records.clear();
-        self.recent.clear();
         self.loaded = false;
         self.requested = false;
+        self.retry_at = None;
         self.tail = None;
         self.tail_at = None;
         self.refreshed = None;
@@ -138,27 +150,23 @@ impl State {
         self.sel.selected().is_none_or(|i| i + 1 >= self.records.len())
     }
 
-    fn append(&mut self, v: Vec<LogRecord>) {
+    /// Append new records (the tail already removed duplicates). `gap`:
+    /// records may have been skipped before these.
+    fn append(&mut self, v: Vec<LogRecord>, gap: bool) {
         let stick = self.follow && self.at_end();
-        for r in v {
-            let key = fingerprint(&r);
-            if self.recent.insert(key) {
-                self.records.push(r);
-            }
+        if gap
+            && let Some(first) = v.first()
+            && !self.records.is_empty()
+        {
+            self.records.push(gap_record(first.time));
         }
+        self.records.extend(v);
         if self.records.len() > MAX_RECORDS {
             let drop = self.records.len() - MAX_RECORDS;
             self.records.drain(..drop);
             if let Some(i) = self.sel.selected() {
                 self.sel.select(Some(i.saturating_sub(drop)));
             }
-        }
-        // Forget dedupe keys older than two minutes before the newest record.
-        if self.recent.len() > 4 * MAX_RECORDS
-            && let Some(last) = self.records.last()
-        {
-            let horizon = last.time.timestamp_micros() - 120_000_000;
-            self.recent.retain(|(t, _)| *t >= horizon);
         }
         if stick && !self.records.is_empty() {
             self.sel.select(Some(self.records.len() - 1));
@@ -169,7 +177,7 @@ impl State {
 impl Embedded {
     pub(crate) fn refresh_logs(&mut self, force: bool) {
         let since = self.since();
-        if !self.logs.requested || force {
+        if (!self.logs.requested && self.logs.retry_at.is_none_or(|t| Instant::now() >= t)) || force {
             let mut q = self.logs.base_query(since.clone());
             q.limit = Some(1000);
             q.order = Some("desc".into());
@@ -187,7 +195,7 @@ impl Embedded {
                 ..Default::default()
             };
             let c = self.client.clone();
-            if self.loader.spawn(Kind::LogVolume, async move { c.log_series(&q).await }, Data::LogSeries) {
+            if self.loader.load(Kind::LogVolume, force, async move { c.log_series(&q).await }, Data::LogSeries) {
                 self.logs.refreshed = Some(Instant::now());
             }
         }
@@ -196,7 +204,16 @@ impl Embedded {
             && due(self.logs.tail_at, Duration::from_secs(2))
             && !self.loader.is_pending(Kind::LogTail)
             && let Some(tail) = self.logs.tail.clone()
-            && self.loader.spawn(Kind::LogTail, async move { tail.lock().await.poll().await }, Data::Logs)
+            && self.loader.spawn(
+                Kind::LogTail,
+                async move {
+                    let mut t = tail.lock().await;
+                    let v = t.poll().await?;
+                    let gap = t.last_poll_truncated();
+                    Ok((v, gap))
+                },
+                Data::Tail,
+            )
         {
             self.logs.tail_at = Some(Instant::now());
         }
@@ -206,22 +223,25 @@ impl Embedded {
         v.reverse();
         let l = &mut self.logs;
         l.records.clear();
-        l.recent.clear();
         l.loaded = true;
         l.error = None;
+        l.retry_at = None;
         let start = v.last().map(|r| r.time).unwrap_or_else(|| Utc::now() - TimeDelta::seconds(5));
         l.follow = true;
-        l.append(v);
-        l.sel.select(l.records.len().checked_sub(1));
         let q = l.base_query(String::new());
         let q = LogQuery { since: None, ..q };
-        l.tail = Some(Arc::new(tokio::sync::Mutex::new(LogTail::new(self.client.clone(), q, start))));
+        let mut tail = LogTail::new(self.client.clone(), q, start);
+        // The tail must not return what the initial load already shows.
+        tail.mark_seen(&v);
+        l.append(v, false);
+        l.sel.select(l.records.len().checked_sub(1));
+        l.tail = Some(Arc::new(tokio::sync::Mutex::new(tail)));
         l.tail_at = Some(Instant::now());
     }
 
-    pub(crate) fn logs_tail_loaded(&mut self, v: Vec<LogRecord>) {
+    pub(crate) fn logs_tail_loaded(&mut self, v: Vec<LogRecord>, gap: bool) {
         if self.logs.loaded {
-            self.logs.append(v);
+            self.logs.append(v, gap);
         }
     }
 
@@ -240,7 +260,7 @@ impl Embedded {
     }
 
     fn selected_log(&self) -> Option<&LogRecord> {
-        self.logs.sel.selected().and_then(|i| self.logs.records.get(i))
+        self.logs.sel.selected().and_then(|i| self.logs.records.get(i)).filter(|r| !is_gap(r))
     }
 
     pub(crate) fn key_logs(&mut self, k: &KeyEvent) -> Option<Outcome> {
@@ -401,6 +421,14 @@ impl Embedded {
             .records
             .iter()
             .map(|r| {
+                if is_gap(r) {
+                    return Row::new(vec![
+                        Cell::from(""),
+                        Cell::from(""),
+                        Cell::from(""),
+                        Cell::from(Span::styled(r.body.clone(), theme::muted())),
+                    ]);
+                }
                 let (lbl, c) = theme::severity(r.severity_number, &r.severity_text);
                 let body_style = if r.severity_number >= 17 { Style::new().fg(theme::ERR) } else { theme::text() };
                 let mut body = vec![];
@@ -421,7 +449,7 @@ impl Embedded {
             })
             .collect();
         let empty = rows.is_empty();
-        let svc_w = l.records.iter().map(|r| r.service_name.chars().count()).max().unwrap_or(8).clamp(7, 20) as u16;
+        let svc_w = l.records.iter().map(|r| widgets::width(&r.service_name)).max().unwrap_or(8).clamp(7, 20) as u16;
         let widths = [
             Constraint::Length(if long { 14 } else { 12 }),
             Constraint::Length(5),
