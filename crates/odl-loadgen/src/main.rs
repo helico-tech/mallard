@@ -897,9 +897,10 @@ impl Sender {
                         return;
                     }
                     Err(e) => {
-                        eprintln!("{path}: {e}");
-                        this.c.failed.fetch_add(1, Relaxed);
+                        // Retried below; only counted as failed when we give up.
+                        eprintln!("{path}: {e} (retrying)");
                         tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(5));
                     }
                 }
             }

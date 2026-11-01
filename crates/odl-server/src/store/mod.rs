@@ -334,8 +334,14 @@ fn attach(conn: &Connection, cfg: &Config) -> Result<()> {
         sql_str(&st.data_path),
     );
     conn.execute_batch(&sql).with_context(|| {
+        let hint = match st.catalog_kind() {
+            CatalogKind::DuckDb | CatalogKind::Sqlite => {
+                "; note: a DuckDB-file or SQLite catalog can be opened by only one process at a time"
+            }
+            _ => "",
+        };
         format!(
-            "attaching DuckLake catalog ({}) with data path {}",
+            "attaching DuckLake catalog ({}) with data path {}{hint}",
             st.catalog_kind().as_str(),
             st.data_path
         )

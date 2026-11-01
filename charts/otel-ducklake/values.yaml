@@ -87,8 +87,9 @@ auth:
   ingestToken: ""
 
 duckdb:
-  # Keep below the container memory limit (about 70%).
-  memoryLimit: 1400MB
+  # DuckDB buffer limit. The process needs about this + 0.5 GB (Parquet
+  # writers, allocator), so keep it at most (container limit - 600MB), ~60%.
+  memoryLimit: 1200MB
   threads: 0
 
 logFormat: json

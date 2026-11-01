@@ -108,8 +108,11 @@ impl Drop for Maintenance {
 fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: Arc<AtomicBool>) {
     let start = Instant::now();
     // Stagger the first runs a little so start-up stays fast.
-    let mut next_compact = start + s.compact_interval.min(Duration::from_secs(60));
-    let mut next_full = start + s.full_compact_interval;
+    // Random offset so replicas sharing a catalog don't compact in lock-step
+    // (concurrent merges of the same files conflict and waste work).
+    let jitter = jitter(s.compact_interval / 2);
+    let mut next_compact = start + s.compact_interval.min(Duration::from_secs(60)) + jitter;
+    let mut next_full = start + s.full_compact_interval + jitter;
     let mut next_retention = start + Duration::from_secs(30).min(s.retention_interval);
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
@@ -130,6 +133,20 @@ fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: A
         }
     }
     info!("maintenance stopped");
+}
+
+/// Pseudo-random duration in `[0, max)`, without a RNG dependency.
+fn jitter(max: Duration) -> Duration {
+    let ms = max.as_millis() as u64;
+    if ms == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let seed = nanos ^ ((std::process::id() as u64) << 20);
+    Duration::from_millis(xxhash_rust::xxh3::xxh3_64(&seed.to_le_bytes()) % ms)
 }
 
 fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
