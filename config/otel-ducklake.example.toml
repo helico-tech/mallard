@@ -17,8 +17,8 @@ log_format = "text"               # text | json
 #                                                   PGPASSWORD env var, read by libpq)
 catalog = "data/catalog.ducklake"
 # Where Parquet data files go: local path, s3://, gs://, az://, abfss://, r2://, hf:// ...
+# Tables live in the DuckLake schema "otel".
 data_path = "data/lake/"
-schema = "otel"
 # Inserts smaller than this many rows are stored inside the catalog until the
 # next compaction, avoiding tiny Parquet files during quiet periods. 0 = off.
 data_inlining_row_limit = 1000
@@ -67,7 +67,6 @@ full_compact_interval = "6h"       # merge files up to storage.target_file_size
 retention_interval = "1h"          # retention deletes, snapshot expiry, file cleanup
 snapshot_retention = "1h"          # time travel window
 file_cleanup_delay = "15m"         # grace period before unreferenced files are deleted
-catalog_wide = true                # snapshot expiry + file cleanup (catalog-wide; one owner per catalog)
 
 [query]
 max_concurrent = 4

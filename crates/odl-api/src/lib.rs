@@ -139,14 +139,8 @@ string_enum! {
 // Errors & health
 // ---------------------------------------------------------------------------
 
-/// Error body returned with every non-2xx response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct ApiError {
-    /// Machine readable error code, e.g. `bad_request`, `not_found`, `timeout`.
-    pub error: String,
-    /// Human readable message.
-    pub message: String,
-}
+/// Error body returned with every non-2xx response (shared with the Sentry API).
+pub use mallard_common::ApiError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Health {

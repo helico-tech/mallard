@@ -5,8 +5,8 @@
 use super::{Ns, us_to_dt};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use duckdb::types::ToSql;
-use duckdb::{Connection, OptionalExt, params, params_from_iter};
+use mallard_duck::duckdb::types::ToSql;
+use mallard_duck::duckdb::{Connection, OptionalExt, params, params_from_iter};
 use sdl_types::*;
 use std::collections::HashMap;
 
@@ -407,7 +407,7 @@ fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Windo
 const EVENT_COLUMNS: &str = "event_id::VARCHAR, group_hash, epoch_us(timestamp), epoch_us(received_at), title, level,
     platform, environment, release, user_key, message, trace_id::VARCHAR, span_id, project_id";
 
-fn event_summary(r: &duckdb::Row<'_>) -> duckdb::Result<EventSummary> {
+fn event_summary(r: &mallard_duck::duckdb::Row<'_>) -> mallard_duck::duckdb::Result<EventSummary> {
     Ok(EventSummary {
         event_id: r.get::<_, String>(0)?.replace('-', ""),
         project_id: r.get::<_, i32>(13)? as u32,

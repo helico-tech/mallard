@@ -244,11 +244,9 @@ pub struct ServerInfo {
     pub queue_capacity: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct ApiError {
-    pub error: String,
-}
+/// Error body of every non-2xx `/v1` response: `error` is a code such as
+/// `not_found`, `message` the text for people (shared with the OTel API).
+pub use mallard_common::ApiError;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(IntoParams))]

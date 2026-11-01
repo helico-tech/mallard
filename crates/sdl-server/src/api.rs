@@ -5,7 +5,6 @@
 use crate::AppState;
 use crate::db::read::{self, Window, parse_group_id};
 use crate::db::{ProjectRow, WriteCmd, WriteError};
-use crate::ingest::constant_time_eq;
 use crate::sourcemaps::{self, AssembleRequest, AssembleResponse, SourcemapError};
 use axum::extract::{Multipart, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
@@ -29,7 +28,8 @@ pub struct ApiErr(StatusCode, String);
 
 impl IntoResponse for ApiErr {
     fn into_response(self) -> Response {
-        (self.0, Json(ApiError { error: self.1 })).into_response()
+        let code = self.0.canonical_reason().unwrap_or("error").to_ascii_lowercase().replace(' ', "_");
+        (self.0, Json(ApiError { error: code, message: self.1 })).into_response()
     }
 }
 
@@ -129,14 +129,8 @@ pub fn meta_router(state: Arc<AppState>) -> Router {
 }
 
 async fn require_token(State(state): S, req: Request, next: Next) -> Response {
-    let token = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
-        .map(str::trim);
-    let ok = token.is_some_and(|t| state.tokens.iter().any(|known| constant_time_eq(known.as_bytes(), t.as_bytes())));
-    if !ok {
+    let header = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    if !state.tokens.allows(header) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "missing or invalid bearer token", "detail": "Invalid token"})),
@@ -162,7 +156,7 @@ async fn readyz(State(state): S) -> Response {
 
 fn to_project(state: &AppState, p: ProjectRow) -> Result<Project, ApiErr> {
     // Config::validate guarantees a public_url that can carry the key.
-    let dsn = Dsn::build(&state.cfg.public_url, &p.public_key, p.id).map_err(anyhow::Error::from)?;
+    let dsn = Dsn::build(&state.public_url, &p.public_key, p.id).map_err(anyhow::Error::from)?;
     Ok(Project {
         dsn,
         id: p.id,
@@ -402,7 +396,7 @@ async fn chunk_options(State(state): S, Path(org): Path<String>) -> Response {
     if !state.sourcemaps.enabled() {
         return sentry_err(StatusCode::NOT_IMPLEMENTED, "sourcemap storage is not configured");
     }
-    let base = state.cfg.public_url.trim_end_matches('/');
+    let base = state.public_url.trim_end_matches('/');
     Json(json!({
         "url": format!("{base}/api/0/organizations/{org}/chunk-upload/"),
         "chunkSize": sourcemaps::CHUNK_SIZE,

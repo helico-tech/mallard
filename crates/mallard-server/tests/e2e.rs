@@ -16,7 +16,7 @@ const TRACES: usize = 40;
 /// Bind all three on port 0 first, so parallel tests never race for ports.
 async fn listeners() -> Listeners {
     let l = || tokio::net::TcpListener::bind("127.0.0.1:0");
-    Listeners { http: l().await.unwrap(), otlp_http: l().await.unwrap(), otlp_grpc: l().await.unwrap() }
+    Listeners { http: l().await.unwrap(), otlp_http: l().await.unwrap(), otlp_grpc: l().await.unwrap(), metrics: None }
 }
 
 fn config(dir: &std::path::Path, l: &Listeners) -> Config {

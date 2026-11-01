@@ -1,7 +1,7 @@
 //! In-process integration tests: the server runs through the library API,
 //! events come from the official Rust `sentry` SDK and raw HTTP.
 
-use sdl_server::{Config, Server};
+use sdl_server::{Config, Host, Server, Standalone};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -22,15 +22,14 @@ impl TestServer {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let cfg = Config {
-            public_url: format!("http://{addr}"),
-            catalog: dir.path().join("catalog.ducklake").display().to_string(),
-            storage_url: Some(dir.path().join("storage").display().to_string()),
-            api_token: Some(TOKEN.into()),
-            batch_window: Duration::from_millis(20),
-            ..Config::default()
-        };
-        let server = Server::new(cfg).await.unwrap();
+        let mut cfg = Standalone::new(
+            &dir.path().join("storage").display().to_string(),
+            &dir.path().join("catalog.ducklake").display().to_string(),
+            TOKEN,
+        );
+        cfg.public_url = format!("http://{addr}");
+        cfg.batch_window = Some(Duration::from_millis(20));
+        let server = Server::new(&cfg).await.unwrap();
         Self::serve(server, listener, dir).await
     }
 
@@ -98,6 +97,8 @@ async fn rust_sdk_events_are_grouped_and_queryable() {
     let project = t.create_project("Rust API").await;
     let dsn = project["dsn"].as_str().unwrap().to_string();
     assert!(dsn.starts_with("http://") && dsn.ends_with("/1"), "{dsn}");
+    let info = t.get("/v1/info").await;
+    assert!(info["catalog"].as_str().unwrap().contains("catalog.ducklake"), "{info}");
 
     let (client, hub) = sentry_hub(&dsn);
     hub.configure_scope(|s| {
@@ -471,7 +472,7 @@ async fn sourcemap_upload_protocol_and_symbolication() {
 async fn embedded_with_shared_connection_and_clean_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     // The embedding app owns the connection and the catalog...
-    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let conn = mallard_duck::duckdb::Connection::open_in_memory().unwrap();
     conn.execute_batch(&format!(
         "INSTALL ducklake; LOAD ducklake; ATTACH 'ducklake:{}' AS lake (DATA_PATH '{}/');
          CREATE SCHEMA lake.otel; CREATE TABLE lake.otel.spans (trace_id UUID, name VARCHAR);",
@@ -482,14 +483,16 @@ async fn embedded_with_shared_connection_and_clean_shutdown() {
     let probe = conn.try_clone().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let cfg = Config {
+    let mut cfg = Config::default();
+    cfg.ingest.batch_window = Duration::from_millis(20);
+    let host = Host {
         public_url: format!("http://{addr}/sentry"),
-        api_token: Some(TOKEN.into()),
-        catalog_wide_maintenance: false,
-        batch_window: Duration::from_millis(20),
-        ..Config::default()
+        api_tokens: vec![TOKEN.into()],
+        artifacts: None,
+        catalog_maintenance: None,
+        maintenance_threads: 0,
     };
-    let server = Server::with_connection(cfg, conn).await.unwrap();
+    let server = Server::with_connection(cfg, host, conn).await.unwrap();
     // ...and mounts us below a prefix.
     let app = axum::Router::new().nest("/sentry", server.router());
     tokio::spawn(async move {

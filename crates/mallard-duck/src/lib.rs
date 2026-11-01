@@ -338,9 +338,8 @@ pub fn object_store_options(st: &StorageConfig, url: &str) -> ObjectStoreOptions
         _ => true,
     };
     ObjectStoreOptions {
-        endpoint: text("endpoint").map(|e| {
-            if e.contains("://") { e } else { format!("{}://{e}", if use_ssl { "https" } else { "http" }) }
-        }),
+        endpoint: text("endpoint")
+            .map(|e| if e.contains("://") { e } else { format!("{}://{e}", if use_ssl { "https" } else { "http" }) }),
         region: text("region"),
         path_style: s.get("url_style").is_some_and(|v| v.eq_ignore_ascii_case("path")),
         key_id: text("key_id"),

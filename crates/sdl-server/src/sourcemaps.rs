@@ -194,8 +194,8 @@ pub struct SourceMaps {
 }
 
 impl SourceMaps {
-    pub fn new(storage: Option<Storage>, cache_mb: u64) -> Self {
-        let budget = cache_mb.max(16) * 1024 * 1024;
+    pub fn new(storage: Option<Storage>, cache: mallard_common::ByteSize) -> Self {
+        let budget = cache.0.max(16 << 20);
         SourceMaps {
             storage,
             bundles: Cache::builder()

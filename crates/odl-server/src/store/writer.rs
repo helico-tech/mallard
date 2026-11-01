@@ -29,7 +29,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
-use duckdb::Connection;
+use mallard_duck::duckdb::Connection;
 use tracing::{debug, error, info, warn};
 
 use super::{CATALOG, Lake, schema::TableId};

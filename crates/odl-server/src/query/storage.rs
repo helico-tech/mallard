@@ -1,6 +1,6 @@
 //! Storage statistics from the DuckLake catalog metadata.
 
-use duckdb::{Connection, params};
+use mallard_duck::duckdb::{Connection, params};
 use odl_api::TableStats;
 
 use super::QResult;
@@ -41,7 +41,7 @@ pub fn tables(conn: &Connection, schema: &str) -> QResult<(i64, Vec<TableStats>)
     Ok((snapshot, out))
 }
 
-fn inlined_rows(conn: &Connection, meta: &str, table_id: i64) -> duckdb::Result<i64> {
+fn inlined_rows(conn: &Connection, meta: &str, table_id: i64) -> mallard_duck::duckdb::Result<i64> {
     let mut stmt =
         conn.prepare(&format!("SELECT table_name FROM {meta}.ducklake_inlined_data_tables WHERE table_id = ?"))?;
     let names: Vec<String> = stmt.query_map(params![table_id], |r| r.get(0))?.collect::<Result<_, _>>()?;

@@ -1,57 +1,54 @@
 //! Platform configuration.
 //!
-//! One TOML file plus `MALLARD_*` environment variables (`__` separates
-//! sections, e.g. `MALLARD_STORAGE__DATA_PATH=s3://bucket/lake/`,
-//! `MALLARD_OTEL__RETENTION__TRACES=3d`, `MALLARD_SENTRY__RETENTION_DAYS=30`).
-//! `${NAME}` inside the file is replaced by environment variable NAME.
+//! One TOML file plus `MALLARD_<SECTION>__<KEY>` environment variables, e.g.
+//! `MALLARD_STORAGE__DATA_PATH=s3://bucket/lake/`,
+//! `MALLARD_OTEL__RETENTION__TRACES=0`, `MALLARD_SENTRY__RETENTION__EVENTS=30d`.
+//! String settings keep the variable's text as is; `${NAME}` inside a
+//! string value is replaced by environment variable NAME
+//! (see [`mallard_common::config`]). Unknown keys are errors.
 //!
-//! Shared settings (`[server]`, `[storage]`, `[duckdb]`) are copied into
-//! both library configs; `[otel]` and `[sentry]` hold the rest of each
-//! library's own config.
+//! `[server]`, `[storage]` and `[duckdb]` are mallard's. `[otel]` and
+//! `[sentry]` hold only the settings each side owns.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use figment::{
-    Figment,
-    providers::{Env, Format, Toml},
-};
-use serde::Deserialize;
+use mallard_common::LogFormat;
+use mallard_duck::{DuckDbConfig, StorageConfig};
+use serde::{Deserialize, Serialize};
 
 pub const SENTRY_PREFIX: &str = "/sentry";
 pub const OTEL_PREFIX: &str = "/otel";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
-    /// DuckLake catalog + data path + secrets, shared by both libraries.
-    /// `schema` is ignored here: otel uses `otel`, sentry uses `sentry`.
-    pub storage: odl_server::config::StorageConfig,
-    pub duckdb: odl_server::config::DuckDbConfig,
-    /// otel-ducklake settings: `[otel.ingest]`, `[otel.retention]`,
-    /// `[otel.maintenance]`, `[otel.query]`.
-    pub otel: odl_server::config::Config,
-    /// sentry-ducklake settings, e.g. `retention_days`, `storage_url`
-    /// (sourcemap bundles).
+    /// DuckLake catalog, data path, secrets and the sourcemap location,
+    /// shared by both sides.
+    pub storage: StorageConfig,
+    pub duckdb: DuckDbConfig,
+    pub otel: OtelConfig,
     pub sentry: sdl_server::Config,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Sentry ingest, both query APIs, health and metrics.
+    /// Sentry ingest, both query APIs, OTLP/HTTP, health and metrics.
     pub http_addr: String,
     pub otlp_http_addr: String,
     pub otlp_grpc_addr: String,
+    /// Serve `/metrics` on this address instead of `http_addr` (keeps it off
+    /// a public ingress), e.g. `0.0.0.0:9090`. Empty = on `http_addr`.
+    pub metrics_addr: String,
     /// How clients reach `http_addr`; used to build Sentry DSNs.
     pub public_url: String,
     /// Bearer tokens for the query/management APIs of both sides. Required.
     pub api_tokens: Vec<String>,
     /// Bearer tokens for OTLP ingest; empty = open. (Sentry ingest uses DSN keys.)
     pub ingest_tokens: Vec<String>,
-    /// `text` or `json`.
-    pub log_format: String,
+    pub log_format: LogFormat,
 }
 
 impl Default for ServerConfig {
@@ -60,23 +57,37 @@ impl Default for ServerConfig {
             http_addr: "0.0.0.0:8080".into(),
             otlp_http_addr: "0.0.0.0:4318".into(),
             otlp_grpc_addr: "0.0.0.0:4317".into(),
+            metrics_addr: String::new(),
             public_url: "http://localhost:8080".into(),
             api_tokens: vec![],
             ingest_tokens: vec![],
-            log_format: "text".into(),
+            log_format: LogFormat::Text,
         }
     }
+}
+
+/// `[otel]`: the settings otel-ducklake owns.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OtelConfig {
+    pub ingest: odl_server::config::IngestConfig,
+    pub retention: odl_server::config::RetentionConfig,
+    pub maintenance: odl_server::config::MaintenanceConfig,
+    pub query: odl_server::config::QueryConfig,
 }
 
 impl Config {
     /// Load `path` (optional) and apply `MALLARD_*` environment overrides.
     pub fn load(path: Option<&Path>) -> Result<Config> {
-        let mut fig = Figment::new();
-        if let Some(p) = path {
-            let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-            fig = fig.merge(Toml::string(&expand_env(&text)?));
-        }
-        let mut cfg: Config = fig.merge(env_overrides()).extract().context("invalid configuration")?;
+        Self::finish(mallard_common::config::load(path, "MALLARD_")?)
+    }
+
+    /// [`Config::load`] from text and explicit environment variables.
+    pub fn load_from(text: Option<&str>, vars: impl IntoIterator<Item = (String, String)>) -> Result<Config> {
+        Self::finish(mallard_common::config::load_from(text, "MALLARD_", vars)?)
+    }
+
+    fn finish(mut cfg: Config) -> Result<Config> {
         cfg.normalize();
         cfg.validate()?;
         Ok(cfg)
@@ -97,54 +108,56 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        // The Sentry API rejects every request without a token, and the OTel
-        // API would be open to anyone: require one so both sides behave alike.
+        // One policy for both query APIs: a token is required.
         anyhow::ensure!(
             !self.server.api_tokens.is_empty(),
-            "server.api_tokens must contain at least one token (e.g. MALLARD_SERVER__API_TOKENS='[\"secret\"]')"
-        );
-        anyhow::ensure!(
-            self.server.public_url.starts_with("http://") || self.server.public_url.starts_with("https://"),
-            "server.public_url must start with http:// or https://"
+            "server.api_tokens must contain at least one token (e.g. MALLARD_SERVER__API_TOKENS=secret)"
         );
         self.otel_config().validate().context("otel")?;
-        self.sentry_config().validate().context("sentry")?;
-        if let Some(artifacts) = &self.sentry.storage_url {
-            anyhow::ensure!(
-                !is_inside(artifacts, &self.storage.data_path),
-                "sentry.storage_url ({artifacts}) must not be inside storage.data_path ({}): \
-                 lake maintenance deletes files there that the catalog does not know",
-                self.storage.data_path
-            );
-        }
+        self.sentry.validate().context("sentry")?;
+        self.sentry_host().validate().context("server.public_url")?;
+        let artifacts = &self.storage.artifacts_path;
+        anyhow::ensure!(
+            artifacts.is_empty() || !is_inside(artifacts, &self.storage.data_path),
+            "storage.artifacts_path ({artifacts}) must not be inside storage.data_path ({}): \
+             lake maintenance deletes files there that the catalog does not know",
+            self.storage.data_path
+        );
         Ok(())
     }
 
     /// The otel-ducklake config with the shared settings applied.
     pub fn otel_config(&self) -> odl_server::config::Config {
-        let mut c = self.otel.clone();
-        c.storage = self.storage.clone();
-        c.storage.schema = "otel".into();
-        c.duckdb = self.duckdb.clone();
-        c.auth.api_tokens = self.server.api_tokens.clone();
-        c.auth.ingest_tokens = self.server.ingest_tokens.clone();
-        // otel owns catalog-wide maintenance on the shared catalog (ADR 0001).
-        c.maintenance.catalog_wide = true;
-        c
+        let o = &self.otel;
+        odl_server::config::Config {
+            server: Default::default(),
+            storage: StorageConfig { artifacts_path: String::new(), ..self.storage.clone() },
+            ingest: o.ingest.clone(),
+            retention: o.retention.clone(),
+            maintenance: o.maintenance.clone(),
+            query: o.query.clone(),
+            auth: odl_server::config::AuthConfig {
+                api_tokens: self.server.api_tokens.clone(),
+                ingest_tokens: self.server.ingest_tokens.clone(),
+            },
+            duckdb: self.duckdb.clone(),
+        }
     }
 
-    /// The sentry-ducklake config with the shared settings applied.
-    pub fn sentry_config(&self) -> sdl_server::Config {
-        let mut c = self.sentry.clone();
-        c.lake_alias = odl_server::CATALOG.into();
-        c.schema = "sentry".into();
-        c.public_url = format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/'));
-        c.api_token = (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(",").into());
-        c.catalog_wide_maintenance = false;
-        // Global DuckDB settings belong to the platform ([duckdb]); a per-
-        // library `SET threads` would also throttle otel on the shared DB.
-        c.maintenance_threads = 0;
-        c
+    /// What mallard decides for the Sentry side. Otel owns catalog-wide
+    /// maintenance (ADR 0001); global DuckDB settings belong to `[duckdb]`.
+    pub fn sentry_host(&self) -> sdl_server::Host {
+        let artifacts = &self.storage.artifacts_path;
+        sdl_server::Host {
+            public_url: format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/')),
+            api_tokens: self.server.api_tokens.clone(),
+            artifacts: (!artifacts.is_empty()).then(|| sdl_server::Artifacts {
+                url: artifacts.clone(),
+                options: mallard_duck::object_store_options(&self.storage, artifacts),
+            }),
+            catalog_maintenance: None,
+            maintenance_threads: 0,
+        }
     }
 }
 
@@ -157,153 +170,146 @@ fn is_inside(inner: &str, outer: &str) -> bool {
     norm(inner).starts_with(&norm(outer))
 }
 
-/// `MALLARD_<SECTION>__<KEY>` variables. Names without `__` (e.g. `MALLARD_CONFIG`,
-/// or `MALLARD_API_TOKEN` used through `${...}` in the file) are not overrides.
-fn env_overrides() -> Env {
-    Env::prefixed("MALLARD_").filter(|k| k.as_str().contains("__")).split("__")
-}
-
-/// Replace `${NAME}` with the value of environment variable NAME.
-/// Comment lines are left alone.
-fn expand_env(text: &str) -> Result<String> {
-    let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        if line.trim_start().starts_with('#') {
-            out.push_str(line);
-            continue;
-        }
-        let mut rest = line;
-        while let Some(i) = rest.find("${") {
-            out.push_str(&rest[..i]);
-            let after = &rest[i + 2..];
-            let end = after.find('}').context("unterminated ${ in config")?;
-            let name = &after[..end];
-            let val = std::env::var(name).with_context(|| format!("environment variable {name} is not set"))?;
-            out.push_str(&val);
-            rest = &after[end + 1..];
-        }
-        out.push_str(rest);
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
-    fn with_token() -> Config {
-        let mut c = Config::default();
-        c.server.api_tokens = vec!["t".into()];
-        c
+    fn load(text: &str, vars: &[(&str, &str)]) -> Result<Config> {
+        Config::load_from(Some(text), vars.iter().map(|(k, v)| (k.to_string(), v.to_string())))
     }
 
-    #[test]
-    fn defaults_plus_a_token_are_valid() {
-        with_token().validate().unwrap();
-    }
+    const TOKEN: &[(&str, &str)] = &[("MALLARD_SERVER__API_TOKENS", "t")];
 
     #[test]
-    #[allow(clippy::result_large_err)] // figment's Jail API returns figment::Error
     fn example_config_loads() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("MALLARD_API_TOKEN", "t");
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/mallard.example.toml");
-            Config::load(Some(Path::new(path))).map_err(|e| e.to_string())?;
-            Ok(())
-        });
+        let text = include_str!("../../../config/mallard.example.toml");
+        let cfg = load(text, &[("MALLARD_API_TOKEN", "t")]).unwrap();
+        assert_eq!(cfg.server.api_tokens, ["t"]);
     }
 
     #[test]
     fn an_api_token_is_required() {
         // Without one, the OTel query API would be open while Sentry's is closed.
-        let err = Config::default().validate().unwrap_err();
+        let err = load("", &[]).unwrap_err();
         assert!(err.to_string().contains("api_tokens"), "{err}");
+        // A ${VAR} token that is empty is dropped, so this is still an error.
+        assert!(load("server.api_tokens = [\"${T}\"]", &[("T", "")]).is_err());
     }
 
     #[test]
-    fn shared_settings_reach_both_libraries() {
-        let cfg: Config = Figment::new()
-            .merge(Toml::string(
-                r#"
-                [server]
-                public_url = "https://mallard.example.com/"
-                api_tokens = ["a", "b"]
-                [storage]
-                catalog = "postgres:host=pg"
-                data_path = "s3://bucket/lake/"
-                [otel.retention]
-                traces = "3d"
-                [sentry]
-                retention_days = 30
-                "#,
-            ))
-            .extract()
-            .unwrap();
+    fn env_overrides_keep_strings() {
+        let cfg = load(
+            "",
+            &[
+                ("MALLARD_SERVER__API_TOKENS", "123"),
+                ("MALLARD_SERVER__PUBLIC_URL", "https://x.example"),
+                ("MALLARD_OTEL__RETENTION__TRACES", "0"),
+                ("MALLARD_SENTRY__RETENTION__EVENTS", "0"),
+                ("MALLARD_DUCKDB__MEMORY_LIMIT", "2000000"),
+                ("MALLARD_CONFIG", "/etc/x.toml"),
+                ("MALLARD_API_TOKEN", "not an override"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(cfg.server.api_tokens, ["123"], "a single numeric token");
+        assert_eq!(cfg.server.public_url, "https://x.example");
+        assert!(cfg.otel.retention.traces.is_zero());
+        assert!(cfg.sentry.retention.events.is_zero());
+        assert_eq!(cfg.duckdb.memory_limit, Some(mallard_common::ByteSize::mb(2)));
+    }
+
+    #[test]
+    fn interpolated_values_may_contain_quotes() {
+        let pw = r#"p"w\d'x"#;
+        let cfg = load(
+            "[storage]\ncatalog = \"postgres:password=${PW}\" # ${NOT_SET_IN_A_COMMENT}\n\
+             [server]\napi_tokens = [\"${MALLARD_API_TOKEN}\"]",
+            &[("PW", pw), ("MALLARD_API_TOKEN", "a,b")],
+        )
+        .unwrap();
+        assert_eq!(cfg.storage.catalog, format!("postgres:password={pw}"));
+        assert_eq!(cfg.server.api_tokens, ["a", "b"]);
+    }
+
+    #[test]
+    fn unknown_and_overridden_keys_are_rejected() {
+        for bad in [
+            "[server]\ntypo = 1",
+            "[sentry]\nretention_days = 30",
+            "[sentry]\nstorage_url = \"x\"",
+            "[sentry]\npublic_url = \"http://x\"",
+            "[otel.server]\napi_addr = \"x\"",
+            "[otel.storage]\ncatalog = \"x\"",
+            "[otel.auth]\napi_tokens = []",
+            "[otel.maintenance]\ncatalog_wide = false",
+            "[storage]\nschema = \"x\"",
+            "[server]\nlog_format = \"xml\"",
+        ] {
+            assert!(load(bad, TOKEN).is_err(), "{bad}");
+        }
+        assert!(load("", &[("MALLARD_SENTRY__TYPO", "1"), TOKEN[0]]).is_err());
+    }
+
+    #[test]
+    fn shared_settings_reach_both_sides() {
+        let cfg = load(
+            r#"
+            [server]
+            public_url = "https://mallard.example.com/"
+            api_tokens = ["a", "b"]
+            [storage]
+            catalog = "postgres:host=pg"
+            data_path = "s3://bucket/lake/"
+            artifacts_path = "s3://bucket/artifacts"
+            [[storage.secrets]]
+            type = "s3"
+            key_id = "k"
+            secret = "s"
+            endpoint = "minio:9000"
+            use_ssl = false
+            url_style = "path"
+            [otel.retention]
+            traces = "3d"
+            [sentry.retention]
+            events = "30d"
+            "#,
+            &[],
+        )
+        .unwrap();
         let o = cfg.otel_config();
         assert_eq!(o.storage.data_path, "s3://bucket/lake/");
-        assert_eq!(o.storage.schema, "otel");
-        assert_eq!(o.retention.traces, std::time::Duration::from_secs(3 * 86_400));
-        assert_eq!(o.auth.api_tokens, vec!["a", "b"]);
-        let s = cfg.sentry_config();
-        assert_eq!(s.schema, "sentry");
-        assert_eq!(s.lake_alias, "lake");
-        assert_eq!(s.public_url, "https://mallard.example.com/sentry");
-        assert_eq!(s.api_tokens(), vec!["a", "b"]);
-        assert_eq!(s.retention_days, 30);
-        assert!(!s.catalog_wide_maintenance);
-        assert_eq!(s.maintenance_threads, 0);
-    }
-
-    #[test]
-    #[allow(clippy::result_large_err)] // figment's Jail API returns figment::Error
-    fn only_section_vars_override() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("MALLARD_CONFIG", "/etc/x.toml");
-            jail.set_env("MALLARD_API_TOKEN", "t");
-            jail.set_env("MALLARD_SERVER__PUBLIC_URL", "https://x.example");
-            jail.set_env("MALLARD_OTEL__RETENTION__TRACES", "3d");
-            // Figment reads these as numbers; typed values must accept them.
-            jail.set_env("MALLARD_OTEL__RETENTION__LOGS", "0");
-            jail.set_env("MALLARD_DUCKDB__MEMORY_LIMIT", "2000000");
-            let cfg: Config = Figment::new().merge(env_overrides()).extract()?;
-            assert_eq!(cfg.server.public_url, "https://x.example");
-            assert_eq!(cfg.otel.retention.traces, std::time::Duration::from_secs(3 * 86_400));
-            assert!(cfg.otel.retention.logs.is_zero());
-            assert_eq!(cfg.duckdb.memory_limit, Some(odl_server::config::ByteSize::mb(2)));
-            Ok(())
-        });
+        assert_eq!(o.retention.traces, Duration::from_secs(3 * 86_400));
+        assert_eq!(o.auth.api_tokens, ["a", "b"]);
+        assert_eq!(cfg.sentry.retention.events, Duration::from_secs(30 * 86_400));
+        let h = cfg.sentry_host();
+        assert_eq!(h.public_url, "https://mallard.example.com/sentry");
+        assert_eq!(h.api_tokens, ["a", "b"]);
+        assert_eq!(h.catalog_maintenance, None);
+        assert_eq!(h.maintenance_threads, 0);
+        let a = h.artifacts.unwrap();
+        assert_eq!(a.url, "s3://bucket/artifacts");
+        assert_eq!(a.options.endpoint.as_deref(), Some("http://minio:9000"));
+        assert!(a.options.path_style);
+        assert_eq!(a.options.key_id.as_deref(), Some("k"));
     }
 
     #[test]
     fn artifacts_must_not_live_inside_the_lake() {
-        let mut cfg = with_token();
-        cfg.storage.data_path = "s3://bucket/lake/".into();
-        cfg.sentry.storage_url = Some("s3://bucket/lake/artifacts".into());
-        assert!(cfg.validate().is_err());
-        cfg.sentry.storage_url = Some("s3://bucket/lake".into());
-        assert!(cfg.validate().is_err());
-        cfg.sentry.storage_url = Some("s3://bucket/lake-artifacts".into());
-        cfg.validate().unwrap();
-        cfg.sentry.storage_url = Some("s3://bucket/artifacts".into());
-        cfg.validate().unwrap();
+        let with = |a: &str| {
+            load(&format!("[storage]\ndata_path = \"s3://bucket/lake/\"\nartifacts_path = \"{a}\""), TOKEN).map(|_| ())
+        };
+        assert!(with("s3://bucket/lake/artifacts").is_err());
+        assert!(with("s3://bucket/lake").is_err());
+        with("s3://bucket/lake-artifacts").unwrap();
+        with("s3://bucket/artifacts").unwrap();
     }
 
     #[test]
     fn tokens_split_on_commas() {
-        let mut cfg = Config::default();
-        cfg.server.api_tokens = vec!["a, b".into(), "".into()];
-        cfg.server.ingest_tokens = vec!["".into()];
-        cfg.normalize();
-        assert_eq!(cfg.server.api_tokens, vec!["a", "b"]);
+        let cfg = load("[server]\napi_tokens = [\"a, b\", \"\"]\ningest_tokens = [\"\"]", &[]).unwrap();
+        assert_eq!(cfg.server.api_tokens, ["a", "b"]);
         assert!(cfg.server.ingest_tokens.is_empty());
-    }
-
-    #[test]
-    fn env_expansion() {
-        // SAFETY: test-only, single-threaded use of a unique variable name.
-        unsafe { std::env::set_var("MALLARD_TEST_SECRET_X", "s3cr3t") };
-        assert_eq!(expand_env("k = \"${MALLARD_TEST_SECRET_X}\"").unwrap(), "k = \"s3cr3t\"");
-        assert!(expand_env("${MALLARD_TEST_MISSING_Y}").is_err());
-        assert_eq!(expand_env("  # ${MALLARD_TEST_MISSING_Y}\n").unwrap(), "  # ${MALLARD_TEST_MISSING_Y}\n");
     }
 }

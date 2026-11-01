@@ -113,7 +113,7 @@ impl Client {
     }
 
     /// `Error::Api` from a non-success response. The message is the
-    /// `ApiError.error` field when the body is one, else the start of a
+    /// `ApiError.message` field when the body is one, else the start of a
     /// plain-text body, else the status reason (so a proxy's HTML error
     /// page becomes "Bad Gateway").
     async fn api_error(resp: reqwest::Response) -> Error {
@@ -124,8 +124,15 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.starts_with("text/plain"));
         let text = resp.text().await.unwrap_or_default();
-        let message = match serde_json::from_str::<ApiError>(&text) {
-            Ok(e) => e.error,
+        // `{"error": code, "message": text}`; older servers sent only
+        // `{"error": text}`.
+        #[derive(serde::Deserialize)]
+        struct Body {
+            error: String,
+            message: Option<String>,
+        }
+        let message = match serde_json::from_str::<Body>(&text) {
+            Ok(e) => e.message.unwrap_or(e.error),
             Err(_) if plain => shorten(text.trim(), MAX_ERROR_BODY),
             Err(_) => status.canonical_reason().unwrap_or_default().to_string(),
         };

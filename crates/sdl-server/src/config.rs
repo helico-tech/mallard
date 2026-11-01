@@ -1,322 +1,282 @@
-//! Server configuration.
+//! Configuration.
 //!
-//! Three ways to build it:
-//! - the `sentry-ducklake` binary: flags or `SDL_*` environment variables;
-//! - embedded, in code: `Config { public_url: ..., ..Config::default() }`
-//!   or deserialize it from a config file section (serde);
-//! - embedded, from env with your own prefix: [`Config::from_env_prefix`].
+//! - [`Config`]: the settings this library owns (retention, ingest limits,
+//!   batching, maintenance, queries, sourcemaps). It is the `[sentry]`
+//!   section of mallard's config file (serde, unknown keys rejected).
+//! - [`Host`]: what the application around it decides: the public URL,
+//!   API tokens, where sourcemap bundles go, and whether this side runs
+//!   catalog-wide maintenance.
+//! - The `sentry-ducklake` binary builds both from flags or `SDL_*`
+//!   environment variables ([`crate::Standalone`]).
 
-use clap::Args;
-use serde::Deserialize;
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Args, Deserialize)]
-#[serde(default)]
+use mallard_common::{ByteSize, duration};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Address to listen on (binary only).
-    #[arg(long, env = "SDL_LISTEN", default_value = "0.0.0.0:8000")]
-    pub listen: SocketAddr,
-
-    /// Public base URL of this server, used to build DSNs. May contain a
-    /// path prefix when mounted below one (`https://host/sentry`).
-    #[arg(long, env = "SDL_PUBLIC_URL", default_value = "http://localhost:8000")]
-    pub public_url: String,
-
-    /// DuckLake catalog: a path (DuckDB file, one process only),
-    /// `sqlite:<path>`, `postgres:<libpq string>` or `mysql:<string>`.
-    /// Ignored when the server is given an already attached connection.
-    #[arg(long, env = "SDL_CATALOG", default_value = "./.data/catalog.ducklake")]
-    pub catalog: String,
-
-    /// Alias the DuckLake catalog is attached as.
-    #[arg(long, env = "SDL_LAKE_ALIAS", default_value = "lake")]
-    pub lake_alias: String,
-
-    /// Schema inside the lake that holds our tables.
-    #[arg(long, env = "SDL_SCHEMA", default_value = "sentry")]
-    pub schema: String,
-
-    /// Where data files and sourcemap bundles live:
-    /// `s3://bucket/prefix` (also R2, MinIO, Garage, ...), `gs://bucket/prefix`,
-    /// `az://container/prefix`, or a local path / `file:///path`.
-    /// With an attached connection only sourcemap bundles go here; if unset
-    /// there, sourcemap uploads are disabled.
-    #[arg(long, env = "SDL_STORAGE_URL")]
-    pub storage_url: Option<String>,
-
-    /// Custom S3 endpoint including scheme, e.g. `http://minio:9000`.
-    #[arg(long, env = "SDL_S3_ENDPOINT")]
-    pub s3_endpoint: Option<String>,
-
-    /// S3 region.
-    #[arg(long, env = "SDL_S3_REGION", default_value = "us-east-1")]
-    pub s3_region: String,
-
-    /// Use path-style S3 URLs (needed by most self-hosted S3 servers).
-    #[arg(long, env = "SDL_S3_PATH_STYLE", default_value_t = false)]
-    pub s3_path_style: bool,
-
-    /// Bearer token(s) for the management API and sourcemap uploads, comma
-    /// separated. The binary requires one; without one the API rejects all
-    /// requests.
-    #[arg(long, env = "SDL_API_TOKEN", hide_env_values = true)]
-    pub api_token: Option<Secret>,
-
-    /// Delete events older than this many days (0 = keep forever).
-    #[arg(long, env = "SDL_RETENTION_DAYS", default_value_t = 90)]
-    pub retention_days: u32,
-
-    /// Run catalog-wide maintenance (snapshot expiry, old file cleanup).
-    /// Turn off on all but one service sharing a catalog.
-    #[arg(long, env = "SDL_CATALOG_WIDE_MAINTENANCE", default_value_t = true, action = clap::ArgAction::Set)]
-    pub catalog_wide_maintenance: bool,
-
-    /// Max events per write batch.
-    #[arg(long, env = "SDL_BATCH_MAX", default_value_t = 2000)]
-    pub batch_max: usize,
-
-    /// How long the writer collects events after the first one before
-    /// committing (bounds DuckLake snapshots at low load to one per window).
-    /// Under load, batches of 200+ commit immediately.
-    #[arg(long, env = "SDL_BATCH_WINDOW", value_parser = humantime::parse_duration, default_value = "500ms")]
-    #[serde(with = "humantime_serde")]
-    pub batch_window: Duration,
-
-    /// Events waiting to be written before ingest answers 429.
-    #[arg(long, env = "SDL_QUEUE_CAPACITY", default_value_t = 20000)]
-    pub queue_capacity: usize,
-
-    /// How often small inlined batches are flushed into Parquet files.
-    #[arg(long, env = "SDL_FLUSH_INTERVAL", value_parser = humantime::parse_duration, default_value = "5m")]
-    #[serde(with = "humantime_serde")]
-    pub flush_interval: Duration,
-
-    /// Also flush once this many events are inlined (bounds catalog size).
-    #[arg(long, env = "SDL_FLUSH_ROWS", default_value_t = 50_000)]
-    pub flush_rows: usize,
-
-    /// How often to compact files, apply retention and expire snapshots.
-    #[arg(long, env = "SDL_COMPACT_INTERVAL", value_parser = humantime::parse_duration, default_value = "1h")]
-    #[serde(with = "humantime_serde")]
-    pub compact_interval: Duration,
-
-    /// DuckDB threads used while compacting (sorted merges need memory per
-    /// thread; 1 keeps compaction within small memory limits). 0 = leave the
-    /// thread count alone. DuckDB's thread count is global for the database,
-    /// so queries running at the same time also use this many threads.
-    /// Ignored (0) with a shared connection (`Server::with_connection`).
-    #[arg(long, env = "SDL_MAINTENANCE_THREADS", default_value_t = 1)]
-    pub maintenance_threads: usize,
-
-    /// Keep DuckLake snapshots (and the files they reference) this long.
-    /// Must exceed the age of your oldest catalog backup you may restore.
-    #[arg(long, env = "SDL_SNAPSHOT_RETENTION", value_parser = humantime::parse_duration, default_value = "1h")]
-    #[serde(with = "humantime_serde")]
-    pub snapshot_retention: Duration,
-
-    /// Max size of one event after decompression.
-    #[arg(long, env = "SDL_MAX_EVENT_BYTES", default_value_t = 1024 * 1024)]
-    pub max_event_bytes: usize,
-
-    /// Max size of a request body after decompression.
-    #[arg(long, env = "SDL_MAX_BODY_BYTES", default_value_t = 20 * 1024 * 1024)]
-    pub max_body_bytes: usize,
-
-    /// Ingest requests processed at once (bounds memory for request bodies);
-    /// more wait for a slot.
-    #[arg(long, env = "SDL_INGEST_CONCURRENCY", default_value_t = 256)]
-    pub ingest_concurrency: usize,
-
-    /// Read connections for the query API.
-    #[arg(long, env = "SDL_READERS", default_value_t = 4)]
-    pub readers: usize,
-
-    /// DuckDB worker threads (default: number of CPUs).
-    #[arg(long, env = "SDL_DUCKDB_THREADS")]
-    pub duckdb_threads: Option<usize>,
-
-    /// DuckDB memory limit, e.g. `2GB` (default: DuckDB's 80% of RAM).
-    #[arg(long, env = "SDL_DUCKDB_MEMORY_LIMIT")]
-    pub duckdb_memory_limit: Option<String>,
-
-    /// DuckDB spill directory for large queries (default: `.tmp` in the
-    /// working directory).
-    #[arg(long, env = "SDL_DUCKDB_TEMP_DIR")]
-    pub duckdb_temp_dir: Option<PathBuf>,
-
-    /// Directory with DuckDB extensions (the Docker image pre-installs them).
-    #[arg(long, env = "SDL_EXTENSION_DIR")]
-    pub extension_dir: Option<PathBuf>,
-
-    /// Use the last `X-Forwarded-For` address (the one the proxy in front of
-    /// this server adds) as client IP. Earlier addresses come from the client
-    /// and are ignored. Enable only behind exactly one proxy hop.
-    #[arg(long, env = "SDL_TRUST_FORWARDED_FOR", default_value_t = false)]
-    pub trust_forwarded_for: bool,
-
-    /// Memory budget for cached sourcemaps, in MiB.
-    #[arg(long, env = "SDL_SOURCEMAP_CACHE_MB", default_value_t = 256)]
-    pub sourcemap_cache_mb: u64,
+    pub retention: RetentionConfig,
+    pub ingest: IngestConfig,
+    pub maintenance: MaintenanceConfig,
+    pub query: QueryConfig,
+    pub sourcemaps: SourcemapConfig,
 }
 
-impl Default for Config {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RetentionConfig {
+    /// Delete events older than this (`0` = keep forever), e.g. `90d`.
+    /// Whole days are dropped at once, so it is rounded up to days.
+    #[serde(with = "duration")]
+    pub events: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestConfig {
+    /// Max size of one event after decompression.
+    pub max_event_bytes: ByteSize,
+    /// Max size of a request body after decompression.
+    pub max_body_bytes: ByteSize,
+    /// Ingest requests processed at once (bounds memory for request
+    /// bodies); more wait for a slot.
+    pub concurrency: usize,
+    /// Events waiting to be written before ingest answers 429.
+    pub queue_capacity: usize,
+    /// Max events per write batch.
+    pub batch_max: usize,
+    /// How long the writer collects events after the first one before
+    /// committing (bounds DuckLake snapshots at low load to one per
+    /// window). Under load, batches of 200+ commit immediately.
+    #[serde(with = "duration")]
+    pub batch_window: Duration,
+    /// Use the last `X-Forwarded-For` address (the one the proxy in front
+    /// of this server adds) as client IP. Enable only behind exactly one
+    /// proxy hop.
+    pub trust_forwarded_for: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MaintenanceConfig {
+    /// How often small inlined batches are flushed into Parquet files.
+    #[serde(with = "duration")]
+    pub flush_interval: Duration,
+    /// Also flush once this many events are inlined (bounds catalog size).
+    pub flush_rows: usize,
+    /// How often to compact files and apply retention.
+    #[serde(with = "duration")]
+    pub compact_interval: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QueryConfig {
+    /// Read connections for the query API.
+    pub readers: usize,
+    /// Max time span a single query may cover, e.g. `366d`.
+    #[serde(with = "duration")]
+    pub max_window: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SourcemapConfig {
+    /// Memory for parsed sourcemaps and bundles, e.g. `256MiB`.
+    pub cache_size: ByteSize,
+}
+
+const DAY: Duration = Duration::from_secs(86_400);
+
+impl Default for RetentionConfig {
     fn default() -> Self {
-        Config {
-            listen: "0.0.0.0:8000".parse().expect("valid addr"),
-            public_url: "http://localhost:8000".into(),
-            catalog: "./.data/catalog.ducklake".into(),
-            lake_alias: "lake".into(),
-            schema: "sentry".into(),
-            storage_url: None,
-            s3_endpoint: None,
-            s3_region: "us-east-1".into(),
-            s3_path_style: false,
-            api_token: None,
-            retention_days: 90,
-            catalog_wide_maintenance: true,
+        Self { events: 90 * DAY }
+    }
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            max_event_bytes: ByteSize::mib(1),
+            max_body_bytes: ByteSize::mib(20),
+            concurrency: 256,
+            queue_capacity: 20_000,
             batch_max: 2000,
             batch_window: Duration::from_millis(500),
-            queue_capacity: 20000,
+            trust_forwarded_for: false,
+        }
+    }
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
             flush_interval: Duration::from_secs(300),
             flush_rows: 50_000,
             compact_interval: Duration::from_secs(3600),
-            snapshot_retention: Duration::from_secs(3600),
-            maintenance_threads: 1,
-            max_event_bytes: 1024 * 1024,
-            max_body_bytes: 20 * 1024 * 1024,
-            ingest_concurrency: 256,
-            readers: 4,
-            duckdb_threads: None,
-            duckdb_memory_limit: None,
-            duckdb_temp_dir: None,
-            extension_dir: None,
-            trust_forwarded_for: false,
-            sourcemap_cache_mb: 256,
         }
     }
 }
 
-/// A string that `Debug` does not print, so `?cfg` cannot leak a token.
-#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
-pub struct Secret(String);
-
-impl Secret {
-    pub fn expose(&self) -> &str {
-        &self.0
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self { readers: 4, max_window: 366 * DAY }
     }
 }
 
-impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("\"***\"")
+impl Default for SourcemapConfig {
+    fn default() -> Self {
+        Self { cache_size: ByteSize::mib(256) }
     }
 }
 
-impl From<String> for Secret {
-    fn from(s: String) -> Self {
-        Secret(s)
-    }
-}
-
-impl From<&str> for Secret {
-    fn from(s: &str) -> Self {
-        Secret(s.to_string())
-    }
-}
-
-impl std::str::FromStr for Secret {
-    type Err = std::convert::Infallible;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(s.into())
-    }
-}
+/// Upper bound for every duration setting; keeps date arithmetic in range.
+const MAX_DURATION: Duration = Duration::from_secs(100 * 366 * 86_400);
 
 impl Config {
-    /// Read `<PREFIX><FIELD>` environment variables, e.g. with prefix
-    /// `OBS_SENTRY_`: `OBS_SENTRY_PUBLIC_URL`, `OBS_SENTRY_BATCH_WINDOW=250ms`.
-    /// Unset fields keep their defaults.
-    pub fn from_env_prefix(prefix: &str) -> anyhow::Result<Config> {
-        Ok(envy::prefixed(prefix).from_env::<Config>()?)
-    }
-
-    pub fn api_tokens(&self) -> Vec<String> {
-        self.api_token
-            .as_ref()
-            .map_or("", Secret::expose)
-            .split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Reject values that would break SQL identifiers or the server.
+    /// Check ranges. Units are checked while parsing.
     pub fn validate(&self) -> anyhow::Result<()> {
-        for (name, v) in [("schema", &self.schema), ("lake_alias", &self.lake_alias)] {
-            let ok = !v.is_empty()
-                && v.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-                && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-            anyhow::ensure!(ok, "{name} must match [a-z_][a-z0-9_]*, got {v:?}");
+        let (i, m, q) = (&self.ingest, &self.maintenance, &self.query);
+        for (name, d) in [
+            ("retention.events", self.retention.events),
+            ("ingest.batch_window", i.batch_window),
+            ("maintenance.flush_interval", m.flush_interval),
+            ("maintenance.compact_interval", m.compact_interval),
+            ("query.max_window", q.max_window),
+        ] {
+            anyhow::ensure!(d <= MAX_DURATION, "{name} is longer than 100 years");
         }
+        for (name, d) in [
+            ("maintenance.flush_interval", m.flush_interval),
+            ("maintenance.compact_interval", m.compact_interval),
+            ("query.max_window", q.max_window),
+        ] {
+            anyhow::ensure!(!d.is_zero(), "{name} must be greater than 0");
+        }
+        for (name, n) in [
+            ("ingest.batch_max", i.batch_max),
+            ("ingest.queue_capacity", i.queue_capacity),
+            ("ingest.concurrency", i.concurrency),
+            ("maintenance.flush_rows", m.flush_rows),
+            ("query.readers", q.readers),
+        ] {
+            anyhow::ensure!(n > 0, "{name} must be greater than 0");
+        }
+        Ok(())
+    }
+}
+
+/// Settings the host application decides (not part of [`Config`]).
+#[derive(Clone)]
+pub struct Host {
+    /// Public base URL of the routes, used to build DSNs. May contain a
+    /// path prefix when mounted below one (`https://host/sentry`).
+    pub public_url: String,
+    /// Bearer tokens for the `/v1` API and sourcemap uploads. Without one,
+    /// every API request is refused.
+    pub api_tokens: Vec<String>,
+    /// Where sourcemap bundles go. `None` disables sourcemap upload.
+    pub artifacts: Option<Artifacts>,
+    /// Also expire DuckLake snapshots and delete old files catalog-wide,
+    /// keeping snapshots this long. `None` when another component of a
+    /// shared catalog does it (ADR 0001).
+    pub catalog_maintenance: Option<Duration>,
+    /// DuckDB threads while compacting (`SET threads` is global). 0 = leave
+    /// the setting alone; must be 0 on a shared connection.
+    pub maintenance_threads: usize,
+}
+
+/// Object storage for sourcemap bundles.
+#[derive(Clone, Debug)]
+pub struct Artifacts {
+    /// `s3://bucket/prefix`, `gs://...`, `az://container/prefix` or a local directory.
+    pub url: String,
+    /// Endpoint, region and credentials; unset values come from the
+    /// environment (`AWS_*`, `GCS_HMAC_*`, `AZURE_*`).
+    pub options: mallard_duck::ObjectStoreOptions,
+}
+
+impl Host {
+    pub fn validate(&self) -> anyhow::Result<()> {
         let public_url = url::Url::parse(&self.public_url).ok();
         anyhow::ensure!(
             public_url.is_some_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host()),
             "public_url must be an http(s) URL with a host, got {:?}",
             self.public_url
         );
-        anyhow::ensure!(self.batch_max > 0 && self.queue_capacity > 0, "batch_max and queue_capacity must be > 0");
         Ok(())
+    }
+}
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host")
+            .field("public_url", &self.public_url)
+            .field("api_tokens", &self.api_tokens.len())
+            .field("artifacts", &self.artifacts)
+            .field("catalog_maintenance", &self.catalog_maintenance)
+            .field("maintenance_threads", &self.maintenance_threads)
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
-    #[derive(Parser)]
-    struct T {
-        #[command(flatten)]
-        c: Config,
+    fn load(text: &str) -> anyhow::Result<Config> {
+        mallard_common::config::load_from(Some(text), "SDL_", std::iter::empty())
     }
 
     #[test]
-    fn clap_defaults_match_default_impl() {
-        // Assumes no SDL_* variables are set in the test environment.
-        let a = T::parse_from(["t"]).c;
-        let b = Config::default();
-        assert_eq!(format!("{a:?}"), format!("{b:?}"));
-    }
-
-    #[test]
-    fn serde_partial_with_durations() {
-        let c: Config = serde_json::from_str(r#"{"schema":"errors","batch_window":"250ms","api_token":"t"}"#).unwrap();
-        assert_eq!(c.schema, "errors");
-        assert_eq!(c.batch_window, Duration::from_millis(250));
-        assert_eq!(c.retention_days, 90);
-        assert_eq!(c.api_tokens(), vec!["t"]);
-    }
-
-    #[test]
-    fn debug_hides_the_api_token() {
-        let c = Config { api_token: Some("hunter2".into()), ..Config::default() };
-        assert!(!format!("{c:?}").contains("hunter2"));
-        assert_eq!(c.api_tokens(), vec!["hunter2"]);
-        let c = T::parse_from(["t", "--api-token", "a,b"]).c;
-        assert_eq!(c.api_tokens(), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn validates_identifiers() {
-        let c = Config { schema: "bad;drop".into(), ..Config::default() };
-        assert!(c.validate().is_err());
-        assert!(Config::default().validate().is_ok());
-        for bad in ["data:x", "localhost:8000", "/sentry"] {
-            let c = Config { public_url: bad.into(), ..Config::default() };
-            assert!(c.validate().is_err(), "{bad}");
+    fn sections_with_units() {
+        let c = load(
+            r#"
+            retention.events = "30d"
+            ingest = { batch_window = "250ms", max_event_bytes = "2MiB", trust_forwarded_for = true }
+            sourcemaps.cache_size = "64MB"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.retention.events, 30 * DAY);
+        assert_eq!(c.ingest.batch_window, Duration::from_millis(250));
+        assert_eq!(c.ingest.max_event_bytes, ByteSize(2 << 20));
+        assert!(c.ingest.trust_forwarded_for);
+        assert_eq!(c.sourcemaps.cache_size, ByteSize::mb(64));
+        assert_eq!(c.ingest.max_body_bytes, ByteSize::mib(20), "defaults stay");
+        assert_eq!(load("retention.events = \"0\"").unwrap().retention.events, Duration::ZERO);
+        c.validate().unwrap();
+        for bad in ["retention_days = 90", "storage_url = \"x\"", "ingest.typo = 1", "public_url = \"http://x\""] {
+            assert!(load(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn validates_ranges() {
+        Config::default().validate().unwrap();
+        let mut c = Config::default();
+        c.ingest.batch_max = 0;
+        assert!(c.validate().is_err());
+        let mut c = Config::default();
+        c.query.max_window = Duration::ZERO;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn host_needs_an_http_url() {
+        let host = |u: &str| Host {
+            public_url: u.into(),
+            api_tokens: vec!["hunter2".into()],
+            artifacts: None,
+            catalog_maintenance: None,
+            maintenance_threads: 0,
+        };
+        host("https://x.example/sentry").validate().unwrap();
+        for bad in ["data:x", "localhost:8000", "/sentry"] {
+            assert!(host(bad).validate().is_err(), "{bad}");
+        }
+        assert!(!format!("{:?}", host("http://x")).contains("hunter2"));
     }
 }

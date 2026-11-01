@@ -7,9 +7,10 @@ license.workspace = true
 
 [features]
 default = []
-openapi = ["dep:utoipa"]
+openapi = ["dep:utoipa", "mallard-common/openapi"]
 
 [dependencies]
+mallard-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

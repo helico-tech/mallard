@@ -201,7 +201,8 @@ mod tests {
 
     #[test]
     fn only_section_vars_override() {
-        let cfg = load(None, &[("APP_CONFIG", "/etc/x.toml"), ("APP_TOKEN", "t"), ("OTHER_SERVER__PORT", "1")]).unwrap();
+        let cfg =
+            load(None, &[("APP_CONFIG", "/etc/x.toml"), ("APP_TOKEN", "t"), ("OTHER_SERVER__PORT", "1")]).unwrap();
         assert_eq!(cfg.server.port, 80);
     }
 

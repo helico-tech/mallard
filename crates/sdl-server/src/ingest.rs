@@ -59,7 +59,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/{project_id}/store/", post(store))
         .route("/api/{project_id}/store", post(store))
         .layer(RequestDecompressionLayer::new())
-        .layer(tower::limit::GlobalConcurrencyLimitLayer::new(state.cfg.ingest_concurrency.max(1)))
+        .layer(tower::limit::GlobalConcurrencyLimitLayer::new(state.cfg.ingest.concurrency.max(1)))
         .layer(cors)
         .with_state(state)
 }
@@ -94,7 +94,7 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
         project_id.parse().map_err(|_| sentry_error(StatusCode::BAD_REQUEST, "invalid project id"))?;
     let (parts, body) = req.into_parts();
     let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
-    let forwarded = state.cfg.trust_forwarded_for.then(|| forwarded_ip(&parts.headers)).flatten();
+    let forwarded = state.cfg.ingest.trust_forwarded_for.then(|| forwarded_ip(&parts.headers)).flatten();
     // Authenticate before reading (and decompressing) the body whenever the
     // key is in a header or the query string, so unauthenticated clients
     // cannot make us inflate large bodies. Requests that carry the key only
@@ -104,9 +104,9 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
     let limit = match &header_key {
         Some(key) => {
             check_key(state, project_id, key)?;
-            state.cfg.max_body_bytes
+            state.cfg.ingest.max_body_bytes.as_usize()
         }
-        None => state.cfg.max_body_bytes.min(UNAUTHENTICATED_BODY_LIMIT),
+        None => state.cfg.ingest.max_body_bytes.as_usize().min(UNAUTHENTICATED_BODY_LIMIT),
     };
     let body = axum::body::to_bytes(body, limit).await.map_err(|e| {
         if is_length_limit(&e) {
@@ -223,7 +223,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
         metrics::counter!("sdl_ingest_items_total", "type" => item_type_label(ty)).increment(1);
         match ty {
             "event" | "error" => {
-                if item.payload.len() > state.cfg.max_event_bytes {
+                if item.payload.len() > state.cfg.ingest.max_event_bytes.as_usize() {
                     return sentry_error(StatusCode::PAYLOAD_TOO_LARGE, "event too large");
                 }
                 let raw: Value = match serde_json::from_slice(&item.payload) {
@@ -259,10 +259,12 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
     if let Err(r) = authenticate(&state, &inc, None) {
         return r;
     }
-    let Some(json_bytes) = sdl_protocol::store::decode_store_body(&inc.body, state.cfg.max_event_bytes) else {
+    let Some(json_bytes) =
+        sdl_protocol::store::decode_store_body(&inc.body, state.cfg.ingest.max_event_bytes.as_usize())
+    else {
         return sentry_error(StatusCode::BAD_REQUEST, "invalid or too large event body");
     };
-    if json_bytes.len() > state.cfg.max_event_bytes {
+    if json_bytes.len() > state.cfg.ingest.max_event_bytes.as_usize() {
         return sentry_error(StatusCode::PAYLOAD_TOO_LARGE, "event too large");
     }
     let raw: Value = match serde_json::from_slice(&json_bytes) {

@@ -134,7 +134,10 @@ impl utoipa::Modify for BearerAuth {
 /// `/openapi.json` and `/docs` (an API reference page). Paths are relative,
 /// so the router can be nested. The page script comes from a CDN pinned
 /// with SRI, so `/docs` needs internet access in the browser.
-pub fn docs_routes<S: Clone + Send + Sync + 'static>(spec: &utoipa::openapi::OpenApi, title: &'static str) -> Router<S> {
+pub fn docs_routes<S: Clone + Send + Sync + 'static>(
+    spec: &utoipa::openapi::OpenApi,
+    title: &'static str,
+) -> Router<S> {
     let spec_json = spec.to_json().unwrap_or_default();
     let html = format!(
         r#"<!doctype html>

@@ -44,6 +44,9 @@ enum Cmd {
     Check {
         #[arg(short, long, env = "MALLARD_CONFIG")]
         config: Option<PathBuf>,
+        /// Also open the catalog and storage (extensions, secrets, attach).
+        #[arg(long)]
+        connect: bool,
     },
     /// Download every DuckDB extension any config may need, so the server
     /// runs without internet access (used when building the Docker image).
@@ -98,7 +101,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Serve { config } => return server_cmd::serve(config.as_deref()).await,
-        Cmd::Check { config } => return server_cmd::check(config.as_deref()),
+        Cmd::Check { config, connect } => return server_cmd::check(config.as_deref(), connect).await,
         Cmd::InstallExtensions { dir } => return server_cmd::install_extensions(&dir),
         _ => {}
     }

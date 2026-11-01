@@ -4,6 +4,8 @@ description = "OpenTelemetry collector backed by DuckLake"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "otel-ducklake"
@@ -11,9 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 odl-api.workspace = true
-# json/parquet are compiled in: always needed, and container images then
-# work without downloading them (the extension files are ~100 MB).
-duckdb = { workspace = true, features = ["json", "parquet"] }
+mallard-common = { workspace = true, features = ["server"] }
+mallard-duck.workspace = true
 arrow.workspace = true
 opentelemetry-proto.workspace = true
 tonic.workspace = true
@@ -31,21 +32,20 @@ clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 humantime.workspace = true
+metrics.workspace = true
 xxhash-rust.workspace = true
 flate2.workspace = true
 base64.workspace = true
-toml = "0.9"
-sha2 = "0.10"
-subtle = "2"
 zstd = "0.13"
-tokio-util = "0.7"
+tokio-util.workspace = true
 
 [dev-dependencies]
-odl-client = { path = "../odl-client" }
+odl-client.workspace = true
 futures.workspace = true
 tonic = { workspace = true, features = ["channel"] }
-serde = { workspace = true }
-tempfile = "3"
+tempfile.workspace = true
 reqwest.workspace = true
+
+[lints]
+workspace = true

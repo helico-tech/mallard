@@ -15,7 +15,7 @@ use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crossbeam_channel::{Receiver, RecvTimeoutError};
-use duckdb::{Connection, params};
+use mallard_duck::duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
 use std::collections::HashSet;
@@ -97,10 +97,8 @@ pub struct Writer {
     batch_window: Duration,
     flush_interval: Duration,
     compact_interval: Duration,
-    retention_days: u32,
-    catalog_wide_maintenance: bool,
-    snapshot_retention: Duration,
-    maintenance_threads: usize,
+    retention: Duration,
+    maintenance: Maintenance,
     last_flush: Instant,
     inlined_since_flush: usize,
     flush_rows: usize,
@@ -214,8 +212,25 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     Ok(())
 }
 
+/// Settings for maintenance that is not scoped to this schema.
+#[derive(Debug, Clone, Copy)]
+pub struct Maintenance {
+    /// Expire snapshots and delete old files catalog-wide, keeping
+    /// snapshots this long (`None`: another component does it).
+    pub catalog_wide: Option<Duration>,
+    /// `SET threads` while compacting (0 = leave alone).
+    pub threads: usize,
+}
+
 impl Writer {
-    pub fn new(conn: Connection, ns: Ns, rx: Receiver<WriteCmd>, caches: Arc<Caches>, cfg: &Config) -> Result<Self> {
+    pub fn new(
+        conn: Connection,
+        ns: Ns,
+        rx: Receiver<WriteCmd>,
+        caches: Arc<Caches>,
+        cfg: &Config,
+        maintenance: Maintenance,
+    ) -> Result<Self> {
         conn.execute_batch(&ns.sql("ATTACH IF NOT EXISTS ':memory:' AS $T"))?;
         conn.execute_batch(&ns.sql(STAGING))?;
         Ok(Writer {
@@ -223,18 +238,16 @@ impl Writer {
             ns,
             rx,
             caches,
-            batch_max: cfg.batch_max.max(1),
-            batch_window: cfg.batch_window,
-            flush_interval: cfg.flush_interval,
-            compact_interval: cfg.compact_interval,
-            retention_days: cfg.retention_days,
-            catalog_wide_maintenance: cfg.catalog_wide_maintenance,
-            snapshot_retention: cfg.snapshot_retention,
-            maintenance_threads: cfg.maintenance_threads,
+            batch_max: cfg.ingest.batch_max.max(1),
+            batch_window: cfg.ingest.batch_window,
+            flush_interval: cfg.maintenance.flush_interval,
+            compact_interval: cfg.maintenance.compact_interval,
+            retention: cfg.retention.events,
+            maintenance,
             last_flush: Instant::now(),
             last_compact: Instant::now(),
             inlined_since_flush: 0,
-            flush_rows: cfg.flush_rows.max(1),
+            flush_rows: cfg.maintenance.flush_rows.max(1),
         })
     }
 
@@ -630,11 +643,12 @@ impl Writer {
         let ns = &self.ns;
         let started = Instant::now();
         let mut errors = Vec::new();
-        if self.retention_days > 0 {
+        if !self.retention.is_zero() {
             // Day-aligned cutoff: whole daily partitions are dropped without
-            // writing delete files.
+            // writing delete files. Partial days round up (keep more).
+            let days = self.retention.as_secs().div_ceil(86_400);
             let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
-            let cutoff = (today - chrono::Duration::days(self.retention_days as i64)).timestamp_micros();
+            let cutoff = (today - chrono::Duration::days(days as i64)).timestamp_micros();
             match self
                 .conn
                 .execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])
@@ -646,7 +660,7 @@ impl Writer {
         }
         // Sorted merges need memory per thread: compact with fewer threads,
         // then restore the previous setting.
-        let restore_threads: Option<i64> = match self.maintenance_threads {
+        let restore_threads: Option<i64> = match self.maintenance.threads {
             0 => None,
             n => {
                 let current: Option<i64> =
@@ -673,9 +687,8 @@ impl Writer {
         if let Some(t) = restore_threads {
             let _ = self.conn.execute_batch(&format!("SET threads = {t}"));
         }
-        if self.catalog_wide_maintenance {
-            let cutoff = (Utc::now() - chrono::Duration::from_std(self.snapshot_retention).unwrap_or_default())
-                .timestamp_micros();
+        if let Some(keep) = self.maintenance.catalog_wide {
+            let cutoff = (Utc::now() - chrono::Duration::from_std(keep).unwrap_or_default()).timestamp_micros();
             for (what, sql) in [
                 ("expiring snapshots", "CALL ducklake_expire_snapshots($C, older_than => make_timestamp(?))"),
                 ("cleaning up old files", "CALL ducklake_cleanup_old_files($C, older_than => make_timestamp(?))"),

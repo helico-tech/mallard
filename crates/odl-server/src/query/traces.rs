@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use duckdb::{Connection, params_from_iter, types::Value};
+use mallard_duck::duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{
     OperationSummary, RedStats, ServiceSummary, Span, SpanEvent, SpanLink, SpanSeries, SpanSeriesPoint, Trace,
     TraceSummary,
@@ -22,10 +22,12 @@ const RED_AGGS: &str = "count(*) AS n, count(*) FILTER (WHERE status_code = 'ERR
     approx_quantile(duration_ns, 0.5)::DOUBLE AS p50, approx_quantile(duration_ns, 0.95)::DOUBLE AS p95, \
     approx_quantile(duration_ns, 0.99)::DOUBLE AS p99, max(duration_ns)::DOUBLE AS mx";
 
-fn red(row: &duckdb::Row, first: usize, secs: f64) -> duckdb::Result<RedStats> {
+fn red(row: &mallard_duck::duckdb::Row, first: usize, secs: f64) -> mallard_duck::duckdb::Result<RedStats> {
     let n: i64 = row.get(first)?;
     let errors: i64 = row.get(first + 1)?;
-    let ms = |i: usize| -> duckdb::Result<f64> { Ok(row.get::<_, Option<f64>>(first + i)?.unwrap_or(0.0) / 1e6) };
+    let ms = |i: usize| -> mallard_duck::duckdb::Result<f64> {
+        Ok(row.get::<_, Option<f64>>(first + i)?.unwrap_or(0.0) / 1e6)
+    };
     Ok(RedStats {
         span_count: n as u64,
         error_count: errors as u64,
@@ -184,8 +186,8 @@ pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<Tra
         tid = trace_hex("s.trace_id"),
     );
     let mut params = f.params;
-    params.push(w.start_param());
-    params.push(w.end_param());
+    params.push(super::ts(w.from));
+    params.push(super::ts(w.to));
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(params), |r| {
         Ok(TraceSummary {
@@ -250,7 +252,7 @@ pub fn span_select(alias: &str) -> String {
     )
 }
 
-pub fn span_from_row(r: &duckdb::Row) -> duckdb::Result<Span> {
+pub fn span_from_row(r: &mallard_duck::duckdb::Row) -> mallard_duck::duckdb::Result<Span> {
     let events: Vec<EventJson> = json_col(r.get(15)?);
     let links: Vec<LinkJson> = json_col(r.get(16)?);
     Ok(Span {
@@ -295,7 +297,7 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let spans: Vec<Span> = stmt
-        .query_map(params_from_iter([Value::Text(tid.clone()), w.start_param(), w.end_param()]), span_from_row)?
+        .query_map(params_from_iter([Value::Text(tid.clone()), super::ts(w.from), super::ts(w.to)]), span_from_row)?
         .collect::<Result<_, _>>()?;
     if spans.is_empty() {
         return Err(QueryError::NotFound(format!("trace {tid} not found in the time window")));

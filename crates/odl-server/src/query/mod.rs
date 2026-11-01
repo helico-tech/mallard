@@ -13,13 +13,11 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
-use duckdb::InterruptHandle;
-use duckdb::{Connection, types::Value};
-use odl_api::TimeWindow;
+use chrono::{DateTime, NaiveDateTime, Utc};
+pub use mallard_common::window::Window;
+use mallard_common::window::WindowError;
+use mallard_duck::duckdb::{self, Connection, InterruptHandle, types::Value};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-
-use crate::config::parse_duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
@@ -33,6 +31,12 @@ pub enum QueryError {
     Busy,
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
+}
+
+impl From<WindowError> for QueryError {
+    fn from(e: WindowError) -> Self {
+        QueryError::BadRequest(e.to_string())
+    }
 }
 
 impl From<duckdb::Error> for QueryError {
@@ -177,91 +181,13 @@ impl Reader {
     }
 }
 
-/// A resolved time window in UTC.
-#[derive(Debug, Clone, Copy)]
-pub struct Window {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-}
-
-impl Window {
-    /// Resolve `from`/`to`/`since`. Without `from` and `since` the window is
-    /// `default` long, capped at `max`.
-    pub fn resolve(w: &TimeWindow, default: Duration, max: Duration) -> QResult<Self> {
-        let too_large =
-            || bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max)));
-        let to = w.to.unwrap_or_else(Utc::now);
-        // `since` is user input: check it against `max` before any date
-        // arithmetic, and never let the subtraction overflow (chrono panics).
-        let back = |d: Duration| -> QResult<DateTime<Utc>> {
-            if d > max {
-                return Err(too_large());
-            }
-            TimeDelta::from_std(d)
-                .ok()
-                .and_then(|d| to.checked_sub_signed(d))
-                .ok_or_else(|| bad("time window starts before the earliest supported time"))
-        };
-        let from = match (w.from, w.since.as_deref()) {
-            (Some(f), _) => f,
-            (None, Some(s)) => back(parse_duration(s).map_err(|e| bad(format!("invalid since={s:?}: {e}")))?)?,
-            (None, None) => back(default.min(max))?,
-        };
-        if from >= to {
-            return Err(bad("`from` must be before `to`"));
-        }
-        if (to - from).to_std().unwrap_or(Duration::MAX) > max {
-            return Err(too_large());
-        }
-        Ok(Self { from, to })
-    }
-
-    pub fn secs(&self) -> f64 {
-        (self.to - self.from).num_microseconds().unwrap_or(i64::MAX) as f64 / 1e6
-    }
-
-    pub fn start_param(&self) -> Value {
-        ts_value(self.from.naive_utc())
-    }
-
-    pub fn end_param(&self) -> Value {
-        ts_value(self.to.naive_utc())
-    }
-
-    /// Bucket width in seconds: explicit `step`, else ~60 buckets on a nice boundary.
-    pub fn step(&self, step: Option<&str>) -> QResult<u64> {
-        let secs = self.secs();
-        let s = match step {
-            Some(s) => {
-                let d = parse_duration(s).map_err(|e| bad(format!("invalid step={s:?}: {e}")))?;
-                // At most one bucket for the whole window (also bounds all
-                // arithmetic on the step below).
-                d.as_secs().clamp(1, (secs.ceil() as u64).clamp(1, 366 * 86400))
-            }
-            None => {
-                const NICE: [u64; 17] =
-                    [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 86400];
-                let raw = (secs / 60.0).ceil() as u64;
-                *NICE.iter().find(|n| **n >= raw).unwrap_or(&86400)
-            }
-        };
-        if secs / s as f64 > 5000.0 {
-            return Err(bad("step too small: more than 5000 buckets"));
-        }
-        Ok(s)
-    }
-
-    /// All bucket starts (epoch seconds) for a step.
-    pub fn buckets(&self, step: u64) -> Vec<i64> {
-        let step = step as i64;
-        let first = self.from.timestamp().div_euclid(step) * step;
-        let last = (self.to.timestamp() - 1).div_euclid(step) * step;
-        (0..=((last - first) / step).max(0)).map(|i| first + i * step).collect()
-    }
-}
-
 pub fn ts_value(t: NaiveDateTime) -> Value {
     Value::Timestamp(duckdb::types::TimeUnit::Microsecond, t.and_utc().timestamp_micros())
+}
+
+/// A UTC time as a SQL parameter (e.g. a window bound).
+pub fn ts(t: DateTime<Utc>) -> Value {
+    ts_value(t.naive_utc())
 }
 
 /// Epoch microseconds from DuckDB. Out of range (corrupt data) is logged
@@ -306,7 +232,7 @@ impl Filter {
     }
 
     pub fn window(&mut self, col: &str, w: &Window) {
-        self.add(format!("{col} >= ? AND {col} < ?"), [w.start_param(), w.end_param()]);
+        self.add(format!("{col} >= ? AND {col} < ?"), [ts(w.from), ts(w.to)]);
     }
 
     /// `key=value` filters on span/log/metric attributes or resource attributes.
@@ -354,55 +280,6 @@ pub fn json_str<T: serde::de::DeserializeOwned + Default>(s: Option<&str>) -> T 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
-    #[test]
-    fn windows() {
-        let w = TimeWindow { since: Some("1h".into()), ..Default::default() };
-        let r = Window::resolve(&w, Duration::from_secs(60), Duration::from_secs(7200)).unwrap();
-        assert!((r.secs() - 3600.0).abs() < 1.0);
-        assert_eq!(r.step(None).unwrap(), 60);
-        let too_big = TimeWindow { since: Some("3h".into()), ..Default::default() };
-        assert!(Window::resolve(&too_big, Duration::from_secs(60), Duration::from_secs(7200)).is_err());
-        assert!(r.step(Some("100ms")).is_ok());
-        assert!(r.step(Some("0s")).is_ok());
-    }
-
-    #[test]
-    fn huge_since_is_an_error_not_a_panic() {
-        let w = TimeWindow { since: Some("300000y".into()), ..Default::default() };
-        let day = Duration::from_secs(86_400);
-        assert!(Window::resolve(&w, day, 31 * day).is_err());
-        // Even when the window limit allows it, the subtraction must not overflow.
-        assert!(Window::resolve(&w, day, Duration::MAX).is_err());
-    }
-
-    #[test]
-    fn default_window_is_capped_at_max_window() {
-        let day = Duration::from_secs(86_400);
-        let r = Window::resolve(&TimeWindow::default(), 7 * day, day).unwrap();
-        assert!((r.secs() - 86_400.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn from_must_be_before_to() {
-        let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let w = TimeWindow { from: Some(t), to: Some(t), since: None };
-        assert!(Window::resolve(&w, HOUR, HOUR).is_err());
-    }
-
-    const HOUR: Duration = Duration::from_secs(3600);
-
-    #[test]
-    fn buckets_cover_window() {
-        let w = Window {
-            from: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 30).unwrap(),
-            to: Utc.with_ymd_and_hms(2026, 1, 1, 0, 3, 0).unwrap(),
-        };
-        let b = w.buckets(60);
-        assert_eq!(b.len(), 3);
-        assert_eq!(b[0] % 60, 0);
-    }
 
     #[test]
     fn trace_ids() {

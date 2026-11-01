@@ -1,179 +1,186 @@
-//! Storage abstraction.
-//!
-//! One storage URL holds everything:
-//!
-//! ```text
-//! <storage_url>/lake/        DuckLake Parquet data files (written by DuckDB)
-//! <storage_url>/artifacts/   sourcemap chunks and bundles (written by us)
-//! ```
-//!
-//! DuckDB reaches the lake through its own filesystem layer (httpfs/azure),
-//! configured with a secret built here. Artifacts go through the
-//! `object_store` crate. Both read the same credentials, so users configure
-//! storage once.
+//! Object storage for sourcemap bundles (`<url>/artifacts/`), through the
+//! `object_store` crate. The standalone binary also keeps the lake under
+//! the same URL (`<url>/lake/`, see [`lake`]); DuckDB reaches it through a
+//! secret built from the same settings, so users configure storage once.
 
-use crate::config::Config;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
+use mallard_duck::{ObjectStoreOptions, SecretConfig};
 use object_store::path::Path as ObjPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+enum Kind {
     S3,
     Gcs,
     Azure,
     Local,
 }
 
-#[derive(Clone)]
-pub struct Storage {
-    pub kind: Kind,
-    /// Root URL with a trailing slash, as DuckDB sees it.
-    pub root: String,
-    store: Arc<dyn ObjectStore>,
-    /// Prefix inside the object store for artifacts.
-    artifacts: ObjPath,
-    s3: S3Settings,
+/// A storage URL split up: kind, root URL with a trailing slash (as DuckDB
+/// sees it), bucket or container, and the prefix inside it.
+struct Location {
+    kind: Kind,
+    root: String,
+    bucket: String,
+    prefix: String,
 }
 
-#[derive(Clone, Debug, Default)]
-struct S3Settings {
-    endpoint: Option<String>,
-    region: String,
-    path_style: bool,
+fn locate(url: &str) -> Result<Location> {
+    let url = url.trim().trim_end_matches('/');
+    let split = |rest: &str| {
+        let (b, p) = rest.split_once('/').unwrap_or((rest, ""));
+        (b.to_string(), p.to_string())
+    };
+    let (kind, scheme, rest) = if let Some(r) = url.strip_prefix("s3://").or_else(|| url.strip_prefix("s3a://")) {
+        (Kind::S3, "s3", r)
+    } else if let Some(r) = url.strip_prefix("gs://").or_else(|| url.strip_prefix("gcs://")) {
+        (Kind::Gcs, "gs", r)
+    } else if let Some(r) = url.strip_prefix("az://").or_else(|| url.strip_prefix("azure://")) {
+        (Kind::Azure, "az", r)
+    } else {
+        let path = url.strip_prefix("file://").unwrap_or(url);
+        if path.contains("://") {
+            bail!("unsupported storage url {url:?}; use s3://, gs://, az:// or a local path");
+        }
+        std::fs::create_dir_all(path).with_context(|| format!("creating {path}"))?;
+        let abs = std::fs::canonicalize(path)?;
+        return Ok(Location {
+            kind: Kind::Local,
+            root: format!("{}/", abs.display()),
+            bucket: abs.display().to_string(),
+            prefix: String::new(),
+        });
+    };
+    let (bucket, prefix) = split(rest);
+    Ok(Location { kind, root: format!("{scheme}://{bucket}/{}", with_slash(&prefix)), bucket, prefix })
 }
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// Escape a value for a single-quoted SQL string.
-pub fn sql_str(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+/// GCS through its S3-compatible XML API with HMAC keys: one credential
+/// works for both DuckDB and object_store.
+fn gcs_keys(o: &ObjectStoreOptions) -> Result<(String, String)> {
+    match (o.key_id.clone().or_else(|| env("GCS_HMAC_KEY_ID")), o.secret.clone().or_else(|| env("GCS_HMAC_SECRET"))) {
+        (Some(k), Some(s)) => Ok((k, s)),
+        // Fail now: otherwise object_store silently falls back to the AWS credentials.
+        _ => bail!("gs:// storage needs HMAC keys (a gcs secret, or GCS_HMAC_KEY_ID and GCS_HMAC_SECRET)"),
+    }
+}
+
+/// Where the standalone binary keeps its lake, and the DuckDB secret for it.
+pub struct Lake {
+    pub data_path: String,
+    pub secret: Option<SecretConfig>,
+}
+
+/// The lake below `url` (`<url>/lake/`) with a DuckDB secret built from
+/// `opts` and the `AWS_*` / `GCS_HMAC_*` / `AZURE_STORAGE_*` environment.
+pub fn lake(url: &str, opts: &ObjectStoreOptions) -> Result<Lake> {
+    let loc = locate(url)?;
+    let scope = toml::Value::String(loc.root.trim_end_matches('/').to_string());
+    let text = |s: &str| toml::Value::String(s.to_string());
+    let mut o = std::collections::BTreeMap::new();
+    match loc.kind {
+        Kind::Local => {}
+        Kind::S3 => {
+            o.insert("type".into(), text("s3"));
+            o.insert("scope".into(), scope);
+            match (
+                opts.key_id.clone().or_else(|| env("AWS_ACCESS_KEY_ID")),
+                opts.secret.clone().or_else(|| env("AWS_SECRET_ACCESS_KEY")),
+            ) {
+                (Some(k), Some(s)) => {
+                    o.insert("key_id".into(), text(&k));
+                    o.insert("secret".into(), text(&s));
+                    if let Some(t) = opts.session_token.clone().or_else(|| env("AWS_SESSION_TOKEN")) {
+                        o.insert("session_token".into(), text(&t));
+                    }
+                }
+                // IAM roles / IRSA / profiles via the aws extension.
+                _ => {
+                    o.insert("provider".into(), text("credential_chain"));
+                }
+            }
+            if let Some(r) = &opts.region {
+                o.insert("region".into(), text(r));
+            }
+            if let Some(ep) = &opts.endpoint {
+                let (ssl, host) = match ep.split_once("://") {
+                    Some(("http", h)) => (false, h),
+                    Some((_, h)) => (true, h),
+                    None => (true, ep.as_str()),
+                };
+                o.insert("endpoint".into(), text(host.trim_end_matches('/')));
+                o.insert("use_ssl".into(), toml::Value::Boolean(ssl));
+            }
+            if opts.path_style {
+                o.insert("url_style".into(), text("path"));
+            }
+        }
+        Kind::Gcs => {
+            let (k, s) = gcs_keys(opts)?;
+            o.insert("type".into(), text("gcs"));
+            o.insert("key_id".into(), text(&k));
+            o.insert("secret".into(), text(&s));
+            o.insert("scope".into(), scope);
+        }
+        Kind::Azure => {
+            o.insert("type".into(), text("azure"));
+            if let Some(cs) = env("AZURE_STORAGE_CONNECTION_STRING") {
+                o.insert("connection_string".into(), text(&cs));
+            } else {
+                o.insert("provider".into(), text("credential_chain"));
+                if let Some(a) = env("AZURE_STORAGE_ACCOUNT_NAME") {
+                    o.insert("account_name".into(), text(&a));
+                }
+            }
+        }
+    }
+    let secret = (!o.is_empty()).then(|| SecretConfig { name: Some("sdl_storage".into()), options: o });
+    Ok(Lake { data_path: format!("{}lake/", loc.root), secret })
+}
+
+#[derive(Clone)]
+pub struct Storage {
+    /// Root URL with a trailing slash.
+    root: String,
+    store: Arc<dyn ObjectStore>,
+    /// Prefix inside the object store for artifacts.
+    artifacts: ObjPath,
 }
 
 impl Storage {
-    pub fn new(url: &str, cfg: &Config) -> Result<Self> {
-        let url = url.trim().trim_end_matches('/').to_string();
-        let s3 = S3Settings {
-            endpoint: cfg.s3_endpoint.clone(),
-            region: cfg.s3_region.clone(),
-            path_style: cfg.s3_path_style,
-        };
-        let (kind, root, store, prefix): (Kind, String, Arc<dyn ObjectStore>, String) =
-            if let Some(rest) = url.strip_prefix("s3://").or_else(|| url.strip_prefix("s3a://")) {
-                let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
-                let store = s3_store(bucket, &s3, None)?;
-                (Kind::S3, format!("s3://{bucket}/{}", with_slash(prefix)), store, prefix.to_string())
-            } else if let Some(rest) = url.strip_prefix("gs://").or_else(|| url.strip_prefix("gcs://")) {
-                // GCS through its S3-compatible XML API with HMAC keys: one
-                // credential works for both DuckDB and object_store.
-                let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
-                let gcs = S3Settings {
-                    endpoint: Some("https://storage.googleapis.com".into()),
-                    region: "auto".into(),
-                    path_style: true,
-                };
-                // Fail now: otherwise DuckDB gets empty keys while object_store
-                // silently falls back to the AWS credentials.
-                let (Some(key_id), Some(secret)) = (env("GCS_HMAC_KEY_ID"), env("GCS_HMAC_SECRET")) else {
-                    bail!("gs:// storage needs GCS_HMAC_KEY_ID and GCS_HMAC_SECRET");
-                };
-                let store = s3_store(bucket, &gcs, Some((key_id, secret)))?;
-                (Kind::Gcs, format!("gs://{bucket}/{}", with_slash(prefix)), store, prefix.to_string())
-            } else if let Some(rest) = url.strip_prefix("az://").or_else(|| url.strip_prefix("azure://")) {
-                let (container, prefix) = rest.split_once('/').unwrap_or((rest, ""));
-                let store = object_store::azure::MicrosoftAzureBuilder::from_env()
-                    .with_container_name(container)
-                    .build()
-                    .context("configuring Azure blob storage")?;
-                (Kind::Azure, format!("az://{container}/{}", with_slash(prefix)), Arc::new(store), prefix.to_string())
-            } else {
-                let path = url.strip_prefix("file://").unwrap_or(&url);
-                if path.contains("://") {
-                    bail!("unsupported storage url {url:?}; use s3://, gs://, az:// or a local path");
-                }
-                std::fs::create_dir_all(path).with_context(|| format!("creating {path}"))?;
-                let abs = std::fs::canonicalize(path)?;
-                let store = object_store::local::LocalFileSystem::new_with_prefix(&abs)?;
-                (Kind::Local, format!("{}/", abs.display()), Arc::new(store), String::new())
-            };
-        let artifacts = ObjPath::from(format!("{}artifacts", with_slash(&prefix)).trim_start_matches('/'));
-        Ok(Storage { kind, root, store, artifacts, s3 })
-    }
-
-    /// DuckLake `DATA_PATH`.
-    pub fn lake_data_path(&self) -> String {
-        format!("{}lake/", self.root)
-    }
-
-    /// Extensions DuckDB needs for this storage.
-    pub fn duckdb_extensions(&self) -> &'static [&'static str] {
-        match self.kind {
-            Kind::S3 | Kind::Gcs => &["httpfs"],
-            Kind::Azure => &["azure"],
-            Kind::Local => &[],
-        }
-    }
-
-    /// `CREATE SECRET` statement so DuckDB can read and write the lake.
-    pub fn duckdb_secret_sql(&self) -> Option<String> {
-        match self.kind {
-            Kind::Local => None,
+    /// Artifacts go to `<url>/artifacts/`.
+    pub fn new(url: &str, opts: &ObjectStoreOptions) -> Result<Self> {
+        let loc = locate(url)?;
+        let store: Arc<dyn ObjectStore> = match loc.kind {
             Kind::S3 => {
-                let scope = self.root.trim_end_matches('/');
-                let mut parts = vec!["TYPE s3".to_string(), format!("SCOPE {}", sql_str(scope))];
-                match (env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY")) {
-                    (Some(k), Some(s)) => {
-                        parts.push(format!("KEY_ID {}", sql_str(&k)));
-                        parts.push(format!("SECRET {}", sql_str(&s)));
-                        if let Some(t) = env("AWS_SESSION_TOKEN") {
-                            parts.push(format!("SESSION_TOKEN {}", sql_str(&t)));
-                        }
-                    }
-                    // IAM roles / IRSA / profiles via the aws extension.
-                    _ => parts.push("PROVIDER credential_chain".into()),
-                }
-                parts.push(format!("REGION {}", sql_str(&self.s3.region)));
-                if let Some(ep) = &self.s3.endpoint {
-                    let (ssl, host) = match ep.split_once("://") {
-                        Some(("http", h)) => (false, h),
-                        Some((_, h)) => (true, h),
-                        None => (true, ep.as_str()),
-                    };
-                    parts.push(format!("ENDPOINT {}", sql_str(host.trim_end_matches('/'))));
-                    parts.push(format!("USE_SSL {ssl}"));
-                }
-                if self.s3.path_style {
-                    parts.push("URL_STYLE 'path'".into());
-                }
-                Some(format!("CREATE OR REPLACE SECRET sdl_storage ({})", parts.join(", ")))
+                let keys = opts.key_id.clone().zip(opts.secret.clone());
+                s3_store(&loc.bucket, opts, keys, opts.session_token.clone())?
             }
             Kind::Gcs => {
-                let k = env("GCS_HMAC_KEY_ID").unwrap_or_default();
-                let s = env("GCS_HMAC_SECRET").unwrap_or_default();
-                Some(format!(
-                    "CREATE OR REPLACE SECRET sdl_storage (TYPE gcs, KEY_ID {}, SECRET {}, SCOPE {})",
-                    sql_str(&k),
-                    sql_str(&s),
-                    sql_str(self.root.trim_end_matches('/'))
-                ))
+                let gcs = ObjectStoreOptions {
+                    endpoint: Some("https://storage.googleapis.com".into()),
+                    region: Some("auto".into()),
+                    path_style: true,
+                    ..Default::default()
+                };
+                s3_store(&loc.bucket, &gcs, Some(gcs_keys(opts)?), None)?
             }
-            Kind::Azure => {
-                let mut parts = vec!["TYPE azure".to_string()];
-                if let Some(cs) = env("AZURE_STORAGE_CONNECTION_STRING") {
-                    parts.push(format!("CONNECTION_STRING {}", sql_str(&cs)));
-                } else {
-                    parts.push("PROVIDER credential_chain".into());
-                    if let Some(a) = env("AZURE_STORAGE_ACCOUNT_NAME") {
-                        parts.push(format!("ACCOUNT_NAME {}", sql_str(&a)));
-                    }
-                }
-                Some(format!("CREATE OR REPLACE SECRET sdl_storage ({})", parts.join(", ")))
-            }
-        }
+            Kind::Azure => Arc::new(
+                object_store::azure::MicrosoftAzureBuilder::from_env()
+                    .with_container_name(&loc.bucket)
+                    .build()
+                    .context("configuring Azure blob storage")?,
+            ),
+            Kind::Local => Arc::new(object_store::local::LocalFileSystem::new_with_prefix(&loc.bucket)?),
+        };
+        let artifacts = ObjPath::from(format!("{}artifacts", with_slash(&loc.prefix)).trim_start_matches('/'));
+        Ok(Storage { root: loc.root, store, artifacts })
     }
 
     pub fn describe(&self) -> String {
@@ -219,58 +226,62 @@ fn with_slash(p: &str) -> String {
     if p.is_empty() { String::new() } else { format!("{p}/") }
 }
 
-fn s3_store(bucket: &str, s: &S3Settings, keys: Option<(String, String)>) -> Result<Arc<dyn ObjectStore>> {
-    let mut b = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket).with_region(&s.region);
+fn s3_store(
+    bucket: &str,
+    o: &ObjectStoreOptions,
+    keys: Option<(String, String)>,
+    token: Option<String>,
+) -> Result<Arc<dyn ObjectStore>> {
+    let region = o.region.as_deref().unwrap_or("us-east-1");
+    let mut b = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket).with_region(region);
     if let Some((k, sec)) = keys {
         b = b.with_access_key_id(k).with_secret_access_key(sec);
+        if let Some(t) = token {
+            b = b.with_token(t);
+        }
     }
-    if let Some(ep) = &s.endpoint {
+    if let Some(ep) = &o.endpoint {
         b = b.with_endpoint(ep).with_allow_http(ep.starts_with("http://"));
     }
     // Same URL style as DuckDB's secret (URL_STYLE 'path' only when asked).
-    b = b.with_virtual_hosted_style_request(!s.path_style);
+    b = b.with_virtual_hosted_style_request(!o.path_style);
     Ok(Arc::new(b.build().context("configuring S3 storage")?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
-
-    #[derive(Parser)]
-    struct T {
-        #[command(flatten)]
-        c: Config,
-    }
-
-    fn cfg(args: &[&str]) -> Config {
-        let mut v = vec!["t"];
-        v.extend_from_slice(args);
-        T::parse_from(v).c
-    }
 
     #[test]
     fn s3_urls_and_secret() {
-        let s =
-            Storage::new("s3://bucket/some/prefix/", &cfg(&["--s3-endpoint", "http://minio:9000", "--s3-path-style"]))
-                .unwrap();
-        assert_eq!(s.kind, Kind::S3);
-        assert_eq!(s.lake_data_path(), "s3://bucket/some/prefix/lake/");
+        let opts = ObjectStoreOptions {
+            endpoint: Some("http://minio:9000".into()),
+            region: Some("us-east-1".into()),
+            path_style: true,
+            key_id: Some("k".into()),
+            secret: Some("s".into()),
+            ..Default::default()
+        };
+        let s = Storage::new("s3://bucket/some/prefix/", &opts).unwrap();
         assert_eq!(s.artifact_path_multi("chunks/ab").as_ref(), "some/prefix/artifacts/chunks/ab");
-        let sql = s.duckdb_secret_sql().unwrap();
-        assert!(sql.contains("ENDPOINT 'minio:9000'"), "{sql}");
-        assert!(sql.contains("USE_SSL false"));
-        assert!(sql.contains("URL_STYLE 'path'"));
-        assert!(sql.contains("SCOPE 's3://bucket/some/prefix'"));
+        let l = lake("s3://bucket/some/prefix/", &opts).unwrap();
+        assert_eq!(l.data_path, "s3://bucket/some/prefix/lake/");
+        let secret = l.secret.unwrap();
+        assert_eq!(secret.get("endpoint"), Some("minio:9000"));
+        assert_eq!(secret.options["use_ssl"], toml::Value::Boolean(false));
+        assert_eq!(secret.get("url_style"), Some("path"));
+        assert_eq!(secret.get("scope"), Some("s3://bucket/some/prefix"));
+        assert_eq!(secret.get("key_id"), Some("k"));
     }
 
     #[tokio::test]
     async fn local_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let s = Storage::new(dir.path().to_str().unwrap(), &cfg(&[])).unwrap();
-        assert_eq!(s.kind, Kind::Local);
-        assert!(s.lake_data_path().ends_with("/lake/"));
-        assert!(s.duckdb_secret_sql().is_none());
+        let url = dir.path().to_str().unwrap();
+        let s = Storage::new(url, &ObjectStoreOptions::default()).unwrap();
+        let l = lake(url, &ObjectStoreOptions::default()).unwrap();
+        assert!(l.data_path.ends_with("/lake/"));
+        assert!(l.secret.is_none());
         s.put("chunks/abc", Bytes::from_static(b"hi")).await.unwrap();
         assert!(s.exists("chunks/abc").await.unwrap());
         assert_eq!(s.get("chunks/abc").await.unwrap().unwrap(), Bytes::from_static(b"hi"));

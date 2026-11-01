@@ -20,7 +20,7 @@
 
 use std::collections::HashSet;
 
-use duckdb::{Connection, params};
+use mallard_duck::duckdb::{Connection, params};
 use odl_api::{SqlColumn, SqlResponse};
 use serde_json::Value as J;
 
@@ -198,7 +198,7 @@ pub fn run(conn: &Connection, schema: &str, query: &str, limit: u32) -> QResult<
 
 /// Errors in a user's query are their mistake (400), not ours. The message
 /// is DuckDB's, without our wrapper statement.
-fn user_err(e: duckdb::Error) -> super::QueryError {
+fn user_err(e: mallard_duck::duckdb::Error) -> super::QueryError {
     let msg = e.to_string();
     let msg = msg.split("\nLINE ").next().unwrap_or(&msg).to_string();
     if msg.contains("INTERRUPT") || msg.contains("Interrupted") {

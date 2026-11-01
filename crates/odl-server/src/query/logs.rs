@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use duckdb::{Connection, params_from_iter, types::Value};
+use mallard_duck::duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{LogRecord, LogSeries, LogSeriesPoint};
 
 use super::{Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};

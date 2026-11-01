@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mallard-common = { workspace = true, features = ["openapi"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
