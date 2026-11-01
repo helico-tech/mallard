@@ -23,5 +23,5 @@ they do not show up in the trace views.
 
 Done 2026-11-01: not an edge case. `@sentry/browser` 8, 9 and 10 (10.78 is
 current on the v10 line) send INP spans this way by default whenever tracing is
-on. Converted, see ADR 0021. Checked by reading the SDK's source; the test
+on. Converted, see ADR 0022. Checked by reading the SDK's source; the test
 payload is not a capture from a browser.

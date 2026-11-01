@@ -6,7 +6,7 @@ created: 2026-11-01
 # Check standalone spans against a real @sentry/browser 10
 
 ## Problem
-The bridge's standalone span conversion (ADR 0021) was written from the source
+The bridge's standalone span conversion (ADR 0022) was written from the source
 of `@sentry/browser` 10.78 and tested with a hand-written payload. It has not
 seen an envelope from a running browser: e2e installs only SDK 11.
 

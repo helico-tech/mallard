@@ -1,6 +1,6 @@
 //! Sentry span items → OTLP spans: span streaming (`span.v2`, mapping table
 //! in docs/adr/0013-sentry-span-streaming.md) and the standalone spans of
-//! SDKs before 11 (docs/adr/0021-sentry-standalone-spans.md).
+//! SDKs before 11 (docs/adr/0022-sentry-standalone-spans.md).
 //!
 //! A v2 item is `{"version": 2, "items": [span, …]}`; each span has
 //! `trace_id`, `span_id`, `parent_span_id`, `name`, `start_timestamp`,

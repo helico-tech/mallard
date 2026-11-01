@@ -1,4 +1,4 @@
-# 0021 — Standalone spans of older Sentry SDKs go through the bridge too
+# 0022 — Standalone spans of older Sentry SDKs go through the bridge too
 
 ## Status
 accepted (amends 0013: a `span` item without a content type is converted)
