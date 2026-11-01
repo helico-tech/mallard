@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 /// Time window of the issue list, the stats and the issue detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Window {
+pub(super) enum Window {
     Hour,
     Day,
     Week,
@@ -24,10 +24,10 @@ pub enum Window {
 }
 
 impl Window {
-    pub const ALL: [Window; 5] = [Window::Hour, Window::Day, Window::Week, Window::TwoWeeks, Window::Month];
+    pub(super) const ALL: [Window; 5] = [Window::Hour, Window::Day, Window::Week, Window::TwoWeeks, Window::Month];
 
     /// The API's `since` value.
-    pub fn since(self) -> &'static str {
+    pub(super) fn since(self) -> &'static str {
         match self {
             Window::Hour => "1h",
             Window::Day => "24h",
@@ -38,7 +38,7 @@ impl Window {
     }
 
     /// Stats bucket size that gives ~50 bars.
-    pub fn interval(self) -> &'static str {
+    pub(super) fn interval(self) -> &'static str {
         match self {
             Window::Hour => "1m",
             Window::Day => "30m",
@@ -54,15 +54,15 @@ fn cycle<T: Copy + PartialEq>(all: &[T], cur: T, step: isize) -> T {
     let i = all.iter().position(|x| *x == cur).unwrap_or(0) as isize;
     all[(i + step).rem_euclid(all.len() as isize) as usize]
 }
-pub const REFRESH_EVERY: Duration = Duration::from_secs(5);
-pub const INFO_EVERY: Duration = Duration::from_secs(2);
+pub(super) const REFRESH_EVERY: Duration = Duration::from_secs(5);
+pub(super) const INFO_EVERY: Duration = Duration::from_secs(2);
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const PAGE: usize = 10;
 /// Screens kept behind the front one (oldest dropped first).
 const MAX_BACK: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IssuesKey {
+pub(super) struct IssuesKey {
     pub project: String,
     pub status: StatusFilter,
     pub sort: SortBy,
@@ -71,7 +71,7 @@ pub struct IssuesKey {
 }
 
 impl IssuesKey {
-    pub fn query(&self) -> IssueQuery {
+    pub(super) fn query(&self) -> IssueQuery {
         IssueQuery {
             status: Some(self.status.as_str().into()),
             query: (!self.query.is_empty()).then(|| self.query.clone()),
@@ -84,7 +84,7 @@ impl IssuesKey {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Req {
+pub(super) enum Req {
     Info,
     Projects,
     Issues(IssuesKey),
@@ -98,7 +98,7 @@ pub enum Req {
 
 /// What a request loads; used to count the loads in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Kind {
+pub(super) enum Kind {
     Info,
     Projects,
     Issues,
@@ -111,7 +111,7 @@ pub enum Kind {
 }
 
 impl Req {
-    pub fn kind(&self) -> Kind {
+    pub(super) fn kind(&self) -> Kind {
         match self {
             Req::Info => Kind::Info,
             Req::Projects => Kind::Projects,
@@ -129,25 +129,25 @@ impl Req {
 /// A failed load: a printable one-line message, and whether it was a
 /// network-level failure (server unreachable) rather than an API error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FetchError {
+pub(super) struct FetchError {
     pub message: String,
     pub offline: bool,
 }
 
 #[cfg(test)]
 impl FetchError {
-    pub fn api(message: impl Into<String>) -> Self {
+    pub(super) fn api(message: impl Into<String>) -> Self {
         FetchError { message: message.into(), offline: false }
     }
-    pub fn offline(message: impl Into<String>) -> Self {
+    pub(super) fn offline(message: impl Into<String>) -> Self {
         FetchError { message: message.into(), offline: true }
     }
 }
 
-pub type Res<T> = Result<T, FetchError>;
+pub(super) type Res<T> = Result<T, FetchError>;
 
 #[derive(Debug)]
-pub enum Resp {
+pub(super) enum Resp {
     Info(Res<ServerInfo>),
     Projects(Res<Vec<Project>>),
     Issues(IssuesKey, Res<IssueList>),
@@ -204,7 +204,7 @@ impl Resp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
+pub(super) enum Tab {
     Overview,
     Stack,
     Breadcrumbs,
@@ -213,8 +213,8 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Overview, Tab::Stack, Tab::Breadcrumbs, Tab::Events, Tab::Json];
-    pub fn title(self) -> &'static str {
+    pub(super) const ALL: [Tab; 5] = [Tab::Overview, Tab::Stack, Tab::Breadcrumbs, Tab::Events, Tab::Json];
+    pub(super) fn title(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Stack => "Stack trace",
@@ -229,7 +229,7 @@ impl Tab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Overlay {
+pub(super) enum Overlay {
     None,
     Help,
     Projects { selected: usize },
@@ -238,7 +238,7 @@ pub enum Overlay {
 /// The screen in front, with its data. Esc returns to the screen behind
 /// it (`App::back`); the issue list is always at the bottom.
 #[derive(Debug)]
-pub enum Screen {
+pub(super) enum Screen {
     Issues,
     Detail(Box<Detail>),
     /// Error events of one trace (all projects).
@@ -247,7 +247,7 @@ pub enum Screen {
 
 /// Which kind of screen is in front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
+pub(super) enum View {
     Issues,
     Detail,
     Trace,
@@ -255,7 +255,7 @@ pub enum View {
 
 /// Events of one trace, from [`App::show_trace`].
 #[derive(Debug, Default)]
-pub struct TraceView {
+pub(super) struct TraceView {
     pub trace_id: String,
     pub events: Vec<EventSummary>,
     pub loaded: bool,
@@ -264,13 +264,13 @@ pub struct TraceView {
 }
 
 /// One frame of the stack trace view, flattened over the exception chain.
-pub struct StackFrame<'a> {
+pub(super) struct StackFrame<'a> {
     pub exception: usize,
     pub frame: &'a Frame,
 }
 
 #[derive(Debug, Default)]
-pub struct Detail {
+pub(super) struct Detail {
     pub id: String,
     pub summary: Option<IssueSummary>,
     pub detail: Option<IssueDetail>,
@@ -308,11 +308,11 @@ pub struct Detail {
 }
 
 impl Detail {
-    pub fn tab(&self) -> Tab {
+    pub(super) fn tab(&self) -> Tab {
         self.tab.unwrap_or(Tab::Overview)
     }
 
-    pub fn title(&self) -> &str {
+    pub(super) fn title(&self) -> &str {
         self.detail
             .as_ref()
             .map(|d| d.summary.title.as_str())
@@ -320,15 +320,15 @@ impl Detail {
             .unwrap_or("")
     }
 
-    pub fn current_summary(&self) -> Option<&IssueSummary> {
+    pub(super) fn current_summary(&self) -> Option<&IssueSummary> {
         self.detail.as_ref().map(|d| &d.summary).or(self.summary.as_ref())
     }
 
-    pub fn has_raw(&self) -> bool {
+    pub(super) fn has_raw(&self) -> bool {
         self.exceptions.iter().any(|e| e.raw_frames.is_some())
     }
 
-    pub fn stack_frames(&self) -> Vec<StackFrame<'_>> {
+    pub(super) fn stack_frames(&self) -> Vec<StackFrame<'_>> {
         let mut out = Vec::new();
         for (i, e) in self.exceptions.iter().enumerate() {
             for f in e.frames_newest_first(self.raw) {
@@ -377,18 +377,18 @@ impl Detail {
     }
 
     /// Trace id of the shown event.
-    pub fn trace_id(&self) -> Option<&str> {
+    pub(super) fn trace_id(&self) -> Option<&str> {
         self.event.as_ref().and_then(|e| e.summary.trace_id.as_deref())
     }
 }
 
-pub struct Toast {
+pub(super) struct Toast {
     pub text: String,
     pub error: bool,
     pub at: Instant,
 }
 
-pub struct App {
+pub(super) struct App {
     pub server_url: String,
     pub info: Option<ServerInfo>,
     pub projects: Vec<Project>,
@@ -431,7 +431,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(server_url: &str, project: Option<String>) -> Self {
+    pub(super) fn new(server_url: &str, project: Option<String>) -> Self {
         App {
             server_url: server_url.to_string(),
             info: None,
@@ -467,7 +467,7 @@ impl App {
     }
 
     /// Requests to send at startup.
-    pub fn start(&mut self) -> Vec<Req> {
+    pub(super) fn start(&mut self) -> Vec<Req> {
         let mut r = vec![Req::Info, Req::Projects];
         r.extend(self.list_requests());
         self.track(r)
@@ -480,15 +480,15 @@ impl App {
         reqs
     }
 
-    pub fn in_flight(&self, kind: Kind) -> bool {
+    pub(super) fn in_flight(&self, kind: Kind) -> bool {
         self.pending.contains_key(&kind)
     }
 
-    pub fn loading(&self) -> bool {
+    pub(super) fn loading(&self) -> bool {
         !self.pending.is_empty()
     }
 
-    pub fn view(&self) -> View {
+    pub(super) fn view(&self) -> View {
         match self.screen {
             Screen::Issues => View::Issues,
             Screen::Detail(_) => View::Detail,
@@ -497,14 +497,14 @@ impl App {
     }
 
     /// The issue detail, when it is in front.
-    pub fn detail(&self) -> Option<&Detail> {
+    pub(super) fn detail(&self) -> Option<&Detail> {
         match &self.screen {
             Screen::Detail(d) => Some(d),
             _ => None,
         }
     }
 
-    pub fn detail_mut(&mut self) -> Option<&mut Detail> {
+    pub(super) fn detail_mut(&mut self) -> Option<&mut Detail> {
         match &mut self.screen {
             Screen::Detail(d) => Some(d),
             _ => None,
@@ -512,7 +512,7 @@ impl App {
     }
 
     /// The trace view, when it is in front.
-    pub fn trace(&self) -> Option<&TraceView> {
+    pub(super) fn trace(&self) -> Option<&TraceView> {
         match &self.screen {
             Screen::Trace(t) => Some(t),
             _ => None,
@@ -556,12 +556,12 @@ impl App {
         self.stats = None;
     }
 
-    pub fn current_project(&self) -> Option<&Project> {
+    pub(super) fn current_project(&self) -> Option<&Project> {
         let p = self.project.as_deref()?;
         self.projects.iter().find(|x| x.slug == p || x.id.to_string() == p)
     }
 
-    pub fn issues_key(&self) -> Option<IssuesKey> {
+    pub(super) fn issues_key(&self) -> Option<IssuesKey> {
         Some(IssuesKey {
             project: self.project.clone()?,
             status: self.status,
@@ -585,7 +585,7 @@ impl App {
         }
     }
 
-    pub fn selected_issue(&self) -> Option<&IssueSummary> {
+    pub(super) fn selected_issue(&self) -> Option<&IssueSummary> {
         self.issues_state.selected().and_then(|i| self.issues.get(i))
     }
 
@@ -594,7 +594,7 @@ impl App {
     }
 
     /// Periodic tick: spinner, clock, toast expiry, auto refresh.
-    pub fn on_tick(&mut self, now: Instant) -> Vec<Req> {
+    pub(super) fn on_tick(&mut self, now: Instant) -> Vec<Req> {
         self.spinner = (now.duration_since(self.started_at).as_millis() / 100) as usize;
         self.now = Utc::now();
         if self.toast.as_ref().is_some_and(|t| now.duration_since(t.at) > TOAST_FOR) {

@@ -11,7 +11,7 @@ const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 /// Unicode sparkline, one character per value. Zero is always the lowest
 /// bar and any non-zero value is at least one step higher, so a single
 /// event stays visible next to a spike.
-pub fn sparkline(values: &[u64]) -> String {
+pub(crate) fn sparkline(values: &[u64]) -> String {
     let max = values.iter().copied().max().unwrap_or(0);
     values
         .iter()
@@ -28,7 +28,7 @@ pub fn sparkline(values: &[u64]) -> String {
 
 /// Resample `values` to exactly `width` points. Shrinking sums the values
 /// that fall into each point (so totals are kept); growing repeats values.
-pub fn resample(values: &[u64], width: usize) -> Vec<u64> {
+pub(crate) fn resample(values: &[u64], width: usize) -> Vec<u64> {
     if values.is_empty() || width == 0 {
         return vec![0; width];
     }
@@ -44,7 +44,7 @@ pub fn resample(values: &[u64], width: usize) -> Vec<u64> {
 }
 
 /// "now", "42s ago", "3m ago", "5h ago", "2d ago", "3mo ago", "1y ago".
-pub fn relative_time(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub(crate) fn relative_time(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = (now - t).num_seconds();
     if secs < 0 {
         return "now".into();
@@ -61,13 +61,13 @@ pub fn relative_time(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 /// Like [`relative_time`] but without "ago": "3m", "2d" (for "age" columns).
-pub fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub(crate) fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let s = relative_time(t, now);
     s.strip_suffix(" ago").map(str::to_string).unwrap_or(s)
 }
 
 /// 1234 -> "1.2k", 3_400_000 -> "3.4M". Small numbers stay exact.
-pub fn compact(n: u64) -> String {
+pub(crate) fn compact(n: u64) -> String {
     match n {
         0..1000 => n.to_string(),
         1000..999_950 => trim_dot0(format!("{:.1}k", n as f64 / 1e3)),
@@ -81,7 +81,7 @@ fn trim_dot0(s: String) -> String {
 }
 
 /// 1536 -> "1.5 KiB".
-pub fn bytes(n: u64) -> String {
+pub(crate) fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -93,7 +93,7 @@ pub fn bytes(n: u64) -> String {
 }
 
 /// Terminal columns `s` takes (CJK and emoji take two).
-pub fn width(s: &str) -> usize {
+pub(crate) fn width(s: &str) -> usize {
     s.width()
 }
 
@@ -108,7 +108,7 @@ fn take_columns(it: impl Iterator<Item = char>, max: usize) -> Vec<char> {
 }
 
 /// Cut `s` to at most `max` columns, ending with "…" when cut.
-pub fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.width() <= max {
         return s.to_string();
     }
@@ -121,7 +121,7 @@ pub fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Cut `s` to at most `max` columns keeping the end: "…/src/app.js:10".
-pub fn truncate_left(s: &str, max: usize) -> String {
+pub(crate) fn truncate_left(s: &str, max: usize) -> String {
     if s.width() <= max {
         return s.to_string();
     }
@@ -134,17 +134,17 @@ pub fn truncate_left(s: &str, max: usize) -> String {
 }
 
 /// `s` padded with spaces to `w` columns (`{:<w}` counts chars, not columns).
-pub fn pad(s: &str, w: usize) -> String {
+pub(crate) fn pad(s: &str, w: usize) -> String {
     format!("{s}{}", " ".repeat(w.saturating_sub(s.width())))
 }
 
 /// Short local-free timestamp for tables: "2026-10-31 20:59:13".
-pub fn timestamp(t: DateTime<Utc>) -> String {
+pub(crate) fn timestamp(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// Parse "90s", "5m", "24h", "14d", "2w" into seconds.
-pub fn parse_duration(s: &str) -> Option<u64> {
+pub(crate) fn parse_duration(s: &str) -> Option<u64> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit())?;
     let (num, unit) = s.split_at(split);
@@ -161,7 +161,7 @@ pub fn parse_duration(s: &str) -> Option<u64> {
 }
 
 /// Human interval: 1800 -> "30m", 86400 -> "1d".
-pub fn duration(secs: u64) -> String {
+pub(crate) fn duration(secs: u64) -> String {
     match secs {
         s if s >= 86_400 && s % 86_400 == 0 => format!("{}d", s / 86_400),
         s if s >= 3600 && s % 3600 == 0 => format!("{}h", s / 3600),
@@ -172,7 +172,7 @@ pub fn duration(secs: u64) -> String {
 
 /// Horizontal bar of `width` cells filled to `value / max`, using eighth
 /// blocks for the last cell.
-pub fn hbar(value: u64, max: u64, width: usize) -> String {
+pub(crate) fn hbar(value: u64, max: u64, width: usize) -> String {
     if max == 0 || width == 0 {
         return String::new();
     }
@@ -188,7 +188,7 @@ pub fn hbar(value: u64, max: u64, width: usize) -> String {
 
 /// Bidi overrides and marks: they can make text display in another order
 /// than it is stored.
-pub fn is_bidi_control(c: char) -> bool {
+pub(crate) fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -196,7 +196,7 @@ pub fn is_bidi_control(c: char) -> bool {
 /// terminal: tabs become spaces, other control characters (C0, DEL, C1, so
 /// ESC, OSC, CSI, BEL, CR, ...) become U+FFFD, and bidi overrides are
 /// dropped. Newlines are kept when `keep_newlines`, else they become spaces.
-pub fn clean_text(s: &str, keep_newlines: bool) -> String {
+pub(crate) fn clean_text(s: &str, keep_newlines: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -214,7 +214,7 @@ pub fn clean_text(s: &str, keep_newlines: bool) -> String {
 }
 
 /// One-line [`clean_text`].
-pub fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     clean_text(s, false)
 }
 
@@ -238,7 +238,7 @@ fn clean_value(v: &mut Value, keep_newlines: bool) {
 /// non-JSON output; `--json` output is escaped by serde instead. Fails
 /// closed: a value that does not survive the JSON round trip is an error,
 /// never returned uncleaned.
-pub fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> Result<T, serde_json::Error> {
+pub(crate) fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> Result<T, serde_json::Error> {
     let mut value = serde_json::to_value(&v)?;
     clean_value(&mut value, keep_newlines);
     serde_json::from_value(value)

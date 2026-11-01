@@ -50,7 +50,7 @@ impl Resp {
 
 impl App {
     /// Apply a finished load; returns the follow-up loads (already tracked).
-    pub fn on_response(&mut self, resp: Resp) -> Vec<Req> {
+    pub(crate) fn on_response(&mut self, resp: Resp) -> Vec<Req> {
         let kind = resp.kind();
         if let Some(n) = self.pending.get_mut(&kind) {
             *n -= 1;

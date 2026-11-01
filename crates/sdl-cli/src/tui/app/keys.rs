@@ -29,7 +29,7 @@ fn is_nav(code: KeyCode) -> bool {
 impl App {
     /// Handle a key press: the requests it starts (already tracked) and
     /// what the host should do.
-    pub fn on_key(&mut self, k: KeyEvent) -> Step {
+    pub(crate) fn on_key(&mut self, k: KeyEvent) -> Step {
         let (reqs, outcome) = self.key(k);
         (self.track(reqs), outcome)
     }
@@ -82,7 +82,7 @@ impl App {
 
     /// Show the error events of a trace (searches all projects). Replaces a
     /// trace view in front; Esc returns to the screen before it.
-    pub fn show_trace(&mut self, trace_id: &str) -> Vec<Req> {
+    pub(crate) fn show_trace(&mut self, trace_id: &str) -> Vec<Req> {
         let t = Screen::Trace(TraceView { trace_id: trace_id.to_string(), ..Default::default() });
         if self.view() == View::Trace {
             self.screen = t;

@@ -4,14 +4,16 @@
 //! TUI:
 //! - [`Command`] + [`run`]: the CLI subcommands (global flags such as the
 //!   server URL and token live in the host and arrive via [`Ctx`]).
-//! - [`tui::Embedded`]: the dashboard as a component without terminal setup.
+//! - [`Embedded`]: the dashboard as a component without terminal setup.
+
+#![warn(unreachable_pub)]
 
 mod cli;
-pub mod event_view;
+mod event_view;
 mod fmt;
 mod paint;
 mod send_test;
-pub mod tui;
+mod tui;
 
 pub use cli::{Ctx, Hints, describe, run};
 pub use tui::{Embedded, Outcome};
@@ -19,6 +21,7 @@ pub use tui::{Embedded, Outcome};
 use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum Command {
     /// Server version, storage and ingest queue.
     Info,
@@ -59,6 +62,7 @@ pub enum Command {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum ProjectsCmd {
     /// All projects.
     List,
@@ -157,6 +161,7 @@ pub struct IssueListArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum IssuesCmd {
     /// Issues with counts and a trend sparkline.
     List(IssueListArgs),
@@ -185,6 +190,7 @@ pub enum IssuesCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum EventsCmd {
     /// Newest events first.
     List {
@@ -207,6 +213,7 @@ pub enum EventsCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum SourcemapsCmd {
     /// Artifact bundles of the project.
     List,

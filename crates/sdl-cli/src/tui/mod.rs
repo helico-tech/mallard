@@ -214,7 +214,7 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
 }
 
 /// Standalone `sdl tui`.
-pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
+pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
     use futures::StreamExt;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("{} tui needs an interactive terminal (stdin and stdout must be a TTY)", ctx.hints.command);

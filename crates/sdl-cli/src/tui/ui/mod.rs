@@ -29,11 +29,11 @@ fn u16_sat(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
-pub const MIN_WIDTH: u16 = 50;
-pub const MIN_HEIGHT: u16 = 12;
+pub(super) const MIN_WIDTH: u16 = 50;
+pub(super) const MIN_HEIGHT: u16 = 12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
+pub(super) fn render(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Clear, area);
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         too_small(f, area);
@@ -92,7 +92,7 @@ fn load_state(error: Option<&str>, loading: &str) -> Paragraph<'static> {
     Paragraph::new(line).alignment(Alignment::Center).wrap(Wrap { trim: true })
 }
 
-pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
+pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
@@ -243,7 +243,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use sdl_client::types::IssueList;
 
-    pub fn draw(app: &mut App, w: u16, h: u16) -> String {
+    pub(super) fn draw(app: &mut App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| render(f, f.area(), app)).unwrap();
         screen(&term)

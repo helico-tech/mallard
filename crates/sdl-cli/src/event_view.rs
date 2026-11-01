@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Frame {
+pub(crate) struct Frame {
     pub function: Option<String>,
     pub module: Option<String>,
     pub filename: Option<String>,
@@ -42,7 +42,7 @@ impl Frame {
     }
 
     /// Function name, or a placeholder for anonymous frames.
-    pub fn function_name(&self) -> &str {
+    pub(crate) fn function_name(&self) -> &str {
         match self.function.as_deref() {
             Some(f) if !f.is_empty() && f != "?" => f,
             _ => "<anonymous>",
@@ -50,7 +50,7 @@ impl Frame {
     }
 
     /// `file:line:col` (or the module when there is no file name).
-    pub fn location(&self) -> String {
+    pub(crate) fn location(&self) -> String {
         let mut s = self.filename.clone().or_else(|| self.module.clone()).unwrap_or_else(|| "<unknown>".into());
         if let Some(l) = self.lineno {
             let _ = write!(s, ":{l}");
@@ -62,7 +62,7 @@ impl Frame {
     }
 
     /// Source lines around the frame: `(line number, text, is error line)`.
-    pub fn context(&self) -> Vec<(Option<u64>, String, bool)> {
+    pub(crate) fn context(&self) -> Vec<(Option<u64>, String, bool)> {
         let Some(line) = &self.context_line else {
             return vec![];
         };
@@ -81,7 +81,7 @@ impl Frame {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Exception {
+pub(crate) struct Exception {
     pub ty: String,
     pub value: Option<String>,
     pub mechanism: Option<String>,
@@ -93,13 +93,13 @@ pub struct Exception {
 }
 
 impl Exception {
-    pub fn frames_newest_first(&self, raw: bool) -> Vec<&Frame> {
+    pub(crate) fn frames_newest_first(&self, raw: bool) -> Vec<&Frame> {
         let src = if raw { self.raw_frames.as_ref().unwrap_or(&self.frames) } else { &self.frames };
         src.iter().rev().collect()
     }
 
     /// "onerror · unhandled" (or just the mechanism), when it is known.
-    pub fn mechanism_label(&self) -> Option<String> {
+    pub(crate) fn mechanism_label(&self) -> Option<String> {
         let m = self.mechanism.as_ref()?;
         let handled = match self.handled {
             Some(false) => " · unhandled",
@@ -110,7 +110,7 @@ impl Exception {
     }
 
     /// "TypeError: boom" (or just the type).
-    pub fn headline(&self) -> String {
+    pub(crate) fn headline(&self) -> String {
         match &self.value {
             Some(v) if !v.is_empty() => format!("{}: {v}", self.ty),
             _ => self.ty.clone(),
@@ -137,7 +137,7 @@ fn values(v: Option<&Value>) -> &[Value] {
 /// The exception chain, primary (outermost) exception first. Events without
 /// an exception but with a thread or top-level stack trace get one
 /// pseudo-exception so their frames can still be shown.
-pub fn exceptions(payload: &Value) -> Vec<Exception> {
+pub(crate) fn exceptions(payload: &Value) -> Vec<Exception> {
     let mut out: Vec<Exception> = values(payload.get("exception"))
         .iter()
         .map(|e| {
@@ -175,7 +175,7 @@ pub fn exceptions(payload: &Value) -> Vec<Exception> {
 }
 
 /// `logentry.formatted` / `logentry.message` / `message`.
-pub fn message(payload: &Value) -> Option<String> {
+pub(crate) fn message(payload: &Value) -> Option<String> {
     let le = payload.get("logentry");
     le.and_then(|l| l.get("formatted"))
         .or_else(|| le.and_then(|l| l.get("message")))
@@ -191,7 +191,7 @@ pub fn message(payload: &Value) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Breadcrumb {
+pub(crate) struct Breadcrumb {
     pub timestamp: Option<DateTime<Utc>>,
     pub ty: Option<String>,
     pub category: Option<String>,
@@ -202,7 +202,7 @@ pub struct Breadcrumb {
 
 impl Breadcrumb {
     /// Message, or a compact rendering of `data` (e.g. `GET /api -> 500`).
-    pub fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         if let Some(m) = &self.message {
             return m.clone();
         }
@@ -241,7 +241,7 @@ fn parse_ts(v: &Value) -> Option<DateTime<Utc>> {
 }
 
 /// Breadcrumbs, newest first.
-pub fn breadcrumbs(payload: &Value) -> Vec<Breadcrumb> {
+pub(crate) fn breadcrumbs(payload: &Value) -> Vec<Breadcrumb> {
     let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     let mut out: Vec<Breadcrumb> = values(payload.get("breadcrumbs"))
         .iter()
@@ -268,7 +268,7 @@ fn scalar(v: &Value) -> Option<String> {
 }
 
 /// `user` fields as key/value pairs (id, email, username, ip_address, ...).
-pub fn user(payload: &Value) -> Vec<(String, String)> {
+pub(crate) fn user(payload: &Value) -> Vec<(String, String)> {
     let Some(Value::Object(u)) = payload.get("user") else {
         return vec![];
     };
@@ -276,14 +276,14 @@ pub fn user(payload: &Value) -> Vec<(String, String)> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Request {
+pub(crate) struct Request {
     pub method: Option<String>,
     pub url: Option<String>,
     pub query: Option<String>,
     pub headers: Vec<(String, String)>,
 }
 
-pub fn request(payload: &Value) -> Option<Request> {
+pub(crate) fn request(payload: &Value) -> Option<Request> {
     let r = payload.get("request")?.as_object()?;
     let headers = match r.get("headers") {
         Some(Value::Object(h)) => h.iter().filter_map(|(k, v)| scalar(v).map(|s| (k.clone(), s))).collect(),
@@ -314,7 +314,7 @@ pub fn request(payload: &Value) -> Option<Request> {
 }
 
 /// Short summaries of well-known contexts: runtime, os, browser, device.
-pub fn contexts(payload: &Value) -> Vec<(String, String)> {
+pub(crate) fn contexts(payload: &Value) -> Vec<(String, String)> {
     let Some(c) = payload.get("contexts") else {
         return vec![];
     };
@@ -353,7 +353,7 @@ pub(crate) mod tests {
         assert_eq!(t(json!(true)), None);
     }
 
-    pub fn node_payload() -> Value {
+    pub(crate) fn node_payload() -> Value {
         json!({
             "event_id": "655354d4abd54c31a077367796352d8c",
             "platform": "node",
