@@ -2579,10 +2579,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "clap",
  "duckdb",
  "figment",
+ "futures",
  "metrics-exporter-prometheus",
+ "obs-client",
  "odl-server",
  "reqwest",
  "sdl-server",
@@ -2595,6 +2598,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
