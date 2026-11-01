@@ -215,7 +215,8 @@ async fn create_project(
     State(state): S,
     Json(req): Json<CreateProject>,
 ) -> Result<(StatusCode, Json<Project>), ApiErr> {
-    let slug = req.slug.clone().unwrap_or_else(|| slugify(&req.name));
+    let CreateProject { name, slug, platform } = req;
+    let slug = slug.unwrap_or_else(|| slugify(&name));
     if slug.is_empty()
         || slug.len() > 64
         || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
@@ -225,11 +226,10 @@ async fn create_project(
     if slug.chars().all(|c| c.is_ascii_digit()) {
         return Err(bad("slug must not be numeric (it would clash with project ids)"));
     }
-    if req.name.trim().is_empty() {
+    let name = name.trim().to_string();
+    if name.is_empty() {
         return Err(bad("name is required"));
     }
-    let name = req.name.trim().to_string();
-    let platform = req.platform.clone();
     let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await?;
     Ok((StatusCode::CREATED, Json(to_project(&state, row))))
 }

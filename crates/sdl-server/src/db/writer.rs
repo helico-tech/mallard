@@ -18,7 +18,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -400,18 +400,18 @@ impl Writer {
         }
     }
 
-    fn try_write_events(&mut self, batch: &[EventWrite]) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn try_write_events(&self, batch: &[EventWrite]) -> Result<()> {
+        let ns = &self.ns;
         // Decide new issues and regressions against the cache, but only
         // apply cache changes after the commit succeeded.
         let mut new_issues: Vec<&EventWrite> = Vec::new();
         let mut activity: Vec<(u32, u64, IssueStatus, &'static str)> = Vec::new();
-        let mut seen_in_batch: HashMap<(u32, u64), ()> = HashMap::new();
+        let mut seen_in_batch: HashSet<(u32, u64)> = HashSet::new();
         {
             let issues = self.caches.issues.read().expect("lock");
             for w in batch {
                 let key = (w.project_id, w.event.group_hash);
-                if seen_in_batch.insert(key, ()).is_some() {
+                if !seen_in_batch.insert(key) {
                     continue;
                 }
                 match issues.get(&key) {
@@ -508,13 +508,8 @@ impl Writer {
         Ok(())
     }
 
-    fn create_project(
-        &mut self,
-        name: String,
-        slug: String,
-        platform: Option<String>,
-    ) -> Result<ProjectRow, WriteError> {
-        let ns = &self.ns.clone();
+    fn create_project(&self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow, WriteError> {
+        let ns = &self.ns;
         let id = {
             let projects = self.caches.projects.read().expect("lock");
             if projects.values().any(|p| p.slug == slug) {
@@ -544,13 +539,13 @@ impl Writer {
     }
 
     fn set_status(
-        &mut self,
+        &self,
         project_id: u32,
         group_hash: u64,
         status: IssueStatus,
         reason: &str,
     ) -> Result<(), WriteError> {
-        let ns = &self.ns.clone();
+        let ns = &self.ns;
         if !self.caches.issues.read().expect("lock").contains_key(&(project_id, group_hash)) {
             return Err(WriteError::IssueNotFound);
         }
@@ -565,8 +560,8 @@ impl Writer {
         Ok(())
     }
 
-    fn add_bundle(&mut self, b: &NewBundle) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn add_bundle(&self, b: &NewBundle) -> Result<()> {
+        let ns = &self.ns;
         let now = Utc::now().timestamp_micros();
         self.in_tx(|c| {
             let mut sb =
@@ -626,8 +621,8 @@ impl Writer {
         Ok(())
     }
 
-    fn compact_and_expire(&mut self) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn compact_and_expire(&self) -> Result<()> {
+        let ns = &self.ns;
         let started = Instant::now();
         let mut errors = Vec::new();
         if self.retention_days > 0 {
