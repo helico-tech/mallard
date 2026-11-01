@@ -26,10 +26,10 @@ async fn main() {
     let cli = Cli::parse();
     let result = match sdl_client::Client::new(&cli.url, &cli.token) {
         Ok(client) => {
-            let ctx = sdl_cli::Ctx { client, project: cli.project, json: cli.json };
+            let ctx = sdl_cli::Ctx::new(client).with_project(cli.project).with_json(cli.json);
             sdl_cli::run(cli.command, &ctx).await
         }
-        Err(e) => Err(anyhow::anyhow!(sdl_cli::describe(&e, &cli.url))),
+        Err(e) => Err(anyhow::anyhow!(sdl_cli::describe(&e, &cli.url, &sdl_cli::Hints::SDL))),
     };
     if let Err(e) = result {
         let red = std::io::IsTerminal::is_terminal(&std::io::stderr()) && std::env::var_os("NO_COLOR").is_none();

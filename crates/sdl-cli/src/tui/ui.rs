@@ -341,7 +341,10 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
         } else if app.projects_loaded && app.projects.is_empty() {
             vec![
                 Line::from(Span::styled("No projects yet", th::bold())),
-                Line::from(Span::styled("create one with: sdl projects create <name>", th::dim())),
+                Line::from(Span::styled(
+                    format!("create one with: {} projects create <name>", app.hints.command),
+                    th::dim(),
+                )),
             ]
         } else if !app.issues_loaded {
             vec![Line::from(Span::styled(format!("{} loading issues…", spinner(app)), th::dim()))]
@@ -1213,6 +1216,16 @@ mod tests {
         assert!(app.issues_error.is_some() && app.stats_error.is_some());
         let s = draw(&mut app, 120, 30);
         assert!(s.contains("project not found") && !s.contains("offline"), "{s}");
+    }
+
+    #[test]
+    fn no_projects_hint_names_the_host_command() {
+        let mut app = App::new("http://x", None);
+        app.hints.command = "mallard errors";
+        app.start();
+        app.on_response(Resp::Projects(Ok(vec![])));
+        let s = draw(&mut app, 120, 30);
+        assert!(s.contains("create one with: mallard errors projects create <name>"), "{s}");
     }
 
     #[test]

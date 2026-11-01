@@ -72,7 +72,7 @@ enum Cmd {
     #[command(alias = "sentry")]
     Errors {
         /// Project id or slug; optional when there is only one project.
-        #[arg(short, long, env = "MALLARD_PROJECT")]
+        #[arg(short, long, env = "MALLARD_PROJECT", global = true)]
         project: Option<String>,
         #[command(subcommand)]
         cmd: sdl_cli::Command,
@@ -84,6 +84,14 @@ enum Cmd {
         cmd: odl_cli::Cmd,
     },
 }
+
+/// Hints in `mallard errors …` messages name mallard's command and env vars.
+const ERRORS_HINTS: sdl_cli::Hints = sdl_cli::Hints {
+    command: "mallard errors",
+    url_env: "MALLARD_URL",
+    token_env: "MALLARD_TOKEN",
+    project_env: "MALLARD_PROJECT",
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -100,7 +108,8 @@ async fn main() -> Result<()> {
         Cmd::Status => status(&client, cli.json).await,
         Cmd::Tui { project } => tui::run(&client, project).await,
         Cmd::Errors { project, cmd } => {
-            sdl_cli::run(cmd, &sdl_cli::Ctx { client: client.sentry.clone(), project, json: cli.json }).await
+            let ctx = sdl_cli::Ctx::new(client.sentry.clone()).with_project(project).with_json(cli.json);
+            sdl_cli::run(cmd, &ctx.with_hints(ERRORS_HINTS)).await
         }
         Cmd::Telemetry { cmd } => {
             let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
@@ -153,4 +162,27 @@ async fn status(c: &Client, json: bool) -> Result<()> {
         Err(e) => println!("otel     ERROR {e}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn errors_project_works_before_and_after_the_subcommand() {
+        for args in [
+            &["mallard", "errors", "-p", "web", "issues", "list"][..],
+            &["mallard", "errors", "issues", "list", "-p", "web"][..],
+            &["mallard", "errors", "issues", "list", "--project", "web"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.cmd, Cmd::Errors { project: Some(p), .. } if p == "web"), "{args:?}");
+        }
+    }
 }

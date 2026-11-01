@@ -297,7 +297,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_token_sends_no_authorization_header() {
-        let info = r#"{"version":"1","duckdb_version":"v","catalog":"c","storage":"s","queue_depth":0,"queue_capacity":1}"#;
+        let info =
+            r#"{"version":"1","duckdb_version":"v","catalog":"c","storage":"s","queue_depth":0,"queue_capacity":1}"#;
         let (url, head) = serve_once(200, "application/json", info.into());
         Client::new(&url, "").unwrap().info().await.unwrap();
         let head = head.recv().unwrap().to_ascii_lowercase();

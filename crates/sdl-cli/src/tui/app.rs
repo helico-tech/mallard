@@ -2,6 +2,7 @@
 //! go in, data requests ([`Req`]) come out. `mod.rs` runs the requests on
 //! tokio tasks and feeds the responses back, so the UI never blocks.
 
+use crate::cli::Hints;
 use crate::event_view::{self as ev, Breadcrumb, Exception, Frame};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -359,6 +360,8 @@ pub struct App {
     /// Set by `on_key` when the user asked to open the shown event's trace.
     pub open_trace: Option<String>,
     pub started_at: Instant,
+    /// The host's command name, for hints.
+    pub hints: Hints,
 }
 
 impl App {
@@ -397,6 +400,7 @@ impl App {
             ignored: false,
             open_trace: None,
             started_at: Instant::now(),
+            hints: Hints::SDL,
         }
     }
 

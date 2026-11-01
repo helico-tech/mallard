@@ -13,7 +13,7 @@ mod paint;
 mod send_test;
 pub mod tui;
 
-pub use cli::{Ctx, describe, run};
+pub use cli::{Ctx, Hints, describe, run};
 pub use tui::{Embedded, Outcome};
 
 use clap::{Args, Subcommand, ValueEnum};

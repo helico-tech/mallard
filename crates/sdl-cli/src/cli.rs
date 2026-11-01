@@ -4,7 +4,7 @@ use crate::event_view as ev;
 use crate::fmt;
 use crate::paint as p;
 use crate::{Command, EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SortBy, SourcemapsCmd, StatusFilter};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, modifiers, presets};
 use sdl_client::Client;
@@ -20,16 +20,41 @@ macro_rules! out {
     }};
 }
 
-/// One-line, actionable message for a client error. Safe to print: server
-/// text in it is stripped of control characters.
-pub fn describe(e: &sdl_client::Error, url: &str) -> String {
-    fmt::clean(&describe_raw(e, url))
+/// How the host names the commands and its env vars, for the hints in
+/// messages ("create one with: sdl projects create <name>").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hints {
+    /// What runs these commands, e.g. `sdl` or `mallard errors`.
+    pub command: &'static str,
+    pub url_env: &'static str,
+    pub token_env: &'static str,
+    pub project_env: &'static str,
 }
 
-fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
+impl Hints {
+    /// The standalone `sdl` binary.
+    pub const SDL: Hints =
+        Hints { command: "sdl", url_env: "SDL_URL", token_env: "SDL_TOKEN", project_env: "SDL_PROJECT" };
+}
+
+impl Default for Hints {
+    fn default() -> Self {
+        Hints::SDL
+    }
+}
+
+/// One-line, actionable message for a client error. Safe to print: server
+/// text in it is stripped of control characters.
+pub fn describe(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
+    fmt::clean(&describe_raw(e, url, hints))
+}
+
+fn describe_raw(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
     match e {
-        sdl_client::Error::Api { status: 401, .. } => "invalid token (set SDL_TOKEN or --token)".into(),
-        sdl_client::Error::Api { status: 403, .. } => "token not allowed to do this (check SDL_TOKEN)".into(),
+        sdl_client::Error::Api { status: 401, .. } => format!("invalid token (set {} or --token)", hints.token_env),
+        sdl_client::Error::Api { status: 403, .. } => {
+            format!("token not allowed to do this (check {})", hints.token_env)
+        }
         sdl_client::Error::Api { status: 404, message } => {
             if message.is_empty() {
                 "not found".into()
@@ -45,10 +70,10 @@ fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
         }
         sdl_client::Error::InvalidSegment(_) => format!("{e}: ids and slugs can't be empty, '.' or '..'"),
         sdl_client::Error::Url(m) => {
-            format!("invalid server url {url:?}: {m} (set SDL_URL or --url)")
+            format!("invalid server url {url:?}: {m} (set {} or --url)", hints.url_env)
         }
         sdl_client::Error::Http(h) if h.is_connect() => {
-            format!("cannot reach server at {url} (is it running? set SDL_URL)")
+            format!("cannot reach server at {url} (is it running? set {})", hints.url_env)
         }
         sdl_client::Error::Http(h) if h.is_timeout() => format!("request to {url} timed out"),
         sdl_client::Error::Http(h) if h.is_decode() => {
@@ -60,18 +85,52 @@ fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
 }
 
 /// What the commands need besides their own arguments. A host that mounts
-/// [`Command`] builds this from its own global flags.
+/// [`Command`] builds this from its own global flags:
+/// `Ctx::new(client).with_project(p).with_json(true)`.
 pub struct Ctx {
-    pub client: Client,
+    pub(crate) client: Client,
     /// Project id or slug; optional when the server has only one project.
-    pub project: Option<String>,
+    pub(crate) project: Option<String>,
     /// Print raw JSON instead of tables.
-    pub json: bool,
+    pub(crate) json: bool,
+    pub(crate) hints: Hints,
 }
 
 impl Ctx {
-    pub fn err(&self, e: sdl_client::Error) -> anyhow::Error {
-        anyhow!(describe(&e, self.client.base_url()))
+    /// No project, table output, [`Hints::SDL`].
+    pub fn new(client: Client) -> Self {
+        Ctx { client, project: None, json: false, hints: Hints::SDL }
+    }
+
+    /// Project id or slug; optional when the server has only one project.
+    pub fn with_project(mut self, project: Option<String>) -> Self {
+        self.project = project;
+        self
+    }
+
+    /// Print raw JSON instead of tables.
+    pub fn with_json(mut self, json: bool) -> Self {
+        self.json = json;
+        self
+    }
+
+    pub fn with_hints(mut self, hints: Hints) -> Self {
+        self.hints = hints;
+        self
+    }
+
+    /// The friendly message, with the client error kept as its source so a
+    /// host can still downcast it. The server's message in the source is
+    /// cleaned too: hosts may print the whole chain.
+    pub(crate) fn err(&self, e: sdl_client::Error) -> anyhow::Error {
+        let msg = describe(&e, self.url(), &self.hints);
+        let e = match e {
+            sdl_client::Error::Api { status, message } => {
+                sdl_client::Error::Api { status, message: fmt::clean(&message) }
+            }
+            e => e,
+        };
+        anyhow::Error::new(e).context(msg)
     }
 
     fn url(&self) -> &str {
@@ -79,17 +138,18 @@ impl Ctx {
     }
 
     /// The `--project`, or the only project on the server.
-    pub async fn project(&self) -> Result<String> {
+    pub(crate) async fn resolve_project(&self) -> Result<String> {
         if let Some(p) = &self.project {
             return Ok(p.clone());
         }
         let projects = self.client.projects().await.map_err(|e| self.err(e))?;
+        let h = &self.hints;
         match projects.as_slice() {
             [one] => Ok(one.slug.clone()),
-            [] => bail!("no projects yet (create one: sdl projects create <name>)"),
+            [] => bail!("no projects yet (create one: {} projects create <name>)", h.command),
             many => {
                 let slugs: Vec<String> = many.iter().map(|p| fmt::clean(&p.slug)).collect();
-                bail!("several projects; pick one with -p or SDL_PROJECT ({})", slugs.join(", "))
+                bail!("several projects; pick one with -p or {} ({})", h.project_env, slugs.join(", "))
             }
         }
     }
@@ -135,7 +195,7 @@ fn is_broken_pipe(e: &anyhow::Error) -> bool {
 
 async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
     match cmd {
-        Command::SendTest { dsn, message } => send_test(&dsn, &message, ctx.json).await,
+        Command::SendTest { dsn, message } => send_test(&dsn, &message, ctx).await,
         Command::Info => info(ctx).await,
         Command::Projects(c) => projects(ctx, c).await,
         Command::Issues(c) => issues(ctx, c).await,
@@ -224,7 +284,7 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             }
             let ps = fmt::sanitize(ps, true);
             if ps.is_empty() {
-                out!("no projects yet; create one with: sdl projects create <name>");
+                out!("no projects yet; create one with: {} projects create <name>", ctx.hints.command);
                 return Ok(());
             }
             let mut t = table(&["ID", "SLUG", "NAME", "PLATFORM", "DSN"]);
@@ -248,7 +308,7 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             }
             let pr = fmt::sanitize(pr, true);
             out!("{} created project {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
-            print_project(&pr)?;
+            print_project(&pr, &ctx.hints)?;
             Ok(())
         }
         ProjectsCmd::Show { project } => {
@@ -257,13 +317,13 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
                 return ctx.print_json(&pr);
             }
             let pr = fmt::sanitize(pr, true);
-            print_project(&pr)?;
+            print_project(&pr, &ctx.hints)?;
             Ok(())
         }
     }
 }
 
-fn print_project(pr: &Project) -> Result<()> {
+fn print_project(pr: &Project, h: &Hints) -> Result<()> {
     out!();
     out!("  {}", p::dim("DSN"));
     out!("  {}", p::bold(&p::cyan(&pr.dsn)));
@@ -275,7 +335,7 @@ fn print_project(pr: &Project) -> Result<()> {
     kv("public key", &pr.public_key)?;
     kv("created", &fmt::timestamp(pr.created_at))?;
     out!();
-    out!("  {}", p::dim(&format!("test it: sdl send-test --dsn {}", pr.dsn)));
+    out!("  {}", p::dim(&format!("test it: {} send-test --dsn {}", h.command, pr.dsn)));
     Ok(())
 }
 
@@ -308,7 +368,7 @@ fn issue_query(a: &IssueListArgs) -> IssueQuery {
 }
 
 async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
-    let project = ctx.project().await?;
+    let project = ctx.resolve_project().await?;
     match cmd {
         IssuesCmd::List(a) => {
             let list = ctx.client.issues(&project, &issue_query(&a)).await.map_err(|e| ctx.err(e))?;
@@ -355,7 +415,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&d);
             }
-            print_issue(&fmt::sanitize(d, true), &fmt::clean(&project))?;
+            print_issue(&fmt::sanitize(d, true), &fmt::clean(&project), &ctx.hints)?;
             Ok(())
         }
         IssuesCmd::Resolve { ids } => set_status(ctx, &project, &ids, IssueStatus::Resolved).await,
@@ -364,7 +424,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
     }
 }
 
-fn print_issue(d: &IssueDetail, project: &str) -> Result<()> {
+fn print_issue(d: &IssueDetail, project: &str, h: &Hints) -> Result<()> {
     let s = &d.summary;
     let now = Utc::now();
     out!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
@@ -410,7 +470,8 @@ fn print_issue(d: &IssueDetail, project: &str) -> Result<()> {
     }
     if let Some(e) = &d.latest_event_id {
         out!();
-        out!("{}", p::dim(&format!("latest event: sdl events show {e} --issue {} -p {project}", s.id)));
+        let cmd = h.command;
+        out!("{}", p::dim(&format!("latest event: {cmd} events show {e} --issue {} -p {project}", s.id)));
     }
     Ok(())
 }
@@ -434,7 +495,7 @@ async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatu
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("{} {}: {}", p::red("✗"), fmt::clean(id), describe(&e, ctx.url()));
+                eprintln!("{} {}: {}", p::red("✗"), fmt::clean(id), describe(&e, ctx.url(), &ctx.hints));
             }
         }
     }
@@ -455,7 +516,7 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 let q = TraceQuery { trace_id, limit, ..Default::default() };
                 ctx.client.events_by_trace_query(&q).await
             } else {
-                let project = ctx.project().await?;
+                let project = ctx.resolve_project().await?;
                 ctx.client.events(&project, &EventQuery { issue, limit, ..Default::default() }).await
             }
             .map_err(|e| ctx.err(e))?;
@@ -497,7 +558,7 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
             Ok(())
         }
         EventsCmd::Show { event_id, issue } => {
-            let project = ctx.project().await?;
+            let project = ctx.resolve_project().await?;
             let e = ctx.client.event(&project, &event_id, issue.as_deref()).await.map_err(|e| ctx.err(e))?;
             if ctx.json {
                 return ctx.print_json(&e);
@@ -626,7 +687,7 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
 }
 
 async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()> {
-    let project = ctx.project().await?;
+    let project = ctx.resolve_project().await?;
     let s = ctx
         .client
         .stats(&project, &WindowQuery { since: Some(since.clone()), interval })
@@ -673,7 +734,7 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
 }
 
 async fn sourcemaps(ctx: &Ctx) -> Result<()> {
-    let project = ctx.project().await?;
+    let project = ctx.resolve_project().await?;
     let list = ctx.client.sourcemaps(&project).await.map_err(|e| ctx.err(e))?;
     if ctx.json {
         return ctx.print_json(&list);
@@ -699,14 +760,14 @@ async fn sourcemaps(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-async fn send_test(dsn: &str, message: &str, json: bool) -> Result<()> {
+async fn send_test(dsn: &str, message: &str, ctx: &Ctx) -> Result<()> {
     let (d, id) = crate::send_test::send(dsn, message).await?;
-    if json {
+    if ctx.json {
         out!("{}", serde_json::json!({"id": id, "project_id": d.project_id, "url": d.envelope_url}));
     } else {
         out!("{} sent test event {} to project {}", p::green("✓"), p::bold(&id), d.project_id);
         out!("  {}", p::dim(&format!("POST {}", d.envelope_url)));
-        out!("  {}", p::dim(&format!("check it: sdl events show {id} -p {}", d.project_id)));
+        out!("  {}", p::dim(&format!("check it: {} events show {id} -p {}", ctx.hints.command, d.project_id)));
     }
     Ok(())
 }
@@ -714,6 +775,57 @@ async fn send_test(dsn: &str, message: &str, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MALLARD: Hints = Hints {
+        command: "mallard errors",
+        url_env: "MALLARD_URL",
+        token_env: "MALLARD_TOKEN",
+        project_env: "MALLARD_PROJECT",
+    };
+
+    #[test]
+    fn hints_name_the_host() {
+        let e = sdl_client::Error::Api { status: 401, message: String::new() };
+        assert_eq!(describe(&e, "http://x", &Hints::SDL), "invalid token (set SDL_TOKEN or --token)");
+        assert_eq!(describe(&e, "http://x", &MALLARD), "invalid token (set MALLARD_TOKEN or --token)");
+        let e = sdl_client::Client::new("nope", "").unwrap_err();
+        assert!(describe(&e, "nope", &MALLARD).contains("set MALLARD_URL or --url"));
+    }
+
+    #[test]
+    fn describe_maps_every_kind_of_error() {
+        let api = |status: u16, m: &str| sdl_client::Error::Api { status, message: m.into() };
+        let d = |e: sdl_client::Error| describe(&e, "http://x", &Hints::SDL);
+        assert_eq!(d(api(403, "")), "token not allowed to do this (check SDL_TOKEN)");
+        assert_eq!(d(api(404, "")), "not found");
+        assert_eq!(d(api(404, "no issue")), "not found: no issue");
+        assert_eq!(d(api(400, "bad since")), "request rejected (400): bad since");
+        assert_eq!(d(api(503, "down\x1b[2J")), "server error (503): down\u{FFFD}[2J");
+        let e = block_on(sdl_client::Client::new("http://x", "").unwrap().project("..")).unwrap_err();
+        assert_eq!(d(e), "invalid path segment \"..\": ids and slugs can't be empty, '.' or '..'");
+    }
+
+    #[test]
+    fn err_keeps_the_typed_source_and_cleans_it() {
+        let ctx = Ctx::new(sdl_client::Client::new("http://x", "").unwrap()).with_hints(MALLARD);
+        let e = ctx.err(sdl_client::Error::Api { status: 404, message: "gone\x1b]0;x\x07".into() });
+        assert_eq!(e.to_string(), "not found: gone\u{FFFD}]0;x\u{FFFD}");
+        let src = e.downcast_ref::<sdl_client::Error>().expect("typed source");
+        assert!(src.is_not_found());
+        assert!(!format!("{e:#}").chars().any(char::is_control), "{e:#}");
+    }
+
+    /// Minimal executor for futures that resolve without I/O.
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+        let mut f = std::pin::pin!(f);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
 
     #[test]
     fn json_output_escapes_c1_and_bidi_but_stays_equal() {

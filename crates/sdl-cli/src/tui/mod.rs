@@ -11,7 +11,7 @@ mod fixtures;
 mod theme;
 mod ui;
 
-use crate::cli::describe;
+use crate::cli::{Hints, describe};
 use app::{App, FetchError, Req, Resp};
 use crossterm::event::{Event, KeyEventKind};
 use futures::FutureExt;
@@ -59,6 +59,12 @@ impl Embedded {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = Handle::current();
         Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false }
+    }
+
+    /// Name the host's command and env vars in hints (default [`Hints::SDL`]).
+    pub fn with_hints(mut self, hints: Hints) -> Self {
+        self.app.hints = hints;
+        self
     }
 
     /// Draw inside `area` only.
@@ -115,7 +121,7 @@ impl Embedded {
 
     fn dispatch(&self, reqs: Vec<Req>) {
         for r in reqs {
-            self.handle.spawn(guarded(fetch(self.client.clone(), r), self.tx.clone()));
+            self.handle.spawn(guarded(fetch(self.client.clone(), r, self.app.hints), self.tx.clone()));
         }
     }
 }
@@ -137,16 +143,16 @@ async fn guarded(fut: impl Future<Output = Resp>, tx: mpsc::UnboundedSender<Resp
     let _ = tx.send(resp);
 }
 
-fn fetch_error(err: sdl_client::Error, url: &str) -> FetchError {
+fn fetch_error(err: sdl_client::Error, url: &str, hints: &Hints) -> FetchError {
     // Network-level failures mean "offline"; a body we can't decode is a
     // version mismatch, not an outage.
     let offline = matches!(&err, sdl_client::Error::Http(h) if !h.is_decode());
-    FetchError { message: describe(&err, url), offline }
+    FetchError { message: describe(&err, url, hints), offline }
 }
 
-async fn fetch(c: Client, req: Req) -> Resp {
+async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
     let url = c.base_url().to_string();
-    let e = |err: sdl_client::Error| fetch_error(err, &url);
+    let e = |err: sdl_client::Error| fetch_error(err, &url, &hints);
     match req {
         Req::Info => Resp::Info(c.info().await.map_err(e)),
         Req::Projects => Resp::Projects(c.projects().await.map_err(e)),
@@ -190,11 +196,11 @@ async fn fetch(c: Client, req: Req) -> Resp {
 pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
     use futures::StreamExt;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        anyhow::bail!("sdl tui needs an interactive terminal (stdin and stdout must be a TTY)");
+        anyhow::bail!("{} tui needs an interactive terminal (stdin and stdout must be a TTY)", ctx.hints.command);
     }
     // Fail fast with a friendly message instead of an empty dashboard.
     ctx.client.info().await.map_err(|e| ctx.err(e))?;
-    let mut ui = Embedded::new(ctx.client.clone(), ctx.project.clone());
+    let mut ui = Embedded::new(ctx.client.clone(), ctx.project.clone()).with_hints(ctx.hints);
     // `try_init` enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before printing the panic.
     let mut terminal = match ratatui::try_init() {
