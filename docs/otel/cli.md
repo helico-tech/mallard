@@ -20,12 +20,14 @@ are the same as on the errors side: [../cli.md](../cli.md).
 | `odl status` | ingest counters, buffer, flushes, storage per table, last maintenance |
 | `odl services [-s 1h] [--all-spans]` | rate, error %, p50/p95/p99 per service |
 | `odl ops [-S svc]` | the same per operation |
-| `odl traces [-S svc] [-O op] [-e] [--min-ms 500] [-a k=v] [-n 30]` | search traces |
+| `odl traces [-S svc] [-O op] [-e] [--min-ms 500] [-a k=v] [-n 30] [--cursor c]` | search traces; `--cursor`: the next page |
 | `odl trace <id> [-A]` | waterfall of one trace (`-A`: attributes and events) |
-| `odl logs [-S svc] [-l warn] [-q text] [-t trace] [-a k=v] [-n 100] [-f]` | search logs; `-f` follows like `tail -f` |
+| `odl logs [-S svc] [-l warn] [-q text] [-t trace] [-a k=v] [-n 100] [-f] [--cursor c]` | search logs; `-f` follows like `tail -f`; `--cursor`: the next page |
 | `odl metrics [-S svc] [-q name]` | metric catalog |
 | `odl metric <name> [-g p95] [-b route,service.name] [--step 1m]` | a metric over time, with sparklines |
 | `odl sql "<select>"` | read-only SQL (server must enable it) |
+| `odl schema` | the tables and columns SQL can query |
+| `odl attrs [--signal spans\|logs\|metrics] [-S svc] [-k key] [--metric m] [-n 50]` | attribute keys with counts, or the top values of one key (sampled) |
 | `odl tui [-s 1h]` | interactive UI |
 
 Examples:

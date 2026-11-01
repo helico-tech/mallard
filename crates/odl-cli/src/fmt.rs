@@ -364,6 +364,42 @@ pub(crate) fn sql_text(r: &SqlResponse) -> String {
     format!("{t}\n{}", dim(&summary))
 }
 
+/// Keys (or values of one key) with how many sampled rows have them.
+pub(crate) fn attributes_text(s: &AttributeStats, key: Option<&str>) -> String {
+    if s.items.is_empty() {
+        return "no attributes in this window".into();
+    }
+    let mut t = table(&[if key.is_some() { "value" } else { "key" }, "rows"]);
+    for a in &s.items {
+        let name = if key.is_some() { a.value.as_deref().unwrap_or_default() } else { &a.key };
+        t.add_row(vec![Cell::new(clean(name)).fg(Color::White), num(a.count as f64)]);
+    }
+    let sampled = if s.sampled_rows < s.total_rows {
+        format!("counted in a sample of {} of {} rows", compact(s.sampled_rows as f64), compact(s.total_rows as f64))
+    } else {
+        format!("counted in {} rows", compact(s.total_rows as f64))
+    };
+    format!("{t}\n{}", dim(&sampled))
+}
+
+/// One row per column: table, column, type; the time column of each table
+/// is marked.
+pub(crate) fn schema_text(tables: &[SchemaTable]) -> String {
+    let mut t = table(&["table", "column", "type", ""]);
+    for tb in tables {
+        for c in &tb.columns {
+            let time = if c.name == tb.time_column { "time" } else { "" };
+            t.add_row(vec![
+                Cell::new(clean(&tb.name)).fg(Color::White),
+                Cell::new(clean(&c.name)),
+                Cell::new(clean(&c.data_type)),
+                Cell::new(time).fg(Color::Cyan),
+            ]);
+        }
+    }
+    t.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

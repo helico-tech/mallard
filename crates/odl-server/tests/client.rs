@@ -99,6 +99,38 @@ async fn client_against_server() {
         .await
         .unwrap();
     assert_eq!(errs.len(), 3);
+    // Pages over inlined rows (the default inlining keeps these in the catalog).
+    let mut q = LogQuery { since: Some("10m".into()), limit: Some(3), ..Default::default() };
+    let mut seen = Vec::new();
+    loop {
+        let (page, next) = c.logs_page(&q).await.unwrap();
+        seen.extend(page.into_iter().map(|r| r.body));
+        match next {
+            Some(cur) => q.cursor = Some(cur),
+            None => break,
+        }
+    }
+    let want: Vec<String> = (0..10).rev().map(|i| format!("line {i}")).collect();
+    assert_eq!(seen, want, "newest first, each once");
+    let span = c.span("0000000000000001", &TraceGetQuery::default()).await.unwrap_err();
+    assert_eq!(span.status(), Some(404));
+    assert!(matches!(c.span("xyz", &TraceGetQuery::default()).await, Err(odl_client::Error::InvalidSpanId(_))));
+    let schema = c.schema().await.unwrap();
+    assert_eq!(schema.tables[1].name, "logs");
+    let keys = c
+        .attributes(&AttributeQuery {
+            signal: AttributeSignal::Logs,
+            from: None,
+            to: None,
+            since: Some("10m".into()),
+            service: None,
+            metric: None,
+            key: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!((keys.total_rows, keys.items[0].key.as_str()), (10, "service.name"));
     let series = c
         .log_series(&LogSeriesQuery { since: Some("10m".into()), step: Some("1m".into()), ..Default::default() })
         .await

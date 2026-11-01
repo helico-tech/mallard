@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Instant};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     middleware,
 };
 use mallard_common::{
@@ -20,7 +20,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     query::{
-        QueryError, Reader, Window, logs, metrics, sql, storage,
+        QueryError, Reader, Window, attributes, logs, metrics, sql, storage,
         traces::{self, clamp_limit},
     },
     stats::Stats,
@@ -57,6 +57,7 @@ const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
         (name = "traces", description = "Services, operations and traces"),
         (name = "logs", description = "Log search and volume"),
         (name = "metrics", description = "Metric catalog and time series"),
+        (name = "schema", description = "Attribute keys and values, tables and columns"),
         (name = "sql", description = "Read-only ad-hoc SQL (disabled by default)")
     )
 )]
@@ -80,6 +81,19 @@ impl From<QueryError> for ApiErr {
 
 type R<T> = Result<Json<T>, ApiErr>;
 
+/// A page of a list: the cursor of the next page goes in a header, so the
+/// body stays the plain array it always was.
+type Page<T> = Result<(HeaderMap, Json<Vec<T>>), ApiErr>;
+
+fn page<T>((items, cursor): (Vec<T>, Option<String>)) -> Page<T> {
+    let mut h = HeaderMap::new();
+    if let Some(c) = cursor {
+        // Digits, hex and ':' only, so always a valid header value.
+        h.insert(NEXT_CURSOR_HEADER, HeaderValue::from_str(&c).map_err(|_| ApiErr::internal())?);
+    }
+    Ok((h, Json(items)))
+}
+
 fn window<Q: HasWindow>(st: &ApiState, q: &Q) -> Result<Window, ApiErr> {
     resolve(st, q, HOUR)
 }
@@ -98,10 +112,13 @@ fn protected_routes() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(span_series))
         .routes(routes!(search_traces))
         .routes(routes!(get_trace))
+        .routes(routes!(get_span))
         .routes(routes!(search_logs))
         .routes(routes!(log_series))
         .routes(routes!(list_metrics))
         .routes(routes!(query_metric))
+        .routes(routes!(attribute_stats))
+        .routes(routes!(get_schema))
         .routes(routes!(run_sql))
 }
 
@@ -185,12 +202,13 @@ async fn span_series(State(st): S, Q(q): Q<SpanSeriesQuery>) -> R<SpanSeries> {
 }
 
 #[utoipa::path(get, path = "/api/v1/traces", tag = "traces", params(TraceQuery), security(("bearer" = [])),
-    responses((status = 200, description = "Matching traces, newest first", body = Vec<TraceSummary>),
+    responses((status = 200, description = "Matching traces, newest first", body = Vec<TraceSummary>,
+               headers(("x-next-cursor" = String, description = "Pass as `cursor` for the next page; missing on the last page"))),
               (status = 400, body = ApiError)))]
-async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> R<Vec<TraceSummary>> {
+async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> Page<TraceSummary> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 50, 1000)?;
-    Ok(Json(
+    page(
         st.reader
             .run(move |c| {
                 traces::search(
@@ -204,11 +222,12 @@ async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> R<Vec<TraceSummary>
                         max_duration_ms: q.max_duration_ms,
                         attributes: q.attributes.as_deref(),
                         limit,
+                        cursor: q.cursor.as_deref(),
                     },
                 )
             })
             .await?,
-    ))
+    )
 }
 
 #[utoipa::path(get, path = "/api/v1/traces/{trace_id}", tag = "traces",
@@ -220,13 +239,25 @@ async fn get_trace(State(st): S, Path(trace_id): Path<String>, Q(q): Q<TraceGetQ
     Ok(Json(st.reader.run(move |c| traces::get(c, &w, &trace_id)).await?))
 }
 
+#[utoipa::path(get, path = "/api/v1/spans/{span_id}", tag = "traces",
+    params(("span_id" = String, Path, description = "16 hex chars"), TraceGetQuery), security(("bearer" = [])),
+    responses((status = 200, description = "The span (the newest one if the id is not unique)", body = Span),
+              (status = 400, body = ApiError), (status = 404, body = ApiError)))]
+async fn get_span(State(st): S, Path(span_id): Path<String>, Q(q): Q<TraceGetQuery>) -> R<Span> {
+    // Without a window, look back a week (as for a trace).
+    let w = resolve(&st, &q, std::time::Duration::from_secs(7 * 86400))?;
+    Ok(Json(st.reader.run(move |c| traces::span(c, &w, &span_id)).await?))
+}
+
 #[utoipa::path(get, path = "/api/v1/logs", tag = "logs", params(LogQuery), security(("bearer" = [])),
-    responses((status = 200, body = Vec<LogRecord>), (status = 400, body = ApiError)))]
-async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> R<Vec<LogRecord>> {
+    responses((status = 200, body = Vec<LogRecord>,
+               headers(("x-next-cursor" = String, description = "Pass as `cursor` for the next page; missing on the last page"))),
+              (status = 400, body = ApiError)))]
+async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> Page<LogRecord> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 100, 5000)?;
     let ascending = q.order == Some(LogOrder::Asc);
-    Ok(Json(
+    page(
         st.reader
             .run(move |c| {
                 logs::search(
@@ -240,11 +271,12 @@ async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> R<Vec<LogRecord>> {
                         attributes: q.attributes.as_deref(),
                         limit,
                         ascending,
+                        cursor: q.cursor.as_deref(),
                     },
                 )
             })
             .await?,
-    ))
+    )
 }
 
 #[utoipa::path(get, path = "/api/v1/logs/series", tag = "logs", params(LogSeriesQuery), security(("bearer" = [])),
@@ -285,6 +317,38 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
             })
             .await?,
     ))
+}
+
+#[utoipa::path(get, path = "/api/v1/attributes", tag = "schema", params(AttributeQuery), security(("bearer" = [])),
+    responses((status = 200, description = "Attribute keys, or the values of `key`, most frequent first", body = AttributeStats),
+              (status = 400, body = ApiError)))]
+async fn attribute_stats(State(st): S, Q(q): Q<AttributeQuery>) -> R<AttributeStats> {
+    let w = window(&st, &q)?;
+    let limit = clamp_limit(q.limit, 50, 1000)?;
+    Ok(Json(
+        st.reader
+            .run(move |c| {
+                attributes::stats(
+                    c,
+                    &w,
+                    &attributes::AttributeSearch {
+                        signal: q.signal,
+                        service: q.service.as_deref(),
+                        metric: q.metric.as_deref(),
+                        key: q.key.as_deref(),
+                        limit,
+                    },
+                )
+            })
+            .await?,
+    ))
+}
+
+#[utoipa::path(get, path = "/api/v1/schema", tag = "schema", security(("bearer" = [])),
+    responses((status = 200, description = "Tables and columns that SQL can query", body = Schema)))]
+async fn get_schema(State(st): S) -> R<Schema> {
+    let schema = st.schema.clone();
+    Ok(Json(st.reader.run(move |c| attributes::schema(c, &schema)).await?))
 }
 
 #[utoipa::path(post, path = "/api/v1/sql", tag = "sql", request_body = SqlRequest, security(("bearer" = [])),

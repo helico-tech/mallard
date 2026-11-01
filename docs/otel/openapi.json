@@ -9,6 +9,117 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/attributes": {
+      "get": {
+        "tags": [
+          "schema"
+        ],
+        "operationId": "attribute_stats",
+        "parameters": [
+          {
+            "name": "signal",
+            "in": "query",
+            "description": "`spans`, `logs` or `metrics`.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/AttributeSignal"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "metric",
+            "in": "query",
+            "description": "Only this metric (signal `metrics` only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "description": "Top values of this key instead of the keys.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max keys or values returned (default 50, max 1000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Attribute keys, or the values of `key`, most frequent first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttributeStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
@@ -130,10 +241,27 @@
             "schema": {
               "$ref": "#/components/schemas/LogOrder"
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Continue after the last page: the `x-next-cursor` header of the\nprevious response (same filters, window and order).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
+            "headers": {
+              "x-next-cursor": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Pass as `cursor` for the next page; missing on the last page"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -546,6 +674,31 @@
         ]
       }
     },
+    "/api/v1/schema": {
+      "get": {
+        "tags": [
+          "schema"
+        ],
+        "operationId": "get_schema",
+        "responses": {
+          "200": {
+            "description": "Tables and columns that SQL can query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Schema"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/services": {
       "get": {
         "tags": [
@@ -706,6 +859,89 @@
             }
           },
           "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/spans/{span_id}": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "operationId": "get_span",
+        "parameters": [
+          {
+            "name": "span_id",
+            "in": "path",
+            "description": "16 hex chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The span (the newest one if the id is not unique)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Span"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
@@ -909,11 +1145,28 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Continue after the last page: the `x-next-cursor` header of the\nprevious response (same filters and window).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
             "description": "Matching traces, newest first",
+            "headers": {
+              "x-next-cursor": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Pass as `cursor` for the next page; missing on the last page"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1033,6 +1286,62 @@
           "message": {
             "type": "string",
             "description": "Human readable message."
+          }
+        }
+      },
+      "AttributeCount": {
+        "type": "object",
+        "description": "One attribute key, or one value of the key asked for. Keys of span, log or\npoint attributes and of resource attributes are counted together, as the\n`attributes` filters match both.",
+        "required": [
+          "key",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sampled rows with this key (or value).",
+            "minimum": 0
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The value, when a `key` was asked for."
+          }
+        }
+      },
+      "AttributeStats": {
+        "type": "object",
+        "description": "Attribute keys (or values of one key) with how many sampled rows have them.",
+        "required": [
+          "total_rows",
+          "sampled_rows",
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttributeCount"
+            },
+            "description": "Most frequent first."
+          },
+          "sampled_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows counted: a random sample of at most 10,000 of the matching rows.",
+            "minimum": 0
+          },
+          "total_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching rows in the window.",
+            "minimum": 0
           }
         }
       },
@@ -1595,6 +1904,46 @@
           }
         }
       },
+      "Schema": {
+        "type": "object",
+        "description": "The tables `POST /api/v1/sql` can query.",
+        "required": [
+          "tables"
+        ],
+        "properties": {
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SchemaTable"
+            }
+          }
+        }
+      },
+      "SchemaTable": {
+        "type": "object",
+        "required": [
+          "name",
+          "time_column",
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SqlColumn"
+            },
+            "description": "Columns in storage order."
+          },
+          "name": {
+            "type": "string",
+            "description": "Table name; also reachable as `lake.<schema>.<name>`."
+          },
+          "time_column": {
+            "type": "string",
+            "description": "Time column the table is partitioned and pruned by; filter on it."
+          }
+        }
+      },
       "ServiceSummary": {
         "allOf": [
           {
@@ -2148,6 +2497,10 @@
     {
       "name": "metrics",
       "description": "Metric catalog and time series"
+    },
+    {
+      "name": "schema",
+      "description": "Attribute keys and values, tables and columns"
     },
     {
       "name": "sql",

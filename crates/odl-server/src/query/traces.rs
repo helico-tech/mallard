@@ -10,7 +10,8 @@ use odl_api::{
 use serde::Deserialize;
 
 use super::{
-    Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, parse_trace_id, span_hex, trace_hex,
+    Cursor, Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, parse_span_id, parse_trace_id,
+    span_hex, trace_hex,
 };
 
 /// Entry spans: where requests enter a service.
@@ -144,11 +145,16 @@ pub struct TraceSearch<'a> {
     pub max_duration_ms: Option<f64>,
     pub attributes: Option<&'a str>,
     pub limit: u32,
+    pub cursor: Option<&'a str>,
 }
 
 /// Find traces with at least one span matching all filters, newest first,
 /// and summarize each trace from its spans inside the window.
-pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<TraceSummary>> {
+///
+/// Pages are cut on the newest matching span of each trace, ties broken by
+/// trace id; the cursor is the last trace of the page. It is returned only
+/// when another page exists.
+pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<(Vec<TraceSummary>, Option<String>)> {
     let mut f = Filter::default();
     f.window("start_time", w);
     if let Some(s) = q.service {
@@ -167,30 +173,43 @@ pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<Tra
         f.add("duration_ns <= ?", [Value::BigInt((ms * 1e6) as i64)]);
     }
     f.attributes(q.attributes)?;
+    let mut having = Filter::default();
+    if let Some(c) = q.cursor {
+        let c = Cursor::parse(c)?;
+        let tid = parse_trace_id(&c.id).map_err(|_| bad("invalid cursor for traces"))?;
+        having.add(
+            "(max(start_time) < ? OR (max(start_time) = ? AND trace_id < ?::UUID))",
+            [c.time(), c.time(), Value::Text(tid)],
+        );
+    }
+    // One more than asked for tells whether another page exists.
     let sql = format!(
         "WITH m AS ( \
             SELECT trace_id, max(start_time) AS last FROM spans WHERE {where_} \
-            GROUP BY trace_id ORDER BY last DESC LIMIT {limit} \
-         ) \
+            GROUP BY trace_id HAVING {having_} ORDER BY last DESC, trace_id DESC LIMIT {limit} \
+         ), r AS (SELECT trace_id, last, row_number() OVER (ORDER BY last DESC, trace_id DESC) AS rn FROM m) \
          SELECT {tid}, epoch_us(min(s.start_time)), \
             (max(epoch_us(s.start_time) * 1000 + s.duration_ns) - min(epoch_us(s.start_time)) * 1000)::DOUBLE / 1e6, \
             any_value(s.service_name) FILTER (WHERE s.parent_span_id IS NULL), \
             any_value(s.name) FILTER (WHERE s.parent_span_id IS NULL), \
             count(*), count(*) FILTER (WHERE s.status_code = 'ERROR'), \
-            to_json(list(DISTINCT s.service_name ORDER BY s.service_name)) \
-         FROM spans s JOIN m USING (trace_id) \
+            to_json(list(DISTINCT s.service_name ORDER BY s.service_name)), \
+            epoch_us(any_value(r.last)), any_value(r.rn) \
+         FROM spans s JOIN r USING (trace_id) \
          WHERE s.start_time >= ? AND s.start_time < ? \
          GROUP BY s.trace_id ORDER BY min(s.start_time) DESC",
         where_ = f.sql(),
-        limit = q.limit,
+        having_ = having.sql(),
+        limit = q.limit as u64 + 1,
         tid = trace_hex("s.trace_id"),
     );
     let mut params = f.params;
+    params.extend(having.params);
     params.push(super::ts(w.from));
     params.push(super::ts(w.to));
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(params), |r| {
-        Ok(TraceSummary {
+        let t = TraceSummary {
             trace_id: r.get(0)?,
             start_time: from_micros(r.get(1)?),
             duration_ms: r.get(2)?,
@@ -199,9 +218,18 @@ pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<Tra
             span_count: r.get::<_, i64>(5)? as u64,
             error_count: r.get::<_, i64>(6)? as u64,
             services: json_col(r.get(7)?),
-        })
+        };
+        Ok((t, r.get::<_, i64>(8)?, r.get::<_, i64>(9)?))
     })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut rows: Vec<(TraceSummary, i64, i64)> = rows.collect::<Result<_, _>>()?;
+    let limit = q.limit as i64;
+    let more = rows.iter().any(|(_, _, rn)| *rn > limit);
+    rows.retain(|(_, _, rn)| *rn <= limit);
+    let cursor = more
+        .then(|| rows.iter().find(|(_, _, rn)| *rn == limit))
+        .flatten()
+        .map(|(t, last, _)| Cursor { us: *last, id: t.trace_id.clone() }.to_string());
+    Ok((rows.into_iter().map(|(t, _, _)| t).collect(), cursor))
 }
 
 #[derive(Deserialize, Default)]
@@ -303,6 +331,27 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
         return Err(QueryError::NotFound(format!("trace {tid} not found in the time window")));
     }
     Ok(Trace { trace_id: tid, spans })
+}
+
+/// The newest span with this id in the window (span ids are unique in
+/// practice; on a collision the newest wins).
+pub fn span(conn: &Connection, w: &Window, span_id: &str) -> QResult<Span> {
+    let id = parse_span_id(span_id)?;
+    let sql = format!(
+        "SELECT {} FROM spans WHERE span_id = ? AND start_time >= ? AND start_time < ? \
+         ORDER BY start_time DESC LIMIT 1",
+        span_select("")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut spans =
+        stmt.query_map(params_from_iter([Value::UBigInt(id), super::ts(w.from), super::ts(w.to)]), span_from_row)?;
+    match spans.next() {
+        Some(s) => Ok(s?),
+        None => Err(QueryError::NotFound(format!(
+            "span {} not found in the time window",
+            span_id.trim().to_ascii_lowercase()
+        ))),
+    }
 }
 
 pub fn clamp_limit(limit: Option<u32>, default: u32, max: u32) -> QResult<u32> {
