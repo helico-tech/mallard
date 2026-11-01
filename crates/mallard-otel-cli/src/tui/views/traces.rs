@@ -394,7 +394,7 @@ impl Embedded {
             if q.is_empty() {
                 TSpan::styled("all traces · press / to filter", theme::faint())
             } else {
-                TSpan::styled(q, theme::bold())
+                TSpan::styled(clean(&q).into_owned(), theme::bold())
             },
         ]);
         let block =

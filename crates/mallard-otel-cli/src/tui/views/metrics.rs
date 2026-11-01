@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use mallard_otel_client::api::*;
-use mallard_term::tui::keys;
+use mallard_term::{text::clean, tui::keys};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -18,7 +18,7 @@ use crate::{
     fmt::{compact, ms},
     tui::{
         Embedded, Outcome, PromptTarget, due,
-        loader::{Data, Kind},
+        loader::{Data, Kind, Named, named},
         nav, theme,
         widgets::{self, Series},
     },
@@ -26,7 +26,7 @@ use crate::{
 
 #[derive(Default)]
 pub struct State {
-    pub list: Vec<MetricInfo>,
+    pub list: Vec<Named<MetricInfo>>,
     pub search: String,
     pub sel: TableState,
     pub error: Option<String>,
@@ -35,7 +35,7 @@ pub struct State {
 }
 
 pub struct ChartState {
-    pub info: MetricInfo,
+    pub info: Named<MetricInfo>,
     pub aggs: Vec<&'static str>,
     pub agg: usize,
     pub group_by: String,
@@ -57,7 +57,7 @@ pub fn aggs_for(info: &MetricInfo) -> Vec<&'static str> {
 }
 
 impl State {
-    pub fn visible(&self) -> Vec<&MetricInfo> {
+    pub fn visible(&self) -> Vec<&Named<MetricInfo>> {
         let s = self.search.to_lowercase();
         self.list.iter().filter(|m| s.is_empty() || m.name.to_lowercase().contains(&s)).collect()
     }
@@ -68,11 +68,11 @@ impl State {
         self.sel.select((n > 0).then_some(i));
     }
 
-    pub fn set_list(&mut self, v: Vec<MetricInfo>) {
-        let keep = self.sel.selected().and_then(|i| self.visible().get(i).map(|m| m.name.clone()));
+    pub fn set_list(&mut self, v: Vec<Named<MetricInfo>>) {
+        let keep = self.sel.selected().and_then(|i| self.visible().get(i).map(|m| m.raw.clone()));
         self.list = v;
         self.error = None;
-        let idx = keep.and_then(|n| self.visible().iter().position(|m| m.name == n));
+        let idx = keep.and_then(|n| self.visible().iter().position(|m| m.raw == n));
         self.sel.select(idx.or(Some(0)));
         self.clamp_selection();
     }
@@ -122,7 +122,7 @@ impl Embedded {
                 return;
             }
             let q = MetricQuery {
-                name: c.info.name.clone(),
+                name: c.info.raw.clone(),
                 since: Some(since),
                 service,
                 agg: Some(c.aggs[c.agg].to_string()),
@@ -140,7 +140,8 @@ impl Embedded {
         }
         let q = MetricListQuery { since: Some(since), service, ..Default::default() };
         let c = self.client.clone();
-        if self.loader.load(Kind::MetricList, force, async move { c.metrics(&q).await }, Data::MetricList) {
+        let wrap = |v| Data::MetricList(named(v));
+        if self.loader.load(Kind::MetricList, force, async move { c.metrics(&q).await }, wrap) {
             self.metrics.refreshed = Some(Instant::now());
         }
     }
@@ -247,7 +248,7 @@ impl Embedded {
                 if m.search.is_empty() {
                     Span::styled("press / to search", theme::faint())
                 } else {
-                    Span::styled(m.search.clone(), theme::bold())
+                    Span::styled(clean(&m.search).into_owned(), theme::bold())
                 },
             ]),
             sl,
@@ -326,7 +327,7 @@ impl Embedded {
         chips.push(if c.group_by.is_empty() {
             Span::styled("(none) b to set", theme::faint())
         } else {
-            Span::styled(c.group_by.clone(), theme::bold())
+            Span::styled(clean(&c.group_by).into_owned(), theme::bold())
         });
         let title = format!(
             "{} · {}{}",

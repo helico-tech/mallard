@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Wrap},
 };
 
-use mallard_term::tui::keys;
+use mallard_term::{text::clean, tui::keys};
 
 use super::{Embedded, VIEWS, View, theme, widgets};
 
@@ -81,16 +81,20 @@ impl Embedded {
             let room = (area.width as usize).saturating_sub(label_w + 1);
             let chars: Vec<char> = p.input.value.chars().collect();
             let cursor = p.input.cursor.min(chars.len());
+            // A filter can hold a name as the server has it, so it shows cleaned. The cursor
+            // stays after the same character.
+            let cols =
+                |c: char| clean(c.encode_utf8(&mut [0; 4])).chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
             let mut start = 0;
-            let mut before: usize = chars[..cursor].iter().map(|c| c.width().unwrap_or(0)).sum();
+            let mut before: usize = chars[..cursor].iter().map(|c| cols(*c)).sum();
             while before > room && start < cursor {
-                before -= chars[start].width().unwrap_or(0);
+                before -= cols(chars[start]);
                 start += 1;
             }
             let mut spans = vec![
                 Span::styled(label, theme::badge(theme::ACCENT2)),
                 Span::raw(" "),
-                Span::styled(chars[start..].iter().collect::<String>(), theme::bold()),
+                Span::styled(clean(&chars[start..].iter().collect::<String>()).into_owned(), theme::bold()),
             ];
             if start == 0 {
                 spans.push(Span::styled(format!("   {}", p.help), theme::faint()));

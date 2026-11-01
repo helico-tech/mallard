@@ -8,7 +8,7 @@ use std::{
 use chrono::{TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use mallard_otel_client::{LogTail, api::*};
-use mallard_term::tui::keys;
+use mallard_term::{text::clean, tui::keys};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -196,8 +196,18 @@ impl Embedded {
             q.limit = Some(1000);
             q.order = Some(LogOrder::Desc);
             let c = self.client.clone();
+            let tail_query = LogQuery { since: None, ..self.logs.base_query(String::new(), self.log_services()) };
             self.loader.cancel(Kind::LogTail);
-            if self.loader.spawn(Kind::Logs, async move { c.logs(&q).await }, Data::Logs) {
+            let page = async move {
+                let records = c.logs(&q).await?;
+                // Now, before the text is cleaned: the tail compares what it polls, as the
+                // server has it, with these. It must not return what this page shows.
+                let start = records.first().map(|r| r.time).unwrap_or_else(|| Utc::now() - TimeDelta::seconds(5));
+                let mut tail = LogTail::new(c, tail_query, start);
+                tail.mark_seen(&records);
+                Ok((records, Box::new(tail)))
+            };
+            if self.loader.spawn(Kind::Logs, page, |(records, tail)| Data::LogPage { records, tail }) {
                 self.logs.requested = true;
             }
         }
@@ -232,21 +242,14 @@ impl Embedded {
         }
     }
 
-    pub(crate) fn logs_loaded(&mut self, mut v: Vec<LogRecord>) {
+    pub(crate) fn logs_loaded(&mut self, mut v: Vec<LogRecord>, tail: LogTail) {
         v.reverse();
-        let service = self.log_services();
         let l = &mut self.logs;
         l.records.clear();
         l.loaded = true;
         l.error = None;
         l.retry_at = None;
-        let start = v.last().map(|r| r.time).unwrap_or_else(|| Utc::now() - TimeDelta::seconds(5));
         l.follow = true;
-        let q = l.base_query(String::new(), service);
-        let q = LogQuery { since: None, ..q };
-        let mut tail = LogTail::new(self.client.clone(), q, start);
-        // The tail must not return what the initial load already shows.
-        tail.mark_seen(&v);
         l.append(v, false);
         l.sel.select(l.records.len().checked_sub(1));
         l.tail = Some(Arc::new(tokio::sync::Mutex::new(tail)));
@@ -444,7 +447,7 @@ impl Embedded {
             if l.query.is_empty() {
                 Span::styled("all logs · press / to filter, s for severity", theme::faint())
             } else {
-                Span::styled(l.query.clone(), theme::bold())
+                Span::styled(clean(&l.query).into_owned(), theme::bold())
             },
         ]);
         f.render_widget(filter_line, fl);

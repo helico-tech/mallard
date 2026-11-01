@@ -255,3 +255,42 @@ async fn app_scopes_each_side() {
 
     srv.stop().await;
 }
+
+/// ADR 0006, checked while fixing issue 0146: commands that show server text print a
+/// hostile service name cleaned. `--json` keeps the value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_output_cleans_server_text() {
+    const EVIL: &str = "evil\u{202e}svc";
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let url = srv.url.as_str();
+    send_service(&reqwest::Client::new(), &srv.otlp_url, EVIL, 1).await;
+    let trace = ids(1).0;
+    eventually("data in the lake", || async {
+        let logs = mallard(url, &["logs", "--json"]).await.ok().json();
+        (logs["count"] == 1).then_some(())
+    })
+    .await;
+
+    for args in [
+        &["services"][..],
+        &["apps"],
+        &["ops"],
+        &["traces", "list"],
+        &["logs"],
+        &["metrics", "list"],
+        &["trace", &trace],
+        &["find", &trace],
+        &["schema", "attrs", "--signal", "logs", "--key", "service.name"],
+    ] {
+        let o = mallard(url, args).await.ok();
+        assert!(!o.stdout.contains('\u{202e}') && !o.stderr.contains('\u{202e}'), "{args:?}: {}", o.stdout);
+    }
+    for args in [&["services"][..], &["logs"], &["traces", "list"], &["trace", &trace]] {
+        let o = mallard(url, args).await.ok();
+        assert!(o.stdout.contains("evil\\u{202e}svc"), "{args:?}: {}", o.stdout);
+    }
+    let o = mallard(url, &["services", "--json"]).await.ok().json();
+    assert_eq!(o["items"][0]["name"], EVIL, "JSON keeps the value: {o}");
+    srv.stop().await;
+}

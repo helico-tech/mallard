@@ -29,7 +29,7 @@ fn red(n: u64, e: u64) -> RedStats {
     }
 }
 
-fn stats() -> Stats {
+pub(super) fn stats() -> Stats {
     Stats {
         version: "0.1.0".into(),
         uptime_secs: 3725,
@@ -102,11 +102,11 @@ fn fixture() -> Embedded {
     let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
     e.stats = Some(stats());
     e.ingest_rate = Some(250.0);
-    e.overview.set_services(vec![
+    e.overview.set_services(loader::named(vec![
         ServiceSummary { name: "frontend".into(), red: red(1000, 12) },
         ServiceSummary { name: "checkout".into(), red: red(200, 20) },
         ServiceSummary { name: "payment".into(), red: red(50, 0) },
-    ]);
+    ]));
     let now = Utc::now();
     e.overview.span_series = Some(SpanSeries {
         step_secs: 60,
@@ -159,7 +159,7 @@ fn fixture() -> Embedded {
         ],
         false,
     );
-    e.metrics.set_list(vec![MetricInfo {
+    e.metrics.set_list(loader::named(vec![MetricInfo {
         name: "app.request.duration".into(),
         metric_type: MetricType::Histogram,
         unit: "s".into(),
@@ -169,7 +169,7 @@ fn fixture() -> Embedded {
         point_count: 360,
         services: vec!["checkout".into()],
         last_seen: now,
-    }]);
+    }]));
     e.metrics.refreshed = Some(Instant::now());
     e
 }
@@ -250,12 +250,12 @@ fn overview_renders() {
     // drill into operations
     assert_eq!(e.handle_event(&key(KeyCode::Enter)), Outcome::Consumed);
     assert!(e.overview.ops.is_some());
-    e.overview.set_operations(vec![OperationSummary {
+    e.overview.set_operations(loader::named(vec![OperationSummary {
         service: "frontend".into(),
         name: "GET /".into(),
         kind: SpanKind::Server,
         red: red(10, 1),
-    }]);
+    }]));
     let s = render(&mut e, 160, 48);
     assert!(s.contains("Operations"), "{s}");
     assert!(s.contains("GET /"));
@@ -1103,7 +1103,7 @@ fn the_services_list_is_limited_to_the_app() {
     let mut e = fixture();
     e.set_scope(&app_scope(&["checkout"]));
     let summary = |n: &str| ServiceSummary { name: n.into(), red: red(1, 0) };
-    e.apply(Kind::Services, Data::Services(vec![summary("checkout"), summary("frontend")]));
+    e.apply(Kind::Services, Data::Services(loader::named(vec![summary("checkout"), summary("frontend")])));
     let names: Vec<_> = e.overview.services.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["checkout"]);
 }
@@ -1130,4 +1130,62 @@ fn suggestion_text_is_cleaned_on_screen() {
     let s = draw_to_string(&mut e, 100, 30);
     assert!(!s.contains('\u{202e}') && !s.contains('\x1b'), "{s}");
     assert!(s.contains("k\\u{202e}"), "{s}");
+}
+
+/// Cleaning a response goes through JSON: it must give back the same values, or a whole
+/// view would fail or lie (ADR 0006, issue 0146).
+#[test]
+fn every_kind_of_response_survives_cleaning() {
+    use mallard_term::text::sanitize;
+    fn same<T>(v: T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug + Clone,
+    {
+        assert_eq!(sanitize(v.clone(), true).unwrap(), v);
+    }
+    // One-line values come through the same way; a stack trace has line breaks to lose.
+    let one_line = stats();
+    assert_eq!(sanitize(one_line.clone(), false).unwrap(), one_line);
+    let e = fixture();
+    same(one_line);
+    same(ServiceSummary { name: "s".into(), red: red(3, 1) });
+    same(OperationSummary { service: "s".into(), name: "o".into(), kind: SpanKind::Client, red: red(3, 1) });
+    same(e.overview.span_series.clone().unwrap());
+    same(e.overview.log_series.clone().unwrap());
+    same(e.traces.list.clone());
+    same(trace_fixture());
+    same(log(1, 9, "body", Some(TID)));
+    for temporality in [Temporality::Unspecified, Temporality::Delta, Temporality::Cumulative] {
+        same(MetricInfo {
+            name: "m".into(),
+            metric_type: MetricType::Summary,
+            unit: "1".into(),
+            description: "d".into(),
+            temporality,
+            series_count: u64::MAX,
+            point_count: 1,
+            services: vec!["s".into()],
+            last_seen: Utc::now(),
+        });
+    }
+    same(MetricQueryResult {
+        name: "m".into(),
+        metric_type: MetricType::Gauge,
+        unit: "ms".into(),
+        agg: "avg".into(),
+        step_secs: 60,
+        series: vec![MetricSeries {
+            labels: [("k".to_string(), "v".to_string())].into(),
+            points: vec![MetricPoint { time: Utc::now(), value: 0.1 + 0.2 }],
+        }],
+        exemplars: vec![],
+    });
+}
+
+#[test]
+fn an_error_from_the_server_is_cleaned() {
+    let e = mallard_otel_client::Error::Api { status: 500, code: "x".into(), message: "bo\u{202e}om\x1b[2J".into() };
+    let s = loader::short_error(&e);
+    assert!(!s.contains('\u{202e}') && !s.contains('\x1b'), "{s}");
+    assert!(s.contains("bo\\u{202e}om"), "{s}");
 }

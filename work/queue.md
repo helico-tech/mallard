@@ -7,4 +7,4 @@
 5. [issue 0135 other {{auto}} IP paths](issues/0135-other-auto-ip-paths.md)
 6. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)
 7. [issue 0144 OTLP flushes conflict with Sentry ingest](issues/0144-otel-flush-conflicts-with-sentry-ingest.md)
-8. [issue 0146 telemetry TUI draws uncleaned text](issues/0146-telemetry-tui-draws-uncleaned-text.md)
+8. [issue 0148 suggestions insert cleaned names](issues/0148-suggestions-insert-cleaned-names.md)

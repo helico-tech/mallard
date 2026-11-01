@@ -394,7 +394,7 @@ async fn aggregation_change_supersedes_pending_query() {
     let aggs = crate::tui::views::metrics::aggs_for(&info);
     assert_eq!(aggs[..2], ["rate", "increase"]);
     e.metrics.chart = Some(crate::tui::views::metrics::ChartState {
-        info,
+        info: info.into(),
         aggs,
         agg: 0,
         group_by: String::new(),
@@ -438,7 +438,7 @@ async fn drill_down_supersedes_pending_traces() {
         max_ms: 1.0,
     };
     let op = OperationSummary { service: "checkout".into(), name: "GET /cart".into(), kind: SpanKind::Server, red };
-    e.overview.ops = Some(("checkout".into(), vec![op]));
+    e.overview.ops = Some(("checkout".into(), vec![op.into()]));
     e.overview.ops_sel.select(Some(0));
     let _ = e.handle_event(&ev(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(e.view, View::Traces);
@@ -517,4 +517,256 @@ fn prompt_leaves_modifier_keys_to_the_host() {
     assert_eq!(e.handle_event(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), Outcome::Consumed);
     assert!(e.prompt.is_none(), "Ctrl-C cancels the prompt");
     assert_eq!(e.handle_event(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)), Outcome::Quit);
+}
+
+// Issue 0146, ADR 0006: every text from the server shows cleaned on every screen, and
+// what goes back to the server stays as the server has it.
+
+const EVIL: &str = "a\u{202e}b";
+/// `EVIL` as it shows.
+const SHOWN: &str = "a\\u{202e}b";
+
+fn hostile_log() -> LogRecord {
+    use chrono::TimeZone;
+    let t = Utc.timestamp_opt(1_761_900_000, 0).unwrap();
+    LogRecord {
+        time: t,
+        observed_time: t,
+        service_name: EVIL.into(),
+        severity_number: 9,
+        severity_text: "se\u{202e}v".into(),
+        body: "first\u{202e}\nsecond".into(),
+        trace_id: Some(TID.into()),
+        span_id: Some("0000000000000001".into()),
+        event_name: "ev\u{202e}".into(),
+        scope_name: "sc\u{202e}".into(),
+        attributes: [("lk\u{202e}".to_string(), "lv\u{202e}".to_string())].into(),
+        resource_attributes: [("lr\u{202e}".to_string(), "lrv\u{202e}".to_string())].into(),
+    }
+}
+
+fn hostile_answer(path: &str) -> String {
+    let red = RedStats {
+        span_count: 1,
+        error_count: 0,
+        error_rate: 0.0,
+        rate_per_sec: 1.0,
+        p50_ms: 1.0,
+        p95_ms: 2.0,
+        p99_ms: 3.0,
+        max_ms: 4.0,
+    };
+    let json = |v: serde_json::Result<String>| v.unwrap();
+    match path {
+        "/api/v1/stats" => {
+            let mut s = super::tests::stats();
+            s.version = "ver\u{202e}".into();
+            s.ingest.last_flush_error = Some("flush\u{202e}".into());
+            s.storage.data_path = "path\u{202e}".into();
+            s.storage.tables[0].name = "tab\u{202e}".into();
+            let m = s.storage.last_maintenance.as_mut().unwrap();
+            m.task = "task\u{202e}".into();
+            m.detail = "detail\u{202e}".into();
+            json(serde_json::to_string(&s))
+        }
+        "/api/v1/services" => json(serde_json::to_string(&vec![ServiceSummary { name: EVIL.into(), red }])),
+        "/api/v1/operations" => json(serde_json::to_string(&vec![OperationSummary {
+            service: EVIL.into(),
+            name: "op\u{202e}".into(),
+            kind: SpanKind::Server,
+            red,
+        }])),
+        "/api/v1/traces" => json(serde_json::to_string(&vec![TraceSummary {
+            trace_id: TID.into(),
+            start_time: Utc::now(),
+            duration_ms: 5.0,
+            root_service: Some(EVIL.into()),
+            root_name: Some("root\u{202e}".into()),
+            span_count: 1,
+            error_count: 0,
+            services: vec!["sv\u{202e}".into()],
+        }])),
+        "/api/v1/logs" => json(serde_json::to_string(&vec![hostile_log()])),
+        "/api/v1/metrics" => json(serde_json::to_string(&vec![MetricInfo {
+            name: "m\u{202e}".into(),
+            metric_type: MetricType::Gauge,
+            unit: "u\u{202e}".into(),
+            description: String::new(),
+            temporality: Temporality::Unspecified,
+            series_count: 1,
+            point_count: 1,
+            services: vec!["ms\u{202e}".into()],
+            last_seen: Utc::now(),
+        }])),
+        "/api/v1/metrics/query" => json(serde_json::to_string(&MetricQueryResult {
+            name: "m\u{202e}".into(),
+            metric_type: MetricType::Gauge,
+            unit: "u\u{202e}".into(),
+            agg: "avg".into(),
+            step_secs: 60,
+            series: vec![MetricSeries {
+                labels: [("k".to_string(), "lab\u{202e}".to_string())].into(),
+                points: vec![MetricPoint { time: Utc::now(), value: 1.0 }],
+            }],
+            exemplars: vec![],
+        })),
+        p if p.starts_with("/api/v1/traces/") => {
+            let mut s = span("0000000000000001", None, 0, 5);
+            s.trace_id = TID.into();
+            s.service_name = EVIL.into();
+            s.name = "name\u{202e}".into();
+            s.status_message = "status\u{202e}".into();
+            s.scope_name = "scope\u{202e}".into();
+            s.attributes = [("key\u{202e}".to_string(), "value\u{202e}".to_string())].into();
+            s.resource_attributes = [("rk\u{202e}".to_string(), "rv\u{202e}".to_string())].into();
+            s.events = vec![SpanEvent {
+                time: s.start_time,
+                name: "event\u{202e}".into(),
+                attributes: [("exception.stacktrace".to_string(), "line one\u{202e}\nline two".to_string())].into(),
+            }];
+            s.links = vec![SpanLink {
+                trace_id: "lt\u{202e}".into(),
+                span_id: "ls\u{202e}".into(),
+                trace_state: String::new(),
+                attributes: Default::default(),
+            }];
+            json(serde_json::to_string(&Trace { trace_id: TID.into(), spans: vec![s] }))
+        }
+        _ => "{\"step_secs\":60,\"points\":[]}".into(),
+    }
+}
+
+/// The frame as lines, after checking that no raw text reached it.
+fn clean_screen(e: &mut Embedded, says: &[&str]) -> Vec<String> {
+    let lines: Vec<String> = render(e, 200, 70).into_iter().map(|row| row.concat()).collect();
+    let text = lines.join("\n");
+    assert!(!text.contains('\u{202e}') && !text.contains('\x1b'), "{text}");
+    for s in says {
+        assert!(text.contains(s), "no {s:?} in\n{text}");
+    }
+    lines
+}
+
+fn asked(hits: &Hits, path: &str, query: &str) -> bool {
+    hits.lock().unwrap().iter().any(|q| q.split('?').next() == Some(path) && q.contains(query))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_text_shows_cleaned_and_goes_back_as_it_was() {
+    let (url, hits) = fake(Arc::new(|path, _| (200, hostile_answer(path), 0))).await;
+    let mut e = Embedded::new(Client::new(&url, None).unwrap());
+    let enter = ev(KeyCode::Enter, KeyModifiers::NONE);
+    let esc = ev(KeyCode::Esc, KeyModifiers::NONE);
+    let press = |c| ev(KeyCode::Char(c), KeyModifiers::NONE);
+    let wait = Duration::from_secs(3);
+
+    // Overview, then its operations: the service goes back as the server has it.
+    assert!(settle(&mut e, |e| !e.overview.services.is_empty() && e.stats.is_some(), wait).await);
+    assert_eq!(e.overview.services[0].raw, EVIL);
+    clean_screen(&mut e, &[SHOWN]);
+    assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+    let ops = |e: &Embedded| e.overview.ops.as_ref().is_some_and(|(_, o)| !o.is_empty());
+    assert!(settle(&mut e, ops, wait).await);
+    assert!(asked(&hits, "/api/v1/operations", "service=a%E2%80%AEb"), "{hits:?}");
+    clean_screen(&mut e, &[SHOWN, "op\\u{202e}"]);
+
+    // Its traces: so do the service and the operation.
+    assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+    assert_eq!(e.traces.filter.service.as_deref(), Some(EVIL));
+    assert_eq!(e.traces.filter.operation.as_deref(), Some("op\u{202e}"));
+    assert!(settle(&mut e, |e| !e.traces.list.is_empty(), wait).await);
+    assert!(asked(&hits, "/api/v1/traces", "service=a%E2%80%AEb"), "{hits:?}");
+    assert!(asked(&hits, "/api/v1/traces", "operation=op%E2%80%AE"), "{hits:?}");
+    clean_screen(&mut e, &[SHOWN, "root\\u{202e}", "sv\\u{202e}", "op=op\\u{202e}"]);
+
+    // The filter bar holds that same text, and applying it again sends the same query.
+    assert_eq!(e.handle_event(&press('/')), Outcome::Consumed);
+    assert!(e.prompt.as_ref().unwrap().input.value.contains(EVIL));
+    clean_screen(&mut e, &[&format!("service={SHOWN}")]);
+    assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+    assert_eq!(e.traces.filter.service.as_deref(), Some(EVIL));
+
+    // The waterfall: a stack trace keeps its lines.
+    assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+    let open = |e: &Embedded| e.traces.detail.as_ref().is_some_and(|d| d.trace.is_some() && !d.logs.is_empty());
+    assert!(settle(&mut e, open, wait).await);
+    let lines = clean_screen(
+        &mut e,
+        &[
+            SHOWN,
+            "name\\u{202e}",
+            "status\\u{202e}",
+            "scope\\u{202e}",
+            "key\\u{202e}",
+            "value\\u{202e}",
+            "rk\\u{202e}",
+            "rv\\u{202e}",
+            "event\\u{202e}",
+            "lt\\u{202e}",
+            "ls\\u{202e}",
+            "first\\u{202e}",
+        ],
+    );
+    let line = |t: &str| lines.iter().filter(|l| l.contains(t)).count();
+    assert_eq!((line("line one\\u{202e}"), line("line two")), (1, 1));
+    assert!(!lines.iter().any(|l| l.contains("line one") && l.contains("line two")), "two lines");
+    assert_eq!(e.handle_event(&esc), Outcome::Consumed);
+
+    // Logs: one line in the list, its own lines in the popup.
+    assert_eq!(e.handle_event(&press('3')), Outcome::Consumed);
+    assert!(settle(&mut e, |e| e.logs.loaded && !e.logs.records.is_empty(), wait).await);
+    clean_screen(&mut e, &[SHOWN, "first\\u{202e} second"]);
+    assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+    let lines = clean_screen(
+        &mut e,
+        &[
+            SHOWN,
+            "se\\u{202e}v",
+            "ev\\u{202e}",
+            "sc\\u{202e}",
+            "lk\\u{202e}",
+            "lv\\u{202e}",
+            "lr\\u{202e}",
+            "lrv\\u{202e}",
+        ],
+    );
+    assert!(lines.iter().any(|l| l.contains("second") && !l.contains("first")), "{lines:#?}");
+    assert_eq!(e.handle_event(&esc), Outcome::Consumed);
+
+    // The tail compares what it polls with the first page: the same record comes once.
+    let before = count(&hits, "/api/v1/logs");
+    e.logs.tail_at = None;
+    assert!(settle(&mut e, |e| !e.loader.is_pending(Kind::LogTail) && e.logs.tail_at.is_some(), wait).await);
+    assert!(settle(&mut e, |e| !e.loader.is_pending(Kind::LogTail), wait).await);
+    assert!(count(&hits, "/api/v1/logs") > before, "the tail polled");
+    assert_eq!(e.logs.records.len(), 1, "not shown twice");
+
+    // Metrics: the name goes back as the server has it, and its answer is taken.
+    assert_eq!(e.handle_event(&press('4')), Outcome::Consumed);
+    assert!(settle(&mut e, |e| !e.metrics.list.is_empty(), wait).await);
+    clean_screen(&mut e, &["m\\u{202e}", "u\\u{202e}", "ms\\u{202e}"]);
+    assert_eq!(e.handle_event(&enter), Outcome::Consumed);
+    let charted = |e: &Embedded| e.metrics.chart.as_ref().is_some_and(|c| c.result.is_some());
+    assert!(settle(&mut e, charted, wait).await);
+    assert!(asked(&hits, "/api/v1/metrics/query", "name=m%E2%80%AE"), "{hits:?}");
+    clean_screen(&mut e, &["m\\u{202e}", "u\\u{202e}", "lab\\u{202e}"]);
+
+    // Status.
+    assert_eq!(e.handle_event(&press('5')), Outcome::Consumed);
+    clean_screen(
+        &mut e,
+        &["ver\\u{202e}", "flush\\u{202e}", "path\\u{202e}", "tab\\u{202e}", "task\\u{202e}", "detail\\u{202e}"],
+    );
+}
+
+/// The app's services are as the server has them, so the tab must compare with the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hostile_service_stays_in_its_app() {
+    let (url, hits) = fake(Arc::new(|path, _| (200, hostile_answer(path), 0))).await;
+    let mut e = Embedded::new(Client::new(&url, None).unwrap());
+    e.set_scope(&Scope::App { slug: "a-b".into(), project: None, services: vec![EVIL.into()] });
+    assert!(settle(&mut e, |e| !e.overview.services.is_empty(), Duration::from_secs(3)).await);
+    assert!(asked(&hits, "/api/v1/spans/series", "service=a%E2%80%AEb"), "{hits:?}");
+    e.set_trace_filter(&format!("service={EVIL}"));
+    assert_eq!(e.traces.filter.service.as_deref(), Some(EVIL), "the filter fits the app");
 }

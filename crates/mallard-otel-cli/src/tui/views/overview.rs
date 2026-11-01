@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use mallard_otel_client::api::*;
+use mallard_term::text::clean;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -17,7 +18,7 @@ use crate::{
     fmt::{compact, ms},
     tui::{
         Embedded, Outcome, View, due,
-        loader::{Data, Kind},
+        loader::{Data, Kind, Named, named},
         nav, theme,
         widgets::{self, Series, Tile},
     },
@@ -25,10 +26,10 @@ use crate::{
 
 #[derive(Default)]
 pub struct State {
-    pub services: Vec<ServiceSummary>,
+    pub services: Vec<Named<ServiceSummary>>,
     pub sel: TableState,
-    /// Drill-down: (service, operations)
-    pub ops: Option<(String, Vec<OperationSummary>)>,
+    /// Drill-down: (service as the server has it, operations)
+    pub ops: Option<(String, Vec<Named<OperationSummary>>)>,
     /// The operations of `ops` arrived (they may be none).
     pub ops_loaded: bool,
     pub ops_sel: TableState,
@@ -39,20 +40,20 @@ pub struct State {
 }
 
 impl State {
-    pub fn set_services(&mut self, v: Vec<ServiceSummary>) {
-        let keep = self.sel.selected().and_then(|i| self.services.get(i)).map(|s| s.name.clone());
+    pub fn set_services(&mut self, v: Vec<Named<ServiceSummary>>) {
+        let keep = self.sel.selected().and_then(|i| self.services.get(i)).map(|s| s.raw.clone());
         self.services = v;
         self.error = None;
-        let i = keep.and_then(|n| self.services.iter().position(|s| s.name == n)).unwrap_or(0);
+        let i = keep.and_then(|n| self.services.iter().position(|s| s.raw == n)).unwrap_or(0);
         self.sel.select((!self.services.is_empty()).then_some(i.min(self.services.len().saturating_sub(1))));
     }
 
-    pub fn set_operations(&mut self, v: Vec<OperationSummary>) {
+    pub fn set_operations(&mut self, v: Vec<Named<OperationSummary>>) {
         if let Some((_, ops)) = &mut self.ops {
             self.ops_loaded = true;
-            let keep = self.ops_sel.selected().and_then(|i| ops.get(i)).map(|o| o.name.clone());
+            let keep = self.ops_sel.selected().and_then(|i| ops.get(i)).map(|o| o.raw.clone());
             *ops = v;
-            let i = keep.and_then(|n| ops.iter().position(|o| o.name == n)).unwrap_or(0);
+            let i = keep.and_then(|n| ops.iter().position(|o| o.raw == n)).unwrap_or(0);
             self.ops_sel.select((!ops.is_empty()).then_some(i.min(ops.len().saturating_sub(1))));
         }
     }
@@ -78,7 +79,8 @@ impl Embedded {
         let since = Some(self.since().to_string());
         let c = self.client.clone();
         let q = ServiceQuery { since: since.clone(), ..Default::default() };
-        if !self.loader.load(Kind::Services, force, async move { c.services(&q).await }, Data::Services) {
+        let wrap = |v| Data::Services(named(v));
+        if !self.loader.load(Kind::Services, force, async move { c.services(&q).await }, wrap) {
             return;
         }
         self.overview.refreshed = Some(Instant::now());
@@ -91,7 +93,8 @@ impl Embedded {
         if let Some((svc, _)) = &self.overview.ops {
             let c = self.client.clone();
             let q = OperationQuery { since, service: vec![svc.clone()], ..Default::default() };
-            self.loader.load(Kind::Operations, force, async move { c.operations(&q).await }, Data::Operations);
+            let wrap = |v| Data::Operations(named(v));
+            self.loader.load(Kind::Operations, force, async move { c.operations(&q).await }, wrap);
         }
     }
 
@@ -109,7 +112,7 @@ impl Embedded {
                 }
                 KeyCode::Enter => {
                     let svc = svc.clone();
-                    let op = o.ops_sel.selected().and_then(|i| ops.get(i)).map(|op| op.name.clone());
+                    let op = o.ops_sel.selected().and_then(|i| ops.get(i)).map(|op| op.raw.clone());
                     self.show_traces_for(Some(svc), op);
                     return Some(Outcome::Consumed);
                 }
@@ -122,7 +125,7 @@ impl Embedded {
         }
         match k.code {
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                let svc = o.sel.selected().and_then(|i| o.services.get(i)).map(|s| s.name.clone())?;
+                let svc = o.sel.selected().and_then(|i| o.services.get(i)).map(|s| s.raw.clone())?;
                 o.ops = Some((svc, Vec::new()));
                 o.ops_loaded = false;
                 o.ops_sel.select(Some(0));
@@ -307,9 +310,10 @@ impl Embedded {
                 .collect();
             let mut widths = vec![Constraint::Fill(1), Constraint::Length(9)];
             widths.extend(red_w);
+            let svc = clean(svc);
             let title = Line::from(vec![
                 Span::styled(" Operations · ", theme::title()),
-                Span::styled(format!("● {svc} "), Style::new().fg(theme::service_color(svc))),
+                Span::styled(format!("● {svc} "), Style::new().fg(theme::service_color(&svc))),
             ]);
             let block = widgets::panel_with("", Line::from(format!(" {} ", ops.len())).style(theme::faint()), true)
                 .title(title);

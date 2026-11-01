@@ -417,7 +417,7 @@ impl Embedded {
             }
             Data::Services(mut v) => {
                 // The endpoint has no `service` filter.
-                v.retain(|s| self.in_scope(&s.name));
+                v.retain(|s| self.in_scope(&s.raw));
                 self.overview.set_services(v);
             }
             Data::Operations(v) => self.overview.set_operations(v),
@@ -435,10 +435,8 @@ impl Embedded {
                 self.load_span_errors();
             }
             Data::Errors(r) => self.traces.set_errors(kind, r.unwrap_or_default()),
-            Data::Logs(v) => match kind {
-                Kind::TraceLogs => self.traces.set_trace_logs(v),
-                _ => self.logs_loaded(v),
-            },
+            Data::Logs(v) => self.traces.set_trace_logs(v),
+            Data::LogPage { records, tail } => self.logs_loaded(records, *tail),
             Data::Tail { records, truncated } => self.logs_tail_loaded(records, truncated),
             Data::MetricList(v) => self.metrics.set_list(v),
             Data::MetricQuery(r) => self.metrics.set_result(r),
