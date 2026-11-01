@@ -161,6 +161,36 @@ fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) ->
     }
 }
 
+/// Envelope item types we name in metrics. Anything else is `other`: the
+/// type comes from the client, and every label value is a new series.
+const KNOWN_ITEM_TYPES: &[&str] = &[
+    "event",
+    "error",
+    "transaction",
+    "session",
+    "sessions",
+    "client_report",
+    "attachment",
+    "user_report",
+    "feedback",
+    "replay_event",
+    "replay_recording",
+    "replay_video",
+    "profile",
+    "profile_chunk",
+    "check_in",
+    "log",
+    "otel_log",
+    "span",
+    "otel_span",
+    "statsd",
+    "metric_buckets",
+];
+
+fn item_type_label(ty: &str) -> &'static str {
+    KNOWN_ITEM_TYPES.iter().find(|k| **k == ty).copied().unwrap_or("other")
+}
+
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -181,7 +211,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
     let mut stored_id: Option<String> = None;
     for item in &env.items {
         let ty = item.ty();
-        metrics::counter!("sdl_ingest_items_total", "type" => ty.to_string()).increment(1);
+        metrics::counter!("sdl_ingest_items_total", "type" => item_type_label(ty)).increment(1);
         match ty {
             "event" | "error" => {
                 if item.payload.len() > state.cfg.max_event_bytes {
@@ -199,7 +229,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
             // Accepted and dropped: transactions, sessions, client reports,
             // attachments, replays, profiles, check-ins, logs, feedback...
             // This server stores errors only (see docs/compatibility.md).
-            _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => ty.to_string()).increment(1),
+            _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => item_type_label(ty)).increment(1),
         }
     }
     metrics::histogram!("sdl_ingest_request_seconds", "endpoint" => "envelope").record(started.elapsed().as_secs_f64());
@@ -301,5 +331,17 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
             Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "storing the event failed"))
         }
         Err(_) => Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_type_labels_are_a_closed_set() {
+        assert_eq!(item_type_label("event"), "event");
+        assert_eq!(item_type_label("client_report"), "client_report");
+        assert_eq!(item_type_label("x-random-4711"), "other");
     }
 }
