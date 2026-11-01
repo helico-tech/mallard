@@ -367,8 +367,9 @@ What to back up: the **catalog** and the **bucket**, together.
 
 Measured numbers are in [sentry/capacity.md](sentry/capacity.md) and
 [otel/capacity.md](otel/capacity.md). Set `duckdb.memory_limit` to about half the
-container memory: DuckDB uses some memory outside its limit, and the telemetry write
-buffer needs room too. Do not set a CPU limit below 1 core, or compaction throttles.
+container memory and keep container >= limit + `otel.ingest.max_buffer_bytes` + 0.9 GiB.
+A 2 GiB container runs `1GB`, a `128MB` buffer and 4 threads, as compose does; 4 GiB runs
+`2GB`, `256MB` and 8. Do not set a CPU limit below 1 core, or compaction throttles.
 
 ## Health and monitoring
 

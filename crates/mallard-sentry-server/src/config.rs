@@ -118,8 +118,11 @@ impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             flush_interval: Duration::from_secs(300),
-            flush_rows: 50_000,
-            compact_interval: Duration::from_secs(3600),
+            // Both measured in 2 GiB at 300 events/s: flushing 50k events at once got the
+            // container killed, and merging 10 min of events ran out of memory
+            // (docs/otel/capacity.md).
+            flush_rows: 10_000,
+            compact_interval: Duration::from_secs(120),
         }
     }
 }

@@ -43,8 +43,10 @@ extensions = []
 # use_ssl = false
 
 [duckdb]
-memory_limit = ""                 # e.g. "2GB"
-threads = 0                       # 0 = all cores
+memory_limit = ""                 # e.g. "1GB". Always set it in a container; about half its memory.
+                                  # Container >= memory_limit + otel.ingest.max_buffer_bytes + 0.9 GiB
+                                  # (docs/otel/capacity.md; 2 GiB: "1GB", a "128MB" buffer and 4 threads)
+threads = 0                       # 0 = all cores, or the container's CPU limit. More threads use more memory.
 temp_directory = ""
 extension_directory = ""
 autoinstall_extensions = true
@@ -86,8 +88,8 @@ trust_forwarded_for = false       # client IP from X-Forwarded-For (one proxy ho
 
 [sentry.maintenance]
 flush_interval = "5m"
-flush_rows = 50000
-compact_interval = "1h"
+flush_rows = 10000
+compact_interval = "2m"
 
 [sentry.query]
 readers = 4
