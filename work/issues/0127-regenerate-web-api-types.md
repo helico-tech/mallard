@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-01
 ---
@@ -18,3 +18,5 @@ In `crates/mallard-web/ui`: `npm run api-types`, then `git diff --exit-code src/
 Only comments differ, no types: 3 lines in `sentry.gen.ts`, 4 in `otel.gen.ts`. The fix
 is to run the command above and commit the result. Do this before merging the branch
 that carries issue 0122.
+
+Done on 2026-11-01 with `npm run api-types`, when the branch merged.

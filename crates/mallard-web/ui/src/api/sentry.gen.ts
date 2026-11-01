@@ -261,7 +261,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`. */
+        /** @description Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `sentry.query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `sentry.query.sql_timeout`. */
         post: operations["run_sql"];
         delete?: never;
         options?: never;
@@ -492,7 +492,7 @@ export interface components {
             duckdb_version: string;
             /**
              * Format: int64
-             * @description Longest query window (`query.max_window`), in seconds.
+             * @description Longest query window (`sentry.query.max_window`), in seconds.
              */
             max_window_secs?: number | null;
             /** @description Base URL the DSNs are built from, e.g. `https://errors.example.com/sentry`. */
@@ -506,7 +506,7 @@ export interface components {
              * @description How long events are kept, in seconds (0 = forever).
              */
             retention_secs?: number | null;
-            /** @description `POST /v1/sql` is on (`query.enable_sql`). */
+            /** @description `POST /v1/sql` is on (`sentry.query.enable_sql`). */
             sql?: boolean | null;
             storage: string;
             version: string;

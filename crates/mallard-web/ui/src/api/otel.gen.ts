@@ -297,20 +297,20 @@ export interface components {
         Capabilities: {
             /**
              * Format: double
-             * @description Buffered data is written at least this often (`ingest.flush_interval`),
+             * @description Buffered data is written at least this often (`otel.ingest.flush_interval`),
              *     so new data can take this long to show up in queries.
              */
             flush_interval_secs: number;
-            /** @description OTLP ingest needs a bearer token (`auth.ingest_tokens` is set). */
+            /** @description OTLP ingest needs a bearer token (`server.ingest_tokens` is set). */
             ingest_auth: boolean;
             /**
              * Format: int64
-             * @description Longest query window (`query.max_window`), in seconds.
+             * @description Longest query window (`otel.query.max_window`), in seconds.
              */
             max_window_secs: number;
             /** @description How long data is kept, in seconds (0 = forever). */
             retention_secs: components["schemas"]["RetentionSecs"];
-            /** @description `POST /api/v1/sql` is enabled (`query.enable_sql`). */
+            /** @description `POST /api/v1/sql` is enabled (`otel.query.enable_sql`). */
             sql: boolean;
         };
         /**
