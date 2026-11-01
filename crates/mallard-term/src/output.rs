@@ -7,7 +7,8 @@
 //!   line and the envelope is left out.
 //! - `--fields a,b` keeps only those top-level keys of each item (or of the
 //!   object); an unknown field is a usage error that lists the valid ones.
-//! - stdout has data only; notes and errors go to stderr.
+//! - stdout has data only; notes and errors go to stderr. `--quiet` drops
+//!   the notes ([`Output::note`]); warnings and errors still print.
 
 use std::io::IsTerminal;
 
@@ -100,6 +101,8 @@ pub struct Output {
     pub fields: Option<Vec<String>>,
     /// Include raw payloads (Sentry `payload`, resource attributes).
     pub raw: bool,
+    /// `--quiet`: no notes on stderr (truncation, progress, fallbacks).
+    pub quiet: bool,
 }
 
 impl Default for Output {
@@ -110,7 +113,14 @@ impl Default for Output {
 
 impl Output {
     pub fn new(format: Format, color: ColorChoice) -> Self {
-        Output { format, out: Out::stdout(color), tty: std::io::stdout().is_terminal(), fields: None, raw: false }
+        Output {
+            format,
+            out: Out::stdout(color),
+            tty: std::io::stdout().is_terminal(),
+            fields: None,
+            raw: false,
+            quiet: false,
+        }
     }
 
     /// `--fields a,b,c` (empty names dropped; empty list = all fields).
@@ -124,6 +134,19 @@ impl Output {
     pub fn with_raw(mut self, raw: bool) -> Self {
         self.raw = raw;
         self
+    }
+
+    pub fn with_quiet(mut self, quiet: bool) -> Self {
+        self.quiet = quiet;
+        self
+    }
+
+    /// `note: …` on stderr, unless `--quiet`. For what helps a person but
+    /// is not data, a warning or an error.
+    pub fn note(&self, message: impl AsRef<str>) {
+        if !self.quiet {
+            eprintln!("note: {}", clean(message.as_ref()));
+        }
     }
 
     /// The command prints its own text (tables, details): text format and
@@ -230,7 +253,7 @@ impl Output {
     /// `truncated` in the envelope, and stderr may be merged into stdout).
     pub fn truncation_note<T>(&self, l: &List<T>) {
         if l.truncated && self.format != Format::Json {
-            eprintln!("note: {} shown, more exist; narrow the window or filters, or raise --limit", l.count);
+            self.note(format!("{} shown, more exist; narrow the window or filters, or raise --limit", l.count));
         }
     }
 
@@ -337,7 +360,7 @@ mod tests {
     use serde_json::json;
 
     fn out(format: Format, tty: bool) -> Output {
-        Output { format, out: Out { color: false }, tty, fields: None, raw: false }
+        Output { format, out: Out { color: false }, tty, fields: None, raw: false, quiet: false }
     }
 
     #[test]

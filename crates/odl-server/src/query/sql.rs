@@ -2,7 +2,7 @@
 //!
 //! Disabled by default and only available with API tokens configured. The
 //! query is checked and run by `mallard_duck::sql`, shared with the Sentry
-//! side (ADR 0005 here, mallard ADR 0010): one SELECT over the lake tables
+//! side (ADR 0005 here, mallard ADR 0011): one SELECT over the lake tables
 //! (`spans`, `logs`, `metric_*`), no file or network access, no settings.
 //!
 //! Resource use (memory, CPU) is bounded by the query timeout and DuckDB's

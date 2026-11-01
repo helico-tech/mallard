@@ -21,6 +21,7 @@ pub use mallard_term::error::Hints;
 pub use tui::{Embedded, Outcome};
 
 use clap::{Args, Subcommand, ValueEnum};
+use mallard_term::wait::WaitArgs;
 use mallard_term::window::WindowArgs;
 
 #[derive(Subcommand, Debug)]
@@ -253,6 +254,8 @@ pub enum EventsCmd {
         /// Continue a list: the `next_cursor` of the previous page.
         #[arg(long, conflicts_with = "trace")]
         cursor: Option<String>,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// One event: exception, stack trace, breadcrumbs, tags, user, request
     /// (JSON: concise; --raw adds the Sentry payload).

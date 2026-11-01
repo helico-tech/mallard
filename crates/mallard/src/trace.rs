@@ -10,6 +10,7 @@ use anyhow::Result;
 use mallard_client::TraceOverview;
 use mallard_term::fmt::ms;
 use mallard_term::text::clean;
+use mallard_term::wait::{WaitArgs, until};
 use mallard_term::window::WindowArgs;
 use serde_json::{Map, Value};
 
@@ -18,15 +19,21 @@ use crate::Run;
 /// Default window of `mallard trace`.
 const WINDOW: Duration = Duration::from_secs(7 * 86_400);
 
-/// `mallard trace <id>` / `traces show <id>`. Not found anywhere: exit 4.
-pub(crate) async fn run(r: &Run, trace_id: &str, window: &WindowArgs) -> Result<()> {
-    let w = window.resolve(WINDOW)?;
-    let t = r
-        .client
-        .trace_overview_in(trace_id, w.from, w.to)
-        .await
-        .map_err(|e| crate::described(e, r.client.base_url()))?;
-    let empty = t.spans.is_empty() && t.errors.is_empty() && t.logs.is_empty();
+/// `mallard trace <id>` / `traces show <id>`. Not found anywhere: exit 4
+/// (with `--wait`: exit 8 when nothing arrived in time).
+pub(crate) async fn run(r: &Run, trace_id: &str, window: &WindowArgs, wait: &WaitArgs) -> Result<()> {
+    // The window is resolved on every try: with --wait it moves along.
+    let fetch = || async {
+        let w = window.resolve(WINDOW)?;
+        let t = r
+            .client
+            .trace_overview_in(trace_id, w.from, w.to)
+            .await
+            .map_err(|e| crate::described(e, r.client.base_url()))?;
+        anyhow::Ok((w, t))
+    };
+    let ((w, t), waited) = until(&r.output, wait, fetch, |(_, t)| !is_empty(t)).await?.split();
+    let empty = is_empty(&t);
     if r.output.text() {
         r.output.out.line(&render(&t))?;
     } else {
@@ -34,10 +41,15 @@ pub(crate) async fn run(r: &Run, trace_id: &str, window: &WindowArgs) -> Result<
         v["window"] = serde_json::to_value(w)?;
         r.output.object(&v)?;
     }
+    waited?;
     if empty {
         return Err(mallard_term::error::not_found(format!("trace {} not found", t.trace_id)));
     }
     Ok(())
+}
+
+fn is_empty(t: &TraceOverview) -> bool {
+    t.spans.is_empty() && t.errors.is_empty() && t.logs.is_empty()
 }
 
 /// The trace as JSON. Without `raw`, resource attributes (the same for

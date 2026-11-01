@@ -10,6 +10,7 @@
 //!   codes, and printing them (text or JSON).
 //! - [`output`]: `--format`, `--fields`, the list envelope (ADR 0008).
 //! - [`window`]: the shared `--since/--from/--to` flags.
+//! - [`wait`]: `--wait <dur>`, poll until there is a result (exit 8 on timeout).
 //! - [`tui`]: theme, shared widgets, the shared keys and [`tui::Outcome`].
 
 #![warn(unreachable_pub)]
@@ -21,4 +22,5 @@ pub mod output;
 pub mod table;
 pub mod text;
 pub mod tui;
+pub mod wait;
 pub mod window;

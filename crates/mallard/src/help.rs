@@ -28,11 +28,11 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["status"], "mallard status\n  mallard status --json   # exit 6 when a side is down"),
     (
         &["setup"],
-        "mallard setup checkout --platform node >> .env\n  mallard setup checkout --json   # {\"project\":…,\"created\":false,\"env\":{…}}",
+        "mallard setup checkout --platform node >> .env\n  mallard setup checkout --json   # {\"project\":…,\"created\":false,\"env\":{…}}\n  mallard setup checkout --sentry-cli >> .env   # adds SENTRY_URL, SENTRY_ORG, SENTRY_PROJECT, SENTRY_AUTH_TOKEN",
     ),
     (
         &["find"],
-        "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue",
+        "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue\n  mallard find 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if nothing arrives",
     ),
     (&["issues"], "mallard issues list --since 1h\n  mallard issues show 85fede14250ec6be"),
     (
@@ -49,7 +49,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["events"], "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events show <event-id>"),
     (
         &["events", "list"],
-        "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events list --trace 0af7651916cd43dd8448eb211c80319c\n  mallard events list --since 1h --tag user=u-42 --release web@1.4.0\n  mallard events list --cursor <next_cursor>   # the next page",
+        "mallard events list --issue 85fede14250ec6be -n 5\n  mallard events list --trace 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if none arrives\n  mallard events list --since 1h --tag user=u-42 --release web@1.4.0\n  mallard events list --cursor <next_cursor>   # the next page",
     ),
     (
         &["events", "show"],
@@ -64,19 +64,29 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["traces"], "mallard traces list -S checkout --errors --since 15m\n  mallard traces show <trace-id>"),
     (
         &["traces", "list"],
-        "mallard traces list -S checkout --errors --since 15m -n 10\n  mallard traces list -O \"POST /pay\" --min-ms 500 -a http.route=/pay",
+        "mallard traces list -S checkout --errors --since 15m -n 10\n  mallard traces list -O \"POST /pay\" --min-ms 500 -a http.route=/pay\n  mallard traces list -S checkout --since 1m --wait 30s",
     ),
     (&["traces", "show"], "mallard traces show 0af7651916cd43dd8448eb211c80319c --fields spans,errors"),
     (
         &["trace"],
-        "mallard trace 0af7651916cd43dd8448eb211c80319c\n  mallard trace 0af7651916cd43dd8448eb211c80319c --since 1d --json",
+        "mallard trace 0af7651916cd43dd8448eb211c80319c\n  mallard trace 0af7651916cd43dd8448eb211c80319c --since 1d --json\n  mallard trace 0af7651916cd43dd8448eb211c80319c --wait 30s",
     ),
     (
         &["logs"],
-        "mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id\n  mallard logs --around 2026-11-01T10:15:03Z --window 2m -S checkout\n  mallard logs -t 0af7651916cd43dd8448eb211c80319c\n  mallard logs -S checkout -f",
+        "mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id\n  mallard logs --around 2026-11-01T10:15:03Z --window 2m -S checkout\n  mallard logs -t 0af7651916cd43dd8448eb211c80319c --wait 30s\n  mallard logs -S checkout -f --for 2m\n  mallard logs -S checkout -f --until-match \"listening on\" --for 1m   # exit 8 if no match",
     ),
     (&["services"], "mallard services --since 1h"),
-    (&["ops"], "mallard ops -S checkout --since 1h"),
+    (
+        &["ops"],
+        "mallard ops -S checkout --since 1h\n  mallard ops -S checkout --since 1h --compare 1d   # p95 and error rate vs. the same hour yesterday",
+    ),
+    (
+        &["series"],
+        "mallard series spans -S checkout -O \"POST /pay\" --since 6h --step 5m\n  mallard series logs -S checkout --since 1h\n  mallard series errors -p web --since 1d --step 1h",
+    ),
+    (&["series", "spans"], "mallard series spans -S checkout -O \"POST /pay\" --since 6h --step 5m --json"),
+    (&["series", "logs"], "mallard series logs -S checkout -q timeout --since 1h --step 1m"),
+    (&["series", "errors"], "mallard series errors -p web --since 1d --step 1h"),
     (&["metrics"], "mallard metrics list -q http\n  mallard metrics show http.server.duration -g p95 -b http.route"),
     (&["metrics", "list"], "mallard metrics list -q http -S checkout"),
     (

@@ -1,4 +1,4 @@
-# 0010 — Read-only SQL over the error tables
+# 0011 — Read-only SQL over the error tables
 
 ## Status
 accepted

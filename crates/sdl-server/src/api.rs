@@ -473,7 +473,7 @@ async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
 const SQL_TABLES: &[&str] = &["events", "issues", "issue_activity"];
 
 #[utoipa::path(post, path = "/v1/sql", request_body = SqlRequest,
-    description = "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0010). Off unless \
+    description = "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless \
         `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
     responses((status = 200, body = SqlResponse), (status = 400, body = ApiError), (status = 403, body = ApiError),
         (status = 504, body = ApiError)))]

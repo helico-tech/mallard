@@ -1,21 +1,26 @@
 //! The bridge between the two sides (docs/adr/0009-bridge.md), in process:
 //!
 //! - Sentry transactions → OTel spans: sdl-server hands each transaction
-//!   item to [`Transactions`], which converts it on a blocking thread and
-//!   buffers it with `odl_server::Server::ingest_traces`. A full buffer
-//!   drops it (counted); Sentry ingest never waits.
+//!   item to [`Transactions`], which queues it for `dedupe_window`. The
+//!   [`TransactionWorker`] then converts it on a blocking thread, drops the
+//!   spans the app also sent over OTLP ([`OtlpSpans`], ADR 0010) and
+//!   buffers the rest with `odl_server::Server::ingest_traces`. A full
+//!   queue or OTel buffer drops it (counted); Sentry ingest never waits.
 //! - OTel exceptions → Sentry events: odl-server shows every buffered
-//!   OTLP request to [`Exceptions`], which queues the exceptions in it. The
-//!   [`Worker`] holds each one for `dedupe_window`, drops it when a Sentry
-//!   SDK sent an event for the same trace + span, and otherwise stores it
-//!   with `sdl_server::Server::ingest_event` in the project of its service.
+//!   OTLP request to [`OtlpHook`], which remembers its span ids and queues
+//!   the exceptions in it. The [`ExceptionWorker`] holds each one for
+//!   `dedupe_window`, drops it when a Sentry SDK sent an event for the same
+//!   trace + span, and otherwise stores it with
+//!   `sdl_server::Server::ingest_event` in the project of its service.
 
 pub mod exception;
 mod stacktrace;
 pub mod transaction;
 
+use std::collections::HashSet;
+use std::future::Future;
 use std::sync::{
-    Arc,
+    Arc, Mutex, PoisonError,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -31,8 +36,16 @@ use uuid::Uuid;
 use crate::config::BridgeConfig;
 use exception::OtelException;
 
-/// Transactions being converted at once; more are dropped.
-const MAX_PENDING_TRANSACTIONS: usize = 1024;
+/// Sentry transactions waiting for their dedupe window: at most this many
+/// and this many payload bytes; more are dropped.
+const TRANSACTION_QUEUE: usize = 50_000;
+const TRANSACTION_QUEUE_BYTES: usize = 256 << 20;
+/// Transactions converted and stored at once (blocking threads).
+const TRANSACTION_WORKERS: usize = 32;
+/// OTLP span ids are remembered in two generations; a new one starts when
+/// the current one is this old or holds this many ids (ADR 0010).
+const OTLP_SPAN_GENERATION: Duration = Duration::from_secs(300);
+const OTLP_SPANS_PER_GENERATION: usize = 500_000;
 /// OTel exceptions waiting for their dedupe window; more are dropped.
 const EXCEPTION_QUEUE: usize = 10_000;
 /// OTel exceptions stored at once (each waits for a Sentry write batch).
@@ -41,81 +54,254 @@ const EXCEPTION_WORKERS: usize = 64;
 const SEEN_SPAN_TTL: Duration = Duration::from_secs(3600);
 const SEEN_SPANS: u64 = 200_000;
 
-/// Install the hooks `cfg` turns on. Returns the worker that stores OTel
-/// exceptions (to run with [`Worker::run`]) when that half is on.
-pub fn install(
-    cfg: &BridgeConfig,
-    sentry: &sdl_server::Server,
-    otel: &Arc<odl_server::Server>,
-) -> Result<Option<Worker>> {
-    if cfg.transactions {
-        let sink = Transactions {
-            otel: otel.clone(),
-            runtime: tokio::runtime::Handle::current(),
-            pending: Arc::new(AtomicUsize::new(0)),
-        };
-        sentry.set_transaction_sink(Arc::new(sink))?;
-    }
-    if !cfg.exceptions {
-        return Ok(None);
-    }
-    let seen =
-        Arc::new(SeenSpans(moka::sync::Cache::builder().max_capacity(SEEN_SPANS).time_to_live(SEEN_SPAN_TTL).build()));
-    sentry.set_event_observer(seen.clone())?;
-    let (tx, rx) = mpsc::channel(EXCEPTION_QUEUE);
-    otel.set_ingest_hook(Arc::new(Exceptions { tx, window: cfg.dedupe_window }))?;
-    Ok(Some(Worker {
-        rx,
-        ctx: Arc::new(Ctx { sentry: sentry.clone(), seen, default_project: cfg.default_project.clone() }),
-    }))
+/// The bridge's background workers; each is `None` when its half is off.
+#[derive(Default)]
+pub struct Workers {
+    /// Stores Sentry transactions as spans (`bridge.transactions`).
+    pub transactions: Option<TransactionWorker>,
+    /// Stores OTel exceptions as Sentry events (`bridge.exceptions`).
+    pub exceptions: Option<ExceptionWorker>,
 }
 
-/// Converts Sentry transactions and buffers them as OTel spans.
+/// Install the hooks `cfg` turns on. Returns the workers to run (with
+/// their `run`) for the halves that are on.
+pub fn install(cfg: &BridgeConfig, sentry: &sdl_server::Server, otel: &Arc<odl_server::Server>) -> Result<Workers> {
+    let mut workers = Workers::default();
+    let mut hook = OtlpHook::default();
+    if cfg.transactions {
+        let otlp_spans = Arc::new(OtlpSpans::new(OTLP_SPAN_GENERATION, OTLP_SPANS_PER_GENERATION));
+        let held = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(TRANSACTION_QUEUE);
+        sentry.set_transaction_sink(Arc::new(Transactions { tx, window: cfg.dedupe_window, held }))?;
+        hook.spans = Some(otlp_spans.clone());
+        workers.transactions =
+            Some(TransactionWorker { rx, store: Arc::new(SpanStore { otel: otel.clone(), otlp_spans }) });
+    }
+    if cfg.exceptions {
+        let seen = Arc::new(SeenSpans(
+            moka::sync::Cache::builder().max_capacity(SEEN_SPANS).time_to_live(SEEN_SPAN_TTL).build(),
+        ));
+        sentry.set_event_observer(seen.clone())?;
+        let (tx, rx) = mpsc::channel(EXCEPTION_QUEUE);
+        hook.exceptions = Some(Exceptions { tx, window: cfg.dedupe_window });
+        workers.exceptions = Some(ExceptionWorker {
+            rx,
+            ctx: Arc::new(Ctx { sentry: sentry.clone(), seen, default_project: cfg.default_project.clone() }),
+        });
+    }
+    if cfg.transactions || cfg.exceptions {
+        otel.set_ingest_hook(Arc::new(hook))?;
+    }
+    Ok(workers)
+}
+
+/// An item waiting until `due`, the end of its dedupe window.
+struct Delayed<T> {
+    due: tokio::time::Instant,
+    item: T,
+}
+
+/// Hand each queued item to `handle` once it is due, at most `workers` at
+/// once. When `stop` is cancelled, handle what is queued without waiting
+/// (the receivers are down, so no copy from the other side can arrive any
+/// more) and return when all of it is done.
+async fn run_delayed<T, F, Fut>(mut rx: mpsc::Receiver<Delayed<T>>, stop: CancellationToken, workers: usize, handle: F)
+where
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let mut tasks = JoinSet::new();
+    loop {
+        let next = tokio::select! {
+            p = rx.recv() => p,
+            () = stop.cancelled(), if !rx.is_closed() => {
+                rx.close();
+                continue;
+            }
+        };
+        let Some(p) = next else { break };
+        if !stop.is_cancelled() {
+            tokio::select! {
+                () = tokio::time::sleep_until(p.due) => {}
+                () = stop.cancelled() => {}
+            }
+        }
+        while tasks.len() >= workers {
+            tasks.join_next().await;
+        }
+        tasks.spawn(handle(p.item));
+    }
+    while tasks.join_next().await.is_some() {}
+}
+
+/// Queues Sentry transactions for their dedupe window.
 struct Transactions {
-    otel: Arc<odl_server::Server>,
-    runtime: tokio::runtime::Handle,
-    pending: Arc<AtomicUsize>,
+    tx: mpsc::Sender<Delayed<Held>>,
+    window: Duration,
+    /// Payload bytes queued.
+    held: Arc<AtomicUsize>,
+}
+
+/// A queued transaction.
+struct Held {
+    project_slug: String,
+    payload: Vec<u8>,
+    _bytes: Release,
 }
 
 impl sdl_server::TransactionSink for Transactions {
     fn transaction(&self, t: sdl_server::Transaction) {
-        if self.pending.fetch_add(1, Ordering::Relaxed) >= MAX_PENDING_TRANSACTIONS {
-            self.pending.fetch_sub(1, Ordering::Relaxed);
+        let n = t.payload.len();
+        if self.held.fetch_add(n, Ordering::Relaxed) + n > TRANSACTION_QUEUE_BYTES {
+            self.held.fetch_sub(n, Ordering::Relaxed);
             count_transaction("busy");
             return;
         }
-        let (otel, pending) = (self.otel.clone(), self.pending.clone());
-        self.runtime.spawn_blocking(move || {
-            let _done = Decrement(pending);
-            count_transaction(store_transaction(&otel, &t));
-        });
+        // A copy: the payload may be a slice of a much larger envelope body.
+        let item =
+            Held { project_slug: t.project_slug, payload: t.payload.to_vec(), _bytes: Release(self.held.clone(), n) };
+        if self.tx.try_send(Delayed { due: tokio::time::Instant::now() + self.window, item }).is_err() {
+            count_transaction("busy");
+        }
     }
 }
 
-/// Lowers the pending count when dropped (also after a panic).
-struct Decrement(Arc<AtomicUsize>);
+/// Gives `n` back to the counter when dropped (also after a panic).
+struct Release(Arc<AtomicUsize>, usize);
 
-impl Drop for Decrement {
+impl Drop for Release {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.0.fetch_sub(self.1, Ordering::Relaxed);
     }
 }
 
-/// Convert and buffer one transaction; the outcome for the metric.
-fn store_transaction(otel: &odl_server::Server, t: &sdl_server::Transaction) -> &'static str {
-    let Ok(tx) = serde_json::from_slice(&t.payload) else { return "invalid" };
-    let Some(req) = transaction::to_otlp(&tx, &t.project_slug) else { return "invalid" };
-    match otel.ingest_traces(req) {
-        Ok(n) => {
-            metrics::counter!("mallard_bridge_spans_total").increment(n);
-            "stored"
+/// Converts due Sentry transactions and stores them as spans.
+pub struct TransactionWorker {
+    rx: mpsc::Receiver<Delayed<Held>>,
+    store: Arc<SpanStore>,
+}
+
+impl TransactionWorker {
+    /// Run until `stop` is cancelled; then store what is queued without
+    /// waiting and return. Run it before otel's final flush.
+    pub async fn run(self, stop: CancellationToken) {
+        let store = self.store;
+        run_delayed(self.rx, stop, TRANSACTION_WORKERS, move |t: Held| {
+            let store = store.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || store.store(&t)).await;
+                count_transaction(result.unwrap_or("error"));
+            }
+        })
+        .await;
+    }
+}
+
+struct SpanStore {
+    otel: Arc<odl_server::Server>,
+    otlp_spans: Arc<OtlpSpans>,
+}
+
+impl SpanStore {
+    /// Convert one transaction, drop the spans that came over OTLP too and
+    /// buffer the rest; the outcome for the metric. Blocking.
+    fn store(&self, t: &Held) -> &'static str {
+        let Ok(tx) = serde_json::from_slice(&t.payload) else { return "invalid" };
+        let Some(mut req) = transaction::to_otlp(&tx, &t.project_slug) else { return "invalid" };
+        let dropped = self.otlp_spans.remove_seen(&mut req);
+        if dropped > 0 {
+            metrics::counter!("mallard_bridge_duplicate_spans_total").increment(dropped);
         }
-        Err(OtelError::Backpressure(_)) => "otel_full",
-        Err(OtelError::TooLarge(_)) => "too_large",
-        Err(e) => {
-            tracing::warn!(error = %e, "storing a Sentry transaction as spans failed");
-            "error"
+        if req.resource_spans.iter().flat_map(|r| &r.scope_spans).all(|s| s.spans.is_empty()) {
+            return "duplicate";
         }
+        match self.otel.ingest_traces(req) {
+            Ok(n) => {
+                metrics::counter!("mallard_bridge_spans_total").increment(n);
+                "stored"
+            }
+            Err(OtelError::Backpressure(_)) => "otel_full",
+            Err(OtelError::TooLarge(_)) => "too_large",
+            Err(e) => {
+                tracing::warn!(error = %e, "storing a Sentry transaction as spans failed");
+                "error"
+            }
+        }
+    }
+}
+
+/// Trace id then span id, packed (24 bytes, no padding).
+type SpanKey = [u8; 24];
+
+fn span_key(trace_id: &[u8], span_id: &[u8]) -> Option<SpanKey> {
+    if trace_id.len() != 16 || span_id.len() != 8 {
+        return None;
+    }
+    let mut k = [0; 24];
+    k[..16].copy_from_slice(trace_id);
+    k[16..].copy_from_slice(span_id);
+    Some(k)
+}
+
+/// Ids (trace + span) of spans received over OTLP recently, to drop the
+/// Sentry copy of a span that an app sends both ways (ADR 0010). Two
+/// generations: when the current one is `generation` old or holds `cap`
+/// ids, it becomes the previous one and the one before is dropped. So an
+/// id is kept for at least `generation` or `cap` spans, whichever ends
+/// first, and memory stays bounded (2 × `cap` ids).
+struct OtlpSpans {
+    generation: Duration,
+    cap: usize,
+    ids: Mutex<Generations>,
+}
+
+struct Generations {
+    current: HashSet<SpanKey>,
+    previous: HashSet<SpanKey>,
+    started: Instant,
+}
+
+impl Generations {
+    fn rotate(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+        self.started = Instant::now();
+    }
+}
+
+impl OtlpSpans {
+    fn new(generation: Duration, cap: usize) -> Self {
+        let ids = Generations { current: HashSet::new(), previous: HashSet::new(), started: Instant::now() };
+        OtlpSpans { generation, cap, ids: Mutex::new(ids) }
+    }
+
+    fn record(&self, req: &ExportTraceServiceRequest) {
+        let mut g = self.ids.lock().unwrap_or_else(PoisonError::into_inner);
+        if g.started.elapsed() >= self.generation {
+            g.rotate();
+        }
+        for s in req.resource_spans.iter().flat_map(|r| &r.scope_spans).flat_map(|s| &s.spans) {
+            if let Some(k) = span_key(&s.trace_id, &s.span_id) {
+                if g.current.len() >= self.cap {
+                    g.rotate();
+                }
+                g.current.insert(k);
+            }
+        }
+    }
+
+    /// Remove the spans whose ids were seen; returns how many.
+    fn remove_seen(&self, req: &mut ExportTraceServiceRequest) -> u64 {
+        let g = self.ids.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut removed = 0;
+        for scope in req.resource_spans.iter_mut().flat_map(|r| &mut r.scope_spans) {
+            scope.spans.retain(|s| {
+                let seen = span_key(&s.trace_id, &s.span_id)
+                    .is_some_and(|k| g.current.contains(&k) || g.previous.contains(&k));
+                removed += u64::from(seen);
+                !seen
+            });
+        }
+        removed
     }
 }
 
@@ -136,35 +322,44 @@ impl sdl_server::EventObserver for SeenSpans {
     }
 }
 
-/// An OTel exception waiting until `due` (its dedupe window).
-struct Pending {
-    due: tokio::time::Instant,
-    exception: OtelException,
+/// Sees every buffered OTLP request: remembers its span ids (for
+/// transactions) and queues its exceptions.
+#[derive(Default)]
+struct OtlpHook {
+    spans: Option<Arc<OtlpSpans>>,
+    exceptions: Option<Exceptions>,
 }
 
-/// Finds exceptions in buffered OTLP requests and queues them.
+impl odl_server::IngestHook for OtlpHook {
+    fn traces(&self, req: &ExportTraceServiceRequest) {
+        if let Some(spans) = &self.spans {
+            spans.record(req);
+        }
+        if let Some(e) = &self.exceptions {
+            e.queue(exception::from_traces(req));
+        }
+    }
+    fn logs(&self, req: &ExportLogsServiceRequest) {
+        if let Some(e) = &self.exceptions {
+            e.queue(exception::from_logs(req));
+        }
+    }
+}
+
+/// Queues OTel exceptions for their dedupe window.
 struct Exceptions {
-    tx: mpsc::Sender<Pending>,
+    tx: mpsc::Sender<Delayed<OtelException>>,
     window: Duration,
 }
 
 impl Exceptions {
     fn queue(&self, found: Vec<OtelException>) {
-        let due = tokio::time::Instant::from_std(Instant::now() + self.window);
-        for exception in found {
-            if self.tx.try_send(Pending { due, exception }).is_err() {
+        let due = tokio::time::Instant::now() + self.window;
+        for item in found {
+            if self.tx.try_send(Delayed { due, item }).is_err() {
                 count_exception("queue_full");
             }
         }
-    }
-}
-
-impl odl_server::IngestHook for Exceptions {
-    fn traces(&self, req: &ExportTraceServiceRequest) {
-        self.queue(exception::from_traces(req));
-    }
-    fn logs(&self, req: &ExportLogsServiceRequest) {
-        self.queue(exception::from_logs(req));
     }
 }
 
@@ -175,39 +370,21 @@ struct Ctx {
 }
 
 /// Stores queued OTel exceptions as Sentry events.
-pub struct Worker {
-    rx: mpsc::Receiver<Pending>,
+pub struct ExceptionWorker {
+    rx: mpsc::Receiver<Delayed<OtelException>>,
     ctx: Arc<Ctx>,
 }
 
-impl Worker {
+impl ExceptionWorker {
     /// Run until `stop` is cancelled; then store what is queued without
-    /// waiting for the dedupe window (the receivers are down, so no Sentry
-    /// event can arrive any more) and return.
-    pub async fn run(mut self, stop: CancellationToken) {
-        let mut tasks = JoinSet::new();
-        loop {
-            let next = tokio::select! {
-                p = self.rx.recv() => p,
-                () = stop.cancelled(), if !self.rx.is_closed() => {
-                    self.rx.close();
-                    continue;
-                }
-            };
-            let Some(p) = next else { break };
-            if !stop.is_cancelled() {
-                tokio::select! {
-                    () = tokio::time::sleep_until(p.due) => {}
-                    () = stop.cancelled() => {}
-                }
-            }
-            while tasks.len() >= EXCEPTION_WORKERS {
-                tasks.join_next().await;
-            }
-            let ctx = self.ctx.clone();
-            tasks.spawn(async move { count_exception(ctx.store(p.exception).await) });
-        }
-        while tasks.join_next().await.is_some() {}
+    /// waiting and return. Run it before Sentry's final flush.
+    pub async fn run(self, stop: CancellationToken) {
+        let ctx = self.ctx;
+        run_delayed(self.rx, stop, EXCEPTION_WORKERS, move |e| {
+            let ctx = ctx.clone();
+            async move { count_exception(ctx.store(e).await) }
+        })
+        .await;
     }
 }
 
@@ -284,5 +461,53 @@ mod tests {
         assert_eq!(service_slug("42"), "service-42");
         assert_eq!(service_slug("::"), "unknown-service");
         assert_eq!(service_slug(&"a".repeat(80)).len(), 64);
+    }
+
+    fn request(ids: &[(u8, u8)]) -> ExportTraceServiceRequest {
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+        let spans = ids
+            .iter()
+            .map(|&(t, s)| Span { trace_id: vec![t; 16], span_id: vec![s; 8], ..Default::default() })
+            .collect();
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans { spans, ..Default::default() }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn left(req: &ExportTraceServiceRequest) -> Vec<u8> {
+        req.resource_spans[0].scope_spans[0].spans.iter().map(|s| s.span_id[0]).collect()
+    }
+
+    #[test]
+    fn otlp_spans_drop_only_seen_ids() {
+        let seen = OtlpSpans::new(Duration::from_secs(60), 100);
+        seen.record(&request(&[(1, 1), (1, 2)]));
+        let mut req = request(&[(1, 1), (1, 2), (1, 3), (2, 1)]);
+        assert_eq!(seen.remove_seen(&mut req), 2);
+        assert_eq!(left(&req), [3, 1], "the same span id in another trace stays");
+    }
+
+    #[test]
+    fn otlp_spans_keep_two_generations() {
+        let seen = OtlpSpans::new(Duration::from_secs(60), 2);
+        seen.record(&request(&[(1, 1), (1, 2)]));
+        seen.record(&request(&[(1, 3), (1, 4)])); // full: 1, 2 become the previous generation
+        let mut req = request(&[(1, 1), (1, 4)]);
+        assert_eq!(seen.remove_seen(&mut req), 2);
+        seen.record(&request(&[(1, 5)])); // full again: 1, 2 are forgotten
+        let mut req = request(&[(1, 1), (1, 3), (1, 5)]);
+        assert_eq!(seen.remove_seen(&mut req), 2);
+        assert_eq!(left(&req), [1]);
+
+        let seen = OtlpSpans::new(Duration::ZERO, 100);
+        for id in 1..=3 {
+            seen.record(&request(&[(1, id)])); // too old: each request starts a generation
+        }
+        let mut req = request(&[(1, 1), (1, 2), (1, 3)]);
+        assert_eq!(seen.remove_seen(&mut req), 2);
+        assert_eq!(left(&req), [1]);
     }
 }

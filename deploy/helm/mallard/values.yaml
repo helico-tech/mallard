@@ -96,8 +96,10 @@ bridge:
   # Project slug for exceptions whose service.name matches no project;
   # empty = one project per service.
   defaultProject: ""
-  # How long an OTel exception waits for a Sentry SDK event of the same
-  # span (then it is dropped as a duplicate). At most 10m.
+  # How long a bridged item waits for its copy from the other side: an
+  # OTel exception for a Sentry SDK event of the same span, a Sentry
+  # transaction for OTLP spans with the same ids (ADR 0010). Copies that
+  # came are dropped. At most 10m.
   dedupeWindow: 10s
 
 duckdb:

@@ -1,7 +1,8 @@
 # 0009 — Bridge: Sentry transactions as traces, OTel exceptions as issues
 
 ## Status
-accepted
+accepted; amended by 0010 (spans sent both as Sentry transactions and
+over OTLP are stored once; transactions wait `dedupe_window`)
 
 ## Context
 mallard runs both sides in one process on one catalog (ADR 0001), but

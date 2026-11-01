@@ -340,7 +340,7 @@ Kept aliases (hidden): `errors …`, `sentry …`, `telemetry …`, `otel …`,
 | `--cursor <c>` | – | continue a list from `next_cursor` | P1 |
 | `--raw` | – | include raw payloads (Sentry `payload`, log `resource_attributes`) | P0 (with the concise default, see §6.3) |
 | `--wait <dur>` | – | poll until ≥1 result; exit 8 on timeout | P1 |
-| `-q/--quiet` | – | no hints/notes on stderr | P1 |
+| `-q/--quiet` | – | no hints/notes on stderr (built as `--quiet` only: `-q` is `--query` on several commands) | P1 |
 
 No config file or profiles: env vars cover agents and CI (one server per
 shell). A `mallard config` command has no clear agent job — skip.

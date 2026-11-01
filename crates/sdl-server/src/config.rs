@@ -80,7 +80,7 @@ pub struct QueryConfig {
     #[serde(with = "duration")]
     pub max_window: Duration,
     /// Enable `POST /v1/sql`: read-only SQL over `events`, `issues` and
-    /// `issue_activity` (ADR 0010). Treat the API tokens as admin access then.
+    /// `issue_activity` (ADR 0011). Treat the API tokens as admin access then.
     pub enable_sql: bool,
     /// Longest run of one SQL query; it is interrupted after this.
     #[serde(with = "duration")]

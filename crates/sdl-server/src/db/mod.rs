@@ -481,6 +481,74 @@ pub(crate) mod tests {
         db.shutdown().await;
     }
 
+    /// Issue 0003: first/last seen, trends and stats follow the event's
+    /// `timestamp` (clamped at ingest), not the receive time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issues_and_stats_use_event_time() {
+        use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let now = Utc::now();
+        let ctx = NormalizeContext::new(now);
+        let ms = |t: DateTime<Utc>| t.timestamp_millis();
+        // Whole seconds, so the stored value equals `past` exactly.
+        let past = DateTime::from_timestamp(now.timestamp() - 50 * 60, 0).unwrap();
+        let future = now + chrono::Duration::days(1);
+        let mut replies = Vec::new();
+        // Two "past" events, the later one sent first: the issue starts at
+        // the earliest. One event far in the future: clamped to now.
+        for (msg, ts) in [("past", past + chrono::Duration::minutes(10)), ("past", past), ("future", future)] {
+            let ev = normalize_event(serde_json::json!({"message": msg, "timestamp": ts.timestamp() as f64}), &ctx);
+            let (tx, rx) = oneshot::channel();
+            let event = ProcessedEvent::from_normalized(&ev, now);
+            let w = EventWrite { project_id: 1, event, payload_json: ev.to_string(), reply: tx };
+            db.try_send(WriteCmd::Event(Box::new(w))).unwrap();
+            replies.push(rx);
+        }
+        for rx in replies {
+            rx.await.unwrap().unwrap();
+        }
+        // 2h window, 5 min trend buckets.
+        let w = read::Window { from: now - chrono::Duration::hours(2), to: now + chrono::Duration::seconds(1) };
+        let list = db
+            .read(move |c, ns| {
+                let q = sdl_types::IssueQuery::default();
+                read::list_issues(c, ns, 1, &q, &[], &w, read::StatusFilter::All, read::IssueSort::LastSeen, None)
+            })
+            .await
+            .unwrap();
+        let by_title = |t: &str| list.issues.iter().find(|i| i.title == t).unwrap().clone();
+        let p = by_title("past");
+        assert_eq!(p.count, 2);
+        assert_eq!(p.first_seen, past);
+        assert_eq!(p.last_seen, past + chrono::Duration::minutes(10));
+        // About 70 and 80 minutes into the window: buckets 13/14 and 15/16
+        // of 24, not the last one (receive time).
+        let span = (w.to - w.from).num_microseconds().unwrap();
+        let idx = |t: DateTime<Utc>| ((t - w.from).num_microseconds().unwrap() / (span / 24)) as usize;
+        let mut want = vec![0u64; 24];
+        want[idx(past)] += 1;
+        want[idx(past + chrono::Duration::minutes(10))] += 1;
+        assert_eq!(p.trend, want);
+        assert_eq!(p.trend[23], 0);
+        let f = by_title("future");
+        assert_eq!(ms(f.first_seen), ms(now));
+        assert_eq!(ms(f.last_seen), ms(now));
+        assert_eq!(f.trend[23], 1);
+
+        let stats = db.read(move |c, ns| read::project_stats(c, ns, 1, &w, None)).await.unwrap();
+        assert_eq!(stats.total_events, 3);
+        assert_eq!(stats.new_issues, 2);
+        let in_bucket = |t: DateTime<Utc>| {
+            stats.buckets.iter().rposition(|b| b.start <= t).map(|i| stats.buckets[i].events).unwrap_or(0)
+        };
+        assert_eq!(in_bucket(past), 1);
+        assert_eq!(in_bucket(past + chrono::Duration::minutes(10)), 1);
+        assert_eq!(in_bucket(now), 1);
+        assert_eq!(stats.buckets.iter().map(|b| b.events).sum::<u64>(), 3);
+        db.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_version_is_recorded_once() {
         let dir = tempfile::tempdir().unwrap();

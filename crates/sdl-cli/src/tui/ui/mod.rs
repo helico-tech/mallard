@@ -314,10 +314,10 @@ mod tests {
         app.start();
         app.on_response(Resp::Projects(Ok(projects())));
         let key = app.issues_key().unwrap();
-        app.on_response(Resp::Issues(key, Err(FetchError::api("not found: project not found"))));
+        app.on_response(Resp::Issues(key, Err(FetchError::api("project not found"))));
         app.on_response(Resp::Info(Ok(info())));
         let s = draw(&mut app, 120, 30);
-        assert!(s.contains("✗ not found: project not found"), "{s}");
+        assert!(s.contains("✗ project not found"), "{s}");
         assert!(s.contains("● live") && !s.contains("offline"), "{s}");
 
         app.on_response(Resp::Stats {

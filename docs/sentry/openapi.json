@@ -1280,7 +1280,7 @@
     },
     "/v1/sql": {
       "post": {
-        "description": "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0010). Off unless `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
+        "description": "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
         "operationId": "run_sql",
         "requestBody": {
           "content": {

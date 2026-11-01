@@ -1,5 +1,5 @@
 ---
-status: todo
+status: in-progress
 type: idea
 created: 2026-11-01
 ---
@@ -41,7 +41,7 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
     the agent guide).
   - S15: `POST /v1/sql` over `events`, `issues`, `issue_activity`, off by
     default (`[sentry.query] enable_sql`, `sql_timeout`); the guard moved to
-    `mallard_duck::sql` and the otel side uses it too (ADR 0010). CLI
+    `mallard_duck::sql` and the otel side uses it too (ADR 0011). CLI
     `mallard sql --errors "<select>"`.
   - Not done here: `status` does not report the Sentry side's SQL switch
     (exit 7 tells); `odl-cli`'s SQL table printer could move to
@@ -57,6 +57,34 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
 - Spec side findings still open: breadcrumb order in `events show` text,
   release endpoints are stubs.
 
-## Polish found in review (2026-11-01)
+## Polish found in review (2026-11-01; done, see Progress)
 - Not-found errors repeat themselves: `not found: issue not found`
   (`mallard-term` describe prefix + the server message).
+
+## Progress
+- 2026-11-01, client-side items done (branch `feat/cli-p1-client`); the
+  server-backed items (`schema`, `--tag`, span ids in `find`, cursors,
+  `releases list`, SQL over Sentry) are separate work:
+  - `--wait <dur>` on `events list`, `traces list`, `logs`, `trace`/`traces
+    show`, `find` (`mallard_term::wait`): polls every second, the window
+    moves along; on timeout the empty result is printed and the exit code is
+    8 (`Kind::Unmet`, `condition_not_met`). Errors end the wait at once.
+  - `logs -f --for <dur>` (exit 0) and `--until-match <text>` (body,
+    case-insensitive; exit 0 at the first match; with `--for` and no match:
+    exit 8). Both need `-f`; `-f` and `--wait` exclude each other.
+  - `ops --compare <dur>`: two `operations` calls, joined on service, name
+    and kind; adds `span_count_before`, `p95_ms_before`, `p95_change_pct`,
+    `error_rate_before`, `error_rate_change` (null without spans then).
+  - `series spans|logs|errors` (`crates/mallard/src/series.rs`): the list
+    envelope, one item per bucket with `time`; default window 1h.
+  - `setup --sentry-cli`: `SENTRY_URL` = the server root (sentry-cli refuses
+    a path), `SENTRY_ORG=default` (the server ignores the org),
+    `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` = the CLI's token. Found: mallard
+    has no `/api/0` at the root, so sentry-cli cannot upload yet →
+    [issue 0008](0008-sentry-cli-needs-root-url.md).
+  - `--quiet` (global; no `-q`: that is `--query` on `issues list`, `logs`,
+    `metrics list`): drops `note:` lines (`Output::note`): truncation,
+    waiting, the 24h fallback, `setup`'s "project exists".
+  - Polish: a 404 with a server message prints the message alone
+    (`issue not found`, not `not found: issue not found`), both sides.
+

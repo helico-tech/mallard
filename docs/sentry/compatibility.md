@@ -59,7 +59,9 @@ bandwidth.
 
 What Sentry does that we also do:
 
-- normalization of all SDK shapes; timestamps clamped to [now-30d, now+5m]
+- normalization of all SDK shapes; an event `timestamp` outside
+  [received - 30d, received + 60s] is replaced by the receive time (Relay:
+  60 s future, retention past); first/last seen, trends and stats use it
 - grouping by fingerprint / exception type + in-app frames / masked values /
   message template, with `{{ default }}` support
 - derived tags: level, environment, release, dist, server_name, transaction,

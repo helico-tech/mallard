@@ -1,5 +1,5 @@
 //! Read-only ad-hoc SQL over one side's lake tables, shared by both sides'
-//! SQL endpoints (otel ADR 0005, ADR 0010). Each side owns its endpoint,
+//! SQL endpoints (otel ADR 0005, ADR 0011). Each side owns its endpoint,
 //! wire types, switch and timeout; this module checks and runs the query.
 //!
 //! A query is checked with DuckDB's own parser before it runs:

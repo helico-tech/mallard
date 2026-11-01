@@ -9,7 +9,7 @@
 //! side does that on a `try_clone()` of the connection (ADR 0001).
 //!
 //! [`sql`] checks and runs read-only ad-hoc SQL for both sides' SQL
-//! endpoints (ADR 0010).
+//! endpoints (ADR 0011).
 
 mod config;
 pub mod sql;

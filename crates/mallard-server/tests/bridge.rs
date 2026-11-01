@@ -1,7 +1,8 @@
 //! The bridge (docs/adr/0009-bridge.md) end to end: Sentry transactions
 //! become spans in the OTel API, OTel exceptions become Sentry issues
 //! linked to their trace, and an exception a Sentry SDK also reported is
-//! stored once.
+//! stored once, like a span an app sends both as a Sentry transaction and
+//! over OTLP (ADR 0010).
 
 use std::time::Duration;
 
@@ -199,6 +200,62 @@ async fn otel_exceptions_become_issues_once() {
         ]
     );
     srv.stop().await;
+}
+
+/// An app on @sentry/node 8+ that also exports OTLP sends its root span and
+/// one child both ways (same ids); its db span only goes to Sentry. Each
+/// span is stored once, the OTLP copy where there is one, whichever copy
+/// arrives first.
+async fn spans_sent_both_ways_are_stored_once(sentry_first: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| c.bridge.dedupe_window = Duration::from_secs(1)).await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let shop = project(&client, "shop").await;
+    let http = reqwest::Client::new();
+    let trace = if sentry_first { "8bf92f3577b34da6a3ce929d0e0e4740" } else { "9bf92f3577b34da6a3ce929d0e0e4741" };
+    let otlp = vec![
+        otel_span(trace, "a1b2c3d4e5f60718", "GET /users/:id", None),
+        otel_span(trace, "1111111111111111", "query", None),
+    ];
+    if sentry_first {
+        send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "transaction", &transaction(trace)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        post_spans(&http, &srv.otlp_url, otlp).await;
+    } else {
+        post_spans(&http, &srv.otlp_url, otlp).await;
+        eventually("the OTLP spans", || async {
+            (client.trace_overview(trace, None).await.unwrap().spans.len() == 2).then_some(())
+        })
+        .await;
+        send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "transaction", &transaction(trace)).await;
+    }
+
+    eventually("three spans", || async {
+        (client.trace_overview(trace, None).await.unwrap().spans.len() >= 3).then_some(())
+    })
+    .await;
+    // Long after the window and a flush: still one row per span.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let t = client.trace_overview(trace, None).await.unwrap();
+    let mut services: Vec<(&str, &str)> =
+        t.spans.iter().map(|s| (s.span_id.as_str(), s.service_name.as_str())).collect();
+    services.sort();
+    assert_eq!(
+        services,
+        [("1111111111111111", "checkout"), ("2222222222222222", "shop"), ("a1b2c3d4e5f60718", "checkout")],
+        "the OTLP copies, plus the span only Sentry sent"
+    );
+    srv.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spans_sent_both_ways_otlp_first() {
+    spans_sent_both_ways_are_stored_once(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spans_sent_both_ways_sentry_first() {
+    spans_sent_both_ways_are_stored_once(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

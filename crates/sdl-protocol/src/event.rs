@@ -20,6 +20,13 @@ pub const MAX_TAGS: usize = 200;
 pub const MAX_EXCEPTIONS: usize = 32;
 /// Frames kept per stack trace (the first and last half, like Sentry).
 pub const MAX_FRAMES: usize = 250;
+/// An event `timestamp` more than this many seconds after receive time is
+/// replaced by the receive time (Relay's `max_secs_in_future` default).
+pub const MAX_SECS_IN_FUTURE: i64 = 60;
+/// An event `timestamp` more than this many seconds before receive time is
+/// replaced by the receive time. Relay uses the event retention; 30 days is
+/// a fixed bound, so a window query on `timestamp` stays near `received_at`.
+pub const MAX_SECS_IN_PAST: i64 = 30 * 86_400;
 
 #[derive(Debug, Clone)]
 pub struct NormalizeContext {
@@ -89,9 +96,13 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
         .unwrap_or_else(Uuid::new_v4);
     ev.insert("event_id".into(), Value::String(id.simple().to_string()));
 
-    // timestamp: clamp obviously wrong client clocks like Sentry does.
+    // timestamp: the event time drives first/last seen and trends, so keep
+    // it, but replace obviously wrong client clocks with the receive time
+    // like Relay does.
     let ts = ev.get("timestamp").and_then(parse_timestamp).unwrap_or(ctx.received_at);
-    let ts = if ts > ctx.received_at + Duration::minutes(5) || ts < ctx.received_at - Duration::days(30) {
+    let ts = if ts > ctx.received_at + Duration::seconds(MAX_SECS_IN_FUTURE)
+        || ts < ctx.received_at - Duration::seconds(MAX_SECS_IN_PAST)
+    {
         ctx.received_at
     } else {
         ts
@@ -663,6 +674,18 @@ mod tests {
         assert_eq!(ev["level"], "error");
         assert_eq!(ev["platform"], "other");
         assert!(ev["event_id"].as_str().unwrap().len() == 32);
+    }
+
+    #[test]
+    fn timestamps_outside_the_window_get_the_receive_time() {
+        let at = |ts: &str| normalize_event(json!({"timestamp": ts}), &ctx())["timestamp"].clone();
+        // Replayed or buffered events keep their time.
+        assert_eq!(at("2026-10-31T11:10:00Z"), "2026-10-31T11:10:00.000Z");
+        assert_eq!(at("2026-10-02T12:00:00Z"), "2026-10-02T12:00:00.000Z");
+        assert_eq!(at("2026-10-31T12:01:00Z"), "2026-10-31T12:01:00.000Z");
+        // Too far in the past or future: receive time.
+        assert_eq!(at("2026-10-01T11:59:59Z"), "2026-10-31T12:00:00.000Z");
+        assert_eq!(at("2026-10-31T12:01:01Z"), "2026-10-31T12:00:00.000Z");
     }
 
     #[test]
