@@ -1,11 +1,9 @@
 //! Object storage for sourcemap bundles (`<url>/artifacts/`), through the
-//! `object_store` crate. The standalone binary also keeps the lake under
-//! the same URL (`<url>/lake/`, see [`lake`]); DuckDB reaches it through a
-//! secret built from the same settings, so users configure storage once.
+//! `object_store` crate.
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use mallard_duck::{ObjectStoreOptions, SecretConfig};
+use mallard_duck::ObjectStoreOptions;
 use object_store::path::Path as ObjPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
@@ -69,79 +67,6 @@ fn gcs_keys(o: &ObjectStoreOptions) -> Result<(String, String)> {
         // Fail now: otherwise object_store silently falls back to the AWS credentials.
         _ => bail!("gs:// storage needs HMAC keys (a gcs secret, or GCS_HMAC_KEY_ID and GCS_HMAC_SECRET)"),
     }
-}
-
-/// Where the standalone binary keeps its lake, and the DuckDB secret for it.
-pub struct Lake {
-    pub data_path: String,
-    pub secret: Option<SecretConfig>,
-}
-
-/// The lake below `url` (`<url>/lake/`) with a DuckDB secret built from
-/// `opts` and the `AWS_*` / `GCS_HMAC_*` / `AZURE_STORAGE_*` environment.
-pub fn lake(url: &str, opts: &ObjectStoreOptions) -> Result<Lake> {
-    let loc = locate(url)?;
-    let scope = toml::Value::String(loc.root.trim_end_matches('/').to_string());
-    let text = |s: &str| toml::Value::String(s.to_string());
-    let mut o = std::collections::BTreeMap::new();
-    match loc.kind {
-        Kind::Local => {}
-        Kind::S3 => {
-            o.insert("type".into(), text("s3"));
-            o.insert("scope".into(), scope);
-            match (
-                opts.key_id.clone().or_else(|| env("AWS_ACCESS_KEY_ID")),
-                opts.secret.clone().or_else(|| env("AWS_SECRET_ACCESS_KEY")),
-            ) {
-                (Some(k), Some(s)) => {
-                    o.insert("key_id".into(), text(&k));
-                    o.insert("secret".into(), text(&s));
-                    if let Some(t) = opts.session_token.clone().or_else(|| env("AWS_SESSION_TOKEN")) {
-                        o.insert("session_token".into(), text(&t));
-                    }
-                }
-                // IAM roles / IRSA / profiles via the aws extension.
-                _ => {
-                    o.insert("provider".into(), text("credential_chain"));
-                }
-            }
-            if let Some(r) = &opts.region {
-                o.insert("region".into(), text(r));
-            }
-            if let Some(ep) = &opts.endpoint {
-                let (ssl, host) = match ep.split_once("://") {
-                    Some(("http", h)) => (false, h),
-                    Some((_, h)) => (true, h),
-                    None => (true, ep.as_str()),
-                };
-                o.insert("endpoint".into(), text(host.trim_end_matches('/')));
-                o.insert("use_ssl".into(), toml::Value::Boolean(ssl));
-            }
-            if opts.path_style {
-                o.insert("url_style".into(), text("path"));
-            }
-        }
-        Kind::Gcs => {
-            let (k, s) = gcs_keys(opts)?;
-            o.insert("type".into(), text("gcs"));
-            o.insert("key_id".into(), text(&k));
-            o.insert("secret".into(), text(&s));
-            o.insert("scope".into(), scope);
-        }
-        Kind::Azure => {
-            o.insert("type".into(), text("azure"));
-            if let Some(cs) = env("AZURE_STORAGE_CONNECTION_STRING") {
-                o.insert("connection_string".into(), text(&cs));
-            } else {
-                o.insert("provider".into(), text("credential_chain"));
-                if let Some(a) = env("AZURE_STORAGE_ACCOUNT_NAME") {
-                    o.insert("account_name".into(), text(&a));
-                }
-            }
-        }
-    }
-    let secret = (!o.is_empty()).then(|| SecretConfig { name: Some("sdl_storage".into()), options: o });
-    Ok(Lake { data_path: format!("{}lake/", loc.root), secret })
 }
 
 #[derive(Clone)]
@@ -253,7 +178,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s3_urls_and_secret() {
+    fn s3_artifact_paths() {
         let opts = ObjectStoreOptions {
             endpoint: Some("http://minio:9000".into()),
             region: Some("us-east-1".into()),
@@ -264,14 +189,6 @@ mod tests {
         };
         let s = Storage::new("s3://bucket/some/prefix/", &opts).unwrap();
         assert_eq!(s.artifact_path_multi("chunks/ab").as_ref(), "some/prefix/artifacts/chunks/ab");
-        let l = lake("s3://bucket/some/prefix/", &opts).unwrap();
-        assert_eq!(l.data_path, "s3://bucket/some/prefix/lake/");
-        let secret = l.secret.unwrap();
-        assert_eq!(secret.get("endpoint"), Some("minio:9000"));
-        assert_eq!(secret.options["use_ssl"], toml::Value::Boolean(false));
-        assert_eq!(secret.get("url_style"), Some("path"));
-        assert_eq!(secret.get("scope"), Some("s3://bucket/some/prefix"));
-        assert_eq!(secret.get("key_id"), Some("k"));
     }
 
     #[tokio::test]
@@ -279,9 +196,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = dir.path().to_str().unwrap();
         let s = Storage::new(url, &ObjectStoreOptions::default()).unwrap();
-        let l = lake(url, &ObjectStoreOptions::default()).unwrap();
-        assert!(l.data_path.ends_with("/lake/"));
-        assert!(l.secret.is_none());
         s.put("chunks/abc", Bytes::from_static(b"hi")).await.unwrap();
         assert!(s.exists("chunks/abc").await.unwrap());
         assert_eq!(s.get("chunks/abc").await.unwrap().unwrap(), Bytes::from_static(b"hi"));

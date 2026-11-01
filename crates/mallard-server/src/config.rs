@@ -272,6 +272,55 @@ mod tests {
         assert_eq!(cfg.duckdb.memory_limit, Some(mallard_common::ByteSize::mb(2)));
     }
 
+    /// Every setting of the Sentry side can be set from the mallard config.
+    #[test]
+    fn sentry_settings_come_from_the_config() {
+        let cfg = load(
+            "",
+            &[
+                ("MALLARD_SERVER__API_TOKENS", "t"),
+                ("MALLARD_SENTRY__RETENTION__EVENTS", "30d"),
+                ("MALLARD_SENTRY__INGEST__MAX_EVENT_BYTES", "2MiB"),
+                ("MALLARD_SENTRY__INGEST__MAX_BODY_BYTES", "30MiB"),
+                ("MALLARD_SENTRY__INGEST__CONCURRENCY", "7"),
+                ("MALLARD_SENTRY__INGEST__QUEUE_CAPACITY", "11"),
+                ("MALLARD_SENTRY__INGEST__BATCH_MAX", "13"),
+                ("MALLARD_SENTRY__INGEST__BATCH_WINDOW", "20ms"),
+                ("MALLARD_SENTRY__INGEST__TRUST_FORWARDED_FOR", "true"),
+                ("MALLARD_SENTRY__MAINTENANCE__FLUSH_INTERVAL", "1m"),
+                ("MALLARD_SENTRY__MAINTENANCE__FLUSH_ROWS", "17"),
+                ("MALLARD_SENTRY__MAINTENANCE__COMPACT_INTERVAL", "2h"),
+                ("MALLARD_SENTRY__QUERY__READERS", "3"),
+                ("MALLARD_SENTRY__QUERY__ENABLE_SQL", "true"),
+                ("MALLARD_SENTRY__SOURCEMAPS__CACHE_SIZE", "64MiB"),
+            ],
+        )
+        .unwrap();
+        let s = &cfg.sentry;
+        assert_eq!(s.retention.events, Duration::from_secs(30 * 86_400));
+        assert_eq!(s.ingest.max_event_bytes, mallard_common::ByteSize::mib(2));
+        assert_eq!(s.ingest.max_body_bytes, mallard_common::ByteSize::mib(30));
+        assert_eq!((s.ingest.concurrency, s.ingest.queue_capacity, s.ingest.batch_max), (7, 11, 13));
+        assert_eq!(s.ingest.batch_window, Duration::from_millis(20));
+        assert!(s.ingest.trust_forwarded_for);
+        assert_eq!(s.maintenance.flush_interval, Duration::from_secs(60));
+        assert_eq!(s.maintenance.flush_rows, 17);
+        assert_eq!(s.maintenance.compact_interval, Duration::from_secs(7200));
+        assert_eq!(s.query.readers, 3);
+        assert!(s.query.enable_sql);
+        assert_eq!(s.sourcemaps.cache_size, mallard_common::ByteSize::mib(64));
+    }
+
+    /// Unset settings keep the library's defaults, and in mallard otel owns
+    /// catalog-wide maintenance (ADR 0001).
+    #[test]
+    fn an_empty_config_keeps_the_sentry_defaults() {
+        let cfg = load("", TOKEN).unwrap();
+        assert_eq!(format!("{:?}", cfg.sentry), format!("{:?}", mallard_sentry_server::Config::default()));
+        let host = cfg.sentry_host();
+        assert_eq!((host.catalog_maintenance, host.maintenance_threads), (None, 0));
+    }
+
     #[test]
     fn interpolated_values_may_contain_quotes() {
         let pw = r#"p"w\d'x"#;

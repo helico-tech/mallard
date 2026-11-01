@@ -6,8 +6,6 @@
 //! - [`Host`]: what the application around it decides: the public URL,
 //!   API tokens, where sourcemap bundles go, and whether this side runs
 //!   catalog-wide maintenance.
-//! - [`crate::Standalone`] builds both from flags or `SDL_*` environment
-//!   variables (used by the tests).
 
 use std::time::Duration;
 

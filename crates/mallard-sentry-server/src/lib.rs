@@ -21,9 +21,8 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Or open it on its own with [`Standalone`] (used by the tests). The library
-//! installs no global tracing subscriber or metrics recorder; it only emits
-//! `tracing` events and `metrics` counters.
+//! The library installs no global tracing subscriber or metrics recorder; it
+//! only emits `tracing` events and `metrics` counters.
 
 mod api;
 mod config;
@@ -31,14 +30,12 @@ mod db;
 mod hooks;
 mod ingest;
 mod sourcemaps;
-mod standalone;
 mod storage;
 
 pub use config::{
     Artifacts, Config, Host, IngestConfig, MaintenanceConfig, QueryConfig, RetentionConfig, SourcemapConfig,
 };
 pub use hooks::{EventObserver, IngestError, SpanSink, Spans, Transaction, TransactionSink};
-pub use standalone::{Secret, Standalone};
 
 use anyhow::{Context, Result};
 use db::Db;
@@ -75,14 +72,6 @@ pub struct Server {
 }
 
 impl Server {
-    /// Standalone: open DuckDB, attach the catalog and keep the lake and
-    /// sourcemaps below `args.storage_url`.
-    pub async fn new(args: &Standalone) -> Result<Server> {
-        let (st, duck) = args.storage()?;
-        let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &duck)).await??;
-        Self::with_connection(args.config(), args.host(), conn).await
-    }
-
     /// `conn` has the DuckLake catalog attached as `lake` (with secrets
     /// set). We create the `sentry` schema in it. Global DuckDB settings
     /// belong to the host and are left untouched (except

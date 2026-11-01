@@ -1,7 +1,8 @@
 //! In-process integration tests: the server runs through the library API,
 //! events come from the official Rust `sentry` SDK and raw HTTP.
 
-use mallard_sentry_server::{Config, Host, Server, Standalone};
+use mallard_duck::{DuckDbConfig, StorageConfig};
+use mallard_sentry_server::{Artifacts, Config, Host, Server};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -22,20 +23,33 @@ impl TestServer {
         Self::start_with(|_| {}).await
     }
 
-    /// [`TestServer::start`] with flags changed by `change`.
-    async fn start_with(change: impl FnOnce(&mut Standalone)) -> TestServer {
+    /// [`TestServer::start`] with settings changed by `change`. Everything
+    /// lives in a temp dir: a DuckDB-file catalog, the lake and the sourcemaps.
+    async fn start_with(change: impl FnOnce(&mut Config)) -> TestServer {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut cfg = Standalone::new(
-            &dir.path().join("storage").display().to_string(),
-            &dir.path().join("catalog.ducklake").display().to_string(),
-            TOKEN,
-        );
-        cfg.public_url = format!("http://{addr}");
-        cfg.batch_window = Some(Duration::from_millis(20));
+        let mut cfg = Config::default();
+        cfg.ingest.batch_window = Duration::from_millis(20);
         change(&mut cfg);
-        let server = Server::new(&cfg).await.unwrap();
+        let storage = StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: format!("{}/", dir.path().join("lake").display()),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&storage.data_path).unwrap();
+        let conn = mallard_duck::open_connection(&storage, &DuckDbConfig::default()).unwrap();
+        let host = Host {
+            public_url: format!("http://{addr}"),
+            api_tokens: vec![TOKEN.into()],
+            artifacts: Some(Artifacts {
+                url: dir.path().join("storage").display().to_string(),
+                options: Default::default(),
+            }),
+            catalog_maintenance: Some(Duration::from_secs(3600)),
+            maintenance_threads: 1,
+        };
+        let server = Server::with_connection(cfg, host, conn).await.unwrap();
         Self::serve(server, listener, dir).await
     }
 
@@ -401,7 +415,7 @@ async fn filters_cursors_and_releases() {
 /// S15: read-only SQL over the error tables when enabled.
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_over_error_tables() {
-    let t = TestServer::start_with(|c| c.enable_sql = true).await;
+    let t = TestServer::start_with(|c| c.query.enable_sql = true).await;
     let project = t.create_project("web").await;
     let key = project["public_key"].as_str().unwrap();
     for (msg, url) in [("a", "/x"), ("a", "/x"), ("b", "/y")] {
