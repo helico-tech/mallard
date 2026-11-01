@@ -1,6 +1,6 @@
 # mallard CLI for agents — research and spec
 
-Status: proposal (input for story `work/epics/0002-mallard/08-agent-cli.md`).
+Status: P0 implemented in story `work/epics/0002-mallard/08-agent-cli.md` (ADR 0008); P1 is `work/issues/0004-agent-cli-p1.md`.
 Date: 2026-11-01. Based on the `mallard` debug build in `target/debug/mallard`,
 the code in `crates/`, and a throwaway server with seeded data
 (161k spans, 46k logs, 500 Sentry events) used to measure real output sizes.
