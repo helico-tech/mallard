@@ -338,19 +338,21 @@ impl SourceMaps {
         release: Option<&str>,
         dist: Option<&str>,
     ) -> Option<(ArtifactLocation, &'static str)> {
-        if let Some(id) = r.debug_id {
+        // Only ids of stored maps reach the database: debug ids come from
+        // the client and are cheap to make up.
+        if let Some(id) = r.debug_id
+            && db.caches.has_debug_id(project_id, id)
+        {
             let key = (project_id, format!("id:{id}"));
+            // try_get_with: a failed lookup is not cached as "not found".
             let loc = self
                 .lookups
-                .get_with(key, async {
-                    db.read(move |c, ns| read::find_by_debug_id(c, ns, project_id, id)).await.unwrap_or_else(|e| {
-                        tracing::warn!(error = format!("{e:#}"), "debug id lookup failed");
-                        None
-                    })
-                })
+                .try_get_with(key, db.read(move |c, ns| read::find_by_debug_id(c, ns, project_id, id)))
                 .await;
-            if let Some(l) = loc {
-                return Some((l, "debug-id"));
+            match loc {
+                Ok(Some(l)) => return Some((l, "debug-id")),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = format!("{e:#}"), "debug id lookup failed"),
             }
         }
         let release = release?.to_string();
@@ -362,16 +364,18 @@ impl SourceMaps {
         let key = (project_id, format!("url:{release}\0{}\0{}", dist.as_deref().unwrap_or(""), r.abs_path));
         let loc = self
             .lookups
-            .get_with(key, async move {
-                db.read(move |c, ns| read::find_by_url(c, ns, project_id, &release, dist.as_deref(), &candidates))
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(error = format!("{e:#}"), "release artifact lookup failed");
-                        None
-                    })
-            })
+            .try_get_with(
+                key,
+                db.read(move |c, ns| read::find_by_url(c, ns, project_id, &release, dist.as_deref(), &candidates)),
+            )
             .await;
-        loc.map(|l| (l, "release"))
+        match loc {
+            Ok(l) => l.map(|l| (l, "release")),
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "release artifact lookup failed");
+                None
+            }
+        }
     }
 
     async fn load_map(&self, loc: &ArtifactLocation, resolved_with: &'static str) -> Option<ParsedMap> {

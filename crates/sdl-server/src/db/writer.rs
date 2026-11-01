@@ -186,19 +186,24 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?)))?;
-    let mut bundles = caches.bundles.write().expect("lock");
-    let mut releases = caches.bundle_releases.write().expect("lock");
     for row in rows {
         let (b, p, r) = row?;
-        bundles.insert((b, p));
-        if let Some(r) = r {
-            releases.insert((p, r));
-        }
+        caches.add_bundle(p, &b, r.as_deref(), []);
+    }
+    let mut stmt = conn.prepare(&ns.sql(
+        "SELECT DISTINCT bundle_id, project_id, debug_id::VARCHAR FROM $S.artifact_files
+         WHERE debug_id IS NOT NULL AND file_type = 'source_map'",
+    ))?;
+    let rows =
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, String>(2)?)))?;
+    for row in rows {
+        let (b, p, id) = row?;
+        caches.add_bundle(p, &b, None, uuid::Uuid::try_parse(&id).ok());
     }
     tracing::info!(
         projects = caches.projects.read().expect("lock").len(),
         issues = n_issues,
-        bundles = bundles.len(),
+        bundles = caches.bundle_count(),
         "loaded caches"
     );
     Ok(())
@@ -605,13 +610,9 @@ impl Writer {
             }
             Ok(())
         })?;
-        let mut cache = self.caches.bundles.write().expect("lock");
-        let mut releases = self.caches.bundle_releases.write().expect("lock");
+        let debug_ids = || b.files.iter().filter(|f| f.file_type == "source_map").filter_map(|f| f.debug_id);
         for p in &b.project_ids {
-            cache.insert((b.bundle_id.clone(), *p));
-            if let Some(r) = &b.release {
-                releases.insert((*p, r.clone()));
-            }
+            self.caches.add_bundle(*p, &b.bundle_id, b.release.as_deref(), debug_ids());
         }
         Ok(())
     }

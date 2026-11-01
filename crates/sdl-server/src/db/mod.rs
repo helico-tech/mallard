@@ -38,10 +38,18 @@ pub struct Caches {
     pub projects: RwLock<HashMap<u32, ProjectRow>>,
     /// Current status per (project, group). Also the set of known issues.
     pub issues: RwLock<HashMap<(u32, u64), IssueStatus>>,
-    /// (bundle checksum, project) pairs that are stored and indexed.
-    pub bundles: RwLock<HashSet<(String, u32)>>,
-    /// (project, release) pairs that have at least one bundle.
-    pub bundle_releases: RwLock<HashSet<(u32, String)>>,
+    /// What is stored and indexed per project.
+    bundles: RwLock<HashMap<u32, ProjectBundles>>,
+}
+
+#[derive(Default)]
+struct ProjectBundles {
+    /// Bundle checksums.
+    checksums: HashSet<String>,
+    /// Releases with at least one bundle.
+    releases: HashSet<String>,
+    /// Debug ids of stored source maps.
+    debug_ids: HashSet<uuid::Uuid>,
 }
 
 impl Caches {
@@ -52,15 +60,45 @@ impl Caches {
         let p = self.projects.read().expect("lock");
         r.parse::<u32>().ok().and_then(|id| p.get(&id).cloned()).or_else(|| p.values().find(|p| p.slug == r).cloned())
     }
+    fn with_bundles<T>(&self, project: u32, f: impl FnOnce(&ProjectBundles) -> T) -> Option<T> {
+        self.bundles.read().expect("lock").get(&project).map(f)
+    }
     pub fn bundle_known(&self, checksum: &str, projects: &[u32]) -> bool {
-        let b = self.bundles.read().expect("lock");
-        projects.iter().all(|p| b.contains(&(checksum.to_string(), *p)))
+        projects.iter().all(|p| self.with_bundles(*p, |b| b.checksums.contains(checksum)).unwrap_or(false))
     }
     pub fn project_has_release(&self, project: u32, release: &str) -> bool {
-        self.bundle_releases.read().expect("lock").contains(&(project, release.to_string()))
+        self.with_bundles(project, |b| b.releases.contains(release)).unwrap_or(false)
     }
     pub fn project_has_bundles(&self, project: u32) -> bool {
-        self.bundles.read().expect("lock").iter().any(|(_, p)| *p == project)
+        self.with_bundles(project, |b| !b.checksums.is_empty()).unwrap_or(false)
+    }
+    /// Whether a source map with this debug id is stored for the project.
+    /// Lets lookups for unknown (or made-up) ids skip the database.
+    pub fn has_debug_id(&self, project: u32, id: uuid::Uuid) -> bool {
+        self.with_bundles(project, |b| b.debug_ids.contains(&id)).unwrap_or(false)
+    }
+    /// Record a stored bundle (or one source map of it).
+    pub(crate) fn add_bundle(
+        &self,
+        project: u32,
+        checksum: &str,
+        release: Option<&str>,
+        debug_ids: impl IntoIterator<Item = uuid::Uuid>,
+    ) {
+        let mut all = self.bundles.write().expect("lock");
+        let b = all.entry(project).or_default();
+        if !b.checksums.contains(checksum) {
+            b.checksums.insert(checksum.to_string());
+        }
+        if let Some(r) = release
+            && !b.releases.contains(r)
+        {
+            b.releases.insert(r.to_string());
+        }
+        b.debug_ids.extend(debug_ids);
+    }
+    fn bundle_count(&self) -> usize {
+        self.bundles.read().expect("lock").values().map(|b| b.checksums.len()).sum()
     }
     pub fn projects(&self) -> Vec<ProjectRow> {
         let mut v: Vec<ProjectRow> = self.projects.read().expect("lock").values().cloned().collect();
@@ -345,6 +383,20 @@ pub fn us_to_dt(us: i64) -> DateTime<Utc> {
 pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn bundle_caches_per_project() {
+        let c = Caches::default();
+        let id = uuid::Uuid::new_v4();
+        assert!(!c.project_has_bundles(1));
+        c.add_bundle(1, "abc", Some("1.0"), [id]);
+        c.add_bundle(2, "abc", None, []);
+        assert!(c.project_has_bundles(1) && c.project_has_bundles(2) && !c.project_has_bundles(3));
+        assert!(c.bundle_known("abc", &[1, 2]) && !c.bundle_known("abc", &[1, 3]));
+        assert!(c.project_has_release(1, "1.0") && !c.project_has_release(2, "1.0"));
+        assert!(c.has_debug_id(1, id) && !c.has_debug_id(2, id) && !c.has_debug_id(1, uuid::Uuid::new_v4()));
+        assert_eq!(c.bundle_count(), 2);
+    }
 
     /// A standalone Db on local storage in `dir`.
     pub(crate) fn open_db(dir: &std::path::Path, readers: usize) -> Db {
