@@ -16,6 +16,7 @@
 //! file cleanup are catalog-wide and only run when `catalog_wide = true`.
 
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -53,11 +54,9 @@ impl Maintenance {
         Ok(Self { stop, handle: Some(handle) })
     }
 
-    pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+    /// Stop after the current task and wait for the thread.
+    pub fn stop(self) {
+        drop(self);
     }
 }
 
@@ -65,6 +64,7 @@ impl Drop for Maintenance {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
+            h.thread().unpark();
             let _ = h.join();
         }
     }
@@ -99,7 +99,8 @@ fn run(
             task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size.0)));
             next_compact = Instant::now() + s.compact_interval;
         } else {
-            std::thread::sleep(Duration::from_millis(500));
+            // Woken early by `stop`.
+            std::thread::park_timeout(next_retention.min(next_full).min(next_compact) - now);
         }
     }
     info!("maintenance stopped");
@@ -117,9 +118,12 @@ fn jitter(max: Duration) -> Duration {
     Duration::from_millis(xxhash_rust::xxh3::xxh3_64(&seed.to_le_bytes()) % ms)
 }
 
+/// Run one task and record the outcome. A panic counts as a failure, so the
+/// maintenance thread keeps running.
 fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
     let t0 = Instant::now();
-    let res = f();
+    let res = catch_unwind(AssertUnwindSafe(f))
+        .unwrap_or_else(|p| Err(anyhow::anyhow!("panicked: {}", super::writer::panic_message(&*p))));
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     let (ok, detail) = match res {
         Ok(d) => {
@@ -264,6 +268,15 @@ mod tests {
         assert_eq!(c, Some(Utc.with_ymd_and_hms(2026, 10, 24, 0, 0, 0).unwrap()));
         let c = retention_cutoff(now, Duration::from_secs(3600));
         assert_eq!(c, Some(Utc.with_ymd_and_hms(2026, 10, 31, 12, 45, 0).unwrap()));
+    }
+
+    #[test]
+    fn a_panicking_task_is_recorded_as_failed() {
+        let stats = Stats::default();
+        task(&stats, "compaction", || panic!("boom"));
+        let m = stats.last_maintenance().unwrap();
+        assert!(!m.ok);
+        assert!(m.detail.contains("boom"), "{}", m.detail);
     }
 
     #[test]
