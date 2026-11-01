@@ -450,7 +450,7 @@ async fn sentry_counts(l: &dyn ErrorLookup, traces: &[TraceSummary], w: Window) 
     match l.errors(ids, w.from, w.to).await {
         Ok(m) => traces.iter().map(|t| Some(m.get(&t.trace_id).map_or(0, |e| e.count))).collect(),
         Err(e) => {
-            eprintln!("{} sentry errors: {}", alert("warning:"), clean(&format!("{e:#}")));
+            eprintln!("{} sentry errors: {}", alert("warning:"), clean(&e.to_string()));
             vec![None; traces.len()]
         }
     }

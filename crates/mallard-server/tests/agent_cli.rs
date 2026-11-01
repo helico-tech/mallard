@@ -137,6 +137,23 @@ async fn agent_contract_end_to_end() {
     assert_eq!((o.code, o.error()["code"].as_str()), (4, Some("not_found")), "{}", o.stderr);
     assert!(o.json()["items"].as_array().unwrap().is_empty(), "the empty list is still printed");
 
+    // traces list: the Sentry error count per trace; trace: per span.
+    let l = mallard(url, &["traces", "list", "--since", "1h", "--json"]).await.ok().json();
+    let item = l["items"].as_array().unwrap().iter().find(|t| t["trace_id"] == trace.as_str()).expect("listed");
+    assert_eq!((item["sentry_errors"].as_u64(), item["error_count"].as_u64()), (Some(1), Some(1)), "{item}");
+    let nd = mallard(url, &["traces", "list", "--fields", "trace_id,sentry_errors", "--format", "ndjson"]).await.ok();
+    assert_eq!(nd.stdout.trim(), format!(r#"{{"trace_id":"{trace}","sentry_errors":1}}"#));
+    let text = mallard(url, &["traces", "list"]).await.ok();
+    assert!(
+        text.stdout.lines().next().is_some_and(|h| h.contains("errors") && h.contains("sentry")),
+        "{}",
+        text.stdout
+    );
+    let t = mallard(url, &["trace", &trace, "--json", "--fields", "spans"]).await.ok().json();
+    assert_eq!(t["spans"][0]["sentry_errors"], 1, "{t}");
+    let text = mallard(url, &["trace", &trace]).await.ok();
+    assert!(text.stdout.contains("POST /pay") && text.stdout.contains("⚠ 1"), "{}", text.stdout);
+
     // issues list --new, the envelope, --fields, ndjson, plain text.
     let l = mallard(url, &["-p", "checkout", "issues", "list", "--new", "--since", "1h", "--json"]).await.ok().json();
     assert_eq!((l["count"].as_u64(), l["truncated"].as_bool()), (Some(1), Some(false)), "{l}");

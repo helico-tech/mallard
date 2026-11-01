@@ -151,11 +151,12 @@ impl Host {
     }
 }
 
-/// The otel TUI, with its "e: errors of this trace" jump enabled: the
-/// errors tab can answer it.
+/// The otel TUI, with its "x: errors of this trace" jump enabled (the
+/// errors tab can answer it) and Sentry errors marked on traces and spans.
 fn telemetry_pane(client: &Client) -> odl_cli::Embedded {
     let mut pane = odl_cli::Embedded::new(client.otel.clone());
     pane.set_errors_enabled(true);
+    pane.set_error_lookup(std::sync::Arc::new(crate::errors::SentryErrors(client.clone())));
     pane
 }
 

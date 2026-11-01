@@ -236,7 +236,7 @@ impl Embedded {
         }
         let to = Utc::now();
         let from = to - TimeDelta::from_std(self.windows[self.win].1).unwrap_or(TimeDelta::hours(1));
-        let fut = async move { Ok(l.errors(ids, from, to).await.map_err(|e| format!("{e:#}"))) };
+        let fut = async move { Ok(l.errors(ids, from, to).await.map_err(|e| e.to_string())) };
         self.loader.spawn(Kind::TraceErrors, fut, Data::Errors);
     }
 
@@ -250,7 +250,7 @@ impl Embedded {
         let from = start - TimeDelta::hours(1);
         let to = start + TimeDelta::nanoseconds(d.total_ns) + TimeDelta::hours(1);
         let ids = vec![d.trace_id.clone()];
-        let fut = async move { Ok(l.errors(ids, from, to).await.map_err(|e| format!("{e:#}"))) };
+        let fut = async move { Ok(l.errors(ids, from, to).await.map_err(|e| e.to_string())) };
         self.loader.spawn(Kind::SpanErrors, fut, Data::Errors);
     }
 
