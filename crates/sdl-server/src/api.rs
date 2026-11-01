@@ -6,13 +6,13 @@ use crate::AppState;
 use crate::db::read::{self, Window, parse_group_id};
 use crate::db::{ProjectRow, WriteCmd, WriteError};
 use crate::sourcemaps::{self, AssembleRequest, AssembleResponse, SourcemapError};
-use axum::extract::{Multipart, Path, Request, State};
+use axum::extract::{Multipart, Path, RawQuery, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use mallard_common::http::{ApiErr, BearerAuth, J, Q, docs_routes, readiness, require_bearer};
 use sdl_protocol::dsn::Dsn;
@@ -53,13 +53,33 @@ fn window(state: &AppState, since: Option<&str>, r: &WindowRange, default: Durat
     Ok(Window::resolve(r.from, r.to, since, default, state.cfg.query.max_window)?)
 }
 
+/// The repeated `tag=key:value` parameters of a query string (the struct
+/// extractors can't read repeated keys).
+fn tag_filters(raw: Option<&str>) -> Result<Vec<(String, String)>, ApiErr> {
+    let tags: Vec<String> = url::form_urlencoded::parse(raw.unwrap_or("").as_bytes())
+        .filter(|(k, _)| k == "tag")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    if tags.len() > MAX_TAG_FILTERS {
+        return Err(bad(format!("at most {MAX_TAG_FILTERS} tag filters")));
+    }
+    tags.iter()
+        .map(|t| {
+            parse_tag_filter(t)
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| bad(format!("tag must be key:value, got {t:?}")))
+        })
+        .collect()
+}
+
 #[derive(OpenApi)]
 #[openapi(
     info(title = "sentry-ducklake API", description = "Query and manage errors stored by sentry-ducklake. Ingest uses the Sentry protocol at /api/{project_id}/envelope/."),
     components(schemas(
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
-        ArtifactBundle, ApiError, EventsByTrace, TraceEvents, TraceEvent
+        ArtifactBundle, ApiError, EventsByTrace, TraceEvents, TraceEvent, Release, ReleaseList,
+        SqlRequest, SqlResponse, SqlColumn
     )),
     modifiers(&BearerAuth),
     security(("bearer" = []))
@@ -80,8 +100,10 @@ fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(list_events))
         .routes(routes!(get_event))
         .routes(routes!(project_stats))
+        .routes(routes!(list_releases))
         .routes(routes!(list_sourcemaps))
         .routes(routes!(run_maintenance))
+        .routes(routes!(run_sql))
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {
@@ -218,21 +240,37 @@ async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Projec
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues",
-    params(("project" = String, Path, description = "Project id or slug"), IssueQuery, WindowRange),
+    params(("project" = String, Path, description = "Project id or slug"), IssueQuery, WindowRange,
+        ("tag" = Option<Vec<String>>, Query, description = "Only events with this tag, `key:value`; repeat for more (all must match, max 10)")),
+    description = "Issues with events in the window. Pages: pass `next_cursor` as `cursor` with the same filters; \
+        the cursor carries the window and the sort.",
     responses((status = 200, body = IssueList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
 async fn list_issues(
     State(state): S,
     Path(p): Path<String>,
     Q(q): Q<IssueQuery>,
     Q(r): Q<WindowRange>,
+    RawQuery(raw): RawQuery,
 ) -> ApiResult<IssueList> {
     let pid = project(&state, &p)?.id;
     let status = read::StatusFilter::parse(q.status.as_deref())
         .ok_or_else(|| bad("status must be unresolved, resolved, ignored or all"))?;
     let sort = read::IssueSort::parse(q.sort.as_deref())
         .ok_or_else(|| bad("sort must be last_seen, first_seen, count or users"))?;
-    let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
-    Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w, status, sort)).await?))
+    let tags = tag_filters(raw.as_deref())?;
+    let after =
+        q.cursor.as_deref().map(|c| read::IssueCursor::parse(c).ok_or_else(|| bad("invalid cursor"))).transpose()?;
+    let w = match after {
+        Some(c) if c.sort != sort => return Err(bad(format!("cursor is for sort={}", c.sort.as_str()))),
+        // The cursor's window, so every page ranks the same events.
+        Some(c) => {
+            let at = |us| DateTime::from_timestamp_micros(us).ok_or_else(|| bad("invalid cursor"));
+            let r = WindowRange { from: Some(at(c.from_us)?), to: Some(at(c.to_us)?), step: None };
+            window(&state, None, &r, 14 * DAY)?
+        }
+        None => window(&state, q.since.as_deref(), &r, 14 * DAY)?,
+    };
+    Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &tags, &w, status, sort, after)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues/{issue_id}",
@@ -282,13 +320,15 @@ async fn update_issue(
     Ok(Json(d))
 }
 
-#[utoipa::path(get, path = "/v1/projects/{project}/events", params(("project" = String, Path), EventQuery, WindowRange),
+#[utoipa::path(get, path = "/v1/projects/{project}/events", params(("project" = String, Path), EventQuery, WindowRange,
+        ("tag" = Option<Vec<String>>, Query, description = "Only events with this tag, `key:value`; repeat for more (all must match, max 10)")),
     responses((status = 200, body = EventList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
 async fn list_events(
     State(state): S,
     Path(p): Path<String>,
     Q(q): Q<EventQuery>,
     Q(r): Q<WindowRange>,
+    RawQuery(raw): RawQuery,
 ) -> ApiResult<EventList> {
     let pid = project(&state, &p)?.id;
     // No window unless one is asked for (all events, newest first).
@@ -303,7 +343,8 @@ async fn list_events(
     }
     let before =
         q.before.as_deref().map(|c| read::Cursor::parse(c).ok_or_else(|| bad("invalid cursor"))).transpose()?;
-    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, w.as_ref(), before)).await?))
+    let tags = tag_filters(raw.as_deref())?;
+    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, &tags, w.as_ref(), before)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/events", params(TraceQuery, WindowRange),
@@ -397,6 +438,22 @@ async fn project_stats(
     Ok(Json(state.db.read(move |c, ns| read::project_stats(c, ns, pid, &w, interval_us)).await?))
 }
 
+#[utoipa::path(get, path = "/v1/projects/{project}/releases", params(("project" = String, Path), ReleaseQuery, WindowRange),
+    description = "Releases named by the project's events in the window (default 14d), newest last event first. \
+        Derived from events: releases created with sentry-cli are not stored.",
+    responses((status = 200, body = ReleaseList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
+async fn list_releases(
+    State(state): S,
+    Path(p): Path<String>,
+    Q(q): Q<ReleaseQuery>,
+    Q(r): Q<WindowRange>,
+) -> ApiResult<ReleaseList> {
+    let pid = project(&state, &p)?.id;
+    let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
+    let limit = q.limit.unwrap_or(50);
+    Ok(Json(state.db.read(move |c, ns| read::list_releases(c, ns, pid, &w, limit)).await?))
+}
+
 #[utoipa::path(get, path = "/v1/projects/{project}/sourcemaps", params(("project" = String, Path)),
     responses((status = 200, body = Vec<ArtifactBundle>), (status = 404, body = ApiError)))]
 async fn list_sourcemaps(State(state): S, Path(p): Path<String>) -> ApiResult<Vec<ArtifactBundle>> {
@@ -410,6 +467,53 @@ async fn list_sourcemaps(State(state): S, Path(p): Path<String>) -> ApiResult<Ve
 async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
     state.db.call(|reply| WriteCmd::Maintenance { reply }).await.map_err(ApiErr::from)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tables `POST /v1/sql` may read (the default schema of the readers).
+const SQL_TABLES: &[&str] = &["events", "issues", "issue_activity"];
+
+#[utoipa::path(post, path = "/v1/sql", request_body = SqlRequest,
+    description = "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0010). Off unless \
+        `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
+    responses((status = 200, body = SqlResponse), (status = 400, body = ApiError), (status = 403, body = ApiError),
+        (status = 504, body = ApiError)))]
+async fn run_sql(State(state): S, J(req): J<SqlRequest>) -> ApiResult<SqlResponse> {
+    if !state.cfg.query.enable_sql {
+        return Err(ApiErr::new(
+            StatusCode::FORBIDDEN,
+            "disabled",
+            "SQL over the error tables is disabled; set sentry.query.enable_sql = true (standalone: --enable-sql)",
+        ));
+    }
+    let limit = req.limit.unwrap_or(1000);
+    if !(1..=100_000).contains(&limit) {
+        return Err(bad("limit must be between 1 and 100000"));
+    }
+    let timeout = state.cfg.query.sql_timeout;
+    let run = state
+        .db
+        .read_for(timeout, move |c, _| Ok(mallard_duck::sql::run(c, crate::SCHEMA, SQL_TABLES, &req.query, limit)))
+        .await?;
+    match run {
+        None => Err(ApiErr::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+            format!("query exceeded the {} time limit", humantime_secs(timeout)),
+        )),
+        Some(Ok(r)) => Ok(Json(SqlResponse {
+            columns: r.columns.into_iter().map(|(name, data_type)| SqlColumn { name, data_type }).collect(),
+            rows: r.rows,
+            truncated: r.truncated,
+            elapsed_ms: r.elapsed_ms,
+        })),
+        Some(Err(mallard_duck::sql::SqlError::Rejected(m))) => Err(bad(m)),
+        Some(Err(mallard_duck::sql::SqlError::Internal(e))) => Err(e.into()),
+    }
+}
+
+/// `30s`, `1.5s`.
+fn humantime_secs(d: Duration) -> String {
+    format!("{}s", d.as_secs_f64())
 }
 
 // ---------------------------------------------------------------------------

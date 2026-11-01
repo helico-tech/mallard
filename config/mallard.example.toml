@@ -89,6 +89,8 @@ compact_interval = "1h"
 [sentry.query]
 readers = 4
 max_window = "366d"
+enable_sql = false                # POST /sentry/v1/sql over events, issues, issue_activity (= admin access; ADR 0010)
+sql_timeout = "30s"
 
 [sentry.sourcemaps]
 cache_size = "256MiB"

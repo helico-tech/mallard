@@ -107,45 +107,113 @@ impl IssueSort {
             Some(_) => None,
         }
     }
-    fn column(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::LastSeen => "last_us",
-            Self::FirstSeen => "first_us",
-            Self::Count => "cnt",
+            Self::LastSeen => "last_seen",
+            Self::FirstSeen => "first_seen",
+            Self::Count => "count",
             Self::Users => "users",
+        }
+    }
+    /// The sorted value (a BIGINT) in the issue list query.
+    fn expr(self) -> &'static str {
+        match self {
+            Self::LastSeen => "agg.last_us",
+            Self::FirstSeen => "epoch_us(i.first_seen)",
+            Self::Count => "agg.cnt",
+            Self::Users => "agg.users",
         }
     }
 }
 
+/// Where the next page of an issue list starts: after the row with this
+/// sort value and group (`ORDER BY value DESC, group_hash`). It carries the
+/// sort and the window, so every page ranks the same events. Text form
+/// `<sort>:<value>:<group hex>:<from µs>:<to µs>`; clients treat it as
+/// opaque.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IssueCursor {
+    pub sort: IssueSort,
+    value: i64,
+    group: u64,
+    pub from_us: i64,
+    pub to_us: i64,
+}
+
+impl IssueCursor {
+    pub fn parse(c: &str) -> Option<IssueCursor> {
+        let mut p = c.split(':');
+        let sort = IssueSort::parse(Some(p.next()?))?;
+        let value = p.next()?.parse().ok()?;
+        let group = parse_group_id(p.next()?)?;
+        let from_us = p.next()?.parse().ok()?;
+        let to_us = p.next()?.parse().ok()?;
+        p.next().is_none().then_some(IssueCursor { sort, value, group, from_us, to_us })
+    }
+}
+
+impl std::fmt::Display for IssueCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let IssueCursor { sort, value, group, from_us, to_us } = self;
+        write!(f, "{}:{value}:{}:{from_us}:{to_us}", sort.as_str(), group_id(*group))
+    }
+}
+
+/// Filters on event columns, shared by the issue and event lists:
+/// `(sql, values)` with ` AND …` clauses and their bound values. `tags`
+/// are `(key, value)` pairs; all must match.
+fn event_filters(environment: Option<&str>, release: Option<&str>, tags: &[(String, String)]) -> (String, Vec<String>) {
+    let mut sql = String::new();
+    let mut values = Vec::new();
+    if let Some(env) = environment {
+        sql.push_str(" AND environment = ?");
+        values.push(env.to_string());
+    }
+    if let Some(rel) = release {
+        sql.push_str(" AND release = ?");
+        values.push(rel.to_string());
+    }
+    for (k, v) in tags {
+        sql.push_str(" AND tags[?] = ?");
+        values.push(k.clone());
+        values.push(v.clone());
+    }
+    (sql, values)
+}
+
+/// `%text%` for `ILIKE … ESCAPE '\'`, with `%`, `_` and `\` taken literally.
+/// `None` for no or blank text.
+fn like_pattern(text: Option<&str>) -> Option<String> {
+    let text = text.map(str::trim).filter(|t| !t.is_empty())?;
+    Some(format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")))
+}
+
+/// The issue list. `tags` filter the events counted (like `environment`
+/// and `release`); `after` continues a previous page (its window is `w`).
+#[allow(clippy::too_many_arguments)]
 pub fn list_issues(
     conn: &Connection,
     ns: &Ns,
     project_id: u32,
     q: &IssueQuery,
+    tags: &[(String, String)],
     w: &Window,
     status: StatusFilter,
     sort: IssueSort,
+    after: Option<IssueCursor>,
 ) -> Result<IssueList> {
     let status = status.as_str();
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
 
-    let mut filters = String::new();
-    let mut filter_values: Vec<&String> = Vec::new();
-    if let Some(env) = &q.environment {
-        filters.push_str(" AND environment = ?");
-        filter_values.push(env);
-    }
-    if let Some(rel) = &q.release {
-        filters.push_str(" AND release = ?");
-        filter_values.push(rel);
-    }
+    let (filters, filter_values) = event_filters(q.environment.as_deref(), q.release.as_deref(), tags);
     let (pid, start_us, end_us) = (project_id as i32, start_us(w), end_us(w));
 
     // Phase 1: rank issues with cheap aggregates only (count, max). Distinct
     // users are only computed for all groups when sorting by them, and then
     // approximately.
     let users_expr = if sort == IssueSort::Users { "approx_count_distinct(user_key)" } else { "0" };
-    let sort = sort.column();
+    let sort_kind = sort;
+    let sort = sort.expr();
     let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us, &end_us];
     p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
     p.push(&pid); // st
@@ -153,12 +221,7 @@ pub fn list_issues(
     p.push(&status);
     p.push(&status);
     // Text search matches the issue's first title and culprit.
-    let like = q
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(|text| format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+    let like = like_pattern(q.query.as_deref());
     let mut search = match &like {
         Some(like) => {
             p.push(like);
@@ -177,10 +240,17 @@ pub fn list_issues(
         search.push_str(" AND i.first_release = ?");
         p.push(rel);
     }
+    let after_values = after.map(|c| (c.value, c.group));
+    if let Some((value, group)) = &after_values {
+        search.push_str(&format!(" AND ({sort} < ? OR ({sort} = ? AND agg.group_hash > ?))"));
+        p.push(value);
+        p.push(value);
+        p.push(group);
+    }
     p.push(&limit);
     let sql = ns.sql(&format!(
         "WITH agg AS (
-            SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, {users_expr} AS users
+            SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, CAST({users_expr} AS BIGINT) AS users
             FROM $S.events
             WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?){filters}
             GROUP BY group_hash
@@ -190,7 +260,7 @@ pub fn list_issues(
          )
          SELECT agg.group_hash, i.title, i.culprit, i.level, i.platform, i.exception_type,
                 coalesce(st.status, 'unresolved') AS status, epoch_us(i.first_seen) AS first_us,
-                agg.cnt, agg.last_us
+                agg.cnt, agg.last_us, {sort} AS sort_value
          FROM agg
          JOIN $S.issues i ON i.project_id = ? AND i.group_hash = agg.group_hash
          LEFT JOIN st ON st.group_hash = agg.group_hash
@@ -200,7 +270,7 @@ pub fn list_issues(
     ));
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(p), |r| {
-        Ok(IssueSummary {
+        let issue = IssueSummary {
             id: group_id(r.get(0)?),
             project_id,
             title: r.get(1)?,
@@ -214,12 +284,21 @@ pub fn list_issues(
             last_seen: us_to_dt(r.get(9)?),
             user_count: 0,
             trend: vec![],
-        })
+        };
+        Ok((issue, r.get::<_, i64>(10)?))
     })?;
-    let mut issues: Vec<IssueSummary> = rows.collect::<Result<_, _>>()?;
+    let ranked: Vec<(IssueSummary, i64)> = rows.collect::<Result<_, _>>()?;
+    let next_cursor = (ranked.len() as i64 == limit)
+        .then(|| ranked.last())
+        .flatten()
+        .and_then(|(i, value)| Some((parse_group_id(&i.id)?, *value)))
+        .map(|(group, value)| {
+            IssueCursor { sort: sort_kind, value, group, from_us: start_us, to_us: end_us }.to_string()
+        });
+    let mut issues: Vec<IssueSummary> = ranked.into_iter().map(|(i, _)| i).collect();
     let groups: Vec<u64> = issues.iter().filter_map(|i| parse_group_id(&i.id)).collect();
     if groups.is_empty() {
-        return Ok(IssueList { issues, window_start: w.from, window_end: w.to });
+        return Ok(IssueList { issues, window_start: w.from, window_end: w.to, next_cursor });
     }
 
     // Phase 2: exact users and the latest title/culprit/level, only for the
@@ -255,7 +334,7 @@ pub fn list_issues(
             i.trend = v;
         }
     }
-    Ok(IssueList { issues, window_start: w.from, window_end: w.to })
+    Ok(IssueList { issues, window_start: w.from, window_end: w.to, next_cursor })
 }
 
 pub fn issue_detail(
@@ -418,12 +497,16 @@ fn event_summary(r: &mallard_duck::duckdb::Row<'_>) -> mallard_duck::duckdb::Res
     })
 }
 
+/// Events of a project, newest first. `tags` are `(key, value)` filters
+/// (all must match).
+#[allow(clippy::too_many_arguments)]
 pub fn list_events(
     conn: &Connection,
     ns: &Ns,
     project_id: u32,
     group: Option<u64>,
     q: &EventQuery,
+    tags: &[(String, String)],
     w: Option<&Window>,
     before: Option<Cursor>,
 ) -> Result<EventList> {
@@ -434,6 +517,14 @@ pub fn list_events(
         sql.push_str(" AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)");
         p.push(Box::new(start_us(w)));
         p.push(Box::new(end_us(w)));
+    }
+    let (filters, values) = event_filters(q.environment.as_deref(), q.release.as_deref(), tags);
+    sql.push_str(&filters);
+    p.extend(values.into_iter().map(|v| Box::new(v) as Box<dyn ToSql>));
+    if let Some(like) = like_pattern(q.query.as_deref()) {
+        sql.push_str(r" AND (title ILIKE ? ESCAPE '\' OR message ILIKE ? ESCAPE '\')");
+        p.push(Box::new(like.clone()));
+        p.push(Box::new(like));
     }
     if let Some(g) = group {
         sql.push_str(" AND group_hash = ?");
@@ -703,6 +794,42 @@ pub fn project_stats(
     })
 }
 
+/// Releases named by the project's events in the window, newest
+/// `last_seen` first. `new_issues` counts issues whose `first_release` is
+/// the version (not limited to the window: the issues table is small).
+pub fn list_releases(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, limit: u32) -> Result<ReleaseList> {
+    let mut stmt = conn.prepare(&ns.sql(
+        "WITH r AS (
+            SELECT release, epoch_us(min(received_at)) AS first_us, epoch_us(max(received_at)) AS last_us,
+                   count(*) AS events, count(DISTINCT group_hash) AS issues
+            FROM $S.events
+            WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)
+              AND release IS NOT NULL
+            GROUP BY release
+         ), n AS (
+            SELECT first_release, count(*) AS new_issues FROM $S.issues
+            WHERE project_id = ? AND first_release IS NOT NULL GROUP BY first_release
+         )
+         SELECT r.release, r.first_us, r.last_us, r.events, r.issues, coalesce(n.new_issues, 0)
+         FROM r LEFT JOIN n ON n.first_release = r.release
+         ORDER BY r.last_us DESC, r.release
+         LIMIT ?",
+    ))?;
+    let pid = project_id as i32;
+    let limit = limit.clamp(1, 500) as i64;
+    let rows = stmt.query_map(params![pid, start_us(w), end_us(w), pid, limit], |r| {
+        Ok(Release {
+            version: r.get(0)?,
+            first_seen: us_to_dt(r.get(1)?),
+            last_seen: us_to_dt(r.get(2)?),
+            events: r.get::<_, i64>(3)? as u64,
+            issues: r.get::<_, i64>(4)? as u64,
+            new_issues: r.get::<_, i64>(5)? as u64,
+        })
+    })?;
+    Ok(ReleaseList { releases: rows.collect::<Result<_, _>>()?, window_start: w.from, window_end: w.to })
+}
+
 /// Bucket size and count for a window of `span_us` (> 0): buckets of at
 /// least one minute, at most 1000 of them. No overflow for any interval.
 fn stats_buckets(span_us: i64, interval_us: Option<i64>) -> (i64, i64) {
@@ -859,6 +986,29 @@ mod tests {
         assert_eq!(Cursor::parse("-5"), Some(Cursor { us: -5, id: None }));
         assert_eq!(Cursor::parse("abc"), None);
         assert_eq!(Cursor::parse("123:not-a-uuid"), None);
+    }
+
+    #[test]
+    fn issue_cursors_round_trip() {
+        let c = IssueCursor { sort: IssueSort::Count, value: 42, group: 0xab, from_us: -1, to_us: 9 };
+        assert_eq!(c.to_string(), "count:42:00000000000000ab:-1:9");
+        assert_eq!(IssueCursor::parse(&c.to_string()), Some(c));
+        for bad in [
+            "",
+            "count:1:00000000000000ab:0",
+            "nope:1:00000000000000ab:0:1",
+            "count:x:00000000000000ab:0:1",
+            "count:1:ab:0:1",
+            "count:1:00000000000000ab:0:1:2",
+        ] {
+            assert_eq!(IssueCursor::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn like_patterns_are_literal() {
+        assert_eq!(like_pattern(Some(" a_b%c\\ ")).as_deref(), Some("%a\\_b\\%c\\\\%"));
+        assert_eq!(like_pattern(Some("  ")), None);
     }
 
     #[test]
