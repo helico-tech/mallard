@@ -139,7 +139,7 @@ impl Config {
         c.lake_alias = odl_server::store::CATALOG.into();
         c.schema = "sentry".into();
         c.public_url = format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/'));
-        c.api_token = (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(","));
+        c.api_token = (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(",").into());
         c.catalog_wide_maintenance = false;
         // Global DuckDB settings belong to the platform ([duckdb]); a per-
         // library `SET threads` would also throttle otel on the shared DB.

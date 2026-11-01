@@ -134,10 +134,11 @@ impl Platform {
             c??;
             anyhow::Ok(())
         };
-        let (r, o, ()) = tokio::join!(receivers, otel_bg, sentry_bg);
+        let (r, o, s) = tokio::join!(receivers, otel_bg, sentry_bg);
         info!("stopped");
         r?;
         o?;
+        s?;
         Ok(())
     }
 }

@@ -13,6 +13,7 @@
 
 use crate::AppState;
 use crate::db::{EnqueueError, EventWrite, WriteCmd};
+use crate::sourcemaps::MAX_REFS_PER_EVENT;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Request, State};
@@ -21,13 +22,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use chrono::Utc;
 use sdl_protocol::envelope::Envelope;
+use sdl_protocol::event::parse_uuid;
 use sdl_protocol::{NormalizeContext, ProcessedEvent, auth, normalize_event, symbolicate};
 use serde_json::{Value, json};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
+use uuid::Uuid;
 
 pub fn router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -90,14 +93,8 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
     let project_id: u32 =
         project_id.parse().map_err(|_| sentry_error(StatusCode::BAD_REQUEST, "invalid project id"))?;
     let (parts, body) = req.into_parts();
-    let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip().to_string());
-    let forwarded = state
-        .cfg
-        .trust_forwarded_for
-        .then(|| parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()))
-        .flatten()
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string());
+    let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+    let forwarded = state.cfg.trust_forwarded_for.then(|| forwarded_ip(&parts.headers)).flatten();
     // Authenticate before reading (and decompressing) the body whenever the
     // key is in a header or the query string, so unauthenticated clients
     // cannot make us inflate large bodies. Requests that carry the key only
@@ -112,14 +109,26 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
         None => state.cfg.max_body_bytes.min(UNAUTHENTICATED_BODY_LIMIT),
     };
     let body = axum::body::to_bytes(body, limit).await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("length limit") {
+        if is_length_limit(&e) {
             sentry_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
         } else {
             sentry_error(StatusCode::BAD_REQUEST, "could not read request body (bad compression?)")
         }
     })?;
-    Ok(Incoming { project_id, header_key, client_ip: forwarded.or(peer), body })
+    Ok(Incoming { project_id, header_key, client_ip: forwarded.or(peer).map(|ip| ip.to_string()), body })
+}
+
+/// The address the proxy in front of us appended to `X-Forwarded-For`: the
+/// last entry. Earlier entries come from the client and can be forged.
+fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    let last_header = headers.get_all("x-forwarded-for").iter().next_back()?.to_str().ok()?;
+    last_header.rsplit(',').next()?.trim().parse().ok()
+}
+
+/// Whether reading a body failed because it hit the size limit.
+fn is_length_limit(e: &axum::Error) -> bool {
+    std::iter::successors(Some(e as &(dyn std::error::Error + 'static)), |e| e.source())
+        .any(|e| e.is::<http_body_util::LengthLimitError>())
 }
 
 /// Body limit for requests whose key is only inside the envelope.
@@ -161,6 +170,36 @@ fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) ->
     }
 }
 
+/// Envelope item types we name in metrics. Anything else is `other`: the
+/// type comes from the client, and every label value is a new series.
+const KNOWN_ITEM_TYPES: &[&str] = &[
+    "event",
+    "error",
+    "transaction",
+    "session",
+    "sessions",
+    "client_report",
+    "attachment",
+    "user_report",
+    "feedback",
+    "replay_event",
+    "replay_recording",
+    "replay_video",
+    "profile",
+    "profile_chunk",
+    "check_in",
+    "log",
+    "otel_log",
+    "span",
+    "otel_span",
+    "statsd",
+    "metric_buckets",
+];
+
+fn item_type_label(ty: &str) -> &'static str {
+    KNOWN_ITEM_TYPES.iter().find(|k| **k == ty).copied().unwrap_or("other")
+}
+
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -181,7 +220,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
     let mut stored_id: Option<String> = None;
     for item in &env.items {
         let ty = item.ty();
-        metrics::counter!("sdl_ingest_items_total", "type" => ty.to_string()).increment(1);
+        metrics::counter!("sdl_ingest_items_total", "type" => item_type_label(ty)).increment(1);
         match ty {
             "event" | "error" => {
                 if item.payload.len() > state.cfg.max_event_bytes {
@@ -199,7 +238,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
             // Accepted and dropped: transactions, sessions, client reports,
             // attachments, replays, profiles, check-ins, logs, feedback...
             // This server stores errors only (see docs/compatibility.md).
-            _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => ty.to_string()).increment(1),
+            _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => item_type_label(ty)).increment(1),
         }
     }
     metrics::histogram!("sdl_ingest_request_seconds", "endpoint" => "envelope").record(started.elapsed().as_secs_f64());
@@ -251,36 +290,55 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
         metrics::counter!("sdl_ingest_items_dropped_total", "type" => "non_error_event").increment(1);
         return Ok(id);
     }
+    // Claim the event id before the expensive work, so SDK retries (also
+    // concurrent ones) are stored once. Same id rule as `normalize_event`;
+    // events without an id get a random one and need no check.
+    let claimed_id =
+        raw.get("event_id").and_then(Value::as_str).and_then(parse_uuid).or_else(|| hint.and_then(parse_uuid));
+    let mut claim = match claimed_id {
+        Some(id) => match Claim::new(&state.recent_events, (inc.project_id, id)) {
+            Some(c) => Some(c),
+            None => {
+                metrics::counter!("sdl_ingest_duplicates_total").increment(1);
+                return Ok(id.simple().to_string());
+            }
+        },
+        None => None,
+    };
+
     let received_at = Utc::now();
     let mut ctx = NormalizeContext::new(received_at);
     ctx.client_ip = inc.client_ip.clone();
     ctx.event_id_hint = hint.map(str::to_string);
     // Normalizing, symbolicating and grouping are CPU work: keep them off
     // the async worker threads.
-    let blocking_err = |_| sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed");
-    let ev = tokio::task::spawn_blocking(move || normalize_event(raw, &ctx)).await.map_err(blocking_err)?;
-    let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev).await;
-    let (processed, payload_json) = tokio::task::spawn_blocking(move || {
+    let blocking_err = |e: tokio::task::JoinError| {
+        tracing::error!(error = %e, "event processing panicked");
+        sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed")
+    };
+    let want_refs = state.sourcemaps.applies_to(&state.db, inc.project_id);
+    let (ev, refs) = tokio::task::spawn_blocking(move || {
+        let ev = normalize_event(raw, &ctx);
+        let refs = if want_refs { symbolicate::collect_refs(&ev, MAX_REFS_PER_EVENT) } else { Vec::new() };
+        (ev, refs)
+    })
+    .await
+    .map_err(blocking_err)?;
+    let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev, refs).await;
+    let (event, payload_json) = tokio::task::spawn_blocking(move || {
         let mut ev = ev;
         if !maps.is_empty() {
             let n = symbolicate::apply(&mut ev, &maps);
             metrics::counter!("sdl_frames_symbolicated_total").increment(n as u64);
         }
-        let processed = ProcessedEvent::from_normalized(ev, received_at);
-        let payload_json = processed.payload.to_string();
-        (processed, payload_json)
+        // Only the JSON text is queued; the Value tree is dropped here.
+        (ProcessedEvent::from_normalized(&ev, received_at), ev.to_string())
     })
     .await
     .map_err(blocking_err)?;
-    let id = processed.event_id.simple().to_string();
-    let dedupe_key = (inc.project_id, processed.event_id);
-    if state.recent_events.contains_key(&dedupe_key) {
-        metrics::counter!("sdl_ingest_duplicates_total").increment(1);
-        return Ok(id);
-    }
+    let id = event.event_id.simple().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let cmd =
-        WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event: processed, payload_json, reply: tx }));
+    let cmd = WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event, payload_json, reply: tx }));
     match state.db.try_send(cmd) {
         Ok(()) => {}
         Err(EnqueueError::Full) => {
@@ -290,16 +348,121 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
             return Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"));
         }
     }
+    // Queued: the event will most likely be stored even if this request
+    // is cancelled now, so keep the claim unless the write fails.
+    let set_keep = |claim: &mut Option<Claim<'_>>, keep: bool| {
+        if let Some(c) = claim {
+            c.keep = keep;
+        }
+    };
+    set_keep(&mut claim, true);
     match rx.await {
         Ok(Ok(())) => {
-            state.recent_events.insert(dedupe_key, ());
             metrics::counter!("sdl_ingest_events_total").increment(1);
             Ok(id)
         }
         Ok(Err(e)) => {
+            set_keep(&mut claim, false);
             tracing::error!(error = format!("{e:#}"), "storing event failed");
             Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "storing the event failed"))
         }
-        Err(_) => Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")),
+        Err(_) => {
+            set_keep(&mut claim, false);
+            Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"))
+        }
+    }
+}
+
+type RecentEvents = moka::sync::Cache<(u32, Uuid), ()>;
+
+/// A claimed (project, event id) in the recent-events cache. Released on
+/// drop unless `keep` is set, so a failed or cancelled request lets the
+/// SDK's retry through.
+struct Claim<'a> {
+    cache: &'a RecentEvents,
+    key: (u32, Uuid),
+    keep: bool,
+}
+
+impl<'a> Claim<'a> {
+    /// `None` when the id is already claimed (a duplicate). Atomic:
+    /// `or_insert_with` coalesces concurrent calls (`or_insert` does not).
+    fn new(cache: &'a RecentEvents, key: (u32, Uuid)) -> Option<Self> {
+        cache.entry(key).or_insert_with(|| ()).is_fresh().then(|| Claim { cache, key, keep: false })
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.cache.invalidate(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claims_are_exclusive_and_released_unless_kept() {
+        let cache = RecentEvents::new(100);
+        let key = (1, Uuid::new_v4());
+        let c = Claim::new(&cache, key).unwrap();
+        assert!(Claim::new(&cache, key).is_none(), "second claim of the same id is a duplicate");
+        assert!(Claim::new(&cache, key).is_none(), "a duplicate does not release the first claim");
+        drop(c);
+        let mut c = Claim::new(&cache, key).expect("released on drop");
+        c.keep = true;
+        drop(c);
+        assert!(Claim::new(&cache, key).is_none(), "kept after a stored event");
+    }
+
+    #[tokio::test]
+    async fn body_limit_is_detected_by_type() {
+        let big = axum::body::Body::from(vec![0u8; 100]);
+        let e = axum::body::to_bytes(big, 10).await.unwrap_err();
+        assert!(is_length_limit(&e));
+        let failing = axum::body::Body::from_stream(futures::stream::once(async {
+            Err::<Bytes, _>(std::io::Error::other("length limit exceeded (but not really)"))
+        }));
+        let e = axum::body::to_bytes(failing, 10).await.unwrap_err();
+        assert!(!is_length_limit(&e));
+    }
+
+    #[test]
+    fn forwarded_ip_is_the_last_valid_entry() {
+        let h = |values: &[&str]| {
+            let mut m = HeaderMap::new();
+            for v in values {
+                m.append("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+            }
+            forwarded_ip(&m)
+        };
+        assert_eq!(h(&["6.6.6.6, 1.2.3.4"]), Some("1.2.3.4".parse().unwrap()));
+        assert_eq!(h(&["6.6.6.6", " 2001:db8::1 "]), Some("2001:db8::1".parse().unwrap()));
+        assert_eq!(h(&["1.2.3.4, not-an-ip"]), None);
+        assert_eq!(h(&[]), None);
+    }
+
+    #[test]
+    fn key_from_headers_precedence() {
+        let mut m = HeaderMap::new();
+        assert_eq!(key_from_headers(&m, Some("sentry_key=q")).as_deref(), Some("q"));
+        m.insert(header::AUTHORIZATION, HeaderValue::from_static("Sentry sentry_key=a, sentry_version=7"));
+        assert_eq!(key_from_headers(&m, Some("sentry_key=q")).as_deref(), Some("a"));
+        m.insert("x-sentry-auth", HeaderValue::from_static("Sentry sentry_key=x, sentry_version=7"));
+        assert_eq!(key_from_headers(&m, Some("sentry_key=q")).as_deref(), Some("x"));
+        // A bearer token is not a Sentry key.
+        let mut m = HeaderMap::new();
+        m.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer sentry_key=a"));
+        assert_eq!(key_from_headers(&m, None), None);
+    }
+
+    #[test]
+    fn item_type_labels_are_a_closed_set() {
+        assert_eq!(item_type_label("event"), "event");
+        assert_eq!(item_type_label("client_report"), "client_report");
+        assert_eq!(item_type_label("x-random-4711"), "other");
     }
 }

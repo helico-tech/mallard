@@ -295,6 +295,10 @@ async fn ingest_auth_compression_cors_and_dedupe() {
     let r = t.http.post(format!("{url}?sentry_key={key}")).body("not json").send().await.unwrap();
     assert_eq!(r.status(), 400);
 
+    // A cursor that does not parse is an error, not the first page again.
+    let (s, _) = t.api(reqwest::Method::GET, "/v1/projects/web/events?before=garbage", None).await;
+    assert_eq!(s, 400);
+
     // Management API requires the token.
     let r = t.http.get(format!("{}/v1/projects", t.base)).send().await.unwrap();
     assert_eq!(r.status(), 401);
@@ -303,6 +307,22 @@ async fn ingest_auth_compression_cors_and_dedupe() {
     // Meta routes are public.
     assert_eq!(t.http.get(format!("{}/openapi.json", t.base)).send().await.unwrap().status(), 200);
     assert_eq!(t.http.get(format!("{}/readyz", t.base)).send().await.unwrap().status(), 200);
+    t.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_retries_are_stored_once() {
+    let t = TestServer::start().await;
+    let project = t.create_project("dup").await;
+    let key = project["public_key"].as_str().unwrap();
+    let url = format!("{}/api/1/envelope/?sentry_key={key}", t.base);
+    let body = "{\"event_id\":\"0f6d8c0c43fc4630ad850ee518f1b9d1\"}\n{\"type\":\"event\"}\n{\"message\":\"dup\"}\n";
+    let sends = (0..8).map(|_| t.http.post(&url).body(body).send());
+    for r in futures::future::join_all(sends).await {
+        assert_eq!(r.unwrap().status(), 200);
+    }
+    let events = t.get("/v1/projects/dup/events").await;
+    assert_eq!(events["events"].as_array().unwrap().len(), 1, "{events}");
     t.stop().await;
 }
 

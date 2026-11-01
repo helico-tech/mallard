@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     init_tracing(args.log_json);
     let cfg = args.config;
     match install {
-        true => sdl_server::db::install_all_extensions(&cfg),
+        true => sdl_server::install_all_extensions(&cfg),
         false => {
             anyhow::ensure!(!cfg.api_tokens().is_empty(), "SDL_API_TOKEN (--api-token) is required");
             let prometheus = metrics_exporter_prometheus::PrometheusBuilder::new()
@@ -93,7 +93,11 @@ async fn main() -> Result<()> {
                 Some(addr) => {
                     let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
                     tracing::info!(%addr, "metrics listening");
-                    tokio::spawn(async move { axum::serve(l, metrics_route).await });
+                    tokio::spawn(async move {
+                        if let Err(e) = axum::serve(l, metrics_route).await {
+                            tracing::error!(error = %e, "metrics server failed");
+                        }
+                    });
                 }
                 None => app = app.merge(metrics_route),
             }

@@ -67,8 +67,6 @@ pub struct ProcessedEvent {
     pub span_id: Option<u64>,
     /// Stable 64-bit issue group hash (fingerprint).
     pub group_hash: u64,
-    /// The full normalized event.
-    pub payload: Value,
 }
 
 pub fn parse_uuid(s: &str) -> Option<Uuid> {
@@ -205,11 +203,11 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
         let parsed = useragent::parse(&ua);
         let contexts = ev.entry("contexts").or_insert_with(|| json!({}));
         if let Value::Object(c) = contexts {
-            if let (false, Some((name, version))) = (c.contains_key("browser"), parsed.browser) {
-                c.insert("browser".into(), json!({"type": "browser", "name": name, "version": version}));
+            if let (false, Some(b)) = (c.contains_key("browser"), parsed.browser) {
+                c.insert("browser".into(), json!({"type": "browser", "name": b.name, "version": b.version}));
             }
-            if let (false, Some((name, version))) = (c.contains_key("os"), parsed.os) {
-                c.insert("os".into(), json!({"type": "os", "name": name, "version": version}));
+            if let (false, Some(os)) = (c.contains_key("os"), parsed.os) {
+                c.insert("os".into(), json!({"type": "os", "name": os.name, "version": os.version}));
             }
         }
     }
@@ -220,26 +218,26 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
 impl ProcessedEvent {
     /// Extract columns, tags and the group hash from a normalized (and
     /// optionally symbolicated) event.
-    pub fn from_normalized(payload: Value, received_at: DateTime<Utc>) -> Self {
+    pub fn from_normalized(payload: &Value, received_at: DateTime<Utc>) -> Self {
         let s = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
         let event_id = s("event_id").as_deref().and_then(parse_uuid).unwrap_or_else(Uuid::new_v4);
         let timestamp = payload.get("timestamp").and_then(parse_timestamp).unwrap_or(received_at);
-        let meta = grouping::metadata(&payload);
-        let group_hash = grouping::group_hash(&payload);
+        let meta = grouping::metadata(payload);
+        let group_hash = grouping::group_hash(payload);
         let message = payload
             .get("logentry")
             .and_then(|l| l.get("formatted").or_else(|| l.get("message")))
             .and_then(Value::as_str)
             .map(|m| truncate(m, 1024));
-        let handled = last_exception(&payload)
+        let handled = last_exception(payload)
             .and_then(|e| e.get("mechanism"))
             .and_then(|m| m.get("handled"))
             .and_then(Value::as_bool);
-        let user_key = user_key(&payload);
+        let user_key = user_key(payload);
         let sdk = payload.get("sdk");
         let sdk_name = sdk.and_then(|s| s.get("name")).and_then(Value::as_str).map(str::to_string);
         let sdk_version = sdk.and_then(|s| s.get("version")).and_then(Value::as_str).map(str::to_string);
-        let tags = derive_tags(&payload, handled, user_key.as_deref());
+        let tags = derive_tags(payload, handled, user_key.as_deref());
         let trace = payload.get("contexts").and_then(|c| c.get("trace"));
         let trace_id = trace.and_then(|t| t.get("trace_id")).and_then(Value::as_str).and_then(parse_trace_id);
         let span_id = trace.and_then(|t| t.get("span_id")).and_then(Value::as_str).and_then(parse_span_id);
@@ -268,7 +266,6 @@ impl ProcessedEvent {
             trace_id,
             span_id,
             group_hash,
-            payload,
         }
     }
 }
@@ -285,7 +282,8 @@ pub fn parse_trace_id(s: &str) -> Option<Uuid> {
 /// 16 hex chars -> big-endian u64 (same encoding as OTLP span ids).
 pub fn parse_span_id(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.len() != 16 {
+    // `from_str_radix` alone would also accept a leading `+`.
+    if s.len() != 16 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     u64::from_str_radix(s, 16).ok().filter(|v| *v != 0)
@@ -312,8 +310,13 @@ fn derive_tags(ev: &Value, handled: Option<bool>, user_key: Option<&str>) -> Vec
     let mut out: Vec<(String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut push = |k: &str, v: &str| {
-        if !v.is_empty() && seen.insert(k.to_string()) {
-            out.push((truncate(k, MAX_TAG_KEY), truncate(v, MAX_TAG_VALUE)));
+        if v.is_empty() {
+            return;
+        }
+        // Dedupe on the stored (truncated) key.
+        let k = truncate(k, MAX_TAG_KEY);
+        if seen.insert(k.clone()) {
+            out.push((k, truncate(v, MAX_TAG_VALUE)));
         }
     };
     if let Some(Value::Object(tags)) = ev.get("tags") {
@@ -366,13 +369,17 @@ fn derive_tags(ev: &Value, handled: Option<bool>, user_key: Option<&str>) -> Vec
 }
 
 pub fn normalize_level(l: &str) -> &'static str {
-    match l.to_ascii_lowercase().as_str() {
-        "fatal" | "critical" => "fatal",
-        "warning" | "warn" => "warning",
-        "info" | "log" => "info",
-        "debug" | "trace" => "debug",
-        _ => "error",
-    }
+    const LEVELS: &[(&str, &str)] = &[
+        ("fatal", "fatal"),
+        ("critical", "fatal"),
+        ("warning", "warning"),
+        ("warn", "warning"),
+        ("info", "info"),
+        ("log", "info"),
+        ("debug", "debug"),
+        ("trace", "debug"),
+    ];
+    LEVELS.iter().find(|(name, _)| name.eq_ignore_ascii_case(l)).map_or("error", |(_, level)| level)
 }
 
 pub fn parse_timestamp(v: &Value) -> Option<DateTime<Utc>> {
@@ -671,7 +678,7 @@ mod tests {
             &ctx(),
         );
         assert_eq!(ev["contexts"]["browser"]["name"], "Firefox");
-        let p = ProcessedEvent::from_normalized(ev, ctx().received_at);
+        let p = ProcessedEvent::from_normalized(&ev, ctx().received_at);
         assert!(p.tags.contains(&("browser".into(), "Firefox 131.0".into())));
         assert!(p.tags.contains(&("url".into(), "https://x.test/a".into())));
     }
@@ -687,7 +694,7 @@ mod tests {
             }),
             &ctx(),
         );
-        let p = ProcessedEvent::from_normalized(ev, ctx().received_at);
+        let p = ProcessedEvent::from_normalized(&ev, ctx().received_at);
         assert_eq!(p.title, "TypeError: x is undefined");
         assert_eq!(p.handled, Some(false));
         assert_eq!(p.user_key.as_deref(), Some("email:a@b.c"));
@@ -706,10 +713,10 @@ mod tests {
             (0..100).map(|i| json!({"type": format!("E{i}"), "stacktrace": {"frames": frames}})).collect();
         let started = std::time::Instant::now();
         let ev = normalize_event(json!({"tags": tags, "exception": excs}), &ctx());
-        let p = ProcessedEvent::from_normalized(ev, ctx().received_at);
+        let _ = ProcessedEvent::from_normalized(&ev, ctx().received_at);
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        assert_eq!(p.payload["tags"].as_object().unwrap().len(), MAX_TAGS);
-        let values = p.payload["exception"]["values"].as_array().unwrap();
+        assert_eq!(ev["tags"].as_object().unwrap().len(), MAX_TAGS);
+        let values = ev["exception"]["values"].as_array().unwrap();
         assert_eq!(values.len(), MAX_EXCEPTIONS);
         assert_eq!(values.last().unwrap()["type"], "E99");
         let fr = values[0]["stacktrace"]["frames"].as_array().unwrap();
@@ -719,12 +726,33 @@ mod tests {
     }
 
     #[test]
+    fn tags_dedupe_on_the_truncated_key() {
+        let long = "k".repeat(MAX_TAG_KEY);
+        let ev = json!({"tags": {format!("{long}a"): "1", format!("{long}b"): "2"}});
+        let tags = derive_tags(&ev, None, None);
+        assert_eq!(tags.iter().filter(|(k, _)| *k == long).count(), 1, "{tags:?}");
+    }
+
+    #[test]
+    fn levels() {
+        assert_eq!(normalize_level("WARN"), "warning");
+        assert_eq!(normalize_level("Critical"), "fatal");
+        assert_eq!(normalize_level("whatever"), "error");
+    }
+
+    #[test]
+    fn span_ids_are_strict_hex() {
+        assert_eq!(parse_span_id("+00f067aa0ba902b"), None);
+        assert_eq!(parse_span_id(" 00f067aa0ba902b7 "), Some(0x00f067aa0ba902b7));
+    }
+
+    #[test]
     fn trace_context() {
         let ev = normalize_event(
             json!({"contexts": {"trace": {"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7"}}}),
             &ctx(),
         );
-        let p = ProcessedEvent::from_normalized(ev, ctx().received_at);
+        let p = ProcessedEvent::from_normalized(&ev, ctx().received_at);
         assert_eq!(p.trace_id.unwrap().simple().to_string(), "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(p.span_id, Some(0x00f067aa0ba902b7));
         assert_eq!(parse_trace_id("00000000000000000000000000000000"), None);

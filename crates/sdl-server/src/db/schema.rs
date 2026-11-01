@@ -5,7 +5,8 @@
 //! latest row wins. That keeps writes cheap in a lakehouse, where an
 //! UPDATE means writing delete files.
 
-/// Bump when the schema changes and add a migration step in `migrate`.
+/// Bump when the schema changes. Stored in `meta` at startup; there are
+/// no migrations yet.
 pub const SCHEMA_VERSION: i32 = 1;
 
 pub const CREATE: &[&str] = &[

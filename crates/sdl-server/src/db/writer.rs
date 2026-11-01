@@ -18,7 +18,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -27,7 +27,18 @@ pub struct EventWrite {
     pub project_id: u32,
     pub event: ProcessedEvent,
     pub payload_json: String,
-    pub reply: oneshot::Sender<Result<(), String>>,
+    pub reply: oneshot::Sender<Result<(), Arc<anyhow::Error>>>,
+}
+
+/// Errors of writer commands that callers answer differently.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("a project with slug {0:?} already exists")]
+    SlugTaken(String),
+    #[error("issue not found")]
+    IssueNotFound,
+    #[error(transparent)]
+    Db(#[from] anyhow::Error),
 }
 
 pub struct NewBundleFile {
@@ -54,14 +65,14 @@ pub enum WriteCmd {
         name: String,
         slug: String,
         platform: Option<String>,
-        reply: oneshot::Sender<Result<ProjectRow>>,
+        reply: oneshot::Sender<Result<ProjectRow, WriteError>>,
     },
     SetStatus {
         project_id: u32,
         group_hash: u64,
         status: IssueStatus,
         reason: &'static str,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), WriteError>>,
     },
     AddBundle {
         bundle: Box<NewBundle>,
@@ -122,16 +133,21 @@ const MOVE_STAGED: &str = "INSERT INTO $S.events SELECT
     CAST(tags_json::JSON AS MAP(VARCHAR, VARCHAR)), size_bytes, payload
     FROM $T.staging_events";
 
+/// Store the schema version once (the latest row wins).
 pub fn record_schema_version(conn: &Connection, ns: &Ns) -> Result<()> {
-    let current: Option<String> = conn
-        .query_row(&ns.sql("SELECT max(value) FROM $S.meta WHERE key = 'schema_version'"), [], |r| r.get(0))
-        .ok()
-        .flatten();
-    let want = super::schema::SCHEMA_VERSION.to_string();
-    if current.as_deref() != Some(want.as_str()) {
+    // Compare as numbers: as text, "10" < "9".
+    let current: Option<i32> = conn
+        .query_row(
+            &ns.sql("SELECT max(TRY_CAST(value AS INTEGER)) FROM $S.meta WHERE key = 'schema_version'"),
+            [],
+            |r| r.get(0),
+        )
+        .context("reading the schema version")?;
+    let want = super::schema::SCHEMA_VERSION;
+    if current != Some(want) {
         conn.execute(
             &ns.sql("INSERT INTO $S.meta VALUES ('schema_version', ?, make_timestamp(?))"),
-            params![want, Utc::now().timestamp_micros()],
+            params![want.to_string(), Utc::now().timestamp_micros()],
         )?;
     }
     Ok(())
@@ -168,26 +184,31 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     let mut issues = caches.issues.write().expect("lock");
     for row in rows {
         let (p, g, s) = row?;
-        issues.insert((p, g), IssueStatus::parse(&s).unwrap_or_default());
+        issues.insert((p, g), s.parse().unwrap_or_default());
     }
     let n_issues = issues.len();
     drop(issues);
     let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?)))?;
-    let mut bundles = caches.bundles.write().expect("lock");
-    let mut releases = caches.bundle_releases.write().expect("lock");
     for row in rows {
         let (b, p, r) = row?;
-        bundles.insert((b, p));
-        if let Some(r) = r {
-            releases.insert((p, r));
-        }
+        caches.add_bundle(p, &b, r.as_deref(), []);
+    }
+    let mut stmt = conn.prepare(&ns.sql(
+        "SELECT DISTINCT bundle_id, project_id, debug_id::VARCHAR FROM $S.artifact_files
+         WHERE debug_id IS NOT NULL AND file_type = 'source_map'",
+    ))?;
+    let rows =
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, String>(2)?)))?;
+    for row in rows {
+        let (b, p, id) = row?;
+        caches.add_bundle(p, &b, None, uuid::Uuid::try_parse(&id).ok());
     }
     tracing::info!(
         projects = caches.projects.read().expect("lock").len(),
         issues = n_issues,
-        bundles = bundles.len(),
+        bundles = caches.bundle_count(),
         "loaded caches"
     );
     Ok(())
@@ -378,24 +399,24 @@ impl Writer {
                 tracing::error!(events = n, error = format!("{e:#}"), "batch failed");
             }
         }
-        let reply = result.map_err(|e| e.to_string());
+        let reply = result.map_err(Arc::new);
         for ev in batch {
             let _ = ev.reply.send(reply.clone());
         }
     }
 
-    fn try_write_events(&mut self, batch: &[EventWrite]) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn try_write_events(&self, batch: &[EventWrite]) -> Result<()> {
+        let ns = &self.ns;
         // Decide new issues and regressions against the cache, but only
         // apply cache changes after the commit succeeded.
         let mut new_issues: Vec<&EventWrite> = Vec::new();
         let mut activity: Vec<(u32, u64, IssueStatus, &'static str)> = Vec::new();
-        let mut seen_in_batch: HashMap<(u32, u64), ()> = HashMap::new();
+        let mut seen_in_batch: HashSet<(u32, u64)> = HashSet::new();
         {
             let issues = self.caches.issues.read().expect("lock");
             for w in batch {
                 let key = (w.project_id, w.event.group_hash);
-                if seen_in_batch.insert(key, ()).is_some() {
+                if !seen_in_batch.insert(key) {
                     continue;
                 }
                 match issues.get(&key) {
@@ -492,12 +513,12 @@ impl Writer {
         Ok(())
     }
 
-    fn create_project(&mut self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow> {
-        let ns = &self.ns.clone();
+    fn create_project(&self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow, WriteError> {
+        let ns = &self.ns;
         let id = {
             let projects = self.caches.projects.read().expect("lock");
             if projects.values().any(|p| p.slug == slug) {
-                return Err(anyhow!("a project with slug {slug:?} already exists"));
+                return Err(WriteError::SlugTaken(slug));
             }
             projects.keys().max().copied().unwrap_or(0) + 1
         };
@@ -522,10 +543,16 @@ impl Writer {
         Ok(row)
     }
 
-    fn set_status(&mut self, project_id: u32, group_hash: u64, status: IssueStatus, reason: &str) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn set_status(
+        &self,
+        project_id: u32,
+        group_hash: u64,
+        status: IssueStatus,
+        reason: &str,
+    ) -> Result<(), WriteError> {
+        let ns = &self.ns;
         if !self.caches.issues.read().expect("lock").contains_key(&(project_id, group_hash)) {
-            return Err(anyhow!("issue not found"));
+            return Err(WriteError::IssueNotFound);
         }
         self.in_tx(|c| {
             c.execute(
@@ -538,8 +565,8 @@ impl Writer {
         Ok(())
     }
 
-    fn add_bundle(&mut self, b: &NewBundle) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn add_bundle(&self, b: &NewBundle) -> Result<()> {
+        let ns = &self.ns;
         let now = Utc::now().timestamp_micros();
         self.in_tx(|c| {
             let mut sb =
@@ -583,13 +610,9 @@ impl Writer {
             }
             Ok(())
         })?;
-        let mut cache = self.caches.bundles.write().expect("lock");
-        let mut releases = self.caches.bundle_releases.write().expect("lock");
+        let debug_ids = || b.files.iter().filter(|f| f.file_type == "source_map").filter_map(|f| f.debug_id);
         for p in &b.project_ids {
-            cache.insert((b.bundle_id.clone(), *p));
-            if let Some(r) = &b.release {
-                releases.insert((*p, r.clone()));
-            }
+            self.caches.add_bundle(*p, &b.bundle_id, b.release.as_deref(), debug_ids());
         }
         Ok(())
     }
@@ -603,8 +626,8 @@ impl Writer {
         Ok(())
     }
 
-    fn compact_and_expire(&mut self) -> Result<()> {
-        let ns = &self.ns.clone();
+    fn compact_and_expire(&self) -> Result<()> {
+        let ns = &self.ns;
         let started = Instant::now();
         let mut errors = Vec::new();
         if self.retention_days > 0 {

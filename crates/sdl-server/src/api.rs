@@ -4,9 +4,9 @@
 
 use crate::AppState;
 use crate::db::read::{self, Window, parse_group_id};
-use crate::db::{ProjectRow, WriteCmd};
+use crate::db::{ProjectRow, WriteCmd, WriteError};
 use crate::ingest::constant_time_eq;
-use crate::sourcemaps::{self, AssembleRequest};
+use crate::sourcemaps::{self, AssembleRequest, AssembleResponse, SourcemapError};
 use axum::extract::{Multipart, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
@@ -37,6 +37,22 @@ impl From<anyhow::Error> for ApiErr {
     fn from(e: anyhow::Error) -> Self {
         tracing::error!(error = format!("{e:#}"), "api error");
         ApiErr(StatusCode::INTERNAL_SERVER_ERROR, "internal error (see server log)".into())
+    }
+}
+
+impl From<WriteError> for ApiErr {
+    fn from(e: WriteError) -> Self {
+        match e {
+            WriteError::SlugTaken(_) => ApiErr(StatusCode::CONFLICT, e.to_string()),
+            WriteError::IssueNotFound => not_found("issue"),
+            WriteError::Db(e) => e.into(),
+        }
+    }
+}
+
+impl From<read::WindowError> for ApiErr {
+    fn from(e: read::WindowError) -> Self {
+        bad(e.to_string())
     }
 }
 
@@ -144,16 +160,18 @@ async fn readyz(State(state): S) -> Response {
     }
 }
 
-fn to_project(state: &AppState, p: ProjectRow) -> Project {
-    Project {
-        dsn: Dsn::format(&state.cfg.public_url, &p.public_key, p.id),
+fn to_project(state: &AppState, p: ProjectRow) -> Result<Project, ApiErr> {
+    // Config::validate guarantees a public_url that can carry the key.
+    let dsn = Dsn::build(&state.cfg.public_url, &p.public_key, p.id).map_err(anyhow::Error::from)?;
+    Ok(Project {
+        dsn,
         id: p.id,
         slug: p.slug,
         name: p.name,
         platform: p.platform,
         public_key: p.public_key,
         created_at: p.created_at,
-    }
+    })
 }
 
 fn project(state: &AppState, r: &str) -> Result<ProjectRow, ApiErr> {
@@ -177,8 +195,8 @@ async fn info(State(state): S) -> Json<ServerInfo> {
 }
 
 #[utoipa::path(get, path = "/v1/projects", responses((status = 200, body = Vec<Project>)))]
-async fn list_projects(State(state): S) -> Json<Vec<Project>> {
-    Json(state.db.caches.projects().into_iter().map(|p| to_project(&state, p)).collect())
+async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
+    Ok(Json(state.db.caches.projects().into_iter().map(|p| to_project(&state, p)).collect::<Result<_, _>>()?))
 }
 
 fn slugify(name: &str) -> String {
@@ -199,7 +217,8 @@ async fn create_project(
     State(state): S,
     Json(req): Json<CreateProject>,
 ) -> Result<(StatusCode, Json<Project>), ApiErr> {
-    let slug = req.slug.clone().unwrap_or_else(|| slugify(&req.name));
+    let CreateProject { name, slug, platform } = req;
+    let slug = slug.unwrap_or_else(|| slugify(&name));
     if slug.is_empty()
         || slug.len() > 64
         || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
@@ -209,21 +228,18 @@ async fn create_project(
     if slug.chars().all(|c| c.is_ascii_digit()) {
         return Err(bad("slug must not be numeric (it would clash with project ids)"));
     }
-    if req.name.trim().is_empty() {
+    let name = name.trim().to_string();
+    if name.is_empty() {
         return Err(bad("name is required"));
     }
-    let name = req.name.trim().to_string();
-    let platform = req.platform.clone();
-    let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await.map_err(|e| {
-        if e.to_string().contains("already exists") { ApiErr(StatusCode::CONFLICT, e.to_string()) } else { e.into() }
-    })?;
-    Ok((StatusCode::CREATED, Json(to_project(&state, row))))
+    let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await?;
+    Ok((StatusCode::CREATED, Json(to_project(&state, row)?)))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}", params(("project" = String, Path, description = "Project id or slug")),
     responses((status = 200, body = Project), (status = 404, body = ApiError)))]
 async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Project> {
-    Ok(Json(to_project(&state, project(&state, &p)?)))
+    Ok(Json(to_project(&state, project(&state, &p)?)?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues",
@@ -231,14 +247,12 @@ async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Projec
     responses((status = 200, body = IssueList), (status = 404, body = ApiError)))]
 async fn list_issues(State(state): S, Path(p): Path<String>, Query(q): Query<IssueQuery>) -> ApiResult<IssueList> {
     let pid = project(&state, &p)?.id;
-    if let Some(s) = q.status.as_deref()
-        && s != "all"
-        && IssueStatus::parse(s).is_none()
-    {
-        return Err(bad("status must be unresolved, resolved, ignored or all"));
-    }
-    let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
-    Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w)).await?))
+    let status = read::StatusFilter::parse(q.status.as_deref())
+        .ok_or_else(|| bad("status must be unresolved, resolved, ignored or all"))?;
+    let sort = read::IssueSort::parse(q.sort.as_deref())
+        .ok_or_else(|| bad("sort must be last_seen, first_seen, count or users"))?;
+    let w = Window::parse(q.since.as_deref(), "14d", Utc::now())?;
+    Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w, status, sort)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues/{issue_id}",
@@ -251,7 +265,7 @@ async fn get_issue(
 ) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
-    let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
+    let w = Window::parse(q.since.as_deref(), "14d", Utc::now())?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
@@ -268,9 +282,8 @@ async fn update_issue(
     state
         .db
         .call(|reply| WriteCmd::SetStatus { project_id: pid, group_hash: g, status: req.status, reason: "user", reply })
-        .await
-        .map_err(|e| if e.to_string().contains("not found") { not_found("issue") } else { e.into() })?;
-    let w = Window::parse(None, "14d", Utc::now()).map_err(bad)?;
+        .await?;
+    let w = Window::parse(None, "14d", Utc::now())?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
@@ -282,7 +295,9 @@ async fn list_events(State(state): S, Path(p): Path<String>, Query(q): Query<Eve
     if q.trace_id.as_deref().is_some_and(|t| sdl_protocol::event::parse_trace_id(t).is_none()) {
         return Err(bad("trace_id must be 32 hex characters"));
     }
-    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q)).await?))
+    let before =
+        q.before.as_deref().map(|c| read::Cursor::parse(c).ok_or_else(|| bad("invalid cursor"))).transpose()?;
+    Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, before)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/events", params(TraceQuery),
@@ -296,7 +311,7 @@ async fn events_by_trace(State(state): S, Query(q): Query<TraceQuery>) -> ApiRes
         .as_deref()
         .map(|s| sdl_protocol::event::parse_span_id(s).ok_or_else(|| bad("span_id must be 16 hex characters")))
         .transpose()?;
-    let w = Window::parse(q.since.as_deref(), "30d", Utc::now()).map_err(bad)?;
+    let w = Window::parse(q.since.as_deref(), "30d", Utc::now())?;
     let limit = q.limit.unwrap_or(50);
     Ok(Json(state.db.read(move |c, ns| read::events_by_trace(c, ns, t, span, &w, limit)).await?))
 }
@@ -334,13 +349,16 @@ async fn project_stats(
     Query(q): Query<WindowQuery>,
 ) -> ApiResult<ProjectStats> {
     let pid = project(&state, &p)?.id;
-    let w = Window::parse(q.since.as_deref(), "24h", Utc::now()).map_err(bad)?;
-    let interval = q
+    let w = Window::parse(q.since.as_deref(), "24h", Utc::now())?;
+    let interval_us = q
         .interval
         .as_deref()
-        .map(|i| humantime::parse_duration(i).map_err(|e| bad(format!("invalid interval: {e}"))))
+        .map(|i| {
+            let d = humantime::parse_duration(i).map_err(|e| bad(format!("invalid interval: {e}")))?;
+            i64::try_from(d.as_micros()).map_err(|_| bad("interval is too large"))
+        })
         .transpose()?;
-    Ok(Json(state.db.read(move |c, ns| read::project_stats(c, ns, pid, &w, interval)).await?))
+    Ok(Json(state.db.read(move |c, ns| read::project_stats(c, ns, pid, &w, interval_us)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/sourcemaps", params(("project" = String, Path)),
@@ -354,7 +372,7 @@ async fn list_sourcemaps(State(state): S, Path(p): Path<String>) -> ApiResult<Ve
     description = "Flush inlined data to Parquet, apply retention, compact files and expire snapshots now.",
     responses((status = 204), (status = 500, body = ApiError)))]
 async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
-    state.db.call(|reply| WriteCmd::Maintenance { reply }).await?;
+    state.db.call(|reply| WriteCmd::Maintenance { reply }).await.map_err(ApiErr::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -365,6 +383,19 @@ async fn run_maintenance(State(state): S) -> Result<StatusCode, ApiErr> {
 fn sentry_err(status: StatusCode, msg: impl Into<String>) -> Response {
     let msg = msg.into();
     (status, Json(json!({ "error": msg, "detail": msg }))).into_response()
+}
+
+impl IntoResponse for SourcemapError {
+    fn into_response(self) -> Response {
+        match self {
+            SourcemapError::NotConfigured => sentry_err(StatusCode::NOT_IMPLEMENTED, self.to_string()),
+            SourcemapError::BadRequest(msg) => sentry_err(StatusCode::BAD_REQUEST, msg),
+            SourcemapError::Internal(e) => {
+                tracing::error!(error = format!("{e:#}"), "sourcemap request failed");
+                sentry_err(StatusCode::INTERNAL_SERVER_ERROR, "internal error (see server log)")
+            }
+        }
+    }
 }
 
 async fn chunk_options(State(state): S, Path(org): Path<String>) -> Response {
@@ -422,20 +453,14 @@ async fn chunk_upload(State(state): S, mut form: Multipart) -> Response {
             return sentry_err(StatusCode::BAD_REQUEST, "Request too large");
         }
         if let Err(e) = state.sourcemaps.store_chunk(&checksum, data).await {
-            let msg = e.to_string();
-            let status =
-                if msg.contains("not configured") { StatusCode::NOT_IMPLEMENTED } else { StatusCode::BAD_REQUEST };
-            return sentry_err(status, msg);
+            return e.into_response();
         }
     }
     StatusCode::OK.into_response()
 }
 
-async fn assemble(State(state): S, Json(req): Json<AssembleRequest>) -> Response {
-    match state.sourcemaps.assemble(&state.db, req).await {
-        Ok(r) => Json(r).into_response(),
-        Err(e) => sentry_err(StatusCode::BAD_REQUEST, e.to_string()),
-    }
+async fn assemble(State(state): S, Json(req): Json<AssembleRequest>) -> Result<Json<AssembleResponse>, SourcemapError> {
+    Ok(Json(state.sourcemaps.assemble(&state.db, req).await?))
 }
 
 /// Releases are not stored; we answer so bundler plugins don't log errors.
@@ -470,6 +495,26 @@ mod tests {
     fn slugs() {
         assert_eq!(super::slugify("My Web App!"), "my-web-app");
         assert_eq!(super::slugify("  API  "), "api");
+    }
+
+    #[test]
+    fn write_errors_map_by_variant_not_text() {
+        use super::*;
+        let status = |e: WriteError| ApiErr::from(e).0;
+        assert_eq!(status(WriteError::SlugTaken("x".into())), StatusCode::CONFLICT);
+        assert_eq!(status(WriteError::IssueNotFound), StatusCode::NOT_FOUND);
+        // A database error whose text happens to say "not found" is a 500.
+        assert_eq!(status(WriteError::Db(anyhow::anyhow!("table not found"))), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status(WriteError::Db(anyhow::anyhow!("x already exists"))), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn sourcemap_errors_map_by_variant() {
+        use super::*;
+        let status = |e: SourcemapError| e.into_response().status();
+        assert_eq!(status(SourcemapError::NotConfigured), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(status(SourcemapError::BadRequest("bad".into())), StatusCode::BAD_REQUEST);
+        assert_eq!(status(SourcemapError::Internal(anyhow::anyhow!("disk"))), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

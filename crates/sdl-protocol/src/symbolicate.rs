@@ -13,11 +13,11 @@
 
 use serde_json::{Value, json};
 use sourcemap::{DecodedMap, SourceMap, SourceView};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
-const CONTEXT_LINES: usize = 5;
+const CONTEXT_LINES: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceMapRef {
@@ -32,8 +32,18 @@ pub struct ResolvedSourceMap {
     pub minified: Option<Arc<SourceView>>,
     /// URL (or bundle path) of the map; relative sources resolve against it.
     pub map_url: String,
-    /// "debug-id" or "release", reported in `frame.data.resolved_with`.
-    pub resolved_with: &'static str,
+    /// How the map was found, reported in `frame.data.resolved_with`.
+    pub resolved_with: ResolvedWith,
+}
+
+/// How a map was found for a minified file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolvedWith {
+    /// `debug-id`
+    DebugId,
+    /// `release` (release + dist + url)
+    Release,
 }
 
 impl std::fmt::Debug for ResolvedSourceMap {
@@ -98,26 +108,24 @@ fn debug_ids(ev: &Value) -> HashMap<String, Uuid> {
         .collect()
 }
 
-pub fn collect_refs(ev: &Value) -> Vec<SourceMapRef> {
+/// The distinct minified files (at most `limit`) that the event's frames
+/// point at, in frame order.
+pub fn collect_refs(ev: &Value, limit: usize) -> Vec<SourceMapRef> {
     let ids = debug_ids(ev);
-    let mut out: Vec<SourceMapRef> = Vec::new();
-    let mut holders: Vec<&Value> = Vec::new();
-    for key in ["exception", "threads"] {
-        if let Some(values) = ev.get(key).and_then(|e| e.get("values")).and_then(Value::as_array) {
-            holders.extend(values.iter());
-        }
-    }
-    holders.push(ev);
-    for h in holders {
-        for f in frames(h).filter(|f| is_symbolicatable(f)) {
-            let abs = f["abs_path"].as_str().unwrap_or_default();
-            if out.iter().any(|r| r.abs_path == abs) {
-                continue;
-            }
-            out.push(SourceMapRef { abs_path: abs.to_string(), debug_id: ids.get(strip_file_scheme(abs)).copied() });
-        }
-    }
-    out
+    let mut seen: HashSet<&str> = HashSet::new();
+    let holders = ["exception", "threads"]
+        .into_iter()
+        .filter_map(|key| ev.get(key).and_then(|e| e.get("values")).and_then(Value::as_array))
+        .flatten()
+        .chain(std::iter::once(ev));
+    holders
+        .flat_map(frames)
+        .filter(|f| is_symbolicatable(f))
+        .filter_map(|f| f["abs_path"].as_str())
+        .filter(|abs| seen.insert(abs))
+        .take(limit)
+        .map(|abs| SourceMapRef { abs_path: abs.to_string(), debug_id: ids.get(strip_file_scheme(abs)).copied() })
+        .collect()
 }
 
 /// Release-artifact url candidates for a minified file, most specific first:
@@ -159,14 +167,15 @@ fn resolve_source(source: &str, map_url: &str) -> (String, String) {
     (abs, filename)
 }
 
-fn context(sm: &SourceMap, src_id: u32, line: usize) -> Option<(Vec<Value>, String, Vec<Value>)> {
-    let contents = sm.get_source_contents(src_id)?;
-    let lines: Vec<&str> = contents.lines().collect();
-    let current = *lines.get(line)?;
-    let start = line.saturating_sub(CONTEXT_LINES);
-    let end = (line + 1 + CONTEXT_LINES).min(lines.len());
-    let pre = lines[start..line].iter().map(|l| json!(l)).collect();
-    let post = lines[line + 1..end].iter().map(|l| json!(l)).collect();
+/// Lines around `line` of a map source. The map's `SourceView` keeps a line
+/// index (built once per cached map), so this does not rescan the source for
+/// every frame.
+fn context(sm: &SourceMap, src_id: u32, line: u32) -> Option<(Vec<Value>, String, Vec<Value>)> {
+    let sv = sm.get_source_view(src_id)?;
+    let current = sv.get_line(line)?;
+    let pre = (line.saturating_sub(CONTEXT_LINES)..line).filter_map(|i| sv.get_line(i)).map(|l| json!(l)).collect();
+    let post =
+        (line + 1..=line.saturating_add(CONTEXT_LINES)).map_while(|i| sv.get_line(i)).map(|l| json!(l)).collect();
     Some((pre, current.to_string(), post))
 }
 
@@ -176,7 +185,11 @@ fn rewrite_frame(frame: &mut Value, rm: &ResolvedSourceMap) -> bool {
     else {
         return false;
     };
-    let (line0, col0) = (line.saturating_sub(1) as u32, col.saturating_sub(1) as u32);
+    // Frame numbers are untrusted u64; out-of-range lines must not wrap.
+    let (Some(Ok(line0)), Ok(col0)) = (line.checked_sub(1).map(u32::try_from), u32::try_from(col.saturating_sub(1)))
+    else {
+        return false;
+    };
     let Some(token) = rm.map.lookup_token(line0, col0) else { return false };
     let Some(source) = token.get_source() else { return false };
     let minified_fn = frame.get("function").and_then(Value::as_str).map(str::to_string);
@@ -188,9 +201,9 @@ fn rewrite_frame(frame: &mut Value, rm: &ResolvedSourceMap) -> bool {
         Some(if short.len() == f.len() { orig.to_string() } else { format!("{}{}", &f[..f.len() - short.len()], orig) })
     });
     let (abs_path, filename) = resolve_source(source, &rm.map_url);
-    let src_line = token.get_src_line() as usize;
+    let src_line = token.get_src_line();
     let fo = frame.as_object_mut().expect("frame is object");
-    fo.insert("lineno".into(), json!(src_line + 1));
+    fo.insert("lineno".into(), json!(u64::from(src_line) + 1));
     fo.insert("colno".into(), json!(token.get_src_col() + 1));
     let in_app = !(abs_path.contains("/node_modules/") || abs_path.contains("webpack/bootstrap"));
     fo.insert("in_app".into(), json!(in_app));
@@ -228,23 +241,27 @@ pub fn apply(ev: &mut Value, maps: &HashMap<String, Arc<ResolvedSourceMap>>) -> 
     }
     let mut total = 0;
     for_each_stacktrace_mut(ev, |holder, keep_raw| {
-        let raw = holder.get("stacktrace").cloned();
+        // Copy the original frames only when one of them can change.
+        let raw = (keep_raw
+            && holder.get("raw_stacktrace").is_none()
+            && frames(holder)
+                .any(|f| is_symbolicatable(f) && f["abs_path"].as_str().is_some_and(|abs| maps.contains_key(abs))))
+        .then(|| holder.get("stacktrace").cloned())
+        .flatten();
         let mut changed = 0;
         if let Some(frames) =
             holder.get_mut("stacktrace").and_then(|s| s.get_mut("frames")).and_then(Value::as_array_mut)
         {
             for f in frames.iter_mut().filter(|f| is_symbolicatable(f)) {
-                let abs = f["abs_path"].as_str().unwrap_or_default().to_string();
-                if let Some(rm) = maps.get(&abs)
-                    && rewrite_frame(f, rm)
+                let rm = f["abs_path"].as_str().and_then(|abs| maps.get(abs)).cloned();
+                if let Some(rm) = rm
+                    && rewrite_frame(f, &rm)
                 {
                     changed += 1;
                 }
             }
         }
         if changed > 0
-            && keep_raw
-            && holder.get("raw_stacktrace").is_none()
             && let (Some(raw), Some(o)) = (raw, holder.as_object_mut())
         {
             o.insert("raw_stacktrace".into(), raw);
@@ -286,7 +303,7 @@ mod tests {
             map: Arc::new(sm),
             minified: Some(Arc::new(SourceView::new(Arc::from(minified)))),
             map_url: "https://cdn.test/assets/main.js.map".into(),
-            resolved_with: "debug-id",
+            resolved_with: ResolvedWith::DebugId,
         }
     }
 
@@ -306,8 +323,20 @@ mod tests {
     }
 
     #[test]
+    fn collect_refs_dedupes_and_stops_at_the_limit() {
+        let frames: Vec<Value> = (0..100)
+            .map(|i| json!({"abs_path": format!("https://h.test/{}.js", i % 10), "lineno": 1, "colno": 1}))
+            .collect();
+        let ev = json!({"stacktrace": {"frames": frames}});
+        assert_eq!(collect_refs(&ev, 50).len(), 10);
+        let refs = collect_refs(&ev, 3);
+        let paths: Vec<&str> = refs.iter().map(|r| r.abs_path.as_str()).collect();
+        assert_eq!(paths, ["https://h.test/0.js", "https://h.test/1.js", "https://h.test/2.js"]);
+    }
+
+    #[test]
     fn collects_refs_with_debug_ids() {
-        let refs = collect_refs(&event());
+        let refs = collect_refs(&event(), 50);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].debug_id, Some(Uuid::parse_str("c941d872-af1f-4f0c-a7ff-ad3d295fe153").unwrap()));
         assert_eq!(refs[1].debug_id, None);
@@ -333,6 +362,34 @@ mod tests {
         // Unresolved frame untouched; applying twice is a no-op.
         assert_eq!(exc["stacktrace"]["frames"][1]["function"], "z");
         assert_eq!(apply(&mut ev, &maps), 0);
+    }
+
+    #[test]
+    fn out_of_range_line_is_not_symbolicated() {
+        let mut ev = event();
+        // 2^32 + 1 would wrap to line 0 with a truncating cast.
+        ev["exception"]["values"][0]["stacktrace"]["frames"][0]["lineno"] = json!(4_294_967_297u64);
+        let mut maps = HashMap::new();
+        maps.insert("https://cdn.test/assets/main.js".to_string(), Arc::new(fixture()));
+        assert_eq!(apply(&mut ev, &maps), 0);
+        assert!(ev["exception"]["values"][0].get("raw_stacktrace").is_none());
+    }
+
+    #[test]
+    fn context_at_the_edges() {
+        let mut b = SourceMapBuilder::new(None);
+        let src = b.add_source("a.js");
+        b.set_source_contents(src, Some("l0\r\nl1\nl2\nl3\nl4\nl5\nl6\nl7"));
+        let sm = b.into_sourcemap();
+        let (pre, cur, post) = context(&sm, src, 0).unwrap();
+        assert!(pre.is_empty());
+        assert_eq!(cur, "l0");
+        assert_eq!(post, vec![json!("l1"), json!("l2"), json!("l3"), json!("l4"), json!("l5")]);
+        let (pre, cur, post) = context(&sm, src, 7).unwrap();
+        assert_eq!(pre, vec![json!("l2"), json!("l3"), json!("l4"), json!("l5"), json!("l6")]);
+        assert_eq!(cur, "l7");
+        assert!(post.is_empty());
+        assert!(context(&sm, src, 8).is_none());
     }
 
     #[test]

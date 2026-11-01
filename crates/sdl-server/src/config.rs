@@ -62,7 +62,7 @@ pub struct Config {
     /// separated. The binary requires one; without one the API rejects all
     /// requests.
     #[arg(long, env = "SDL_API_TOKEN", hide_env_values = true)]
-    pub api_token: Option<String>,
+    pub api_token: Option<Secret>,
 
     /// Delete events older than this many days (0 = keep forever).
     #[arg(long, env = "SDL_RETENTION_DAYS", default_value_t = 90)]
@@ -150,7 +150,9 @@ pub struct Config {
     #[arg(long, env = "SDL_EXTENSION_DIR")]
     pub extension_dir: Option<PathBuf>,
 
-    /// Use the first `X-Forwarded-For` address as client IP.
+    /// Use the last `X-Forwarded-For` address (the one the proxy in front of
+    /// this server adds) as client IP. Earlier addresses come from the client
+    /// and are ignored. Enable only behind exactly one proxy hop.
     #[arg(long, env = "SDL_TRUST_FORWARDED_FOR", default_value_t = false)]
     pub trust_forwarded_for: bool,
 
@@ -196,6 +198,42 @@ impl Default for Config {
     }
 }
 
+/// A string that `Debug` does not print, so `?cfg` cannot leak a token.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("\"***\"")
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Secret(s)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Secret(s.to_string())
+    }
+}
+
+impl std::str::FromStr for Secret {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(s.into())
+    }
+}
+
 impl Config {
     /// Read `<PREFIX><FIELD>` environment variables, e.g. with prefix
     /// `OBS_SENTRY_`: `OBS_SENTRY_PUBLIC_URL`, `OBS_SENTRY_BATCH_WINDOW=250ms`.
@@ -206,8 +244,8 @@ impl Config {
 
     pub fn api_tokens(&self) -> Vec<String> {
         self.api_token
-            .as_deref()
-            .unwrap_or("")
+            .as_ref()
+            .map_or("", Secret::expose)
             .split(',')
             .map(str::trim)
             .filter(|t| !t.is_empty())
@@ -223,7 +261,12 @@ impl Config {
                 && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
             anyhow::ensure!(ok, "{name} must match [a-z_][a-z0-9_]*, got {v:?}");
         }
-        anyhow::ensure!(url::Url::parse(&self.public_url).is_ok(), "public_url must be an absolute URL");
+        let public_url = url::Url::parse(&self.public_url).ok();
+        anyhow::ensure!(
+            public_url.is_some_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host()),
+            "public_url must be an http(s) URL with a host, got {:?}",
+            self.public_url
+        );
         anyhow::ensure!(self.batch_max > 0 && self.queue_capacity > 0, "batch_max and queue_capacity must be > 0");
         Ok(())
     }
@@ -258,9 +301,22 @@ mod tests {
     }
 
     #[test]
+    fn debug_hides_the_api_token() {
+        let c = Config { api_token: Some("hunter2".into()), ..Config::default() };
+        assert!(!format!("{c:?}").contains("hunter2"));
+        assert_eq!(c.api_tokens(), vec!["hunter2"]);
+        let c = T::parse_from(["t", "--api-token", "a,b"]).c;
+        assert_eq!(c.api_tokens(), vec!["a", "b"]);
+    }
+
+    #[test]
     fn validates_identifiers() {
         let c = Config { schema: "bad;drop".into(), ..Config::default() };
         assert!(c.validate().is_err());
         assert!(Config::default().validate().is_ok());
+        for bad in ["data:x", "localhost:8000", "/sentry"] {
+            let c = Config { public_url: bad.into(), ..Config::default() };
+            assert!(c.validate().is_err(), "{bad}");
+        }
     }
 }

@@ -14,8 +14,9 @@ pub fn group_id(hash: u64) -> String {
     format!("{hash:016x}")
 }
 
+/// 16 hex digits (no sign, which `from_str_radix` would accept).
 pub fn parse_group_id(s: &str) -> Option<u64> {
-    (s.len() == 16).then(|| u64::from_str_radix(s, 16).ok()).flatten()
+    (s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| u64::from_str_radix(s, 16).ok()).flatten()
 }
 
 pub const TREND_BUCKETS: i64 = 24;
@@ -25,14 +26,23 @@ pub struct Window {
     pub end: DateTime<Utc>,
 }
 
+/// A `since` value that is not a usable window.
+#[derive(Debug, thiserror::Error)]
+pub enum WindowError {
+    #[error("invalid duration {0:?}: {1}")]
+    Invalid(String, humantime::DurationError),
+    #[error("duration {0:?} is too large")]
+    TooLarge(String),
+}
+
 impl Window {
-    pub fn parse(since: Option<&str>, default: &str, now: DateTime<Utc>) -> Result<Window, String> {
+    pub fn parse(since: Option<&str>, default: &str, now: DateTime<Utc>) -> Result<Window, WindowError> {
         let s = since.unwrap_or(default);
-        let d = humantime::parse_duration(s).map_err(|e| format!("invalid duration {s:?}: {e}"))?;
+        let d = humantime::parse_duration(s).map_err(|e| WindowError::Invalid(s.into(), e))?;
         let start = chrono::Duration::from_std(d)
             .ok()
             .and_then(|d| now.checked_sub_signed(d))
-            .ok_or_else(|| format!("duration {s:?} is too large"))?;
+            .ok_or_else(|| WindowError::TooLarge(s.into()))?;
         Ok(Window { start, end: now })
     }
     fn start_us(&self) -> i64 {
@@ -72,46 +82,111 @@ fn trends(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, groups: &[u64
     Ok(out)
 }
 
-pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, w: &Window) -> Result<IssueList> {
-    let status = q.status.clone().unwrap_or_else(|| "unresolved".into());
-    let sort = match q.sort.as_deref() {
-        Some("first_seen") => "first_us",
-        Some("count") => "cnt",
-        Some("users") => "users",
-        _ => "last_us",
-    };
+/// `status` filter of the issue list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    All,
+    Only(IssueStatus),
+}
+
+impl StatusFilter {
+    /// `None` (the default) means unresolved issues.
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s {
+            None => Some(Self::Only(IssueStatus::Unresolved)),
+            Some("all") => Some(Self::All),
+            Some(s) => s.parse().ok().map(Self::Only),
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Only(s) => s.as_str(),
+        }
+    }
+}
+
+/// `sort` of the issue list (always descending).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueSort {
+    LastSeen,
+    FirstSeen,
+    Count,
+    Users,
+}
+
+impl IssueSort {
+    /// `None` (the default) means `last_seen`.
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s {
+            None | Some("last_seen") => Some(Self::LastSeen),
+            Some("first_seen") => Some(Self::FirstSeen),
+            Some("count") => Some(Self::Count),
+            Some("users") => Some(Self::Users),
+            Some(_) => None,
+        }
+    }
+    fn column(self) -> &'static str {
+        match self {
+            Self::LastSeen => "last_us",
+            Self::FirstSeen => "first_us",
+            Self::Count => "cnt",
+            Self::Users => "users",
+        }
+    }
+}
+
+pub fn list_issues(
+    conn: &Connection,
+    ns: &Ns,
+    project_id: u32,
+    q: &IssueQuery,
+    w: &Window,
+    status: StatusFilter,
+    sort: IssueSort,
+) -> Result<IssueList> {
+    let status = status.as_str();
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
 
     let mut filters = String::new();
-    let mut filter_params: Vec<Box<dyn ToSql>> = Vec::new();
+    let mut filter_values: Vec<&String> = Vec::new();
     if let Some(env) = &q.environment {
         filters.push_str(" AND environment = ?");
-        filter_params.push(Box::new(env.clone()));
+        filter_values.push(env);
     }
     if let Some(rel) = &q.release {
         filters.push_str(" AND release = ?");
-        filter_params.push(Box::new(rel.clone()));
+        filter_values.push(rel);
     }
+    let (pid, start_us) = (project_id as i32, w.start_us());
 
     // Phase 1: rank issues with cheap aggregates only (count, max). Distinct
     // users are only computed for all groups when sorting by them, and then
     // approximately.
-    let users_expr = if sort == "users" { "approx_count_distinct(user_key)" } else { "0" };
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
-    p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
-    p.push(Box::new(project_id as i32)); // st
-    p.push(Box::new(project_id as i32)); // issues join
-    p.push(Box::new(status.clone()));
-    p.push(Box::new(status.clone()));
-    let mut search = String::new();
-    if let Some(text) = q.query.as_ref().filter(|t| !t.trim().is_empty()) {
-        // Matches the issue's first title and culprit.
-        search.push_str(r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')");
-        let like = format!("%{}%", text.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-        p.push(Box::new(like.clone()));
-        p.push(Box::new(like));
-    }
-    p.push(Box::new(limit));
+    let users_expr = if sort == IssueSort::Users { "approx_count_distinct(user_key)" } else { "0" };
+    let sort = sort.column();
+    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us];
+    p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
+    p.push(&pid); // st
+    p.push(&pid); // issues join
+    p.push(&status);
+    p.push(&status);
+    // Text search matches the issue's first title and culprit.
+    let like = q
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|text| format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+    let search = match &like {
+        Some(like) => {
+            p.push(like);
+            p.push(like);
+            r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')"
+        }
+        None => "",
+    };
+    p.push(&limit);
     let sql = ns.sql(&format!(
         "WITH agg AS (
             SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, {users_expr} AS users
@@ -133,7 +208,7 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
          LIMIT ?"
     ));
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+    let rows = stmt.query_map(params_from_iter(p), |r| {
         Ok(IssueSummary {
             id: group_id(r.get(0)?),
             project_id,
@@ -142,7 +217,7 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
             level: r.get(3)?,
             platform: r.get(4)?,
             exception_type: r.get(5)?,
-            status: IssueStatus::parse(&r.get::<_, String>(6)?).unwrap_or_default(),
+            status: r.get::<_, String>(6)?.parse().unwrap_or_default(),
             first_seen: us_to_dt(r.get(7)?),
             count: r.get::<_, i64>(8)? as u64,
             last_seen: us_to_dt(r.get(9)?),
@@ -159,8 +234,8 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
     // Phase 2: exact users and the latest title/culprit/level, only for the
     // issues on this page.
     let list = groups.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
-    p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
+    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us];
+    p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
     let sql = ns.sql(&format!(
         "SELECT group_hash, count(DISTINCT user_key), arg_max(title, received_at), arg_max(culprit, received_at),
                 arg_max(level, received_at)
@@ -170,7 +245,7 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
     ));
     let mut stmt = conn.prepare(&sql)?;
     let mut latest: HashMap<u64, (u64, String, Option<String>, String)> = HashMap::new();
-    for row in stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+    for row in stmt.query_map(params_from_iter(p), |r| {
         Ok((r.get::<_, u64>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?, r.get(4)?))
     })? {
         let (g, users, title, culprit, level) = row?;
@@ -190,17 +265,6 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
         }
     }
     Ok(IssueList { issues, window_start: w.start, window_end: w.end })
-}
-
-/// Filter params are strings; rebuild them for a second statement.
-fn clone_param(p: &dyn ToSql) -> Box<dyn ToSql> {
-    match p.to_sql() {
-        Ok(duckdb::types::ToSqlOutput::Owned(duckdb::types::Value::Text(s))) => Box::new(s),
-        Ok(duckdb::types::ToSqlOutput::Borrowed(duckdb::types::ValueRef::Text(b))) => {
-            Box::new(String::from_utf8_lossy(b).into_owned())
-        }
-        _ => Box::new(Option::<String>::None),
-    }
 }
 
 pub fn issue_detail(
@@ -280,7 +344,7 @@ pub fn issue_detail(
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
     })? {
         let (at, s, reason) = row?;
-        activity.push(IssueActivity { at: us_to_dt(at), status: IssueStatus::parse(&s).unwrap_or_default(), reason });
+        activity.push(IssueActivity { at: us_to_dt(at), status: s.parse().unwrap_or_default(), reason });
     }
     let status = activity.first().map(|a| a.status).unwrap_or_default();
 
@@ -368,6 +432,7 @@ pub fn list_events(
     project_id: u32,
     group: Option<u64>,
     q: &EventQuery,
+    before: Option<Cursor>,
 ) -> Result<EventList> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
     let mut sql = format!("SELECT {EVENT_COLUMNS} FROM $S.events WHERE project_id = ?");
@@ -385,8 +450,7 @@ pub fn list_events(
         p.push(Box::new(t.to_string()));
         p.push(Box::new(since));
     }
-    // Cursor: "<received_at micros>:<event_id>" (ties broken by event id).
-    if let Some((us, id)) = q.before.as_deref().and_then(parse_cursor) {
+    if let Some(Cursor { us, id }) = before {
         match id {
             Some(id) => {
                 sql.push_str(" AND (received_at < make_timestamp(?) OR (received_at = make_timestamp(?) AND event_id < ?::UUID))");
@@ -439,10 +503,20 @@ pub fn events_by_trace(
 /// Days searched by trace id lookups.
 pub const TRACE_WINDOW_DAYS: i64 = 30;
 
-fn parse_cursor(c: &str) -> Option<(i64, Option<uuid::Uuid>)> {
-    match c.split_once(':') {
-        Some((us, id)) => Some((us.parse().ok()?, Some(uuid::Uuid::try_parse(id).ok()?))),
-        None => Some((c.parse().ok()?, None)),
+/// Paging cursor `"<received_at micros>:<event_id>"` (ties broken by event
+/// id); a bare `"<micros>"` is accepted too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    us: i64,
+    id: Option<uuid::Uuid>,
+}
+
+impl Cursor {
+    pub fn parse(c: &str) -> Option<Cursor> {
+        match c.split_once(':') {
+            Some((us, id)) => Some(Cursor { us: us.parse().ok()?, id: Some(uuid::Uuid::try_parse(id).ok()?) }),
+            None => Some(Cursor { us: c.parse().ok()?, id: None }),
+        }
     }
 }
 
@@ -520,7 +594,10 @@ fn event_detail_in(
             summary,
             culprit,
             tags,
-            payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
+            payload: serde_json::from_str(&payload).unwrap_or_else(|e| {
+                tracing::warn!(%event_id, error = %e, "stored event payload is not valid JSON");
+                serde_json::Value::Null
+            }),
         }
     }))
 }
@@ -530,14 +607,9 @@ pub fn project_stats(
     ns: &Ns,
     project_id: u32,
     w: &Window,
-    interval: Option<std::time::Duration>,
+    interval_us: Option<i64>,
 ) -> Result<ProjectStats> {
-    let interval_us = interval
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(w.span_us() / TREND_BUCKETS)
-        .max(60_000_000)
-        .max(w.span_us() / 1000); // at most 1000 buckets
-    let n = ((w.span_us() + interval_us - 1) / interval_us).max(1);
+    let (interval_us, n) = stats_buckets(w.span_us(), interval_us);
     let mut buckets: Vec<StatsBucket> = (0..n)
         .map(|i| StatsBucket {
             start: us_to_dt(w.start_us() + i * interval_us),
@@ -589,6 +661,14 @@ pub fn project_stats(
         affected_users: users as u64,
         buckets,
     })
+}
+
+/// Bucket size and count for a window of `span_us` (> 0): buckets of at
+/// least one minute, at most 1000 of them. No overflow for any interval.
+fn stats_buckets(span_us: i64, interval_us: Option<i64>) -> (i64, i64) {
+    let interval_us = interval_us.unwrap_or(span_us / TREND_BUCKETS).max(60_000_000).max(span_us / 1000);
+    let n = span_us / interval_us + i64::from(span_us % interval_us != 0);
+    (interval_us, n.max(1))
 }
 
 pub fn list_bundles(conn: &Connection, ns: &Ns, project_id: u32) -> Result<Vec<ArtifactBundle>> {
@@ -657,6 +737,19 @@ pub fn find_by_debug_id(
     Ok(row)
 }
 
+/// The url of a minified file's map: its `sourcemap` header resolved
+/// against the file's url, or `<url>.map`.
+fn map_url_of(url: &str, sourcemap_ref: Option<&str>) -> String {
+    match sourcemap_ref {
+        Some(r) if r.contains("://") || r.starts_with("~/") => r.to_string(),
+        Some(r) => match url.rsplit_once('/') {
+            Some((dir, _)) => format!("{dir}/{r}"),
+            None => r.to_string(),
+        },
+        None => format!("{url}.map"),
+    }
+}
+
 /// Release-based fallback: find the minified file by url, then its map.
 pub fn find_by_url(
     conn: &Connection,
@@ -689,15 +782,7 @@ pub fn find_by_url(
             )
             .optional()?;
         let Some((bundle_id, object_key, minified_path, sourcemap_ref)) = row else { continue };
-        // Resolve the `sourcemap` header relative to the minified url.
-        let map_url = match &sourcemap_ref {
-            Some(r) if r.contains("://") || r.starts_with("~/") => r.clone(),
-            Some(r) => match url.rsplit_once('/') {
-                Some((dir, _)) => format!("{dir}/{r}"),
-                None => r.clone(),
-            },
-            None => format!("{url}.map"),
-        };
+        let map_url = map_url_of(url, sourcemap_ref.as_deref());
         let map = conn
             .query_row(
                 &ns.sql(
@@ -719,4 +804,74 @@ pub fn find_by_url(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY_US: i64 = 86_400_000_000;
+
+    #[test]
+    fn cursors() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(Cursor::parse(&format!("123:{}", id.simple())), Some(Cursor { us: 123, id: Some(id) }));
+        assert_eq!(Cursor::parse("-5"), Some(Cursor { us: -5, id: None }));
+        assert_eq!(Cursor::parse("abc"), None);
+        assert_eq!(Cursor::parse("123:not-a-uuid"), None);
+    }
+
+    #[test]
+    fn map_urls_of_release_artifacts() {
+        assert_eq!(map_url_of("~/static/app.js", Some("app.js.map")), "~/static/app.js.map");
+        assert_eq!(map_url_of("~/static/app.js", Some("~/maps/app.map")), "~/maps/app.map");
+        assert_eq!(map_url_of("~/static/app.js", Some("https://cdn.test/a.map")), "https://cdn.test/a.map");
+        assert_eq!(map_url_of("app.js", Some("app.js.map")), "app.js.map");
+        assert_eq!(map_url_of("~/static/app.js", None), "~/static/app.js.map");
+    }
+
+    #[test]
+    fn group_ids_are_strict_hex() {
+        assert_eq!(parse_group_id("00f067aa0ba902b7"), Some(0x00f067aa0ba902b7));
+        assert_eq!(parse_group_id("+00f067aa0ba902b"), None);
+        assert_eq!(parse_group_id("00f067aa0ba902b"), None);
+    }
+
+    #[test]
+    fn windows() {
+        let now = Utc::now();
+        let w = Window::parse(None, "14d", now).unwrap();
+        assert_eq!(w.end - w.start, chrono::Duration::days(14));
+        assert_eq!(Window::parse(Some("1h"), "14d", now).unwrap().span_us(), 3_600_000_000);
+        assert!(Window::parse(Some("soon"), "14d", now).is_err());
+        assert!(Window::parse(Some("100000000y"), "14d", now).is_err(), "too large");
+    }
+
+    #[test]
+    fn issue_list_filters() {
+        assert_eq!(StatusFilter::parse(None), Some(StatusFilter::Only(IssueStatus::Unresolved)));
+        assert_eq!(StatusFilter::parse(Some("all")), Some(StatusFilter::All));
+        assert_eq!(StatusFilter::parse(Some("ignored")), Some(StatusFilter::Only(IssueStatus::Ignored)));
+        assert_eq!(StatusFilter::parse(Some("nope")), None);
+        assert_eq!(IssueSort::parse(None), Some(IssueSort::LastSeen));
+        assert_eq!(IssueSort::parse(Some("users")), Some(IssueSort::Users));
+        assert_eq!(IssueSort::parse(Some("last_sene")), None, "typos are rejected, not ignored");
+    }
+
+    #[test]
+    fn stats_buckets_default_min_and_max() {
+        assert_eq!(stats_buckets(DAY_US, None), (3_600_000_000, 24));
+        // At least one minute per bucket.
+        assert_eq!(stats_buckets(3_600_000_000, Some(1)), (60_000_000, 60));
+        // At most 1000 buckets.
+        assert_eq!(stats_buckets(DAY_US, Some(1_000_000)), (86_400_000, 1000));
+        // A partial last bucket counts.
+        assert_eq!(stats_buckets(DAY_US, Some(DAY_US / 2 + 1)).1, 2);
+    }
+
+    #[test]
+    fn stats_buckets_huge_interval_does_not_overflow() {
+        assert_eq!(stats_buckets(DAY_US, Some(i64::MAX)), (i64::MAX, 1));
+        assert_eq!(stats_buckets(i64::MAX, Some(i64::MAX)), (i64::MAX, 1));
+    }
 }
