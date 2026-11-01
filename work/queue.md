@@ -6,6 +6,5 @@
 4. [issue 0094 capture a real SDK 10 standalone span](issues/0094-capture-sdk-10-standalone-span.md)
 5. [issue 0050 issues rows past retention](issues/0050-issues-rows-past-retention.md)
 6. [issue 0051 otel maintenance on every replica](issues/0051-otel-maintenance-on-every-replica.md)
-7. [0002/10 one binary](epics/0002-mallard/10-one-binary.md)
-8. [0002/11 crate cleanup](epics/0002-mallard/11-crate-cleanup.md)
-9. [issue 0016 per-side docs for mallard](issues/0016-per-side-docs-for-mallard.md)
+7. [0002/11 crate cleanup](epics/0002-mallard/11-crate-cleanup.md)
+8. [issue 0016 per-side docs for mallard](issues/0016-per-side-docs-for-mallard.md)
