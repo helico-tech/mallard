@@ -106,9 +106,6 @@ pub enum IngestError {
     /// Temporary overload; clients should retry.
     #[error("{0}")]
     Backpressure(String),
-    /// The payload is invalid; retrying won't help.
-    #[error("{0}")]
-    BadRequest(String),
     /// The request is too large to ever be accepted.
     #[error("{0}")]
     TooLarge(String),

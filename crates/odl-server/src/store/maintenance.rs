@@ -140,6 +140,23 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
     stats.maintenance(MaintenanceInfo { task: name.to_string(), at: Utc::now(), duration_ms: ms, ok, detail });
 }
 
+/// Maintenance once, as `otel-ducklake maintenance` runs it: compaction of
+/// small files (of all files with `full`), then retention.
+pub fn run_once(
+    conn: &Connection,
+    schema: &str,
+    m: &MaintenanceConfig,
+    r: &RetentionConfig,
+    full: bool,
+) -> Result<Vec<String>> {
+    let mut done = vec![format!("compaction: {}", compact(conn, schema, Some(m.small_file_size.0))?)];
+    if full {
+        done.push(format!("full compaction: {}", compact(conn, schema, None)?));
+    }
+    done.push(format!("retention: {}", retention(conn, schema, m, r)?));
+    Ok(done)
+}
+
 /// Flush inlined data and merge adjacent files. `max_file_size = None` merges
 /// everything below the table's target file size.
 pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> Result<String> {

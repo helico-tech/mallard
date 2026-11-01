@@ -220,11 +220,11 @@ impl Window {
         (self.to - self.from).num_microseconds().unwrap_or(i64::MAX) as f64 / 1e6
     }
 
-    pub fn from_param(&self) -> Value {
+    pub fn start_param(&self) -> Value {
         ts_value(self.from.naive_utc())
     }
 
-    pub fn to_param(&self) -> Value {
+    pub fn end_param(&self) -> Value {
         ts_value(self.to.naive_utc())
     }
 
@@ -301,7 +301,7 @@ impl Filter {
     }
 
     pub fn window(&mut self, col: &str, w: &Window) {
-        self.add(format!("{col} >= ? AND {col} < ?"), [w.from_param(), w.to_param()]);
+        self.add(format!("{col} >= ? AND {col} < ?"), [w.start_param(), w.end_param()]);
     }
 
     /// `key=value` filters on span/log/metric attributes or resource attributes.

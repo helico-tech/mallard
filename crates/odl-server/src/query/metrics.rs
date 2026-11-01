@@ -352,7 +352,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
             let mut params = lparams.clone();
             params.extend(f.params.clone());
             if !matches!(agg, Agg::Rate | Agg::Increase) || !cumulative {
-                params.push(w.from_param());
+                params.push(w.start_param());
             }
             let mut stmt = conn.prepare(&per_bucket_value)?;
             let rows = stmt.query_map(params_from_iter(params), |r| {
@@ -421,7 +421,7 @@ pub fn query(conn: &Connection, w: &Window, req: &MetricRequest) -> QResult<Metr
             let mut params = lparams.clone();
             params.extend(f.params.clone());
             if !cumulative {
-                params.push(w.from_param());
+                params.push(w.start_param());
             }
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params_from_iter(params), |r| {

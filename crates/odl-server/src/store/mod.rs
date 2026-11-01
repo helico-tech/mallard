@@ -11,7 +11,7 @@ use duckdb::Connection;
 use tracing::{info, warn};
 
 use crate::config::{CatalogKind, Config, is_identifier};
-use schema::{TABLES, TableDef};
+use schema::TABLES;
 
 /// Name under which the lake is attached in DuckDB.
 pub const CATALOG: &str = "lake";
@@ -95,10 +95,6 @@ impl Lake {
         let c = self.root.lock().unwrap().try_clone()?;
         c.execute_batch(&format!("USE {CATALOG}.{}", self.schema))?;
         Ok(c)
-    }
-
-    pub fn table(&self, t: &TableDef) -> String {
-        format!("{CATALOG}.{}.{}", self.schema, t.name)
     }
 
     /// Create schema and tables. Several replicas starting at once on a shared

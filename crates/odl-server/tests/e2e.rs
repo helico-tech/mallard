@@ -9,7 +9,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use odl_api::*;
-use odl_server::{Server, config::Config, store};
+use odl_server::{Server, config::Config};
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
@@ -517,29 +517,6 @@ async fn compaction_and_retention() {
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
-    let lake = store::Lake::open(&cfg).unwrap();
-    let conn = lake.connect().unwrap();
-    // Write 6 small batches directly: two days ago and now.
-    let old = now_ns() - 10 * 86_400_000_000_000;
-    for (i, t) in [old, old + 1, now_ns(), now_ns(), now_ns(), now_ns()].iter().enumerate() {
-        let mut req = traces_req(*t);
-        for rs in &mut req.resource_spans {
-            for ss in &mut rs.scope_spans {
-                for s in &mut ss.spans {
-                    s.span_id[0] = i as u8 + 1;
-                }
-            }
-        }
-        let c = odl_server::otlp::convert::convert_traces(&req);
-        let tx = conn.unchecked_transaction().unwrap();
-        let mut app = conn.appender_to_catalog_and_db("spans", "lake", "otel").unwrap();
-        for (_, b) in c.batches {
-            app.append_record_batch(b).unwrap();
-        }
-        app.flush().unwrap();
-        drop(app);
-        tx.commit().unwrap();
-    }
     let files = |c: &duckdb::Connection| -> i64 {
         c.query_row(
             "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file WHERE end_snapshot IS NULL",
@@ -548,13 +525,40 @@ async fn compaction_and_retention() {
         )
         .unwrap()
     };
-    assert_eq!(files(&conn), 6);
-    let detail = store::maintenance::compact(&conn, "otel", Some(16_000_000)).unwrap();
-    assert!(detail.contains("merged"), "{detail}");
-    assert_eq!(files(&conn), 2, "one file per day partition after merge");
-    let detail = store::maintenance::retention(&conn, "otel", &cfg.maintenance, &cfg.retention).unwrap();
-    assert!(detail.contains("deleted 6 expired rows"), "{detail}");
-    let n: i64 = conn.query_row("SELECT count(*) FROM spans", [], |r| r.get(0)).unwrap();
+    {
+        let conn = odl_server::open_connection(&cfg).unwrap();
+        // Creates the tables.
+        drop(Server::with_connection(cfg.clone(), conn.try_clone().unwrap()).await.unwrap());
+        // Write 6 small batches directly: ten days ago and now.
+        let old = now_ns() - 10 * 86_400_000_000_000;
+        for (i, t) in [old, old + 1, now_ns(), now_ns(), now_ns(), now_ns()].iter().enumerate() {
+            let mut req = traces_req(*t);
+            for rs in &mut req.resource_spans {
+                for ss in &mut rs.scope_spans {
+                    for s in &mut ss.spans {
+                        s.span_id[0] = i as u8 + 1;
+                    }
+                }
+            }
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut app = conn.appender_to_catalog_and_db("spans", "lake", "otel").unwrap();
+            for b in odl_server::__convert_traces(&req) {
+                app.append_record_batch(b).unwrap();
+            }
+            app.flush().unwrap();
+            drop(app);
+            tx.commit().unwrap();
+        }
+        assert_eq!(files(&conn), 6);
+    }
+    // The DuckDB-file catalog is free again: run maintenance as the CLI does.
+    let c = cfg.clone();
+    let done = tokio::task::spawn_blocking(move || odl_server::run_maintenance(&c, false)).await.unwrap().unwrap();
+    assert!(done[0].contains("merged"), "{done:?}");
+    assert!(done[1].contains("deleted 6 expired rows"), "{done:?}");
+    let conn = odl_server::open_connection(&cfg).unwrap();
+    assert_eq!(files(&conn), 1, "one file per day partition after merge; the old day is gone");
+    let n: i64 = conn.query_row("SELECT count(*) FROM lake.otel.spans", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 12);
     let deletes: i64 =
         conn.query_row("SELECT count(*) FROM __ducklake_metadata_lake.ducklake_delete_file", [], |r| r.get(0)).unwrap();
@@ -572,8 +576,9 @@ async fn tolerates_columns_added_by_newer_version() {
     cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     {
-        let lake = store::Lake::open(&cfg).unwrap();
-        lake.connect().unwrap().execute_batch("ALTER TABLE spans ADD COLUMN future_column VARCHAR").unwrap();
+        let conn = odl_server::open_connection(&cfg).unwrap();
+        drop(Server::with_connection(cfg.clone(), conn.try_clone().unwrap()).await.unwrap());
+        conn.execute_batch("ALTER TABLE lake.otel.spans ADD COLUMN future_column VARCHAR").unwrap();
     }
     let server = Arc::new(Server::new(cfg).await.unwrap());
     let shutdown = CancellationToken::new();
@@ -638,7 +643,7 @@ async fn serve_stops_when_background_fails_to_start() {
     cfg.server.otlp_grpc_addr = "127.0.0.1:0".into();
     cfg.server.otlp_http_addr = "127.0.0.1:0".into();
     cfg.server.api_addr = "127.0.0.1:0".into();
-    let conn = store::open_connection(&cfg).unwrap();
+    let conn = odl_server::open_connection(&cfg).unwrap();
     let server = Server::with_connection(cfg, conn.try_clone().unwrap()).await.unwrap();
     // New connections can no longer select the lake schema, so the flusher fails to start.
     conn.execute_batch("DETACH lake").unwrap();

@@ -53,7 +53,6 @@ impl Otlp {
             // is only retried when it carries RetryInfo, which the Collector
             // and the Go SDK require.
             IngestError::Backpressure(m) => Status::unavailable(m),
-            IngestError::BadRequest(m) => Status::invalid_argument(m),
             // Not retryable: the request will never fit.
             IngestError::TooLarge(m) => Status::invalid_argument(m),
             IngestError::Internal(m) => Status::internal(m),

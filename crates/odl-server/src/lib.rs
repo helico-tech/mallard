@@ -17,13 +17,15 @@
 //! The library installs no global state (no tracing subscriber, no metrics
 //! recorder); that is left to the binary or the embedding application.
 
-pub mod api;
-pub mod auth;
+mod api;
+mod auth;
 pub mod config;
-pub mod otlp;
-pub mod query;
-pub mod stats;
-pub mod store;
+mod otlp;
+mod query;
+mod stats;
+mod store;
+
+pub use store::{CATALOG, install_extensions, open_connection};
 
 use std::{future::Future, sync::Arc, time::Instant};
 
@@ -47,6 +49,30 @@ use crate::{
         writer::{Flusher, WriteBuffer},
     },
 };
+
+/// The OpenAPI document of the query API, without building a server.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    api::openapi()
+}
+
+/// Open the lake described by `cfg` and run maintenance once: flush inlined
+/// rows and merge small files (all files below the target size with
+/// `full`), then retention. Blocking; returns one line per step. With a
+/// DuckDB-file or SQLite catalog, stop the server first.
+pub fn run_maintenance(cfg: &Config, full: bool) -> Result<Vec<String>> {
+    cfg.validate()?;
+    let lake = Lake::open(cfg)?;
+    let conn = lake.connect()?;
+    store::maintenance::run_once(&conn, &lake.schema, &cfg.maintenance, &cfg.retention, full)
+}
+
+/// Test hook (not a stable API): OTLP traces as Arrow batches for the `spans` table.
+#[doc(hidden)]
+pub fn __convert_traces(
+    req: &opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
+) -> Vec<arrow::record_batch::RecordBatch> {
+    otlp::convert::convert_traces(req).batches.into_iter().map(|(_, b)| b).collect()
+}
 
 /// A configured collector: storage attached, ready to serve.
 pub struct Server {

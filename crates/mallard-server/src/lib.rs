@@ -37,7 +37,7 @@ impl Platform {
         let ocfg = cfg.otel_config();
         let scfg = cfg.sentry_config();
         let c = ocfg.clone();
-        let conn = tokio::task::spawn_blocking(move || odl_server::store::open_connection(&c))
+        let conn = tokio::task::spawn_blocking(move || odl_server::open_connection(&c))
             .await?
             .context("opening the DuckLake catalog")?;
         let otel = odl_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?;

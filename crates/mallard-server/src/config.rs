@@ -130,7 +130,7 @@ impl Config {
     /// The sentry-ducklake config with the shared settings applied.
     pub fn sentry_config(&self) -> sdl_server::Config {
         let mut c = self.sentry.clone();
-        c.lake_alias = odl_server::store::CATALOG.into();
+        c.lake_alias = odl_server::CATALOG.into();
         c.schema = "sentry".into();
         c.public_url = format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/'));
         c.api_token = (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(","));

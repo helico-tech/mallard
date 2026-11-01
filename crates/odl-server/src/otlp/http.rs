@@ -187,7 +187,6 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             ),
         },
         Err(IngestError::Backpressure(m)) => error(StatusCode::TOO_MANY_REQUESTS, fmt, m),
-        Err(IngestError::BadRequest(m)) => error(StatusCode::BAD_REQUEST, fmt, m),
         Err(IngestError::TooLarge(m)) => error(StatusCode::PAYLOAD_TOO_LARGE, fmt, m),
         Err(IngestError::Internal(m)) => error(StatusCode::INTERNAL_SERVER_ERROR, fmt, m),
     }

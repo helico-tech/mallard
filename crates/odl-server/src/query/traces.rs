@@ -182,8 +182,8 @@ pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<Vec<Tra
         tid = trace_hex("s.trace_id"),
     );
     let mut params = f.params;
-    params.push(w.from_param());
-    params.push(w.to_param());
+    params.push(w.start_param());
+    params.push(w.end_param());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(params), |r| {
         Ok(TraceSummary {
@@ -293,7 +293,7 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let spans: Vec<Span> = stmt
-        .query_map(params_from_iter([Value::Text(tid.clone()), w.from_param(), w.to_param()]), span_from_row)?
+        .query_map(params_from_iter([Value::Text(tid.clone()), w.start_param(), w.end_param()]), span_from_row)?
         .collect::<Result<_, _>>()?;
     if spans.is_empty() {
         return Err(QueryError::NotFound(format!("trace {tid} not found in the time window")));

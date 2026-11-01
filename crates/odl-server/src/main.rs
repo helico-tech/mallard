@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Openapi => {
-            println!("{}", odl_server::api::openapi().to_pretty_json()?);
+            println!("{}", odl_server::openapi().to_pretty_json()?);
             Ok(())
         }
         Cmd::Config => {
@@ -75,24 +75,19 @@ async fn main() -> Result<()> {
         Cmd::InstallExtensions { names } => {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(cfg.server.log_format);
-            odl_server::store::install_extensions(&cfg, &names)?;
+            // DuckDB work blocks; keep it off the async runtime threads.
+            tokio::task::spawn_blocking(move || odl_server::install_extensions(&cfg, &names)).await??;
             Ok(())
         }
         Cmd::Maintenance { full } => {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(cfg.server.log_format);
-            let lake = odl_server::store::Lake::open(&cfg)?;
-            let conn = lake.connect()?;
             let t0 = std::time::Instant::now();
-            let small =
-                odl_server::store::maintenance::compact(&conn, &lake.schema, Some(cfg.maintenance.small_file_size.0))?;
-            info!(detail = %small, "compaction");
-            if full {
-                let d = odl_server::store::maintenance::compact(&conn, &lake.schema, None)?;
-                info!(detail = %d, "full compaction");
+            let done = tokio::task::spawn_blocking(move || odl_server::run_maintenance(&cfg, full)).await??;
+            for d in done {
+                info!(detail = %d, "maintenance");
             }
-            let d = odl_server::store::maintenance::retention(&conn, &lake.schema, &cfg.maintenance, &cfg.retention)?;
-            info!(detail = %d, elapsed_ms = t0.elapsed().as_millis() as u64, "retention");
+            info!(elapsed_ms = t0.elapsed().as_millis() as u64, "maintenance done");
             Ok(())
         }
         Cmd::Check => {
