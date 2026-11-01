@@ -201,3 +201,45 @@ async fn logs(State(i): State<Arc<Ingest>>, h: HeaderMap, b: Bytes) -> Response 
 async fn metrics(State(i): State<Arc<Ingest>>, h: HeaderMap, b: Bytes) -> Response {
     handle(i, Signal::Metrics, h, b).await
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    fn headers(encoding: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_str(encoding).unwrap());
+        h
+    }
+
+    fn gzip(data: &[u8]) -> Bytes {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(data).unwrap();
+        e.finish().unwrap().into()
+    }
+
+    #[test]
+    fn decodes_supported_encodings() {
+        let data = b"hello otlp".repeat(10);
+        assert_eq!(decode_body(&HeaderMap::new(), Bytes::from(data.clone()), 1000).unwrap(), data);
+        assert_eq!(decode_body(&headers("GZIP"), gzip(&data), 1000).unwrap(), data);
+        let z = zstd::encode_all(&data[..], 0).unwrap();
+        assert_eq!(decode_body(&headers("zstd"), z.into(), 1000).unwrap(), data);
+        let mut d = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        d.write_all(&data).unwrap();
+        assert_eq!(decode_body(&headers("deflate"), d.finish().unwrap().into(), 1000).unwrap(), data);
+        assert!(decode_body(&headers("br"), Bytes::from_static(b"x"), 1000).is_err());
+        assert!(decode_body(&headers("gzip"), Bytes::from_static(b"not gzip"), 1000).is_err());
+    }
+
+    /// A small compressed body that expands beyond the limit is refused.
+    #[test]
+    fn refuses_decompression_bombs() {
+        let bomb = gzip(&vec![0u8; 10_000_000]);
+        assert!(bomb.len() < 20_000);
+        let err = decode_body(&headers("gzip"), bomb, 1_000_000).unwrap_err();
+        assert!(err.contains("larger than"), "{err}");
+    }
+}

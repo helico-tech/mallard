@@ -18,8 +18,10 @@ use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value},
     logs::v1::{LogRecord as OtlpLog, ResourceLogs, ScopeLogs},
     metrics::v1::{
-        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
-        ScopeMetrics, Sum, metric::Data, number_data_point,
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram,
+        HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint,
+        exponential_histogram_data_point::Buckets, metric::Data, number_data_point,
+        summary_data_point::ValueAtQuantile,
     },
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span},
@@ -759,5 +761,102 @@ async fn every_documented_route_is_served() {
             assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
         }
     }
+    h.stop().await;
+}
+
+/// Delta sums, exponential histograms and summaries: ingest and query.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delta_sums_exp_histograms_and_summaries() {
+    let h = harness(None).await;
+    let t0 = now_ns() - 1_000_000_000;
+    let start = t0 - 600_000_000_000;
+    let (mut delta, mut exp, mut summary) = (vec![], vec![], vec![]);
+    for i in 0..10u64 {
+        let t = t0 - (9 - i) * 60_000_000_000;
+        // 30 jobs per minute, reported as deltas.
+        delta.push(NumberDataPoint {
+            start_time_unix_nano: t - 60_000_000_000,
+            time_unix_nano: t,
+            value: Some(number_data_point::Value::AsInt(30)),
+            ..Default::default()
+        });
+        // Cumulative, scale 0 (base 2): bucket 3 = (8, 16]; 10 values of 12 per minute.
+        exp.push(ExponentialHistogramDataPoint {
+            start_time_unix_nano: start,
+            time_unix_nano: t,
+            count: 10 * (i + 1),
+            sum: Some(120.0 * (i + 1) as f64),
+            scale: 0,
+            positive: Some(Buckets { offset: 3, bucket_counts: vec![10 * (i + 1)] }),
+            ..Default::default()
+        });
+        // Cumulative count/sum; quantiles as reported by the client.
+        summary.push(SummaryDataPoint {
+            start_time_unix_nano: start,
+            time_unix_nano: t,
+            count: 10 * (i + 1),
+            sum: 50.0 * (i + 1) as f64,
+            quantile_values: vec![
+                ValueAtQuantile { quantile: 0.5, value: 4.0 },
+                ValueAtQuantile { quantile: 0.99, value: 9.0 },
+            ],
+            ..Default::default()
+        });
+    }
+    let metric = |name: &str, data: Data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+    let req = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: resource("worker"),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    metric(
+                        "jobs.done",
+                        Data::Sum(Sum {
+                            data_points: delta,
+                            aggregation_temporality: AggregationTemporality::Delta as i32,
+                            is_monotonic: true,
+                        }),
+                    ),
+                    metric(
+                        "rpc.latency",
+                        Data::ExponentialHistogram(ExponentialHistogram {
+                            data_points: exp,
+                            aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                        }),
+                    ),
+                    metric("gc.pause", Data::Summary(Summary { data_points: summary })),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", req.encode_to_vec()).await;
+    assert_eq!(s, StatusCode::OK);
+    let list: Vec<MetricInfo> = h
+        .eventually(|| async {
+            let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+            (v.len() == 3).then_some(v)
+        })
+        .await;
+    let types: Vec<_> = list.iter().map(|m| (m.name.as_str(), m.metric_type, m.temporality)).collect();
+    assert!(types.contains(&("jobs.done", MetricType::Sum, Temporality::Delta)), "{types:?}");
+    assert!(types.contains(&("rpc.latency", MetricType::ExponentialHistogram, Temporality::Cumulative)));
+    assert!(types.contains(&("gc.pause", MetricType::Summary, Temporality::Unspecified)));
+
+    let all_near = |r: &MetricQueryResult, want: f64| {
+        assert!(!r.series.is_empty() && !r.series[0].points.is_empty(), "{r:?}");
+        for p in &r.series[0].points {
+            assert!((p.value - want).abs() < 1e-6, "{} {}: {} != {want}", r.name, r.agg, p.value);
+        }
+    };
+    let q = |name: &str, agg: &str| format!("/api/v1/metrics/query?name={name}&since=15m&step=1m&agg={agg}");
+    all_near(&h.get(&q("jobs.done", "rate")).await, 0.5);
+    all_near(&h.get(&q("jobs.done", "increase")).await, 30.0);
+    all_near(&h.get(&q("rpc.latency", "p50")).await, 12.0);
+    all_near(&h.get(&q("rpc.latency", "avg")).await, 12.0);
+    all_near(&h.get(&q("rpc.latency", "count")).await, 10.0);
+    all_near(&h.get(&q("gc.pause", "p99")).await, 9.0);
+    all_near(&h.get(&q("gc.pause", "avg")).await, 5.0);
     h.stop().await;
 }

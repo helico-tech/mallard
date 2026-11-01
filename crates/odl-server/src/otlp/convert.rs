@@ -864,6 +864,100 @@ mod tests {
         assert_eq!(dur, 5_000_000);
     }
 
+    /// The SQL type a column of this Arrow type is written to.
+    fn sql_type(dt: &DataType) -> String {
+        match dt {
+            DataType::Timestamp(TimeUnit::Microsecond, None) => "TIMESTAMP".into(),
+            DataType::Int64 => "BIGINT".into(),
+            DataType::Int32 => "INTEGER".into(),
+            DataType::UInt64 => "UBIGINT".into(),
+            DataType::UInt32 => "UINTEGER".into(),
+            DataType::UInt8 => "UTINYINT".into(),
+            DataType::Float64 => "DOUBLE".into(),
+            DataType::Boolean => "BOOLEAN".into(),
+            DataType::Utf8 => "VARCHAR".into(),
+            DataType::FixedSizeBinary(16) => "UUID".into(),
+            DataType::Map(..) => "MAP(VARCHAR, VARCHAR)".into(),
+            DataType::List(item) => format!("{}[]", sql_type(item.data_type())),
+            DataType::Struct(fields) => {
+                let parts: Vec<String> =
+                    fields.iter().map(|f| format!("{} {}", f.name(), sql_type(f.data_type()))).collect();
+                format!("STRUCT({})", parts.join(", "))
+            }
+            other => panic!("unexpected Arrow type {other:?}"),
+        }
+    }
+
+    /// Every batch has exactly the columns of its table, by name and type.
+    #[test]
+    fn batches_match_table_definitions() {
+        use opentelemetry_proto::tonic::{
+            logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+            metrics::v1::{
+                ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram, HistogramDataPoint, Metric,
+                NumberDataPoint, ResourceMetrics, ScopeMetrics, Summary, SummaryDataPoint, summary_data_point,
+            },
+            trace::v1::span::Link,
+        };
+        let span = Span {
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            events: vec![Event::default()],
+            links: vec![Link { trace_id: vec![3; 16], span_id: vec![4; 8], ..Default::default() }],
+            ..Default::default()
+        };
+        let traces = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans { spans: vec![span], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        let logs = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs { log_records: vec![LogRecord::default()], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        let m = |data: Data| Metric { name: "m".into(), data: Some(data), ..Default::default() };
+        let metrics = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![
+                        m(Data::Gauge(Gauge { data_points: vec![NumberDataPoint::default()] })),
+                        m(Data::Histogram(Histogram {
+                            data_points: vec![HistogramDataPoint::default()],
+                            ..Default::default()
+                        })),
+                        m(Data::ExponentialHistogram(ExponentialHistogram {
+                            data_points: vec![ExponentialHistogramDataPoint::default()],
+                            ..Default::default()
+                        })),
+                        m(Data::Summary(Summary {
+                            data_points: vec![SummaryDataPoint {
+                                quantile_values: vec![summary_data_point::ValueAtQuantile::default()],
+                                ..Default::default()
+                            }],
+                        })),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let mut seen = Vec::new();
+        for c in [convert_traces(&traces), convert_logs(&logs), convert_metrics(&metrics)] {
+            for (id, b) in c.batches {
+                let got: Vec<(String, String)> =
+                    b.schema().fields().iter().map(|f| (f.name().clone(), sql_type(f.data_type()))).collect();
+                let want: Vec<(String, String)> =
+                    id.def().columns.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
+                assert_eq!(got, want, "{}", id.def().name);
+                seen.push(id);
+            }
+        }
+        assert_eq!(seen, TableId::ALL.to_vec(), "one batch per table");
+    }
+
     #[test]
     fn series_id_is_stable_and_distinct() {
         let res = ResourceCtx { service: "s".into(), attrs: vec![("service.name".into(), "s".into())] };
