@@ -317,7 +317,7 @@ impl Embedded {
                 Kind::TraceLogs => self.traces.set_trace_logs(v),
                 _ => self.logs_loaded(v),
             },
-            Data::Tail((v, gap)) => self.logs_tail_loaded(v, gap),
+            Data::Tail { records, truncated } => self.logs_tail_loaded(records, truncated),
             Data::MetricList(v) => self.metrics.set_list(v),
             Data::MetricQuery(r) => self.metrics.set_result(r),
         }

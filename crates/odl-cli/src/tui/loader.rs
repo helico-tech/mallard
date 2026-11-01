@@ -44,8 +44,11 @@ pub enum Data {
     Traces(Vec<TraceSummary>),
     Trace(Box<Trace>),
     Logs(Vec<LogRecord>),
-    /// New tail records and whether some may have been skipped.
-    Tail((Vec<LogRecord>, bool)),
+    /// New tail records; `truncated`: some before them may have been skipped.
+    Tail {
+        records: Vec<LogRecord>,
+        truncated: bool,
+    },
     MetricList(Vec<MetricInfo>),
     MetricQuery(MetricQueryResult),
 }

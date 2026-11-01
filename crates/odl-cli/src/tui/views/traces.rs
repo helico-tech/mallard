@@ -465,8 +465,10 @@ impl Embedded {
             r.push_str(&bar.into_iter().collect::<String>());
         }
         f.render_widget(TSpan::styled(format!(" {r}"), theme::muted()), ruler);
-        let items: Vec<ListItem> = d
-            .rows
+        // Build items only for what fits: traces can have thousands of spans.
+        let sel = d.sel.selected();
+        let (shown, sel) = widgets::visible(d.sel.offset_mut(), sel, d.rows.len(), list_area.height);
+        let items: Vec<ListItem> = d.rows[shown]
             .iter()
             .map(|row| {
                 let s = &trace.spans[row.span];
@@ -494,12 +496,10 @@ impl Embedded {
                 ListItem::new(Line::from(label))
             })
             .collect();
-        let sel = d.sel.selected();
-        widgets::fit_offset(d.sel.offset_mut(), sel, d.rows.len(), list_area.height);
         f.render_stateful_widget(
             List::new(items).highlight_style(theme::selected()).highlight_symbol("▌"),
             list_area,
-            &mut d.sel,
+            &mut ListState::default().with_selected(sel),
         );
         // Span details
         let lines = span_details(d);

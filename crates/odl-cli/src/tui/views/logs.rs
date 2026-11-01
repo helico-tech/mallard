@@ -32,7 +32,7 @@ const MAX_RECORDS: usize = 5000;
 pub struct State {
     pub query: String,
     pub filter: LogFilter,
-    pub records: Vec<LogRecord>,
+    pub records: Vec<LogRow>,
     pub sel: TableState,
     pub follow: bool,
     pub series: Option<LogSeries>,
@@ -48,27 +48,20 @@ pub struct State {
     pub detail: Option<u16>,
 }
 
-/// Marker row inserted where the tail skipped records (pause, burst).
-pub const GAP_EVENT: &str = "\u{0}odl.gap";
-
-pub fn is_gap(r: &LogRecord) -> bool {
-    r.event_name == GAP_EVENT
+/// A row of the log list.
+#[allow(clippy::large_enum_variant, reason = "gaps are rare; boxing every record would cost more")]
+pub enum LogRow {
+    Record(LogRecord),
+    /// The tail may have skipped records before this time (pause, burst).
+    Gap(chrono::DateTime<Utc>),
 }
 
-fn gap_record(at: chrono::DateTime<Utc>) -> LogRecord {
-    LogRecord {
-        time: at,
-        observed_time: at,
-        service_name: String::new(),
-        severity_number: 0,
-        severity_text: String::new(),
-        body: "… older records skipped (paused or too many to show) …".into(),
-        trace_id: None,
-        span_id: None,
-        event_name: GAP_EVENT.into(),
-        scope_name: String::new(),
-        attributes: Default::default(),
-        resource_attributes: Default::default(),
+impl LogRow {
+    pub fn record(&self) -> Option<&LogRecord> {
+        match self {
+            LogRow::Record(r) => Some(r),
+            LogRow::Gap(_) => None,
+        }
     }
 }
 
@@ -158,9 +151,9 @@ impl State {
             && let Some(first) = v.first()
             && !self.records.is_empty()
         {
-            self.records.push(gap_record(first.time));
+            self.records.push(LogRow::Gap(first.time));
         }
-        self.records.extend(v);
+        self.records.extend(v.into_iter().map(LogRow::Record));
         if self.records.len() > MAX_RECORDS {
             let drop = self.records.len() - MAX_RECORDS;
             self.records.drain(..drop);
@@ -208,11 +201,10 @@ impl Embedded {
                 Kind::LogTail,
                 async move {
                     let mut t = tail.lock().await;
-                    let v = t.poll().await?;
-                    let gap = t.last_poll_truncated();
-                    Ok((v, gap))
+                    let records = t.poll().await?;
+                    Ok((records, t.last_poll_truncated()))
                 },
-                Data::Tail,
+                |(records, truncated)| Data::Tail { records, truncated },
             )
         {
             self.logs.tail_at = Some(Instant::now());
@@ -261,7 +253,7 @@ impl Embedded {
     }
 
     fn selected_log(&self) -> Option<&LogRecord> {
-        self.logs.sel.selected().and_then(|i| self.logs.records.get(i)).filter(|r| !is_gap(r))
+        self.logs.sel.selected().and_then(|i| self.logs.records.get(i)).and_then(LogRow::record)
     }
 
     pub(crate) fn key_logs(&mut self, k: &KeyEvent) -> Option<Outcome> {
@@ -418,18 +410,28 @@ impl Embedded {
             },
         ]);
         f.render_widget(filter_line, fl);
-        let rows: Vec<Row> = l
-            .records
+        // Build rows only for what fits: the list holds up to 5000 records.
+        let sel = l.sel.selected();
+        let (shown, sel) = widgets::visible(l.sel.offset_mut(), sel, l.records.len(), table_area.height);
+        let shown = &l.records[shown];
+        let time_fmt = if long { "%m-%d %H:%M:%S" } else { "%H:%M:%S%.3f" };
+        let rows: Vec<Row> = shown
             .iter()
-            .map(|r| {
-                if is_gap(r) {
-                    return Row::new(vec![
-                        Cell::from(""),
-                        Cell::from(""),
-                        Cell::from(""),
-                        Cell::from(Span::styled(r.body.clone(), theme::muted())),
-                    ]);
-                }
+            .map(|row| {
+                let r = match row {
+                    LogRow::Record(r) => r,
+                    LogRow::Gap(t) => {
+                        return Row::new(vec![
+                            Cell::from(widgets::local(*t, time_fmt)).style(theme::muted()),
+                            Cell::from(""),
+                            Cell::from(""),
+                            Cell::from(Span::styled(
+                                "… older records skipped (paused or too many to show) …",
+                                theme::muted(),
+                            )),
+                        ]);
+                    }
+                };
                 let (lbl, c) = theme::severity(r.severity_number, &r.severity_text);
                 let body_style = if r.severity_number >= 17 { Style::new().fg(theme::ERR) } else { theme::text() };
                 let mut body = vec![];
@@ -438,11 +440,10 @@ impl Embedded {
                 }
                 body.push(Span::styled(widgets::trunc(&r.body, 400), body_style));
                 Row::new(vec![
-                    Cell::from(widgets::local(r.time, if long { "%m-%d %H:%M:%S" } else { "%H:%M:%S%.3f" }))
-                        .style(theme::dim()),
+                    Cell::from(widgets::local(r.time, time_fmt)).style(theme::dim()),
                     Cell::from(Span::styled(format!("{lbl:<5}"), Style::new().fg(c).add_modifier(Modifier::BOLD))),
                     Cell::from(Span::styled(
-                        r.service_name.clone(),
+                        widgets::trunc(&r.service_name, 20),
                         Style::new().fg(theme::service_color(&r.service_name)),
                     )),
                     Cell::from(Line::from(body)),
@@ -450,19 +451,23 @@ impl Embedded {
             })
             .collect();
         let empty = rows.is_empty();
-        let svc_w = l.records.iter().map(|r| widgets::width(&r.service_name)).max().unwrap_or(8).clamp(7, 20) as u16;
+        let svc_w = shown
+            .iter()
+            .filter_map(LogRow::record)
+            .map(|r| widgets::width(&r.service_name))
+            .max()
+            .unwrap_or(8)
+            .clamp(7, 20) as u16;
         let widths = [
             Constraint::Length(if long { 14 } else { 12 }),
             Constraint::Length(5),
             Constraint::Length(svc_w),
             Constraint::Fill(1),
         ];
-        let sel = l.sel.selected();
-        widgets::fit_offset(l.sel.offset_mut(), sel, l.records.len(), table_area.height);
         f.render_stateful_widget(
             Table::new(rows, widths).row_highlight_style(theme::selected()).highlight_symbol("▌"),
             table_area,
-            &mut l.sel,
+            &mut TableState::default().with_selected(sel),
         );
         if empty {
             let (msg, style) = match &l.error {

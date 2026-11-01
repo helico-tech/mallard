@@ -367,7 +367,7 @@ fn logs_render_and_keys() {
     // a truncated poll inserts a visible gap marker before the new records
     e.logs_tail_loaded(vec![log(9, 9, "after a burst", None)], true);
     assert_eq!(e.logs.records.len(), 6);
-    assert!(crate::tui::views::logs::is_gap(&e.logs.records[4]));
+    assert!(matches!(e.logs.records[4], crate::tui::views::logs::LogRow::Gap(_)));
     assert!(render(&mut e, 160, 40).contains("older records skipped"));
     assert_eq!(e.logs.sel.selected(), Some(5));
     // pause
@@ -581,4 +581,30 @@ async fn live_snapshot() {
     e.handle_event(&key(KeyCode::Esc));
     e.handle_event(&ch('1'));
     println!("===== overview 80x24 =====\n{}", render(&mut e, 80, 24));
+}
+
+// Review finding 4: only visible rows are built; scrolling still shows the
+// selected record, at the end and in the middle of a long list.
+#[test]
+fn long_lists_scroll() {
+    let mut e = fixture();
+    e.handle_event(&ch('3'));
+    let many: Vec<LogRecord> = (0..5000).map(|i| log(i, 9, &format!("record-{i:04}"), None)).collect();
+    e.logs_tail_loaded(many, false);
+    e.logs.sel.select(Some(e.logs.records.len() - 1));
+    let s = render(&mut e, 120, 30);
+    assert!(s.contains("record-4999") && !s.contains("record-0000"), "{s}");
+    e.logs.sel.select(Some(2500));
+    let s = render(&mut e, 120, 30);
+    assert!(s.contains("▌") && s.lines().any(|l| l.contains("▌") && l.contains("record-2500")), "{s}");
+    // Waterfall: the selected span is drawn when scrolled.
+    let spans: Vec<odl_client::api::Span> =
+        (0..3000).map(|i| crate::tui::waterfall::tests::span(&format!("{i:016}"), None, i, 1)).collect();
+    e.handle_event(&ch('2'));
+    e.traces.detail = Some(crate::tui::views::traces::Detail::new(TID.into(), None));
+    e.traces.detail.as_mut().unwrap().requested = true;
+    e.traces.set_trace(Trace { trace_id: TID.into(), spans });
+    e.traces.detail.as_mut().unwrap().sel.select(Some(2999));
+    let s = render(&mut e, 160, 40);
+    assert!(s.lines().any(|l| l.contains("▌") && l.contains("op-0000000000002999")), "{s}");
 }

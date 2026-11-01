@@ -1,5 +1,7 @@
 //! Shared building blocks: panels, KPI tiles, charts, histogram, helpers.
 
+use std::ops::Range;
+
 use chrono::{DateTime, Local, Utc};
 use ratatui::{
     Frame,
@@ -294,6 +296,17 @@ pub fn fit_offset(offset: &mut usize, selected: Option<usize>, len: usize, visib
             *offset = sel + 1 - visible;
         }
     }
+}
+
+/// The part of a list of `len` rows that fits in `height`: fits `offset`
+/// (the list's scroll state) to the selection and returns the visible range
+/// and the selection within it. Build rows only for this range and render
+/// them with a fresh state: lists can be long and `draw` runs often.
+pub fn visible(offset: &mut usize, selected: Option<usize>, len: usize, height: u16) -> (Range<usize>, Option<usize>) {
+    fit_offset(offset, selected, len, height);
+    let start = (*offset).min(len);
+    let end = (start + height as usize).min(len);
+    (start..end, selected.filter(|s| (start..end).contains(s)).map(|s| s - start))
 }
 
 /// Key hint spans: `[k] label`.

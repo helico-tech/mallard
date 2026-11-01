@@ -456,7 +456,7 @@ fn errors_flash_once_and_clear() {
     e.apply_error(Kind::LogTail, &err);
     assert!(e.flash.is_none(), "a retry that fails again must not flash");
     assert!(e.logs.error.is_some());
-    e.apply(Kind::LogTail, Data::Tail((vec![], false)));
+    e.apply(Kind::LogTail, Data::Tail { records: vec![], truncated: false });
     assert!(e.logs.error.is_none(), "recovered tail still shows the old error");
     e.apply_error(Kind::LogTail, &err);
     assert!(e.flash.is_some(), "failing again after a success flashes");
