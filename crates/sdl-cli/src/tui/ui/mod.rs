@@ -297,7 +297,10 @@ mod tests {
         list[0].title = "evil\x1b]52;c;cHduZWQ=\x07 \x1b[2Jtitle\u{9b}31m".into();
         list[0].culprit = Some("cul\rprit\tx".into());
         let key = app.issues_key().unwrap();
-        app.on_response(Resp::Issues(key, Ok(IssueList { issues: list, window_start: now(), window_end: now() })));
+        app.on_response(Resp::Issues(
+            key,
+            Ok(IssueList { issues: list, window_start: now(), window_end: now(), next_cursor: None }),
+        ));
         app.now = now();
         let s = draw(&mut app, 140, 40);
         assert!(!s.chars().any(|c| c.is_control() && c != '\n'), "control character in buffer:\n{s}");
@@ -364,7 +367,12 @@ mod tests {
         let key = app.issues_key().unwrap();
         app.on_response(Resp::Issues(
             key,
-            Ok(sdl_client::types::IssueList { issues: vec![], window_start: now(), window_end: now() }),
+            Ok(sdl_client::types::IssueList {
+                issues: vec![],
+                window_start: now(),
+                window_end: now(),
+                next_cursor: None,
+            }),
         ));
         let s = draw(&mut app, 120, 30);
         assert!(s.contains("No unresolved issues matching \"zzz\" in the last 24h"), "{s}");

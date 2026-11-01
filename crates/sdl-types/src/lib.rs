@@ -124,6 +124,10 @@ pub struct IssueList {
     pub issues: Vec<IssueSummary>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
+    /// Pass as `cursor` to fetch the next page (same filters); `None` on
+    /// the last page. The cursor carries the window and the sort.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +302,14 @@ pub struct IssueQuery {
     pub new: Option<bool>,
     /// Only issues first seen in this release.
     pub first_release: Option<String>,
+    /// Only events with these tags, `key:value` (all must match). Sent as
+    /// repeated `tag` parameters, which the query string format here can't
+    /// express: the server reads them apart and the client adds them.
+    #[serde(skip)]
+    pub tag: Vec<String>,
+    /// Cursor from a previous page (`next_cursor`). It carries the window
+    /// and the sort; pass the same filters.
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -314,6 +326,90 @@ pub struct EventQuery {
     /// Only events received in this window, e.g. `1h` (with `from`/`to`;
     /// default: no window).
     pub since: Option<String>,
+    /// Only events with these tags, `key:value` (all must match); repeated
+    /// `tag` parameters (see [`IssueQuery::tag`]).
+    #[serde(skip)]
+    pub tag: Vec<String>,
+    pub release: Option<String>,
+    pub environment: Option<String>,
+    /// Case-insensitive text search in title and message.
+    pub query: Option<String>,
+}
+
+/// Most `tag` filters in one request.
+pub const MAX_TAG_FILTERS: usize = 10;
+
+/// Split a `key:value` tag filter at the first `:` (values may contain
+/// `:`, keys may not). The key must not be empty.
+pub fn parse_tag_filter(s: &str) -> Option<(&str, &str)> {
+    s.split_once(':').filter(|(k, _)| !k.trim().is_empty())
+}
+
+/// A release, derived from the events that name it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct Release {
+    pub version: String,
+    /// First event of the release in the window.
+    pub first_seen: DateTime<Utc>,
+    /// Last event of the release in the window.
+    pub last_seen: DateTime<Utc>,
+    /// Events in the window.
+    pub events: u64,
+    /// Distinct issues with events in the window.
+    pub issues: u64,
+    /// Issues first seen in this release (`first_release`), at any time.
+    pub new_issues: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReleaseList {
+    /// Newest `last_seen` first.
+    pub releases: Vec<Release>,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct ReleaseQuery {
+    /// Window, e.g. `24h`, `30d` (default `14d`).
+    pub since: Option<String>,
+    /// Max releases (default 50, max 500).
+    pub limit: Option<u32>,
+}
+
+/// `POST /v1/sql`: one read-only `SELECT` over `events`, `issues` and
+/// `issue_activity` (schema `lake.sentry`, the default, so `FROM events`
+/// works).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SqlRequest {
+    pub query: String,
+    /// Max rows returned (default 1000, max 100000).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SqlResponse {
+    pub columns: Vec<SqlColumn>,
+    /// Row values as JSON. Other types (timestamps, UUIDs, maps) are strings
+    /// or JSON objects.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<Vec<Object>>))]
+    pub rows: Vec<Vec<serde_json::Value>>,
+    /// True when more rows existed than `limit`.
+    pub truncated: bool,
+    pub elapsed_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SqlColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub data_type: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

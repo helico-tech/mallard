@@ -19,6 +19,11 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> TestServer {
+        Self::start_with(|_| {}).await
+    }
+
+    /// [`TestServer::start`] with flags changed by `change`.
+    async fn start_with(change: impl FnOnce(&mut Standalone)) -> TestServer {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -29,6 +34,7 @@ impl TestServer {
         );
         cfg.public_url = format!("http://{addr}");
         cfg.batch_window = Some(Duration::from_millis(20));
+        change(&mut cfg);
         let server = Server::new(&cfg).await.unwrap();
         Self::serve(server, listener, dir).await
     }
@@ -287,6 +293,146 @@ async fn agent_endpoints() {
     let info = t.get("/v1/info").await;
     assert_eq!(info["public_url"].as_str(), Some(t.base.as_str()), "{info}");
     assert!(info["retention_secs"].as_u64().is_some() && info["max_window_secs"].as_u64().unwrap() > 0, "{info}");
+    t.stop().await;
+}
+
+/// Store one event through `/api/1/store/` (answered after it is written).
+async fn store(t: &TestServer, key: &str, event: Value) {
+    let url = format!("{}/api/1/store/?sentry_key={key}&sentry_version=7", t.base);
+    let r = t.http.post(url).body(event.to_string()).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+fn ids(v: &Value, list: &str, key: &str) -> Vec<String> {
+    v[list].as_array().unwrap_or_else(|| panic!("{v}")).iter().map(|i| i[key].as_str().unwrap().to_string()).collect()
+}
+
+/// Agent CLI P1, sentry side: tag and event filters (S9), issue cursors
+/// (S10), releases (S14); SQL is off by default (S15).
+#[tokio::test(flavor = "multi_thread")]
+async fn filters_cursors_and_releases() {
+    let t = TestServer::start().await;
+    let project = t.create_project("web").await;
+    let key = project["public_key"].as_str().unwrap();
+    let ev = |msg: &str, release: Option<&str>, env: &str, tags: Value| json!({"message": msg, "level": "error", "release": release, "environment": env, "tags": tags});
+    store(&t, key, ev("alpha", Some("web@1"), "prod", json!({"url": "/checkout", "user": "u-1"}))).await;
+    store(&t, key, ev("beta", Some("web@2"), "staging", json!({"url": "/cart"}))).await;
+    store(&t, key, ev("alpha", Some("web@2"), "prod", json!({"url": "/checkout"}))).await;
+    for i in 0..5 {
+        store(&t, key, ev(&format!("m{i}"), None, "prod", json!({}))).await;
+    }
+
+    // S9: tags on issues (repeat = all must match); counts follow the filter.
+    let v = t.get("/v1/projects/web/issues?tag=url:/checkout").await;
+    assert_eq!((ids(&v, "issues", "title"), &v["issues"][0]["count"]), (vec!["alpha".to_string()], &json!(2)), "{v}");
+    let v = t.get("/v1/projects/web/issues?tag=url:/checkout&tag=user:u-1").await;
+    assert_eq!(v["issues"][0]["count"], 1, "{v}");
+    let v = t.get("/v1/projects/web/issues?tag=release:web@2&sort=count").await;
+    assert_eq!(ids(&v, "issues", "title").len(), 2, "derived tags work too: {v}");
+    assert!(t.get("/v1/projects/web/issues?tag=url:/nope").await["issues"].as_array().unwrap().is_empty());
+    let (s, v) = t.api(reqwest::Method::GET, "/v1/projects/web/issues?tag=nocolon", None).await;
+    assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{v}");
+    let many = (0..11).map(|i| format!("tag=k{i}:v")).collect::<Vec<_>>().join("&");
+    assert_eq!(t.api(reqwest::Method::GET, &format!("/v1/projects/web/issues?{many}"), None).await.0, 400);
+
+    // S9: event filters.
+    let count = |path: &str| {
+        let path = path.to_string();
+        let t = &t;
+        async move { t.get(&path).await["events"].as_array().unwrap().len() }
+    };
+    assert_eq!(count("/v1/projects/web/events?tag=url:/checkout").await, 2);
+    assert_eq!(count("/v1/projects/web/events?since=1h&tag=url:/cart").await, 1);
+    assert_eq!(count("/v1/projects/web/events?release=web@2").await, 2);
+    assert_eq!(count("/v1/projects/web/events?environment=staging").await, 1);
+    assert_eq!(count("/v1/projects/web/events?environment=prod&release=web@2").await, 1);
+    assert_eq!(count("/v1/projects/web/events?query=ALP").await, 2);
+    assert_eq!(count("/v1/projects/web/events?query=m_").await, 0, "_ is literal");
+
+    // S10: pages of issues, each issue once, for every sort.
+    for sort in ["last_seen", "first_seen", "count", "users"] {
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..10 {
+            let mut path = format!("/v1/projects/web/issues?limit=3&sort={sort}");
+            if let Some(c) = &cursor {
+                path.push_str(&format!("&cursor={}", urlencode(c)));
+            }
+            let page = t.get(&path).await;
+            for id in ids(&page, "issues", "id") {
+                assert!(seen.insert(id), "an issue on two pages ({sort})");
+            }
+            cursor = page["next_cursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 7, "{sort}");
+    }
+    let first = t.get("/v1/projects/web/issues?limit=1&sort=count").await;
+    let c = urlencode(first["next_cursor"].as_str().unwrap());
+    let (s, v) = t.api(reqwest::Method::GET, &format!("/v1/projects/web/issues?cursor={c}"), None).await;
+    assert_eq!(s, 400, "a cursor is for one sort: {v}");
+    let (s, _) = t.api(reqwest::Method::GET, "/v1/projects/web/issues?cursor=nope", None).await;
+    assert_eq!(s, 400);
+    let all = t.get("/v1/projects/web/issues").await;
+    assert!(all["next_cursor"].is_null(), "no cursor on the last page: {all}");
+
+    // S14: releases from events, newest first.
+    let v = t.get("/v1/projects/web/releases?since=1h").await;
+    assert_eq!(ids(&v, "releases", "version"), ["web@2", "web@1"], "{v}");
+    let r2 = &v["releases"][0];
+    assert_eq!((&r2["events"], &r2["issues"], &r2["new_issues"]), (&json!(2), &json!(2), &json!(1)), "{v}");
+    assert!(r2["first_seen"].as_str() <= r2["last_seen"].as_str());
+    let r1 = &v["releases"][1];
+    assert_eq!((&r1["events"], &r1["issues"], &r1["new_issues"]), (&json!(1), &json!(1), &json!(1)), "{v}");
+    assert_eq!(t.get("/v1/projects/web/releases?limit=1").await["releases"].as_array().unwrap().len(), 1);
+    let hour_ago = urlencode(&(chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339());
+    let v = t.get(&format!("/v1/projects/web/releases?to={hour_ago}")).await;
+    assert!(v["releases"].as_array().unwrap().is_empty(), "{v}");
+
+    // S15: off unless enabled.
+    let (s, v) = t.api(reqwest::Method::POST, "/v1/sql", Some(json!({"query": "SELECT 1"}))).await;
+    assert_eq!((s, v["error"].as_str()), (403, Some("disabled")), "{v}");
+    assert!(v["message"].as_str().unwrap().contains("enable_sql"), "{v}");
+    t.stop().await;
+}
+
+/// S15: read-only SQL over the error tables when enabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_over_error_tables() {
+    let t = TestServer::start_with(|c| c.enable_sql = true).await;
+    let project = t.create_project("web").await;
+    let key = project["public_key"].as_str().unwrap();
+    for (msg, url) in [("a", "/x"), ("a", "/x"), ("b", "/y")] {
+        store(&t, key, json!({"message": msg, "level": "error", "tags": {"url": url}})).await;
+    }
+    let sql = |query: &str, limit: Option<u32>| {
+        t.api(reqwest::Method::POST, "/v1/sql", Some(json!({"query": query, "limit": limit})))
+    };
+    let (s, v) = sql("SELECT tags['url'] AS url, count(*) AS n FROM events GROUP BY 1 ORDER BY 2 DESC;", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["columns"], json!([{"name": "url", "type": "VARCHAR"}, {"name": "n", "type": "BIGINT"}]));
+    assert_eq!(v["rows"], json!([["/x", 2], ["/y", 1]]));
+    assert_eq!(v["truncated"], false);
+    let (s, v) =
+        sql("SELECT count(*) FROM lake.sentry.issues i JOIN issue_activity a USING (project_id, group_hash)", None)
+            .await;
+    assert_eq!((s, &v["rows"]), (200, &json!([[0]])), "{v}");
+    let (s, v) = sql("SELECT title FROM issues ORDER BY title", Some(1)).await;
+    assert_eq!((s, &v["rows"], &v["truncated"]), (200, &json!([["a"]]), &json!(true)), "{v}");
+    for bad in [
+        "SELECT * FROM projects",
+        "SELECT * FROM lake.otel.spans",
+        "DELETE FROM events",
+        "SELECT * FROM read_csv('/etc/passwd')",
+        "SELECT getenv('HOME')",
+        "SELECT nope FROM events",
+    ] {
+        let (s, v) = sql(bad, None).await;
+        assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{bad}: {v}");
+    }
+    assert_eq!(sql("SELECT 1", Some(0)).await.0, 400);
     t.stop().await;
 }
 

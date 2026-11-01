@@ -26,7 +26,7 @@
 | `mallard` | The CLI/TUI binary (ADR 0007): one flat command tree (ADR 0008) mounting `sdl-cli` and `odl-cli` commands, plus `status`, `setup`, `find`, `trace`, `series`, `help agents`, `tui`; `errors …`/`telemetry …` are hidden aliases. HTTP only; no DuckDB, no server code. |
 | `mallard-server` | Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. The bridge (`src/bridge/`, ADR 0009) turns Sentry transactions into spans and OTel exceptions into Sentry events through the libraries' hooks. Its `mallard-server` binary installs logging and the Prometheus recorder (`mallard-common`). |
 | `mallard-common` | Shared by both sides (ADR 0005): duration/size parsing, query windows, the `ApiError` body; with feature `server` the config loader, bearer tokens, HTTP helpers (`ApiErr`, `Q`, `J`, `require_bearer`, CORS, docs page, readiness), logging, signals, Prometheus. |
-| `mallard-duck` | The only crate that depends on `duckdb`: `[storage]`/`[duckdb]` types, `open_connection`, extensions, secrets, SQL quoting, identifier check, redaction, object-store options for sourcemaps. |
+| `mallard-duck` | The only crate that depends on `duckdb`: `[storage]`/`[duckdb]` types, `open_connection`, extensions, secrets, SQL quoting, identifier check, redaction, object-store options for sourcemaps, and the read-only SQL guard (`sql`) both sides' SQL endpoints use (ADR 0011). |
 | `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables (plain when piped), formats, colour, error kinds and exit codes, the output contract (`--format`, `--fields`, list envelope, `--quiet` notes), window flags and `--wait` polling (ADR 0006, 0008), TUI theme, keys and `Outcome`. Depends on neither client. |
 | `mallard-client` | Wraps `sdl-client` (`<url>/sentry`) and `odl-client` (`<url>/otel`) behind one base URL + token; trace correlation (spans + errors + logs). |
 | `sdl-*` | Sentry side. See [sentry/architecture.md](sentry/architecture.md). |
@@ -79,3 +79,8 @@
   `/sentry/v1/events/by-trace?trace_id=a,b,…` call per list.
 - Errors and traces correlate on `trace_id` (Sentry `contexts.trace.trace_id`
   = OTel span `trace_id`).
+- Ad-hoc SQL is per side (ADR 0011): `/otel/api/v1/sql` over the telemetry
+  tables, `/sentry/v1/sql` over `events`, `issues`, `issue_activity`. Both
+  are off by default and run through one guard, `mallard_duck::sql` (one
+  SELECT, only that side's tables, no files or settings, a timeout).
+  `mallard sql` picks the side with `--errors`.

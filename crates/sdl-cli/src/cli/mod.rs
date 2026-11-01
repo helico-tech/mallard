@@ -4,7 +4,7 @@
 
 use crate::fmt;
 use crate::paint as p;
-use crate::{Command, SourcemapsCmd};
+use crate::{Command, ReleasesCmd, SourcemapsCmd};
 use anyhow::Result;
 use mallard_term::color::{ColorChoice, Out};
 use mallard_term::error::{Described, Failure, Hints, Kind};
@@ -175,6 +175,8 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         Command::Issues(c) => commands::issues(ctx, c).await,
         Command::Events(c) => commands::events(ctx, c).await,
         Command::Stats { window, interval } => commands::stats(ctx, window, interval).await,
+        Command::Releases(ReleasesCmd::List { window, limit }) => commands::releases(ctx, window, limit).await,
+        Command::Sql(a) => commands::sql(ctx, a).await,
         Command::Sourcemaps(SourcemapsCmd::List) => commands::sourcemaps(ctx).await,
         Command::Maintenance => {
             ctx.client.maintenance().await.map_err(|e| ctx.err(e))?;

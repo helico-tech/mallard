@@ -462,6 +462,40 @@
             }
           },
           {
+            "name": "release",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "environment",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "query",
+            "in": "path",
+            "description": "Case-insensitive text search in title and message.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "from",
             "in": "path",
             "description": "Start of the window (inclusive, RFC 3339).",
@@ -497,6 +531,18 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Only events with this tag, `key:value`; repeat for more (all must match, max 10)",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           }
         ],
@@ -589,6 +635,7 @@
     },
     "/v1/projects/{project}/issues": {
       "get": {
+        "description": "Issues with events in the window. Pages: pass `next_cursor` as `cursor` with the same filters; the cursor carries the window and the sort.",
         "operationId": "list_issues",
         "parameters": [
           {
@@ -709,6 +756,18 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "path",
+            "description": "Cursor from a previous page (`next_cursor`). It carries the window\nand the sort; pass the same filters.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "from",
             "in": "path",
             "description": "Start of the window (inclusive, RFC 3339).",
@@ -744,6 +803,18 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Only events with this tag, `key:value`; repeat for more (all must match, max 10)",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           }
         ],
@@ -954,6 +1025,115 @@
         }
       }
     },
+    "/v1/projects/{project}/releases": {
+      "get": {
+        "description": "Releases named by the project's events in the window (default 14d), newest last event first. Derived from events: releases created with sentry-cli are not stored.",
+        "operationId": "list_releases",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window, e.g. `24h`, `30d` (default `14d`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "Max releases (default 50, max 500).",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/projects/{project}/sourcemaps": {
       "get": {
         "operationId": "list_sourcemaps",
@@ -1087,6 +1267,60 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sql": {
+      "post": {
+        "description": "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
+        "operationId": "run_sql",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SqlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SqlResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1440,6 +1674,13 @@
               "$ref": "#/components/schemas/IssueSummary"
             }
           },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page (same filters); `None` on\nthe last page. The cursor carries the window and the sort."
+          },
           "window_end": {
             "type": "string",
             "format": "date-time"
@@ -1641,6 +1882,76 @@
           }
         }
       },
+      "Release": {
+        "type": "object",
+        "description": "A release, derived from the events that name it.",
+        "required": [
+          "version",
+          "first_seen",
+          "last_seen",
+          "events",
+          "issues",
+          "new_issues"
+        ],
+        "properties": {
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events in the window.",
+            "minimum": 0
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time",
+            "description": "First event of the release in the window."
+          },
+          "issues": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct issues with events in the window.",
+            "minimum": 0
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last event of the release in the window."
+          },
+          "new_issues": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Issues first seen in this release (`first_release`), at any time.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ReleaseList": {
+        "type": "object",
+        "required": [
+          "releases",
+          "window_start",
+          "window_end"
+        ],
+        "properties": {
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Release"
+            },
+            "description": "Newest `last_seen` first."
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "ServerInfo": {
         "type": "object",
         "required": [
@@ -1698,6 +2009,77 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "SqlColumn": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "SqlRequest": {
+        "type": "object",
+        "description": "`POST /v1/sql`: one read-only `SELECT` over `events`, `issues` and\n`issue_activity` (schema `lake.sentry`, the default, so `FROM events`\nworks).",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Max rows returned (default 1000, max 100000).",
+            "minimum": 0
+          },
+          "query": {
+            "type": "string"
+          }
+        }
+      },
+      "SqlResponse": {
+        "type": "object",
+        "required": [
+          "columns",
+          "rows",
+          "truncated",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SqlColumn"
+            }
+          },
+          "elapsed_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "description": "Row values as JSON. Other types (timestamps, UUIDs, maps) are strings\nor JSON objects."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when more rows existed than `limit`."
           }
         }
       },

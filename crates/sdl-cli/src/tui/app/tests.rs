@@ -26,7 +26,10 @@ fn stale_issue_lists_are_dropped() {
     let mut app = loaded_app();
     let old = app.issues_key().unwrap();
     press(&mut app, key('s'));
-    app.on_response(Resp::Issues(old, Ok(IssueList { issues: vec![], window_start: now(), window_end: now() })));
+    app.on_response(Resp::Issues(
+        old,
+        Ok(IssueList { issues: vec![], window_start: now(), window_end: now(), next_cursor: None }),
+    ));
     assert_eq!(app.issues.len(), 3, "stale response must not replace the list");
 }
 
@@ -211,7 +214,10 @@ fn project_id_is_replaced_by_slug_and_list_reloaded() {
     assert_eq!(app.project.as_deref(), Some("web"));
     assert!(r.iter().any(|r| matches!(r, Req::Issues(k) if k.project == "web")), "{r:?}");
     // The response to the old request is stale and dropped.
-    app.on_response(Resp::Issues(old, Ok(IssueList { issues: issues(), window_start: now(), window_end: now() })));
+    app.on_response(Resp::Issues(
+        old,
+        Ok(IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None }),
+    ));
     assert!(!app.issues_loaded);
     // With the slug already given, no extra reload.
     let mut app = App::new("http://x", Some("web".into()));
@@ -276,7 +282,7 @@ fn a_stale_response_does_not_end_a_newer_load() {
     let first = press(&mut app, key('s'));
     press(&mut app, key('s'));
     let Req::Issues(old) = &first[1] else { panic!("{first:?}") };
-    let list = IssueList { issues: issues(), window_start: now(), window_end: now() };
+    let list = IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None };
     app.on_response(Resp::Issues(old.clone(), Ok(list.clone())));
     app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
     assert!(app.in_flight(Kind::Issues) && app.in_flight(Kind::Stats), "the newer loads are still running");
@@ -350,7 +356,7 @@ fn show_trace_closes_the_search_box() {
 fn every_api_type_survives_sanitize() {
     cleaned(info()).unwrap();
     cleaned(projects()).unwrap();
-    cleaned(IssueList { issues: issues(), window_start: now(), window_end: now() }).unwrap();
+    cleaned(IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None }).unwrap();
     cleaned(stats()).unwrap();
     cleaned(issue_detail()).unwrap();
     cleaned(event_list()).unwrap();

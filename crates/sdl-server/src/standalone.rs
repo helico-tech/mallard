@@ -136,6 +136,10 @@ pub struct Standalone {
     #[arg(long, env = "SDL_TRUST_FORWARDED_FOR")]
     pub trust_forwarded_for: bool,
 
+    /// Enable `POST /v1/sql`: read-only SQL over the error tables (admin access).
+    #[arg(long, env = "SDL_ENABLE_SQL")]
+    pub enable_sql: bool,
+
     /// Memory budget for cached sourcemaps, in MiB.
     #[arg(long, env = "SDL_SOURCEMAP_CACHE_MB")]
     pub sourcemap_cache_mb: Option<u64>,
@@ -204,6 +208,7 @@ impl Standalone {
         set(&mut c.maintenance.flush_rows, self.flush_rows);
         set(&mut c.maintenance.compact_interval, self.compact_interval);
         set(&mut c.query.readers, self.readers);
+        c.query.enable_sql = self.enable_sql;
         set(&mut c.sourcemaps.cache_size, self.sourcemap_cache_mb.map(ByteSize::mib));
         c
     }

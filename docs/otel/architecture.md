@@ -129,7 +129,8 @@ cleanup are catalog-wide; in mallard the otel side owns them (ADR 0001).
   interrupted (`duckdb_interrupt`) and the connection reused.
 - All user input reaches SQL as bound parameters. The optional `/api/v1/sql`
   endpoint (off by default) validates queries with DuckDB's own parser; see
-  [ADR 0005](adr/0005-sql-endpoint.md).
+  [ADR 0005](adr/0005-sql-endpoint.md). The checks live in `mallard_duck::sql`,
+  shared with the Sentry side's `/v1/sql` (mallard ADR 0011).
 - Metric math (counter rates with reset detection, histogram percentiles)
   runs partly in SQL and partly in Rust; semantics are in [api.md](api.md).
 
