@@ -32,7 +32,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     ),
     (
         &["find"],
-        "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue\n  mallard find 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if nothing arrives",
+        "mallard find 0af7651916cd43dd8448eb211c80319c   # trace and/or Sentry event\n  mallard find 85fede14250ec6be                   # issue or span\n  mallard find 0af7651916cd43dd8448eb211c80319c --wait 30s   # exit 8 if nothing arrives",
     ),
     (&["issues"], "mallard issues list --since 1h\n  mallard issues show 85fede14250ec6be"),
     (
@@ -64,7 +64,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (&["traces"], "mallard traces list -S checkout --errors --since 15m\n  mallard traces show <trace-id>"),
     (
         &["traces", "list"],
-        "mallard traces list -S checkout --errors --since 15m -n 10\n  mallard traces list -O \"POST /pay\" --min-ms 500 -a http.route=/pay\n  mallard traces list -S checkout --since 1m --wait 30s",
+        "mallard traces list -S checkout --errors --since 15m -n 10\n  mallard traces list -O \"POST /pay\" --min-ms 500 -a http.route=/pay\n  mallard traces list -S checkout --since 1m --wait 30s\n  mallard traces list --from <window.from> --to <window.to> --cursor <next_cursor>   # the next page",
     ),
     (&["traces", "show"], "mallard traces show 0af7651916cd43dd8448eb211c80319c --fields spans,errors"),
     (
@@ -73,7 +73,7 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     ),
     (
         &["logs"],
-        "mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id\n  mallard logs --around 2026-11-01T10:15:03Z --window 2m -S checkout\n  mallard logs -t 0af7651916cd43dd8448eb211c80319c --wait 30s\n  mallard logs -S checkout -f --for 2m\n  mallard logs -S checkout -f --until-match \"listening on\" --for 1m   # exit 8 if no match",
+        "mallard logs -S checkout -l warn --since 10m --format ndjson --fields time,severity_text,body,trace_id\n  mallard logs --around 2026-11-01T10:15:03Z --window 2m -S checkout\n  mallard logs -t 0af7651916cd43dd8448eb211c80319c --wait 30s\n  mallard logs -S checkout -f --for 2m\n  mallard logs -S checkout -f --until-match \"listening on\" --for 1m   # exit 8 if no match\n  mallard logs -S checkout --from <window.from> --to <window.to> --cursor <next_cursor>   # the next page",
     ),
     (&["services"], "mallard services --since 1h"),
     (
@@ -96,6 +96,12 @@ const EXAMPLES: &[(&[&str], &str)] = &[
     (
         &["sql"],
         "mallard sql \"SELECT service_name, count(*) FROM spans GROUP BY 1\"   # exit 7 when SQL is off\n  mallard sql --errors \"SELECT release, count(*) FROM events GROUP BY 1\"",
+    ),
+    (&["schema"], "mallard schema   # tables and columns for mallard sql\n  mallard schema attrs -S checkout"),
+    (&["schema", "tables"], "mallard schema tables --fields name,time_column"),
+    (
+        &["schema", "attrs"],
+        "mallard schema attrs --signal spans -S checkout            # keys with counts\n  mallard schema attrs --signal spans --key http.route        # top values\n  mallard schema attrs --signal metrics --metric http.server.request.duration",
     ),
     (&["sourcemaps"], "mallard sourcemaps list"),
     (&["sourcemaps", "list"], "mallard sourcemaps list -p web"),

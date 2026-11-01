@@ -253,7 +253,12 @@ impl Output {
     /// `truncated` in the envelope, and stderr may be merged into stdout).
     pub fn truncation_note<T>(&self, l: &List<T>) {
         if l.truncated && self.format != Format::Json {
-            self.note(format!("{} shown, more exist; narrow the window or filters, or raise --limit", l.count));
+            match &l.next_cursor {
+                Some(c) => self.note(format!("{} shown, more exist; next page: --cursor {}", l.count, clean(c))),
+                None => {
+                    self.note(format!("{} shown, more exist; narrow the window or filters, or raise --limit", l.count))
+                }
+            }
         }
     }
 

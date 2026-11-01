@@ -57,9 +57,21 @@ pub fn any_value_to_string(v: &AnyValue) -> String {
         Some(any_value::Value::StringValue(s)) => s.clone(),
         Some(any_value::Value::BoolValue(b)) => b.to_string(),
         Some(any_value::Value::IntValue(i)) => i.to_string(),
-        Some(any_value::Value::DoubleValue(d)) => d.to_string(),
+        Some(any_value::Value::DoubleValue(d)) => double_to_string(*d),
         Some(any_value::Value::BytesValue(b)) => base64::engine::general_purpose::STANDARD.encode(b),
         Some(_) => any_value_to_json(v).to_string(),
+    }
+}
+
+/// `Display` form, with the protojson spellings for values JSON has no
+/// number for: `NaN`, `Infinity`, `-Infinity` (DuckDB casts them back).
+fn double_to_string(d: f64) -> String {
+    if d.is_nan() {
+        "NaN".into()
+    } else if d.is_infinite() {
+        if d > 0.0 { "Infinity" } else { "-Infinity" }.into()
+    } else {
+        d.to_string()
     }
 }
 
@@ -70,7 +82,9 @@ fn any_value_to_json(v: &AnyValue) -> serde_json::Value {
         Some(any_value::Value::StringValue(s)) => J::String(s.clone()),
         Some(any_value::Value::BoolValue(b)) => J::Bool(*b),
         Some(any_value::Value::IntValue(i)) => J::from(*i),
-        Some(any_value::Value::DoubleValue(d)) => serde_json::Number::from_f64(*d).map(J::Number).unwrap_or(J::Null),
+        Some(any_value::Value::DoubleValue(d)) => {
+            serde_json::Number::from_f64(*d).map(J::Number).unwrap_or_else(|| J::String(double_to_string(*d)))
+        }
         Some(any_value::Value::BytesValue(b)) => J::String(base64::engine::general_purpose::STANDARD.encode(b)),
         Some(any_value::Value::ArrayValue(a)) => J::Array(a.values.iter().map(any_value_to_json).collect()),
         Some(any_value::Value::KvlistValue(kv)) => J::Object(
@@ -801,6 +815,13 @@ mod tests {
         };
         assert_eq!(any_value_to_string(&arr), r#"[1,"a"]"#);
         assert_eq!(any_value_to_string(&AnyValue { value: Some(any_value::Value::DoubleValue(1.5)) }), "1.5");
+        let d = |d| AnyValue { value: Some(any_value::Value::DoubleValue(d)) };
+        assert_eq!(any_value_to_string(&d(f64::NAN)), "NaN");
+        assert_eq!(any_value_to_string(&d(f64::INFINITY)), "Infinity");
+        assert_eq!(any_value_to_string(&d(f64::NEG_INFINITY)), "-Infinity");
+        let arr =
+            AnyValue { value: Some(any_value::Value::ArrayValue(ArrayValue { values: vec![d(f64::NAN), d(-0.5)] })) };
+        assert_eq!(any_value_to_string(&arr), r#"["NaN",-0.5]"#);
         assert_eq!(any_value_to_string(&AnyValue { value: None }), "");
     }
 

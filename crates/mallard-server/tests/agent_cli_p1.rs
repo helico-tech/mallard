@@ -180,11 +180,19 @@ async fn agent_cli_p1_end_to_end() {
     let t = mallard(url, &["series", "spans"]).await.ok();
     assert!(t.stdout.lines().next().is_some_and(|h| h.contains("p95")), "{}", t.stdout);
 
-    // --quiet drops the truncation note, not the data.
+    // --quiet drops the truncation note, not the data. The server says
+    // whether more exist, so a second trace makes the page truncated.
+    send_otlp(&reqwest::Client::new(), &srv.otlp_url, 1).await;
+    let (second, _) = ids(1);
+    eventually("second trace", || async {
+        let l = mallard(url, &["traces", "list", "--json"]).await.ok().json();
+        (l["count"] == 2).then_some(())
+    })
+    .await;
     let o = mallard(url, &["traces", "list", "-n", "1"]).await.ok();
-    assert!(o.stderr.contains("note: 1 shown"), "{}", o.stderr);
+    assert!(o.stderr.contains("note: 1 shown") && o.stderr.contains("--cursor "), "{}", o.stderr);
     let o = mallard(url, &["traces", "list", "-n", "1", "--quiet"]).await.ok();
-    assert!(o.stderr.is_empty() && o.stdout.contains(&trace), "stderr {:?}", o.stderr);
+    assert!(o.stderr.is_empty() && o.stdout.contains(&second), "stderr {:?}", o.stderr);
 
     // Not found says it once, on both sides.
     let o = mallard(url, &["-p", "checkout", "issues", "show", "0000000000000000"]).await;

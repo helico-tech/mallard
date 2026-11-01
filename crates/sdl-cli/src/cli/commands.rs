@@ -213,10 +213,11 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
         IssuesCmd::List(a) => {
             let w = a.window.resolve(ISSUE_WINDOW)?;
             let list = ctx.client.issues_in(&project, &issue_query(&a), &range(&w)).await.map_err(|e| ctx.err(e))?;
+            let w = Window { from: list.window_start, to: list.window_end };
+            let limit = Some(a.limit.unwrap_or(50).clamp(1, 500));
+            let page = List::new(list.issues.clone()).limit(limit).cursor(list.next_cursor.clone()).window(w);
             if !ctx.output.text() {
-                let w = Window { from: list.window_start, to: list.window_end };
-                let limit = Some(a.limit.unwrap_or(50).clamp(1, 500));
-                return ctx.output.list(&List::new(list.issues).limit(limit).cursor(list.next_cursor).window(w));
+                return ctx.output.list(&page);
             }
             let list = fmt::sanitize(list, true)?;
             if list.issues.is_empty() {
@@ -256,9 +257,7 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
                 "{}",
                 p::dim(&format!("{} issues · window {} .. now", list.issues.len(), fmt::timestamp(list.window_start)))
             );
-            if let Some(c) = &list.next_cursor {
-                out!(o, "{}", p::dim(&format!("more: add --cursor {c}")));
-            }
+            ctx.output.truncation_note(&page);
             Ok(())
         }
         IssuesCmd::Show { id, window } => {
@@ -436,13 +435,14 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 anyhow::Ok((w, list))
             };
             let ((w, list), waited) = until(&ctx.output, &wait, fetch, |(_, l)| !l.events.is_empty()).await?.split();
+            let mut page = List::new(list.events.clone())
+                .limit(Some(limit.unwrap_or(50).clamp(1, 500)))
+                .cursor(list.next_cursor.clone());
+            if let Some(w) = w {
+                page = page.window(w);
+            }
             if !ctx.output.text() {
-                let mut l =
-                    List::new(list.events).limit(Some(limit.unwrap_or(50).clamp(1, 500))).cursor(list.next_cursor);
-                if let Some(w) = w {
-                    l = l.window(w);
-                }
-                ctx.output.list(&l)?;
+                ctx.output.list(&page)?;
                 return waited;
             }
             let list = fmt::sanitize(list, true)?;
@@ -474,9 +474,7 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 t.add_row(row);
             }
             out!(o, "{t}");
-            if let Some(c) = &list.next_cursor {
-                out!(o, "{}", p::dim(&format!("more: add --cursor {c}")));
-            }
+            ctx.output.truncation_note(&page);
             Ok(())
         }
         EventsCmd::Show { event_id, issue } => {

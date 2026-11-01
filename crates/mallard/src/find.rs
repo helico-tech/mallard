@@ -1,7 +1,7 @@
 //! `mallard find <id>`: what is this id? 32 hex characters can be a trace
 //! or a Sentry event (both are tried), 16 hex characters an issue (every
-//! project is tried). Each match says how to see more (`next`). No match
-//! is exit code 4. Span ids and free values (request ids, user ids) are not
+//! project is tried) or a span. Each match says how to see more (`next`).
+//! No match is exit code 4. Free values (request ids, user ids) are not
 //! searched yet.
 
 use std::time::Duration;
@@ -25,6 +25,7 @@ pub(crate) enum Match {
     Trace { trace_id: String, spans: usize, errors: usize, logs: usize, next: String },
     Event { event_id: String, issue_id: String, project_id: u32, title: String, trace_id: Option<String>, next: String },
     Issue { issue_id: String, project: String, title: String, status: String, count: u64, next: String },
+    Span { span_id: String, trace_id: String, service: String, name: String, next: String },
 }
 
 impl Match {
@@ -37,6 +38,9 @@ impl Match {
             Match::Issue { issue_id, title, status, count, next, .. } => {
                 format!("issue  {issue_id}  {}  ({status}, {count} events)  → {next}", clean(title))
             }
+            Match::Span { span_id, service, name, next, .. } => {
+                format!("span   {span_id}  {}  {}  → {next}", clean(service), clean(name))
+            }
         }
     }
 }
@@ -46,7 +50,7 @@ impl Match {
 enum IdKind {
     /// Trace id or Sentry event id.
     Hex32(String),
-    /// Issue id (span ids too, not searched yet).
+    /// Issue id or span id.
     Hex16(String),
 }
 
@@ -65,7 +69,7 @@ fn kind_of(id: &str) -> Option<IdKind> {
 pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs, wait: &WaitArgs) -> Result<()> {
     let kind = kind_of(id).ok_or_else(|| {
         usage(format!(
-            "{:?} is not an id mallard can look up: use a trace or event id (32 hex) or an issue id (16 hex)",
+            "{:?} is not an id mallard can look up: use a trace or event id (32 hex) or an issue or span id (16 hex)",
             clean(id)
         ))
     })?;
@@ -74,7 +78,7 @@ pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs, wait: &WaitArgs)
         let w = window.resolve(WINDOW)?;
         let matches = match &kind {
             IdKind::Hex32(id) => hex32(r, id, w.from, w.to).await?,
-            IdKind::Hex16(id) => hex16(r, id).await?,
+            IdKind::Hex16(id) => hex16(r, id, w.from, w.to).await?,
         };
         anyhow::Ok((w, matches))
     };
@@ -140,7 +144,41 @@ async fn hex32(
     }
 }
 
-async fn hex16(r: &Run, id: &str) -> Result<Vec<Match>> {
+/// An issue id (in every project, or the one of `-p`) and a span id, at
+/// the same time.
+async fn hex16(
+    r: &Run,
+    id: &str,
+    from: chrono::DateTime<chrono::Utc>,
+    to: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<Match>> {
+    let q = mallard_client::odl_client::api::TraceGetQuery { from: Some(from), to: Some(to), since: None };
+    let (issues, span) = tokio::join!(issues(r, id), r.client.otel.span(id, &q));
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    match issues {
+        Ok(m) => out.extend(m),
+        Err(e) => errors.push(e),
+    }
+    match span {
+        Ok(s) => out.push(Match::Span {
+            next: format!("mallard trace {}", s.trace_id),
+            span_id: s.span_id,
+            trace_id: s.trace_id,
+            service: s.service_name,
+            name: s.name,
+        }),
+        Err(e) if e.is_not_found() => {}
+        Err(e) => errors.push(crate::described(mallard_client::Error::Otel(e), r.client.base_url())),
+    }
+    // Report a failure only when it may have hidden the answer.
+    match errors.into_iter().next() {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
+}
+
+async fn issues(r: &Run, id: &str) -> Result<Vec<Match>> {
     let c = &r.client.sentry;
     let err = |e| crate::described(mallard_client::Error::Sentry(e), r.client.base_url());
     let projects = match &r.project {
@@ -192,5 +230,14 @@ mod tests {
             serde_json::json!({"kind": "trace", "trace_id": "t", "spans": 1, "errors": 2, "logs": 3, "next": "mallard trace t"})
         );
         assert!(m.line().contains("→ mallard trace t"));
+        let m = Match::Span {
+            span_id: "s".into(),
+            trace_id: "t".into(),
+            service: "checkout".into(),
+            name: "POST /pay".into(),
+            next: "mallard trace t".into(),
+        };
+        assert_eq!(serde_json::to_value(&m).unwrap()["kind"], "span");
+        assert!(m.line().starts_with("span   s  checkout  POST /pay"), "{}", m.line());
     }
 }

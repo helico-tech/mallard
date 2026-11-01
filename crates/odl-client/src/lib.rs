@@ -15,7 +15,7 @@ use odl_api::*;
 use serde::{Serialize, de::DeserializeOwned};
 
 /// The same variants and helpers as `sdl_client::Error` (plus
-/// [`Error::InvalidTraceId`]).
+/// [`Error::InvalidTraceId`] and [`Error::InvalidSpanId`]).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -23,6 +23,8 @@ pub enum Error {
     InvalidUrl(String),
     #[error("invalid trace id {0:?}: must be 32 hex characters")]
     InvalidTraceId(String),
+    #[error("invalid span id {0:?}: must be 16 hex characters")]
+    InvalidSpanId(String),
     /// Connection, timeout or decoding error; the cause is in `source()`.
     #[error("request failed")]
     Http(#[from] reqwest::Error),
@@ -107,10 +109,16 @@ impl Client {
     }
 
     async fn send<T: DeserializeOwned>(r: reqwest::RequestBuilder) -> Result<T> {
+        Ok(Self::send_page(r).await?.0)
+    }
+
+    /// The body and the next-page cursor header ([`NEXT_CURSOR_HEADER`]).
+    async fn send_page<T: DeserializeOwned>(r: reqwest::RequestBuilder) -> Result<(T, Option<String>)> {
         let resp = r.send().await?;
         let status = resp.status();
         if status.is_success() {
-            return Ok(resp.json().await?);
+            let cursor = resp.headers().get(NEXT_CURSOR_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+            return Ok((resp.json().await?, cursor));
         }
         let text = resp.text().await.unwrap_or_default();
         let (code, message) = match serde_json::from_str::<ApiError>(&text) {
@@ -142,6 +150,18 @@ impl Client {
     pub async fn traces(&self, q: &TraceQuery) -> Result<Vec<TraceSummary>> {
         self.get("/api/v1/traces", q).await
     }
+    /// [`Client::traces`] and the cursor of the next page (`None` on the
+    /// last page); pass it back as `q.cursor`.
+    pub async fn traces_page(&self, q: &TraceQuery) -> Result<(Vec<TraceSummary>, Option<String>)> {
+        Self::send_page(self.req(reqwest::Method::GET, "/api/v1/traces").query(q)).await
+    }
+    /// `span_id`: 16 hex characters.
+    pub async fn span(&self, span_id: &str, q: &TraceGetQuery) -> Result<Span> {
+        if span_id.len() != 16 || !span_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::InvalidSpanId(span_id.to_string()));
+        }
+        self.get(&format!("/api/v1/spans/{span_id}"), q).await
+    }
     /// `trace_id`: 32 hex characters; dashes (UUID form) are ignored.
     pub async fn trace(&self, trace_id: &str, q: &TraceGetQuery) -> Result<Trace> {
         let id = trace_id.replace('-', "");
@@ -153,6 +173,11 @@ impl Client {
     pub async fn logs(&self, q: &LogQuery) -> Result<Vec<LogRecord>> {
         self.get("/api/v1/logs", q).await
     }
+    /// [`Client::logs`] and the cursor of the next page (`None` on the last
+    /// page); pass it back as `q.cursor`.
+    pub async fn logs_page(&self, q: &LogQuery) -> Result<(Vec<LogRecord>, Option<String>)> {
+        Self::send_page(self.req(reqwest::Method::GET, "/api/v1/logs").query(q)).await
+    }
     pub async fn log_series(&self, q: &LogSeriesQuery) -> Result<LogSeries> {
         self.get("/api/v1/logs/series", q).await
     }
@@ -161,6 +186,12 @@ impl Client {
     }
     pub async fn metric_query(&self, q: &MetricQuery) -> Result<MetricQueryResult> {
         self.get("/api/v1/metrics/query", q).await
+    }
+    pub async fn attributes(&self, q: &AttributeQuery) -> Result<AttributeStats> {
+        self.get("/api/v1/attributes", q).await
+    }
+    pub async fn schema(&self) -> Result<Schema> {
+        self.get("/api/v1/schema", &()).await
     }
     pub async fn sql(&self, query: &str, limit: Option<u32>) -> Result<SqlResponse> {
         let body = SqlRequest { query: query.to_string(), limit };

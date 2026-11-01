@@ -3,6 +3,7 @@
 pub mod convert;
 pub mod grpc;
 pub mod http;
+pub mod json;
 
 use std::sync::{Arc, OnceLock};
 
@@ -196,7 +197,8 @@ impl Ingest {
         // can expand a lot. Refuse it before allocating.
         let estimate = estimate_expanded_bytes(&req);
         if estimate > self.buffer.max_bytes() {
-            self.stats.record_request(signal, 0, 0);
+            // Items are not counted yet: refusing before converting is the point.
+            self.stats.record_request(signal, 0, 0, 0);
             return Err(IngestError::TooLarge(format!(
                 "request would expand to about {estimate} bytes in memory, more than \
                  ingest.max_buffer_bytes ({}); send smaller batches or fewer resource attributes",
@@ -213,13 +215,19 @@ impl Ingest {
         let kept = hook.map(|_| req);
         let (accepted, rejected) = (c.accepted, c.rejected);
         if let Err(e) = self.buffer.push(c.batches) {
-            self.stats.record_request(signal, 0, accepted + rejected);
+            let items = accepted + rejected;
             return Err(match e {
-                Backpressure::Full { .. } => IngestError::Backpressure(e.to_string()),
-                Backpressure::TooLarge { .. } => IngestError::TooLarge(e.to_string()),
+                Backpressure::Full { .. } => {
+                    self.stats.record_request(signal, 0, items, 0);
+                    IngestError::Backpressure(e.to_string())
+                }
+                Backpressure::TooLarge { .. } => {
+                    self.stats.record_request(signal, 0, 0, items);
+                    IngestError::TooLarge(e.to_string())
+                }
             });
         }
-        self.stats.record_request(signal, accepted, rejected);
+        self.stats.record_request(signal, accepted, 0, rejected);
         // Only buffered requests: a rejected one comes back as a retry.
         if let (Some(h), Some(req)) = (hook, &kept) {
             match req {
@@ -295,5 +303,32 @@ mod tests {
         assert!(full.hook.set(count.clone()).is_ok());
         assert!(full.handle_blocking(Request::Traces(one_span())).is_err());
         assert_eq!(seen(), 1);
+    }
+
+    /// Back-pressure and invalid items are counted apart (otel issue 0006).
+    #[test]
+    fn throttled_and_invalid_items_are_counted_apart() {
+        let stats = Arc::new(Stats::default());
+        let tokens = Tokens::new([""], mallard_common::auth::AuthPolicy::OpenIfEmpty);
+        let buffer = Arc::new(WriteBuffer::new(1 << 20, 1000, stats.clone()));
+        let ingest = Ingest::new(buffer, stats.clone(), tokens.clone(), 1 << 20, 1 << 20);
+        let mut req = one_span();
+        let mut bad = req.resource_spans[0].scope_spans[0].spans[0].clone();
+        bad.trace_id = vec![1, 2, 3];
+        req.resource_spans[0].scope_spans[0].spans.push(bad);
+        ingest.handle_blocking(Request::Traces(req)).unwrap();
+        // Fill a small buffer until it pushes back.
+        let small = Arc::new(WriteBuffer::new(1 << 20, u64::MAX, stats.clone()));
+        let full = Ingest::new(small, stats.clone(), tokens, 1 << 20, 1 << 20);
+        let mut ok = 0;
+        let err = loop {
+            match full.handle_blocking(Request::Traces(one_span())) {
+                Ok(_) => ok += 1,
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(err, IngestError::Backpressure(_)), "{err}");
+        let s = &stats.ingest(0).signals[0];
+        assert_eq!((s.requests, s.accepted, s.throttled, s.invalid), (ok + 2, ok + 1, 1, 1));
     }
 }

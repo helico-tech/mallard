@@ -142,6 +142,10 @@ string_enum! {
 /// Error body returned with every non-2xx response (shared with the Sentry API).
 pub use mallard_common::ApiError;
 
+/// Response header of `GET /api/v1/traces` and `GET /api/v1/logs` with the
+/// cursor for the next page (as `cursor=`); missing on the last page.
+pub const NEXT_CURSOR_HEADER: &str = "x-next-cursor";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Health {
     /// `ok` when the server is up.
@@ -218,8 +222,8 @@ pub struct IngestStats {
     pub max_buffer_bytes: u64,
     pub flushes: u64,
     pub flush_errors: u64,
-    /// Rows dropped because they could not be written while other data
-    /// could (details in the server log).
+    /// Rows dropped because their table refused them with a permanent
+    /// error, e.g. a column changed by hand (details in the server log).
     #[serde(default)]
     pub dropped_rows: u64,
     pub last_flush: Option<FlushInfo>,
@@ -232,8 +236,15 @@ pub struct SignalIngestStats {
     pub requests: u64,
     /// Spans, log records or metric data points accepted.
     pub accepted: u64,
-    /// Items refused because of back-pressure or invalid payloads.
-    pub rejected: u64,
+    /// Items refused because the write buffer was full (HTTP 429 / gRPC
+    /// UNAVAILABLE). Exporters retry them, so they usually arrive later.
+    #[serde(default)]
+    pub throttled: u64,
+    /// Items refused for good: invalid (e.g. a span without a valid trace
+    /// or span id, reported as OTLP partial success) or in a request too
+    /// large for the buffer.
+    #[serde(default)]
+    pub invalid: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -395,6 +406,9 @@ pub struct TraceQuery {
     pub attributes: Option<String>,
     /// Max traces returned (default 50, max 1000).
     pub limit: Option<u32>,
+    /// Continue after the last page: the `x-next-cursor` header of the
+    /// previous response (same filters and window).
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -490,6 +504,9 @@ pub struct LogQuery {
     pub limit: Option<u32>,
     /// `desc` (newest first, default) or `asc`.
     pub order: Option<LogOrder>,
+    /// Continue after the last page: the `x-next-cursor` header of the
+    /// previous response (same filters, window and order).
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -621,6 +638,79 @@ pub struct MetricPoint {
 }
 
 // ---------------------------------------------------------------------------
+// Attributes and schema (what to filter on, what to query)
+// ---------------------------------------------------------------------------
+
+string_enum! {
+    /// Which data `GET /api/v1/attributes` looks at.
+    AttributeSignal: "signal" {
+        Spans = "spans",
+        Logs = "logs",
+        Metrics = "metrics",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct AttributeQuery {
+    /// `spans`, `logs` or `metrics`.
+    pub signal: AttributeSignal,
+    /// Start of the window (inclusive, RFC 3339).
+    pub from: Option<DateTime<Utc>>,
+    /// End of the window (exclusive, RFC 3339). Defaults to now.
+    pub to: Option<DateTime<Utc>>,
+    /// Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set.
+    pub since: Option<String>,
+    pub service: Option<String>,
+    /// Only this metric (signal `metrics` only).
+    pub metric: Option<String>,
+    /// Top values of this key instead of the keys.
+    pub key: Option<String>,
+    /// Max keys or values returned (default 50, max 1000).
+    pub limit: Option<u32>,
+}
+
+/// Attribute keys (or values of one key) with how many sampled rows have them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AttributeStats {
+    /// Matching rows in the window.
+    pub total_rows: u64,
+    /// Rows counted: a random sample of at most 10,000 of the matching rows.
+    pub sampled_rows: u64,
+    /// Most frequent first.
+    pub items: Vec<AttributeCount>,
+}
+
+/// One attribute key, or one value of the key asked for. Keys of span, log or
+/// point attributes and of resource attributes are counted together, as the
+/// `attributes` filters match both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AttributeCount {
+    pub key: String,
+    /// The value, when a `key` was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Sampled rows with this key (or value).
+    pub count: u64,
+}
+
+/// The tables `POST /api/v1/sql` can query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Schema {
+    pub tables: Vec<SchemaTable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SchemaTable {
+    /// Table name; also reachable as `lake.<schema>.<name>`.
+    pub name: String,
+    /// Time column the table is partitioned and pruned by; filter on it.
+    pub time_column: String,
+    /// Columns in storage order.
+    pub columns: Vec<SqlColumn>,
+}
+
+// ---------------------------------------------------------------------------
 // SQL
 // ---------------------------------------------------------------------------
 
@@ -667,6 +757,7 @@ macro_rules! has_window {
 }
 
 has_window!(
+    AttributeQuery,
     ServiceQuery,
     OperationQuery,
     SpanSeriesQuery,

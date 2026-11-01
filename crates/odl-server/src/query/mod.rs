@@ -2,6 +2,7 @@
 //! behind the HTTP API. All user input reaches SQL as bound parameters; only
 //! fixed identifiers are formatted into SQL text.
 
+pub mod attributes;
 pub mod logs;
 pub mod metrics;
 pub mod sql;
@@ -208,6 +209,46 @@ pub fn parse_trace_id(s: &str) -> QResult<String> {
     Ok(s)
 }
 
+/// Validate a 16-char hex span id; returns it as the stored UBIGINT.
+pub fn parse_span_id(s: &str) -> QResult<u64> {
+    let s = s.trim();
+    if s.len() != 16 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(bad("span id must be 16 hex characters"));
+    }
+    u64::from_str_radix(s, 16).map_err(|_| bad("span id must be 16 hex characters"))
+}
+
+/// A paging cursor: `"<time in epoch micros>:<id>"`, where the id breaks
+/// ties between rows of the same time (a trace id, a row id). Clients treat
+/// it as opaque.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor {
+    pub us: i64,
+    pub id: String,
+}
+
+impl Cursor {
+    pub fn parse(s: &str) -> QResult<Cursor> {
+        let invalid = || bad("invalid cursor; pass the x-next-cursor header of the previous page");
+        let (us, id) = s.split_once(':').ok_or_else(invalid)?;
+        let us = us.parse().map_err(|_| invalid())?;
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(invalid());
+        }
+        Ok(Cursor { us, id: id.to_ascii_lowercase() })
+    }
+
+    pub fn time(&self) -> Value {
+        Value::Timestamp(duckdb::types::TimeUnit::Microsecond, self.us)
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.us, self.id)
+    }
+}
+
 /// SQL expression: UUID column -> 32 hex chars.
 pub fn trace_hex(col: &str) -> String {
     format!("replace(CAST({col} AS VARCHAR), '-', '')")
@@ -285,5 +326,23 @@ mod tests {
     fn trace_ids() {
         assert!(parse_trace_id("0AF7651916CD43DD8448EB211C80319C").is_ok());
         assert!(parse_trace_id("xyz").is_err());
+    }
+
+    #[test]
+    fn span_ids() {
+        assert_eq!(parse_span_id("ff00000000000002").unwrap(), 0xff00_0000_0000_0002);
+        assert!(parse_span_id("ff0000000000002").is_err(), "15 chars");
+        assert!(parse_span_id("+f00000000000002").is_err(), "sign");
+        assert!(parse_span_id("zz00000000000002").is_err());
+    }
+
+    #[test]
+    fn cursors() {
+        let c = Cursor::parse("1730000000000000:0AF7").unwrap();
+        assert_eq!(c, Cursor { us: 1_730_000_000_000_000, id: "0af7".into() });
+        assert_eq!(Cursor::parse(&c.to_string()).unwrap(), c);
+        for bad in ["", "1", "x:ab", "1:", "1:zz", "1:a'b"] {
+            assert!(Cursor::parse(bad).is_err(), "{bad}");
+        }
     }
 }
