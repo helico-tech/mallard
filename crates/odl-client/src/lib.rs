@@ -476,6 +476,6 @@ mod tests {
         assert_eq!(poll_window(Duration::from_secs(48 * 3600), lb), (MAX_GAP, true));
         // A look-back longer than the cap still fits.
         let long = Duration::from_secs(3600);
-        assert_eq!(poll_window(Duration::ZERO, long).1, false);
+        assert!(!poll_window(Duration::ZERO, long).1);
     }
 }

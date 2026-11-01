@@ -104,7 +104,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Telemetry { cmd } => {
             let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
-            odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await
+            match odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await {
+                // `mallard telemetry logs | head`: the reader is gone, not a failure.
+                Err(e) if is_broken_pipe(&e) => Ok(()),
+                r => r,
+            }
         }
         Cmd::Trace { trace_id, since } => {
             let t = client.trace_overview_since(&trace_id, since.as_deref()).await?;
@@ -153,6 +157,10 @@ async fn status(c: &Client, json: bool) -> Result<()> {
         Err(e) => println!("otel     ERROR {}", error_chain(&e)),
     }
     Ok(())
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
 }
 
 /// An error and its causes on one line (`a: b: c`).

@@ -24,12 +24,21 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
     let result = async {
-        let ctx = Ctx { client: Client::new(&cli.url, cli.token.clone())?, output: cli.output };
+        let ctx = Ctx { client: Client::new(&cli.url, cli.token)?, output: cli.output };
         run(cli.cmd, &ctx).await
     }
     .await;
-    if let Err(e) = result {
-        eprintln!("{} {e:#}", odl_cli::fmt::paint_err("error:"));
-        std::process::exit(1);
+    match result {
+        Ok(()) => {}
+        // `odl logs | head`: the reader is gone, which is not a failure.
+        Err(e) if is_broken_pipe(&e) => {}
+        Err(e) => {
+            eprintln!("{} {}", odl_cli::paint_err("error:"), odl_cli::clean(&format!("{e:#}")));
+            std::process::exit(1);
+        }
     }
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
 }

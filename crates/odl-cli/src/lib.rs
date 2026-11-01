@@ -3,17 +3,12 @@
 //! - [`Cmd`] + [`run`]: mount the commands in another CLI.
 //! - [`tui::Embedded`]: the TUI as a component without terminal setup.
 
-/// Print a line to stdout: colors are stripped when stdout is not a
-/// terminal or `NO_COLOR` is set, and a closed pipe (`odl logs | head`)
-/// ends the process quietly instead of panicking.
-macro_rules! outln {
-    ($($arg:tt)*) => {
-        $crate::fmt::emit(&format!($($arg)*))
-    };
-}
-
-pub mod fmt;
+mod fmt;
 pub mod tui;
+
+/// For the `odl` binary.
+#[doc(hidden)]
+pub use fmt::{clean, paint_err};
 
 use std::time::Duration;
 
@@ -21,7 +16,7 @@ use anyhow::{Result, bail};
 use clap::{Subcommand, ValueEnum};
 use odl_client::{Client, LogTail, api::*};
 
-use crate::fmt::*;
+use crate::fmt::{emit, json_safe, log_line, *};
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Output {
@@ -194,8 +189,12 @@ fn severity(level: &str) -> Result<u8> {
     })
 }
 
-fn json<T: serde::Serialize>(v: &T) -> Result<()> {
-    outln!("{}", serde_json::to_string_pretty(v)?);
+/// Print `v` as pretty JSON or as the text `text` makes of it.
+fn print<T: serde::Serialize + ?Sized>(out: Output, v: &T, text: impl FnOnce(&T) -> String) -> Result<()> {
+    match out {
+        Output::Json => emit(&json_safe(&serde_json::to_string_pretty(v)?))?,
+        Output::Table => emit(&text(v))?,
+    }
     Ok(())
 }
 
@@ -206,47 +205,31 @@ pub struct Ctx {
 }
 
 /// Run one command.
+///
+/// Output errors are returned too: a closed pipe (`odl logs | head`) is an
+/// [`std::io::Error`] of kind `BrokenPipe` in the chain, which a binary
+/// usually treats as success.
 pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
     let c = ctx.client.clone();
     let out = ctx.output;
     match cmd {
         Cmd::Health => {
             let h = c.health().await?;
-            if out == Output::Json {
-                json(&h)
-            } else {
-                outln!("{} {}", h.status, h.version);
-                Ok(())
-            }
+            print(out, &h, |h| format!("{} {}", clean(&h.status), clean(&h.version)))
         }
         Cmd::Status => {
             let s = c.stats().await?;
-            if out == Output::Json {
-                json(&s)
-            } else {
-                print_stats(&s, c.base_url());
-                Ok(())
-            }
+            print(out, &s, |s| stats_text(s, c.base_url()))
         }
         Cmd::Services { w, all_spans } => {
             let (from, to, since) = w.parts();
             let v = c.services(&ServiceQuery { from, to, since, entry_only: Some(!all_spans) }).await?;
-            if out == Output::Json {
-                json(&v)
-            } else {
-                print_services(&v);
-                Ok(())
-            }
+            print(out, &v, |v| services_text(v))
         }
         Cmd::Ops { w, service, all_spans } => {
             let (from, to, since) = w.parts();
             let v = c.operations(&OperationQuery { from, to, since, service, entry_only: Some(!all_spans) }).await?;
-            if out == Output::Json {
-                json(&v)
-            } else {
-                print_operations(&v);
-                Ok(())
-            }
+            print(out, &v, |v| operations_text(v))
         }
         Cmd::Traces { w, service, operation, errors, min_ms, max_ms, attr, limit } => {
             let (from, to, since) = w.parts();
@@ -264,12 +247,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     limit: Some(limit),
                 })
                 .await?;
-            if out == Output::Json {
-                json(&v)
-            } else {
-                print_traces(&v);
-                Ok(())
-            }
+            print(out, &v, |v| traces_text(v))
         }
         Cmd::Trace { trace_id, since, attributes } => {
             let get = |since: String| {
@@ -287,12 +265,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 }
                 r => r?,
             };
-            if out == Output::Json {
-                json(&t)
-            } else {
-                print_trace(&t, attributes);
-                Ok(())
-            }
+            print(out, &t, |t| trace_lines(t, attributes).join("\n"))
         }
         Cmd::Logs { w, service, level, query, trace, attr, limit, follow } => {
             let min_severity = level.as_deref().map(severity).transpose()?;
@@ -312,12 +285,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             if !follow {
                 let mut v = c.logs(&q).await?;
                 v.reverse(); // print oldest first, like a log file
-                return if out == Output::Json {
-                    json(&v)
-                } else {
-                    v.iter().for_each(print_log);
-                    Ok(())
-                };
+                return print(out, &v, |v| v.iter().map(log_line).collect::<Vec<_>>().join("\n"));
             }
             // Start where --from/--since say; the first poll shows the newest
             // `--limit` records of that window, like `tail -n N -f`.
@@ -335,14 +303,13 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     res = tail.poll() => match res {
                         Ok(v) => {
                             for r in &v {
-                                if out == Output::Json {
-                                    outln!("{}", serde_json::to_string(r)?)
-                                } else {
-                                    print_log(r)
+                                match out {
+                                    Output::Json => emit(&json_safe(&serde_json::to_string(r)?))?,
+                                    Output::Table => emit(&log_line(r))?,
                                 }
                             }
                         }
-                        Err(e) => eprintln!("{} {:#}", paint_err("poll failed:"), anyhow::Error::new(e)),
+                        Err(e) => eprintln!("{} {}", paint_err("poll failed:"), clean(&format!("{:#}", anyhow::Error::new(e)))),
                     },
                     _ = &mut ctrl_c => return Ok(()),
                 }
@@ -355,12 +322,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
         Cmd::Metrics { w, service, query } => {
             let (from, to, since) = w.parts();
             let v = c.metrics(&MetricListQuery { from, to, since, service, q: query }).await?;
-            if out == Output::Json {
-                json(&v)
-            } else {
-                print_metrics(&v);
-                Ok(())
-            }
+            print(out, &v, |v| metrics_text(v))
         }
         Cmd::Metric { name, w, service, agg, by, attr, step } => {
             let (from, to, since) = w.parts();
@@ -377,21 +339,11 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                     step,
                 })
                 .await?;
-            if out == Output::Json {
-                json(&r)
-            } else {
-                print_metric(&r);
-                Ok(())
-            }
+            print(out, &r, metric_text)
         }
         Cmd::Sql { query, limit } => {
             let r = c.sql(&query, Some(limit)).await?;
-            if out == Output::Json {
-                json(&r)
-            } else {
-                print_sql(&r);
-                Ok(())
-            }
+            print(out, &r, sql_text)
         }
         Cmd::Tui { since } => tui::run_standalone(c, since).await,
     }
