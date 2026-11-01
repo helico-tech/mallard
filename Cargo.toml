@@ -14,6 +14,7 @@ rust-version = "1.90"
 sdl-server = { path = "../sentry-ducklake/crates/sdl-server" }
 sdl-client = { path = "../sentry-ducklake/crates/sdl-client" }
 sdl-types = { path = "../sentry-ducklake/crates/sdl-types" }
+sdl-cli = { path = "../sentry-ducklake/crates/sdl-cli" }
 odl-server = { path = "../otel-ducklake/crates/odl-server" }
 odl-api = { path = "../otel-ducklake/crates/odl-api" }
 odl-client = { path = "../otel-ducklake/crates/odl-client" }

@@ -57,15 +57,14 @@ COPY --from=build /out/obs-ducklake /out/obs /usr/local/bin/
 RUN obs-ducklake install-extensions --dir /opt/duckdb/extensions \
  && chmod -R a+rX /opt/duckdb/extensions
 
-# /data is the working directory: the default DuckDB-file catalog, local
-# Parquet files and DuckDB spill files live here. Mount a volume on it.
+# /data is the working directory: with no config the DuckDB-file catalog and
+# Parquet files go to /data/data/, and DuckDB spills to /data/.tmp. Mount a
+# volume on it. Only image facts are set through env here (env overrides the
+# config file); storage and logging come from the config file.
 WORKDIR /data
 ENV OBS_DUCKDB__EXTENSION_DIRECTORY=/opt/duckdb/extensions \
     OBS_DUCKDB__AUTOINSTALL_EXTENSIONS=false \
     OBS_DUCKDB__TEMP_DIRECTORY=/data/.tmp \
-    OBS_STORAGE__CATALOG=/data/catalog.ducklake \
-    OBS_STORAGE__DATA_PATH=/data/lake/ \
-    OBS_SERVER__LOG_FORMAT=json \
     HOME=/data
 
 USER 10001:10001

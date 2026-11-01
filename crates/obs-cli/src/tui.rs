@@ -1,0 +1,232 @@
+//! `obs tui`: hosts the TUIs of both libraries as tabs (ADR 0002).
+//! F1 errors (sentry-ducklake), F2 telemetry (otel-ducklake). Jumps between
+//! them go by trace id.
+
+use std::io;
+use std::time::Duration;
+
+use anyhow::Result;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
+use futures::StreamExt;
+use obs_client::Client;
+use ratatui::{
+    Frame,
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+};
+
+/// What a hosted tab asked for.
+enum Ask {
+    Nothing,
+    Quit,
+    /// Show this trace in the telemetry tab.
+    Trace(String),
+    /// Show this trace's Sentry errors in the errors tab.
+    Errors(String),
+}
+
+/// One library TUI, as the host sees it.
+trait Pane {
+    fn title(&self) -> &'static str;
+    fn draw(&mut self, f: &mut Frame, area: Rect);
+    fn handle(&mut self, ev: &Event) -> Option<Ask>; // None = ignored
+    fn tick(&mut self);
+    fn open(&mut self, trace_id: &str);
+}
+
+struct Errors(sdl_cli::Embedded);
+
+impl Pane for Errors {
+    fn title(&self) -> &'static str {
+        "Errors"
+    }
+    fn draw(&mut self, f: &mut Frame, area: Rect) {
+        self.0.draw(f, area)
+    }
+    fn handle(&mut self, ev: &Event) -> Option<Ask> {
+        match self.0.handle_event(ev) {
+            sdl_cli::Outcome::Consumed => Some(Ask::Nothing),
+            sdl_cli::Outcome::Ignored => None,
+            sdl_cli::Outcome::Quit => Some(Ask::Quit),
+            sdl_cli::Outcome::OpenTrace(t) => Some(Ask::Trace(t)),
+        }
+    }
+    fn tick(&mut self) {
+        self.0.tick()
+    }
+    fn open(&mut self, trace_id: &str) {
+        self.0.show_trace_errors(trace_id)
+    }
+}
+
+struct Host {
+    tabs: Vec<Box<dyn Pane>>,
+    active: usize,
+    base_url: String,
+}
+
+const ERRORS: usize = 0;
+const TELEMETRY: usize = 1;
+
+impl Host {
+    fn draw(&mut self, f: &mut Frame) {
+        let [bar, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(f.area());
+        let mut spans = vec![Span::styled(" obs ", Style::new().fg(Color::Black).bg(Color::Indexed(141)))];
+        for (i, t) in self.tabs.iter().enumerate() {
+            let label = format!(" F{} {} ", i + 1, t.title());
+            let style = if i == self.active {
+                Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::new().fg(Color::DarkGray)
+            };
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(label, style));
+        }
+        spans.push(Span::styled(format!("   {}", self.base_url), Style::new().fg(Color::DarkGray)));
+        f.render_widget(Paragraph::new(Line::from(spans)), bar);
+        self.tabs[self.active].draw(f, body);
+    }
+
+    /// Returns false to quit.
+    fn on_event(&mut self, ev: &Event) -> bool {
+        if let Event::Key(k) = ev
+            && k.kind != KeyEventKind::Release
+            && let KeyCode::F(n) = k.code
+            && (1..=self.tabs.len() as u8).contains(&n)
+        {
+            self.active = n as usize - 1;
+            return true;
+        }
+        match self.tabs[self.active].handle(ev) {
+            None | Some(Ask::Nothing) => true,
+            Some(Ask::Quit) => false,
+            Some(Ask::Trace(t)) => self.jump(TELEMETRY, &t),
+            Some(Ask::Errors(t)) => self.jump(ERRORS, &t),
+        }
+    }
+
+    fn jump(&mut self, tab: usize, trace_id: &str) -> bool {
+        if let Some(p) = self.tabs.get_mut(tab) {
+            p.open(trace_id);
+            self.active = tab;
+        }
+        true
+    }
+}
+
+pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
+    // Fail fast with a clear message instead of an empty screen.
+    client.sentry.info().await.map_err(|e| anyhow::anyhow!("cannot reach {}: {e}", client.base_url()))?;
+    let tabs: Vec<Box<dyn Pane>> = vec![Box::new(Errors(sdl_cli::Embedded::new(client.sentry.clone(), project)))];
+    let mut host = Host { tabs, active: ERRORS, base_url: client.base_url().to_string() };
+
+    let mut term = ratatui::init();
+    let result = event_loop(&mut term, &mut host).await;
+    ratatui::restore();
+    result
+}
+
+async fn event_loop(term: &mut ratatui::DefaultTerminal, host: &mut Host) -> Result<()> {
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        term.draw(|f| host.draw(f))?;
+        tokio::select! {
+            ev = events.next() => match ev {
+                Some(Ok(ev)) => if !host.on_event(&ev) { return Ok(()) },
+                Some(Err(e)) => return Err(io::Error::from(e).into()),
+                None => return Ok(()),
+            },
+            _ = tick.tick() => for t in host.tabs.iter_mut() { t.tick() },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    struct Fake {
+        opened: Vec<String>,
+        title: &'static str,
+        ask_on_x: fn() -> Ask,
+    }
+    impl Pane for Fake {
+        fn title(&self) -> &'static str {
+            self.title
+        }
+        fn draw(&mut self, f: &mut Frame, area: Rect) {
+            f.render_widget(Paragraph::new(format!("{} body", self.title)), area)
+        }
+        fn handle(&mut self, ev: &Event) -> Option<Ask> {
+            match ev {
+                Event::Key(k) if k.code == KeyCode::Char('x') => Some((self.ask_on_x)()),
+                Event::Key(k) if k.code == KeyCode::Char('q') => Some(Ask::Quit),
+                _ => None,
+            }
+        }
+        fn tick(&mut self) {}
+        fn open(&mut self, trace_id: &str) {
+            self.opened.push(trace_id.into())
+        }
+    }
+
+    fn key(c: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
+
+    fn host() -> Host {
+        Host {
+            tabs: vec![
+                Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Trace("t1".into()) }),
+                Box::new(Fake { opened: vec![], title: "Telemetry", ask_on_x: || Ask::Errors("t2".into()) }),
+            ],
+            active: ERRORS,
+            base_url: "http://x".into(),
+        }
+    }
+
+    fn screen(h: &mut Host) -> String {
+        let mut t = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        t.draw(|f| h.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn function_keys_switch_tabs() {
+        let mut h = host();
+        assert!(screen(&mut h).contains("Errors body"));
+        assert!(h.on_event(&key(KeyCode::F(2))));
+        assert!(screen(&mut h).contains("Telemetry body"));
+        assert!(h.on_event(&key(KeyCode::F(9))), "unknown F-key is passed on, not a crash");
+        assert_eq!(h.active, TELEMETRY);
+    }
+
+    #[test]
+    fn jumps_carry_the_trace_id() {
+        let mut h = host();
+        h.on_event(&key(KeyCode::Char('x')));
+        assert_eq!(h.active, TELEMETRY);
+        h.on_event(&key(KeyCode::Char('x')));
+        assert_eq!(h.active, ERRORS);
+        assert!(!h.on_event(&key(KeyCode::Char('q'))), "q quits");
+    }
+
+    #[tokio::test]
+    async fn sentry_pane_draws_inside_its_area() {
+        let c = Client::new("http://127.0.0.1:9", None).unwrap();
+        let mut h = Host {
+            tabs: vec![Box::new(Errors(sdl_cli::Embedded::new(c.sentry.clone(), None)))],
+            active: ERRORS,
+            base_url: c.base_url().into(),
+        };
+        h.tabs[0].tick();
+        let s = screen(&mut h);
+        assert!(s.starts_with(" obs "), "top bar stays: {s:?}");
+    }
+}

@@ -1,6 +1,7 @@
 //! `obs`: command line for obs-ducklake.
 
 mod trace;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -34,6 +35,20 @@ enum Cmd {
         #[arg(short, long)]
         since: Option<String>,
     },
+    /// Terminal UI: F1 errors, F2 telemetry.
+    Tui {
+        /// Sentry project id or slug; optional when there is only one project.
+        #[arg(short, long, env = "OBS_PROJECT")]
+        project: Option<String>,
+    },
+    /// Errors: projects, issues, events, sourcemaps (sentry-ducklake commands).
+    Sentry {
+        /// Project id or slug; optional when there is only one project.
+        #[arg(short, long, env = "OBS_PROJECT")]
+        project: Option<String>,
+        #[command(subcommand)]
+        cmd: sdl_cli::Command,
+    },
     /// Traces, logs and metrics (otel-ducklake commands).
     Otel {
         #[command(subcommand)]
@@ -47,6 +62,10 @@ async fn main() -> Result<()> {
     let client = Client::new(&cli.url, cli.token.as_deref())?;
     match cli.cmd {
         Cmd::Status => status(&client, cli.json).await,
+        Cmd::Tui { project } => tui::run(&client, project).await,
+        Cmd::Sentry { project, cmd } => {
+            sdl_cli::run(cmd, &sdl_cli::Ctx { client: client.sentry.clone(), project, json: cli.json }).await
+        }
         Cmd::Otel { cmd } => {
             let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
             odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await
