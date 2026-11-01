@@ -35,7 +35,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::api::service_slug;
+use crate::api::{app_projects, service_slug};
 use crate::config::BridgeConfig;
 use exception::OtelException;
 
@@ -471,18 +471,30 @@ impl Ctx {
         }
     }
 
-    /// The project whose slug is the service name; else the default
-    /// project; else a new project for the service. Missing ones are created.
+    /// The project of the service's app (the same choice as `/api/v1/apps`, so a project
+    /// `my_app` takes the service `my_app`); else the default project; else a new project
+    /// for the service. Missing ones are created.
     async fn project(&self, e: &OtelException) -> Option<u32> {
-        let slug = service_slug(&e.service);
-        if let Some(id) = self.sentry.project_by_slug(&slug) {
+        let service = service_slug(&e.service);
+        let joined = |projects: Vec<(u32, String)>| {
+            app_projects(projects.iter().map(|(id, slug)| (*id, slug.as_str()))).get(&service).map(|(id, _)| *id)
+        };
+        if let Some(id) = joined(self.sentry.project_slugs()) {
             return Some(id);
         }
         let (name, slug) = match self.default_project.as_str() {
-            "" => (e.service.as_str(), slug),
+            "" => (e.service.as_str(), service.clone()),
             p => (p, p.to_string()),
         };
         if let Some(id) = self.sentry.project_by_slug(&slug) {
+            return Some(id);
+        }
+        // About to create one, and creating only sees the exact slug: another process may
+        // just have made the service's project under a slug only the rule matches. If this
+        // read fails, the create most likely fails too.
+        if let Ok(projects) = self.sentry.projects().await
+            && let Some(id) = joined(projects.into_iter().map(|p| (p.id, p.slug)).collect())
+        {
             return Some(id);
         }
         match self.sentry.create_project(name, &slug, Some(e.platform())).await {

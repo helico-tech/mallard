@@ -3,7 +3,11 @@
 //! `Server` methods and knows nothing of their tables. A side that fails does not
 //! fail the answer, unless it may have changed it.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{Json, Router, extract::State, http::StatusCode, middleware};
 use chrono::TimeDelta;
@@ -61,8 +65,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 }
 
 /// A valid project slug for a service name (`unknown_service:node` →
-/// `unknown-service-node`). The one slug rule: a project and a service whose
-/// slugs are equal are one app, and the bridge sends exceptions there.
+/// `unknown-service-node`). The one slug rule: a project and a service with the
+/// same slug under it are one app, and the bridge sends exceptions there. Project
+/// slugs go through it too, see [`app_projects`].
 pub(crate) fn service_slug(service: &str) -> String {
     let mut s = mallard_sentry_api::slugify(service);
     s.truncate(64);
@@ -76,14 +81,40 @@ pub(crate) fn service_slug(service: &str) -> String {
     }
 }
 
-/// One list from `(id, slug, name)` of the projects and the service names.
+/// The project that takes the services of each [`service_slug`], from `(id, slug)`.
+/// A project may have a slug the rule never gives (`my_app`), and it still joins the
+/// service `my_app`. If several projects share a slug under the rule, the one whose slug
+/// is exactly that wins, and then the oldest. The others stay apps of their own.
+pub(crate) fn app_projects<'a>(projects: impl IntoIterator<Item = (u32, &'a str)>) -> HashMap<String, (u32, &'a str)> {
+    let mut found: HashMap<String, (u32, &str)> = HashMap::new();
+    for (id, slug) in projects {
+        let key = service_slug(slug);
+        let rank = |(id, slug): (u32, &str)| (slug != key, id);
+        match found.get_mut(&key) {
+            Some(best) if rank((id, slug)) < rank(*best) => *best = (id, slug),
+            Some(_) => {}
+            None => {
+                found.insert(key, (id, slug));
+            }
+        }
+    }
+    found
+}
+
+/// One list from `(id, slug, name)` of the projects and the service names. An app with a
+/// project has the project's slug, because clients use it as the project's name.
 fn merge_apps(projects: Vec<(u32, String, String)>, services: Vec<String>) -> Vec<App> {
+    let joins: HashMap<String, String> = app_projects(projects.iter().map(|(id, slug, _)| (*id, slug.as_str())))
+        .into_iter()
+        .map(|(key, (_, slug))| (key, slug.to_string()))
+        .collect();
     let mut apps: BTreeMap<String, App> = projects
         .into_iter()
         .map(|(id, slug, name)| (slug.clone(), App { slug, name, project: Some(id), services: vec![] }))
         .collect();
     for service in services {
-        let slug = service_slug(&service);
+        let key = service_slug(&service);
+        let slug = joins.get(&key).cloned().unwrap_or(key);
         let app = apps.entry(slug.clone()).or_insert_with(|| App {
             slug,
             name: service.clone(),
@@ -304,6 +335,41 @@ mod tests {
         assert_eq!(apps[0].services, ["Checkout API", "checkout-api"], "two names, one app");
         assert!(apps[1].services.is_empty(), "a project without telemetry is an app");
         assert_eq!((apps[2].project, apps[2].name.as_str()), (None, "worker"), "so is a service without a project");
+    }
+
+    /// `check_slug` allows `_` and `--`, which the rule never gives (issue 0142).
+    #[test]
+    fn a_project_slug_the_rule_never_gives_still_joins_its_service() {
+        let apps = merge_apps(
+            vec![(1, "my_app".into(), "Mine".into()), (2, "a--b".into(), "Ab".into())],
+            vec!["my_app".into(), "My App".into(), "my-app".into(), "a-b".into(), "other_one".into()],
+        );
+        let slugs: Vec<&str> = apps.iter().map(|a| a.slug.as_str()).collect();
+        assert_eq!(slugs, ["a--b", "my_app", "other-one"], "the project's own slug, which clients send back");
+        assert_eq!((apps[0].project, apps[0].services.as_slice()), (Some(2), ["a-b".to_string()].as_slice()));
+        assert_eq!(apps[1].project, Some(1));
+        assert_eq!(apps[1].services, ["my_app", "My App", "my-app"]);
+        assert_eq!(apps[2].project, None, "without a project the slug is still the rule's");
+    }
+
+    /// A server that already split `my_app` has both projects. No project is merged or
+    /// renamed, and the services stay where they were.
+    #[test]
+    fn projects_with_one_slug_stay_two_apps() {
+        let apps =
+            merge_apps(vec![(1, "my_app".into(), "a".into()), (2, "my-app".into(), "b".into())], vec!["my_app".into()]);
+        assert_eq!(apps.len(), 2);
+        assert_eq!((apps[0].slug.as_str(), apps[0].services.len()), ("my-app", 1), "the exact slug wins");
+        assert_eq!((apps[1].slug.as_str(), apps[1].services.len()), ("my_app", 0));
+    }
+
+    #[test]
+    fn the_oldest_project_wins_when_none_has_the_exact_slug() {
+        for order in [[(7, "a__b"), (3, "a_b")], [(3, "a_b"), (7, "a__b")]] {
+            assert_eq!(app_projects(order)["a-b"], (3, "a_b"), "{order:?}");
+        }
+        assert_eq!(app_projects([(3, "a_b"), (7, "a-b")])["a-b"], (7, "a-b"));
+        assert_eq!(app_projects([(7, "a-b"), (3, "a_b")])["a-b"], (7, "a-b"));
     }
 
     #[test]

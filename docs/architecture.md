@@ -78,7 +78,8 @@
   `/otel/api/v1/logs?trace_id=`).
 - The server's own API is what every client would otherwise have to work out
   itself: which project and services are one app (ADR 0027, `service_slug` is the one
-  slug rule, also the bridge's), and what an id points at. Document:
+  slug rule, also the bridge's, and project slugs go through it too, so `my_app` joins the
+  service `my_app`; with several such projects `app_projects` picks one), and what an id points at. Document:
   `docs/openapi.json`. It calls the libraries' `Server` methods (`service_names`,
   `projects`, `find_event`, …), which run on each side's read path with its limits,
   so it never depends on their table layout. A side that fails adds to `warnings`;

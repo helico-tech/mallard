@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -31,3 +31,13 @@ ADR 0027 says "the slug rule is the bridge's", so this stays as it is until deci
 Options: forbid `_` in new slugs (simple; existing ones stay split), or let a service
 whose exact name is a project slug join that project (one more rule, in `service_slug`'s
 caller and the bridge). I would forbid `_`.
+
+Fixed by joining on the rule on both sides, not by forbidding `_`: `service_slug` also runs on
+project slugs (`api::app_projects`), for `/api/v1/apps` and the bridge alike. `check_slug` did not
+change. An app with a project keeps the project's slug (`my_app`), because clients send it back as
+`-p`. Several projects with one slug under the rule: the exact slug wins, then the oldest.
+
+Existing data: nothing stored changes. A project `my_app` now joins its service on the next read. A
+server that already has both `my_app` and a bridge-made `my-app` keeps two projects; exceptions and
+services stay on `my-app`, and there is no merge. `--app my-app`, which used to find the service alone
+if no project `my-app` existed, now is exit 4 and `mallard apps` shows `my_app`.

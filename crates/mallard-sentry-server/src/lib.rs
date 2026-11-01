@@ -180,6 +180,11 @@ impl Server {
         self.state.db.caches.projects.read().expect("lock").values().find(|p| p.slug == slug).map(|p| p.id)
     }
 
+    /// The id and slug of every project this process knows. Reads no catalog; [`Self::projects`] does.
+    pub fn project_slugs(&self) -> Vec<(u32, String)> {
+        self.state.db.caches.projects().into_iter().map(|p| (p.id, p.slug)).collect()
+    }
+
     /// Create a project (same rules as `POST /v1/projects`) and return its
     /// id. When the slug is taken, the existing project's id.
     pub async fn create_project(&self, name: &str, slug: &str, platform: Option<&str>) -> Result<u32> {

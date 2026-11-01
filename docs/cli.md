@@ -87,6 +87,8 @@ with `--trace`), traces/logs/metrics 1h, `trace` and `find` 7d.
 `schema attrs`, `series spans|logs` take all its service names (ADR 0027, 0028). There is no
 `app=` in any filter.
 
+- An app with a project has that project's slug, also one like `my_app`: `_` and `-` count as
+  the same when a project and a service are joined, so the service `my_app` joins it.
 - It replaces `-p` and `-S`: giving one next to it is exit 2. `MALLARD_PROJECT` is only a
   default and gives way to the flag. An empty `--app ""` means no app.
 - Everywhere else it is exit 2, and so is `events list --trace`, which looks in all projects.
