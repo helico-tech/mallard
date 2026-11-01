@@ -11,3 +11,8 @@
 9. [issue 0124 no published image or chart](issues/0124-no-published-image-or-chart.md)
 10. [issue 0125 Azure sourcemaps ignore the connection string](issues/0125-azure-artifacts-ignore-connection-string.md)
 11. [issue 0126 move the deployment page out of docs/sentry](issues/0126-move-deployment-page-out-of-sentry.md)
+12. [0004/01 apps and find API](epics/0004-apps-and-search/01-apps-and-find-api.md)
+13. [0004/02 suggestions API](epics/0004-apps-and-search/02-suggestions-api.md)
+14. [0004/03 TUI and CLI](epics/0004-apps-and-search/03-tui-and-cli.md)
+15. [0004/04 web scope and search](epics/0004-apps-and-search/04-web-scope-and-search.md)
+16. [0004/05 web app home](epics/0004-apps-and-search/05-web-app-home.md)
