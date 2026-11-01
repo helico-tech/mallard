@@ -9,10 +9,12 @@
 //! ```
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use reqwest::header::CONTENT_TYPE;
 pub use sdl_types as types;
 use sdl_types::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -37,6 +39,13 @@ impl Error {
 /// Everything except RFC 3986 unreserved characters is encoded in a path
 /// segment (so `/`, `?`, `#`, `%` and spaces can't change the path).
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+
+/// Requests time out after this, except [`Client::maintenance`].
+const TIMEOUT: Duration = Duration::from_secs(30);
+/// Flush + compact + expire can take long on a large lake.
+const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Longest error body (in chars) kept as the message of [`Error::Api`].
+const MAX_ERROR_BODY: usize = 200;
 
 /// Encode one path segment. Empty, `.` and `..` segments are rejected:
 /// URL parsers resolve them (even percent-encoded) and the request would
@@ -72,7 +81,7 @@ impl Client {
         url::Url::parse(base_url).map_err(|e| Error::Url(e.to_string()))?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("sdl-client/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(TIMEOUT)
             .build()?;
         let token = (!token.is_empty()).then(|| token.to_string());
         Ok(Client { http, base: base_url.trim_end_matches('/').to_string(), token })
@@ -86,28 +95,41 @@ impl Client {
         format!("{}{path}", self.base)
     }
 
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.token {
+    /// Send with the token; a non-success status becomes [`Error::Api`].
+    async fn checked(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, Error> {
+        let req = match &self.token {
             Some(t) => req.bearer_auth(t),
             None => req,
-        }
-    }
-
-    async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> Result<T, Error> {
-        let resp = self.auth(req).send().await?;
+        };
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             return Err(Self::api_error(resp).await);
         }
-        Ok(resp.json().await?)
+        Ok(resp)
     }
 
-    /// `Error::Api` from a non-success response; the message is the
-    /// `ApiError.error` field when the body is one, else the raw body.
+    async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> Result<T, Error> {
+        Ok(self.checked(req).await?.json().await?)
+    }
+
+    /// `Error::Api` from a non-success response. The message is the
+    /// `ApiError.error` field when the body is one, else the start of a
+    /// plain-text body, else the status reason (so a proxy's HTML error
+    /// page becomes "Bad Gateway").
     async fn api_error(resp: reqwest::Response) -> Error {
-        let status = resp.status().as_u16();
+        let status = resp.status();
+        let plain = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("text/plain"));
         let text = resp.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<ApiError>(&text).map(|e| e.error).unwrap_or(text);
-        Error::Api { status, message }
+        let message = match serde_json::from_str::<ApiError>(&text) {
+            Ok(e) => e.error,
+            Err(_) if plain => shorten(text.trim(), MAX_ERROR_BODY),
+            Err(_) => status.canonical_reason().unwrap_or_default().to_string(),
+        };
+        Error::Api { status: status.as_u16(), message }
     }
 
     async fn get<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T, Error> {
@@ -149,18 +171,6 @@ impl Client {
         self.send(self.http.patch(url).json(&UpdateIssue { status })).await
     }
 
-    pub async fn resolve(&self, project: &str, issue_id: &str) -> Result<IssueDetail, Error> {
-        self.set_issue_status(project, issue_id, IssueStatus::Resolved).await
-    }
-
-    pub async fn ignore(&self, project: &str, issue_id: &str) -> Result<IssueDetail, Error> {
-        self.set_issue_status(project, issue_id, IssueStatus::Ignored).await
-    }
-
-    pub async fn unresolve(&self, project: &str, issue_id: &str) -> Result<IssueDetail, Error> {
-        self.set_issue_status(project, issue_id, IssueStatus::Unresolved).await
-    }
-
     /// Newest events first; set `q.issue` to restrict to one issue.
     pub async fn events(&self, project: &str, q: &EventQuery) -> Result<EventList, Error> {
         self.get(&format!("/v1/projects/{}/events", segment(project)?), q).await
@@ -189,10 +199,18 @@ impl Client {
         self.get(&format!("/v1/projects/{}/sourcemaps", segment(project)?), &()).await
     }
 
-    /// Flush, compact and expire now.
+    /// Flush, compact and expire now. Waits up to 10 minutes.
     pub async fn maintenance(&self) -> Result<(), Error> {
-        let resp = self.auth(self.http.post(self.url("/v1/maintenance"))).send().await?;
-        if resp.status().is_success() { Ok(()) } else { Err(Self::api_error(resp).await) }
+        self.checked(self.http.post(self.url("/v1/maintenance")).timeout(MAINTENANCE_TIMEOUT)).await?;
+        Ok(())
+    }
+}
+
+/// The first `max` chars of `s`, with "…" when cut.
+fn shorten(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
     }
 }
 
@@ -239,6 +257,42 @@ mod tests {
             let _ = tx.send(head);
         });
         (url, rx)
+    }
+
+    async fn api_message(status: u16, content_type: &'static str, body: &str) -> (u16, String) {
+        let (url, _) = serve_once(status, content_type, body.to_string());
+        match Client::new(&url, "t").unwrap().info().await {
+            Err(Error::Api { status, message }) => (status, message),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn api_errors_use_the_json_message_or_a_short_body() {
+        assert_eq!(
+            api_message(404, "application/json", r#"{"error":"project not found"}"#).await,
+            (404, "project not found".into())
+        );
+        let (_, m) = api_message(400, "text/plain; charset=utf-8", &"bad query ".repeat(100)).await;
+        assert!(m.starts_with("bad query") && m.ends_with('…') && m.chars().count() == MAX_ERROR_BODY + 1, "{m}");
+        let html = format!("<html><body>{}</body></html>", "x".repeat(10_000));
+        assert_eq!(api_message(502, "text/html", &html).await, (502, "Bad Gateway".into()));
+    }
+
+    #[tokio::test]
+    async fn maintenance_reads_errors_from_any_body() {
+        let (url, _) = serve_once(500, "application/json", r#"{"error":"disk full"}"#.into());
+        let r = Client::new(&url, "t").unwrap().maintenance().await;
+        assert!(matches!(r, Err(Error::Api { status: 500, message }) if message == "disk full"));
+        let (url, _) = serve_once(503, "text/html", "<h1>down</h1>".into());
+        let r = Client::new(&url, "t").unwrap().maintenance().await;
+        assert!(matches!(r, Err(Error::Api { status: 503, message }) if message == "Service Unavailable"));
+    }
+
+    #[test]
+    fn shorten_cuts_on_char_boundaries() {
+        assert_eq!(shorten("héllo", 10), "héllo");
+        assert_eq!(shorten("héllo", 2), "hé…");
     }
 
     #[tokio::test]
