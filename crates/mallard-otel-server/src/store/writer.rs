@@ -184,26 +184,16 @@ struct FlushError {
 }
 
 /// Message parts of errors that retrying can fix even while appending:
-/// storage, network, memory, interrupts, conflicts. Appender errors often
-/// carry no DuckDB error type ("the column must exist in the table"), so
-/// this is the list of exceptions, not of permanent errors.
-const TRANSIENT: &[&str] = &[
-    "IO Error",
-    "HTTP Error",
-    "Connection",
-    "connection",
-    "Out of Memory",
-    "out of memory",
-    "Interrupt",
-    "timeout",
-    "Timeout",
-    "conflict",
-    "Conflict",
-];
+/// storage, network, interrupts, conflicts ([`is_permanent`] adds short
+/// memory). Appender errors often carry no DuckDB error type ("the column must
+/// exist in the table"), so this is the list of exceptions, not of permanent
+/// errors.
+const TRANSIENT: &[&str] =
+    &["IO Error", "HTTP Error", "Connection", "connection", "Interrupt", "timeout", "Timeout", "conflict", "Conflict"];
 
 /// True when retrying `e` cannot help: appending to one table failed
 /// (opening its appender or converting a batch to its columns), and not
-/// for a transient reason ([`TRANSIENT`]). Commit errors are never
+/// for a transient reason ([`TRANSIENT`], short memory). Commit errors are never
 /// permanent: that is where data reaches the object store and catalog, so
 /// a storage outage never drops data.
 fn is_permanent(e: &FlushError) -> bool {
@@ -211,7 +201,7 @@ fn is_permanent(e: &FlushError) -> bool {
         return false;
     }
     let msg = format!("{:#}", e.error);
-    !TRANSIENT.iter().any(|t| msg.contains(t))
+    !TRANSIENT.iter().any(|t| msg.contains(t)) && !mallard_duck::is_out_of_memory(&e.error)
 }
 
 /// Append all batches in one transaction. A panic in the DuckDB or Arrow
@@ -550,6 +540,9 @@ mod tests {
             "IO Error: Could not write file \"s3://bucket/x.parquet\"",
             "HTTP Error: HTTP PUT error on 's3://bucket/x.parquet' (HTTP 503)",
             "Out of Memory Error: failed to allocate",
+            // Issue 0131: DuckDB's words for short memory, without its error type.
+            "flushing appender for spans: Failed to append: failed to allocate data of size 256.0 KiB (731.1 MiB/732.4 MiB used)",
+            "opening appender for spans: Failed to get table information from DuckLake: could not allocate block of size 256.0 KiB (732.1 MiB/732.4 MiB used)",
             "IO Error: Unable to connect to Postgres at localhost:5432: Connection refused",
             "TransactionContext Error: Catalog write-write conflict on alter with table \"logs\"",
             "Invalid Input Error: Transaction conflict: cannot add data to table logs",
@@ -558,6 +551,32 @@ mod tests {
         }
         // Commit errors are never pinned on a table: always retried.
         assert!(!is_permanent(&e(None, "Conversion Error: during commit")));
+    }
+
+    /// Issue 0131, with a real allocation error: nothing is dropped, and the rows are
+    /// written once memory is back.
+    #[test]
+    fn short_memory_drops_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let conn = lake.connect().unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
+        // The lowest limit DuckDB takes: about what it uses right now.
+        [4, 8, 16, 32, 64, 128]
+            .into_iter()
+            .find(|mb| conn.execute_batch(&format!("SET memory_limit = '{mb}MB'")).is_ok())
+            .expect("a limit near what is in use");
+        buf.push(logs(20_000)).unwrap();
+        wait_for(|| "no failed flush".into(), || stats.ingest(0).flush_errors > 0);
+        conn.execute_batch("SET memory_limit = '1GB'").unwrap();
+        wait_for(
+            || format!("dropped={}", stats.ingest(0).dropped_rows),
+            || count(&conn, "logs") == 20_000 || stats.ingest(0).dropped_rows > 0,
+        );
+        assert_eq!(stats.ingest(0).dropped_rows, 0);
+        flusher.stop();
     }
 
     #[test]
