@@ -26,35 +26,7 @@ pub struct LogFilter {
     pub attrs: Vec<String>,
 }
 
-/// Split on whitespace, keeping `"quoted strings"` (also inside `key="v w"`).
-pub fn tokenize(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut had = false;
-    for c in s.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
-                had = true;
-            }
-            c if c.is_whitespace() && !quoted => {
-                if had || !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                had = false;
-            }
-            c => {
-                cur.push(c);
-                had = true;
-            }
-        }
-    }
-    if had || !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
+pub use mallard_term::tui::suggest::tokenize;
 
 /// `250` (ms), `250ms`, `1.5s`, `2m`, `100us`.
 pub fn parse_ms(s: &str) -> Option<f64> {
@@ -124,7 +96,7 @@ impl TraceFilter {
     pub fn to_query(&self) -> String {
         let mut parts = Vec::new();
         let q = |v: &str| {
-            if v.contains(' ') { format!("\"{v}\"") } else { v.to_string() }
+            if v.contains(char::is_whitespace) { format!("\"{v}\"") } else { v.to_string() }
         };
         if let Some(s) = &self.service {
             parts.push(format!("service={}", q(s)));
@@ -167,6 +139,9 @@ mod tests {
         assert_eq!(f.min_ms, Some(1500.0));
         assert_eq!(f.attrs, vec!["http.route=/x"]);
         assert_eq!(parse_trace_filter(&f.to_query()).unwrap(), f);
+        // A name as the server has it can hold any white space, and must stay one word.
+        let raw = parse_trace_filter("service=\"a\nb\tc\"").unwrap();
+        assert_eq!(parse_trace_filter(&raw.to_query()).unwrap(), raw);
         assert!(parse_trace_filter("bogus").is_err());
         assert_eq!(parse_trace_filter(">200").unwrap().min_ms, Some(200.0));
     }

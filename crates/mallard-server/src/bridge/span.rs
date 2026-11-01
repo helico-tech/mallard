@@ -11,7 +11,8 @@
 //! when a span lacks them.
 //!
 //! A standalone item is one span in the format of a transaction's `spans[]`,
-//! without a content type. Its `data` holds `release` and `environment`.
+//! without a content type. Its `data` holds `release` and `environment`; a
+//! real one is in tests/fixtures/sentry-browser-10-inp.envelope.
 
 use std::collections::BTreeMap;
 
@@ -38,12 +39,15 @@ const MAX_HEADER_VALUE: usize = 200;
 
 /// What an envelope's headers say about its spans, for spans that lack it
 /// themselves: the `trace` header (release, environment) and the `sdk` header.
+/// `client_ip` is the address of the request, not a header.
 #[derive(Debug, Default)]
 pub struct Defaults {
     release: Option<String>,
     environment: Option<String>,
     sdk_name: Option<String>,
     sdk_version: Option<String>,
+    /// Fills `client.address = "{{auto}}"` of a standalone span.
+    pub client_ip: Option<String>,
 }
 
 impl Defaults {
@@ -57,6 +61,7 @@ impl Defaults {
             environment: value("trace", "environment"),
             sdk_name: value("sdk", "name"),
             sdk_version: value("sdk", "version"),
+            client_ip: None,
         }
     }
 }
@@ -106,7 +111,16 @@ pub fn standalone_to_otlp(s: &Value, defaults: &Defaults, project_slug: &str) ->
         sdk_name: defaults.sdk_name.clone().unwrap_or_else(|| "sentry".into()),
         sdk_version: defaults.sdk_version.clone().unwrap_or_default(),
     };
-    span.attributes.retain(|kv| kv.key != "release" && kv.key != "environment");
+    span.attributes.retain_mut(|kv| match kv.key.as_str() {
+        "release" | "environment" => false,
+        // "Use the address of the request": with user info collection on, the
+        // SDK sends this text. Filled like `user.ip_address` of an event.
+        "client.address" if moved("client.address").as_deref() == Some("{{auto}}") => {
+            kv.value = defaults.client_ip.as_deref().map(Value::from).as_ref().and_then(any_value);
+            kv.value.is_some()
+        }
+        _ => true,
+    });
     // Web vitals are measurements here; SDK 11 sends the same attribute.
     for (name, m) in s.get("measurements").and_then(Value::as_object).into_iter().flatten() {
         if let Some(value) = m.get("value").and_then(any_value) {
@@ -275,9 +289,10 @@ mod tests {
         ]})
     }
 
-    /// What @sentry/browser 10.78 sends for an INP (slow interaction): written
-    /// from its source (`createSpanEnvelope`, `SentrySpan.getSpanJSON`,
-    /// `startStandaloneWebVitalSpan`, `_onInp`), not captured from a browser.
+    /// What @sentry/browser 10.78 sends for an INP (slow interaction) reported
+    /// while the pageload span is still active, shaped like a capture with other
+    /// values. Without an active span it has no `parent_span_id`, `segment_id`
+    /// is its own id and `is_segment` is true: that one is the bridge.rs fixture.
     fn inp_span() -> Value {
         json!({
             "data": {
@@ -288,8 +303,7 @@ mod tests {
                 "environment": "production",
                 "transaction": "/checkout",
                 "user": "dev@example.com",
-                "user_agent.original": "Mozilla/5.0 (Macintosh) Chrome/141.0.0.0 Safari/537.36",
-                "sentry.sample_rate": 1
+                "user_agent.original": "Mozilla/5.0 (Macintosh) Chrome/141.0.0.0 Safari/537.36"
             },
             "description": "body > main > button#checkout",
             "op": "ui.interaction.click",
@@ -301,8 +315,7 @@ mod tests {
             "origin": "auto.http.browser.inp",
             "exclusive_time": 232,
             "measurements": {"inp": {"value": 232, "unit": "millisecond"}},
-            "is_segment": true,
-            "segment_id": "9c1f0e2d3b4a5968"
+            "segment_id": "a1b2c3d4e5f60718"
         })
     }
 
@@ -343,6 +356,23 @@ mod tests {
         let mut no_id = inp_span();
         no_id["trace_id"] = json!("nope");
         assert!(standalone_to_otlp(&no_id, &defaults, "shop").is_none());
+    }
+
+    #[test]
+    fn auto_client_address_of_a_standalone_span_is_the_request_address() {
+        let address = |sent: Option<&str>, client_ip: Option<&str>| {
+            let mut span = inp_span();
+            if let Some(sent) = sent {
+                span["data"]["client.address"] = json!(sent);
+            }
+            let defaults = Defaults { client_ip: client_ip.map(str::to_string), ..Default::default() };
+            let req = standalone_to_otlp(&span, &defaults, "shop").unwrap();
+            attr(&req.resource_spans[0].scope_spans[0].spans[0].attributes, "client.address").cloned()
+        };
+        assert_eq!(address(Some("{{auto}}"), Some("203.0.113.9")), Some(s("203.0.113.9")));
+        assert_eq!(address(Some("{{auto}}"), None), None, "the placeholder is not an address");
+        assert_eq!(address(Some("198.51.100.7"), Some("203.0.113.9")), Some(s("198.51.100.7")), "the SDK's own");
+        assert_eq!(address(None, Some("203.0.113.9")), None, "user info collection off: no address");
     }
 
     #[test]

@@ -10,7 +10,7 @@
 # Unknown keys are errors.
 
 [server]
-http_addr = "0.0.0.0:8080"        # Sentry ingest (/sentry), APIs (/sentry/v1, /otel/api/v1), OTLP/HTTP (/v1/*), /metrics
+http_addr = "0.0.0.0:8080"        # Sentry ingest (/sentry), APIs (/sentry/v1, /otel/api/v1, /api/v1), OTLP/HTTP (/v1/*), /metrics
 otlp_http_addr = "0.0.0.0:4318"   # OTLP/HTTP on the standard port
 otlp_grpc_addr = "0.0.0.0:4317"   # OTLP/gRPC
 metrics_addr = ""                 # e.g. "0.0.0.0:9090": serve /metrics there instead of on http_addr
@@ -26,8 +26,9 @@ log_format = "text"               # text | json
 catalog = "data/catalog.ducklake"
 data_path = "data/lake/"          # local path, s3://, gs://, az://, r2:// ...
 # Sentry sourcemap bundles (empty = sourcemap upload answers 501). A local
-# path, s3://, gs:// or az://, outside data_path. Credentials come from the
-# [[storage.secrets]] entry whose scope covers it.
+# path, s3://, gs:// or az://, outside data_path (not r2:// or abfss://; for R2
+# use s3:// with its endpoint). Credentials come from the [[storage.secrets]]
+# entry of that type whose scope covers it (azure: its connection_string).
 artifacts_path = ""               # e.g. "data/artifacts" or "s3://my-bucket/artifacts"
 data_inlining_row_limit = 1000
 target_file_size = "128MB"

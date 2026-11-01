@@ -235,6 +235,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/projects/{project}/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Tag keys of the project's events in the window (default 14d), or the top values of `key`, most frequent first, with counts from a sample. For suggestions while typing a filter. */
+        get: operations["tag_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/schema": {
         parameters: {
             query?: never;
@@ -261,7 +278,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`. */
+        /** @description Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless `sentry.query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `sentry.query.sql_timeout`. */
         post: operations["run_sql"];
         delete?: never;
         options?: never;
@@ -296,7 +313,11 @@ export interface components {
         CreateProject: {
             name: string;
             platform?: string | null;
-            /** @description URL-safe identifier. Derived from `name` when omitted. */
+            /**
+             * @description URL-safe identifier. Derived from `name` when omitted; then a project that has that
+             *     slug under the slug rule (`my_app` for the name `my-app`) is a 409, because a second
+             *     project would take its services.
+             */
             slug?: string | null;
         };
         EventDetail: components["schemas"]["EventSummary"] & {
@@ -492,7 +513,7 @@ export interface components {
             duckdb_version: string;
             /**
              * Format: int64
-             * @description Longest query window (`query.max_window`), in seconds.
+             * @description Longest query window (`sentry.query.max_window`), in seconds.
              */
             max_window_secs?: number | null;
             /** @description Base URL the DSNs are built from, e.g. `https://errors.example.com/sentry`. */
@@ -506,7 +527,7 @@ export interface components {
              * @description How long events are kept, in seconds (0 = forever).
              */
             retention_secs?: number | null;
-            /** @description `POST /v1/sql` is on (`query.enable_sql`). */
+            /** @description `POST /v1/sql` is on (`sentry.query.enable_sql`). */
             sql?: boolean | null;
             storage: string;
             version: string;
@@ -555,6 +576,17 @@ export interface components {
             /** Format: int64 */
             warnings: number;
         };
+        /** @description One tag key, or one value of the key asked for. */
+        TagCount: {
+            /**
+             * Format: int64
+             * @description Sampled events with this key (or value).
+             */
+            count: number;
+            key: string;
+            /** @description The value, when a `key` was asked for. */
+            value?: string | null;
+        };
         TagFacet: {
             key: string;
             top: components["schemas"]["TagValueCount"][];
@@ -563,6 +595,31 @@ export interface components {
              * @description Distinct values of this key in the window.
              */
             unique: number;
+        };
+        /**
+         * @description Tag keys (or values of one key) with how many sampled events have them.
+         *     The same shape as the telemetry side's `/api/v1/attributes`.
+         */
+        TagStats: {
+            /**
+             * Format: date-time
+             * @description The events looked at start here: the newest part of the window with enough
+             *     events (at least 500,000), or the start of the window. A value seen only
+             *     before this is not listed.
+             */
+            counted_from: string;
+            /** @description Most frequent first. */
+            items: components["schemas"]["TagCount"][];
+            /**
+             * Format: int64
+             * @description Events counted: a sample of at most 10,000 of the matching events.
+             */
+            sampled_rows: number;
+            /**
+             * Format: int64
+             * @description Matching events since `counted_from`.
+             */
+            total_rows: number;
         };
         TagValueCount: {
             /** Format: int64 */
@@ -1225,6 +1282,65 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    tag_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project: string;
+                /** @description Window, e.g. `1h`, `14d`, ending at `to` (default `14d`). Ignored when `from` is set. */
+                since: string | null;
+                /** @description Top values of this tag instead of the tag keys. */
+                key: string | null;
+                /** @description Only keys, or with `key` only values, that start with this (any case). */
+                prefix: string | null;
+                /** @description Max keys or values returned (default 50, max 1000). */
+                limit: number | null;
+                /** @description Start of the window (inclusive, RFC 3339). */
+                from: string | null;
+                /** @description End of the window (exclusive, RFC 3339). Defaults to now. */
+                to: string | null;
+                /** @description Bucket size for time series, e.g. `1h` (same as `interval`). */
+                step: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagStats"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };

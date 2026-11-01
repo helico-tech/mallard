@@ -1,0 +1,520 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "mallard API",
+    "description": "What spans errors and telemetry: the list of apps and looking up any id.",
+    "license": {
+      "name": "MIT OR Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/apps": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "description": "Every app: a project and the services with the same slug, or either alone. Projects are listed whatever the window; services need data in it. A side that cannot be read, or a window longer than `otel.query.max_window`, gives what there is plus `warnings`.",
+        "operationId": "apps",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d` (default `24h`). Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/find": {
+      "get": {
+        "tags": [
+          "find"
+        ],
+        "description": "What an id points at. 32 hex: a trace and/or a Sentry event. 16 hex: issues and/or a span. A source that fails while something else was found adds a warning. When nothing was found, its error is the answer (5xx), since it may have hidden the match: a 404 means every source was read.",
+        "operationId": "find",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "A trace or event id (32 hex, dashes allowed), or an issue or span id (16 hex).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Look for issues in this project only (id or slug). Default: all projects.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the window for traces and spans (inclusive, RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Relative window ending at `to`, e.g. `15m`, `1h`, `7d` (default `7d`). Ignored when `from` is set.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No match (`not_found`), or no such project (`unknown_project`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Error body returned with every non-2xx response.",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine readable error code, e.g. `bad_request`, `not_found`, `timeout`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human readable message."
+          }
+        }
+      },
+      "App": {
+        "type": "object",
+        "description": "A project and the services whose slugs are equal to its slug, or either alone.",
+        "required": [
+          "slug",
+          "name",
+          "services"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The project's name, or else the first service name."
+          },
+          "project": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The project id, when the app has a project. Projects are listed whatever the window.",
+            "minimum": 0
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The service names with data in the window, sorted. May be empty."
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "AppList": {
+        "type": "object",
+        "required": [
+          "apps",
+          "warnings"
+        ],
+        "properties": {
+          "apps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/App"
+            },
+            "description": "Sorted by slug."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What is missing or cut, e.g. when one side could not be read."
+          }
+        }
+      },
+      "FindMatch": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A trace with data in the window. Counts stop at 100000 spans, 50 errors and 1000 logs.",
+            "required": [
+              "trace_id",
+              "time",
+              "spans",
+              "errors",
+              "logs",
+              "kind"
+            ],
+            "properties": {
+              "errors": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "trace"
+                ]
+              },
+              "logs": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "spans": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "time": {
+                "type": "string",
+                "format": "date-time",
+                "description": "The earliest span, error or log found. Pass it to the trace page, which\nonly looks back 7 days without a time."
+              },
+              "trace_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A Sentry event, in any project and at any age.",
+            "required": [
+              "event_id",
+              "issue_id",
+              "project",
+              "project_id",
+              "title",
+              "kind"
+            ],
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "issue_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "event"
+                ]
+              },
+              "project": {
+                "type": "string",
+                "description": "The project's slug, which links use."
+              },
+              "project_id": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "title": {
+                "type": "string"
+              },
+              "trace_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A Sentry issue. An id can exist in several projects.",
+            "required": [
+              "issue_id",
+              "project",
+              "project_id",
+              "title",
+              "status",
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Events in the last 14 days.",
+                "minimum": 0
+              },
+              "issue_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "issue"
+                ]
+              },
+              "project": {
+                "type": "string",
+                "description": "The project's slug, which links use."
+              },
+              "project_id": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "status": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A span in the window.",
+            "required": [
+              "span_id",
+              "trace_id",
+              "service",
+              "name",
+              "time",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "span"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              },
+              "span_id": {
+                "type": "string"
+              },
+              "time": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the span started."
+              },
+              "trace_id": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "One thing an id points at."
+      },
+      "FindResult": {
+        "type": "object",
+        "required": [
+          "matches",
+          "warnings"
+        ],
+        "properties": {
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindMatch"
+            },
+            "description": "Never empty: no match is a 404."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Sources that could not be read, while something else was found."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ]
+}

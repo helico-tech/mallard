@@ -1,7 +1,7 @@
 # Deployment: telemetry
 
-How to run the server (Docker, compose, Helm, storage, catalog) is one page for both
-sides: [sentry/deployment.md](../sentry/deployment.md). This page has what is specific
+How to run the server (Docker, compose, storage, catalog) is one page for both
+sides: [deployment.md](../deployment.md). This page has what is specific
 to telemetry.
 
 > **Security:** the query API always needs a token (`server.api_tokens`). OTLP ingest
@@ -21,27 +21,25 @@ export OTEL_SERVICE_NAME=checkout
 `mallard setup <name>` prints these for a project, with the HTTP port as endpoint
 (OTLP/HTTP also answers on `/v1/*` there, so one ingress can carry everything).
 
-## Helm values for telemetry
+## Telemetry settings in a container
 
-The chart has `retention.traces`, `.logs`, `.metrics`, `ingestToken` and
-`duckdb.memoryLimit` as values. Everything else in `[otel.*]` goes through
-`extraConfig`:
+Set anything in `[otel.*]` with a variable, or in a mounted config file:
 
-```yaml
-extraConfig: |
-  [otel.ingest]
-  flush_interval = "10s"
-  max_buffer_bytes = "256MB"
+```sh
+docker run ... \
+  -e MALLARD_OTEL__INGEST__FLUSH_INTERVAL=10s \
+  -e MALLARD_OTEL__INGEST__MAX_BUFFER_BYTES=256MB \
+  -e MALLARD_OTEL__RETENTION__TRACES=14d \
+  ...
 ```
 
-Mind the memory rule in [capacity.md](capacity.md#sizing-guide): the chart defaults
-(1 GB DuckDB, the default 512 MB buffer, a 2 GiB limit) leave less than it asks for
-([issue 0123](../../work/issues/0123-chart-memory-defaults-below-the-rule.md)).
+Mind the memory rule in [capacity.md](capacity.md#sizing-guide).
 
-Replicas: with `catalog.type=postgres` and object storage, set `replicaCount`. Each
-pod ingests its own traffic; one holds the maintenance lease
-([operations](operations.md#several-replicas)). CI checks a Postgres + S3 install on
-kind (`deploy/helm/kind/test.sh`), with one pod.
+Replicas: with a Postgres catalog and object storage, run several containers. Each
+ingests its own traffic; one holds the maintenance lease
+([operations](operations.md#several-replicas)). CI checks a Postgres + S3 stack with one
+container (`deploy/compose/test.sh`); several processes on one catalog are covered by the
+lease and writer tests.
 
 ## With an OpenTelemetry Collector in front (recommended for zero loss)
 

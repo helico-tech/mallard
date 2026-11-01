@@ -16,8 +16,9 @@ pub struct StorageConfig {
     /// Where Parquet files go: local dir, `s3://`, `gs://`, `az://`/`abfss://`, `r2://`, ...
     pub data_path: String,
     /// Where Sentry sourcemap bundles go (mallard only): a local dir,
-    /// `s3://`, `gs://` or `az://`. Empty = sourcemap upload is disabled.
-    /// Credentials come from `secrets` (the entry whose scope covers it).
+    /// `s3://`, `gs://` or `az://` (not `r2://` or `abfss://`). Empty = sourcemap
+    /// upload is disabled. Credentials come from `secrets` (the entry whose scope
+    /// covers it; for Azure, its `connection_string`).
     pub artifacts_path: String,
     /// DuckDB secrets created before attaching (S3, GCS, Azure, R2 credentials).
     /// Each entry is passed to `CREATE SECRET` as key/value options.

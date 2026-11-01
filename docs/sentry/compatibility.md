@@ -46,7 +46,7 @@ envelope protocol and are expected to work; they are not in the test suite.
 |---|---|
 | `event` | stored (errors and messages) |
 | `transaction` | stored as OTel spans through the bridge (ADR 0009) |
-| `span` | stored as OTel spans through the bridge: v2 items (span streaming, the SDK 11 default; ADR 0013) and standalone spans of older SDKs (ADR 0022) |
+| `span` | stored as OTel spans through the bridge: v2 items (span streaming, the SDK 11 default; ADR 0013) and standalone spans of older SDKs (ADR 0022, checked against a capture from `@sentry/browser` 10.78) |
 | `profile`, `profile_chunk` | accepted, dropped |
 | `session`, `sessions` | accepted, dropped (no release health) |
 | `attachment`, `replay_event`, `replay_recording`, `replay_video` | accepted, dropped |
@@ -71,7 +71,8 @@ What Sentry does that we also do:
 - derived tags: level, environment, release, dist, server_name, transaction,
   logger, browser, os, runtime (+ `.name`), device, url, handled, mechanism,
   user; browser/os parsed from the User-Agent when the SDK did not send them
-- `{{auto}}` IP (uses `X-Forwarded-For` only with `sentry.ingest.trust_forwarded_for`)
+- `{{auto}}` IP (uses `X-Forwarded-For` only with `sentry.ingest.trust_forwarded_for`),
+  in `user.ip_address` of an event and in `client.address` of a standalone span
 - JS sourcemaps: debug ids and release artifacts; original file, line, column,
   function name and source context; `raw_stacktrace` keeps the original
 - regression: a new event reopens a resolved issue

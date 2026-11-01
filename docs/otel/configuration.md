@@ -52,7 +52,7 @@ Tokens may be comma separated; empty entries are dropped. For OTel SDKs set
 |---|---|---|
 | `catalog` | `data/catalog.ducklake` | DuckLake catalog: a DuckDB file path, `sqlite:<path>`, `postgres:<libpq connection string>` or `mysql:<string>`. See [storage-backends.md](storage-backends.md). |
 | `data_path` | `data/lake/` | Where Parquet files go: a local directory or `s3://`, `gs://`, `az://`, `abfss://`, `r2://`, ... It must match the path stored in an existing catalog. |
-| `artifacts_path` | empty | Sentry sourcemap bundles, see [sentry/deployment.md](../sentry/deployment.md#storage). |
+| `artifacts_path` | empty | Sentry sourcemap bundles, see [deployment.md](../deployment.md#storage). |
 | `secrets` | `[]` | List of DuckDB secrets (credentials), see below. |
 | `extensions` | `[]` | Extra DuckDB extensions to load. Needed ones are loaded automatically. |
 | `data_inlining_row_limit` | `1000` | Inserts below this many rows are stored in the catalog until the next compaction. `0` turns inlining off. |

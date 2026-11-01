@@ -1,6 +1,7 @@
 //! What both TUIs share: the theme, a few widgets, the keys that mean the
 //! same on every tab, and the [`Outcome`] a component returns to its host.
 
+pub mod suggest;
 pub mod theme;
 
 use ratatui::{
@@ -29,6 +30,43 @@ pub enum Outcome {
     /// [`keys::JUMP`] on a span with an error event: show this event of
     /// this trace on the errors side.
     JumpEvent { trace_id: String, event_id: String },
+    /// A host with one window for its tabs should set it to about this (`24h`).
+    SetWindow(&'static str),
+}
+
+/// What the host's app picker has chosen; each tab scopes itself to its side of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// Telemetry shows every service; errors, per project, ask for an app (ADR 0028).
+    #[default]
+    All,
+    App {
+        slug: String,
+        /// The project's slug. `None`: the app has no errors side.
+        project: Option<String>,
+        /// The service names with data in the window. Empty: no telemetry side.
+        services: Vec<String>,
+    },
+}
+
+/// The windows of one time range across tabs: the union of what each tab had. The web UI
+/// has the same list (story 0004/04), so keep them alike.
+pub const WINDOW_PRESETS: [(&str, u64); 8] = [
+    ("5m", 300),
+    ("15m", 900),
+    ("1h", 3600),
+    ("6h", 6 * 3600),
+    ("24h", 86_400),
+    ("7d", 7 * 86_400),
+    ("14d", 14 * 86_400),
+    ("30d", 30 * 86_400),
+];
+
+/// The presets no side refuses: `limit` is the smallest `max_window_secs` reported. Never
+/// empty, so there is always a window to show.
+pub fn window_presets(limit: Option<u64>) -> Vec<(&'static str, u64)> {
+    let fits: Vec<_> = WINDOW_PRESETS.iter().copied().filter(|(_, s)| limit.is_none_or(|l| *s <= l)).collect();
+    if fits.is_empty() { WINDOW_PRESETS[..1].to_vec() } else { fits }
 }
 
 /// Keys that mean the same on every tab and every screen. Each component
@@ -42,6 +80,9 @@ pub mod keys {
     pub const WINDOW_PREV: char = 'T';
     pub const SEARCH: char = '/';
     pub const JUMP: char = 'x';
+    /// The app picker, on every screen. The tabs on their own have no picker (the errors
+    /// tab has a list of projects under this key), so they leave it out of their help.
+    pub const APP_PICKER: char = 'p';
 
     /// The shared keys as (keys, what they do), for help screens and docs.
     pub const SHARED: &[(&str, &str)] = &[
@@ -51,6 +92,7 @@ pub mod keys {
         ("tab  1-9", "tabs of this screen"),
         ("/", "filter or search"),
         ("t T", "next / prev time window"),
+        ("p", "choose the app"),
         ("r", "refresh now"),
         ("x", "same trace, other tab"),
         ("?", "help"),
@@ -101,9 +143,27 @@ mod tests {
                 assert!(seen.insert(part), "{part} is listed twice");
             }
         }
-        for c in [keys::HELP, keys::REFRESH, keys::WINDOW_NEXT, keys::WINDOW_PREV, keys::SEARCH, keys::JUMP] {
+        for c in [
+            keys::HELP,
+            keys::REFRESH,
+            keys::WINDOW_NEXT,
+            keys::WINDOW_PREV,
+            keys::SEARCH,
+            keys::JUMP,
+            keys::APP_PICKER,
+        ] {
             assert!(seen.contains(c.to_string().as_str()), "{c} is not in SHARED");
         }
+    }
+
+    #[test]
+    fn presets_are_cut_to_the_smaller_limit() {
+        assert_eq!(window_presets(None).len(), 8);
+        let names = |l| window_presets(Some(l)).iter().map(|(n, _)| *n).collect::<Vec<_>>();
+        assert_eq!(names(31 * 86_400).last(), Some(&"30d"));
+        assert_eq!(names(7 * 86_400).last(), Some(&"7d"));
+        assert_eq!(names(3600), ["5m", "15m", "1h"]);
+        assert_eq!(names(60), ["5m"], "never empty");
     }
 
     #[test]

@@ -24,7 +24,8 @@ has the same CLI and TUI with no server and no DuckDB.
 ## The terminal UI
 
 `mallard tui`: errors on F1, telemetry on F2, and `x` jumps between them by
-trace id.
+trace id. One app picker (`p`) and one time window (`t`) for both, and filters
+that suggest keys and values while you type.
 
 **An issue, with the trace of the request that failed** — open an issue,
 press `x`, and the telemetry tab shows that request's spans with the failing
@@ -63,7 +64,8 @@ mallard tui
 ```
 
 The compose stack runs mallard with a Postgres catalog and an S3 bucket
-(RustFS). Its credentials are for local use only.
+(RustFS). Its credentials are for local use only. The Web UI is on
+http://localhost:8088: sign in with the API token (`dev-token`).
 
 ## Quick start (local)
 
@@ -77,16 +79,22 @@ a few minutes. For only the CLI and TUI, on a machine that talks to a server
 elsewhere: `cargo install --path crates/mallard --no-default-features` (quick
 to build, much smaller, no `serve`; [ADR 0023](docs/adr/0023-one-binary.md)).
 
-## Kubernetes
+## Production
+
+mallard ships as a Docker image. There is no Helm chart for now
+([ADR 0026](docs/adr/0026-no-helm-chart-for-now.md)). A version tag publishes it to
+`ghcr.io/helico-tech/mallard`. No version has been tagged yet, so for now build it yourself:
 
 ```sh
-helm install mallard deploy/helm/mallard \
-  --set publicUrl=https://mallard.example.com --set apiToken=secret \
-  --set storage.dataPath=s3://my-bucket/mallard/lake/
+docker build -f deploy/docker/Dockerfile -t mallard .
+docker run -d --name mallard -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
+  -e MALLARD_SERVER__API_TOKENS=change-me \
+  -e MALLARD_SERVER__PUBLIC_URL=https://mallard.example.com \
+  mallard
 ```
 
-See `deploy/helm/mallard/values.yaml` and the examples in its `ci/`
-folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
+[`docs/deployment.md`](docs/deployment.md) covers object storage, a Postgres catalog,
+health endpoints and running behind a proxy.
 
 ## Ports and paths
 
@@ -110,6 +118,7 @@ mallard find <id>                         # trace, event or issue id: what is it
 mallard trace <trace-id>                  # spans + errors + logs of one trace
 mallard traces list --errors              # telemetry: traces, logs, services, ops, metrics, sql
 mallard logs --around <time> -S checkout  # logs around an error
+mallard logs --app checkout -l warn       # --app: one app's project and services
 mallard tui                               # F1 errors, F2 telemetry
 mallard issues list -n 20 --json --fields id,title,count
 ```
@@ -136,6 +145,8 @@ catalog.
 
 ## More
 
+- [`docs/deployment.md`](docs/deployment.md) — how to deploy: Docker, compose, storage,
+  catalog, backups.
 - `docs/architecture.md` and `docs/adr/` — how it fits together.
 - `docs/sentry/`, `docs/otel/` — each side in depth (data model, capacity,
   compatibility, API).

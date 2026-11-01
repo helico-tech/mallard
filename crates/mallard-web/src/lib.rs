@@ -160,6 +160,7 @@ pub fn router(cfg: Config) -> Result<Router> {
         .route("/web/logout", post(logout))
         .route("/sentry/v1/{*rest}", axum::routing::any(proxy))
         .route("/otel/api/v1/{*rest}", axum::routing::any(proxy))
+        .route("/api/v1/{*rest}", axum::routing::any(proxy))
         .fallback(asset)
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .layer(middleware::map_response(security_headers))
@@ -205,7 +206,7 @@ async fn guard(State(app): State<App>, req: Request, next: Next) -> Result<Respo
     // Another site, or another port on this host, may not even read: a timing
     // difference alone would tell it what the logs contain.
     let path = req.uri().path();
-    if ["/sentry/", "/otel/", "/web/"].iter().any(|p| path.starts_with(p))
+    if ["/sentry/", "/otel/", "/api/", "/web/"].iter().any(|p| path.starts_with(p))
         && headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site" || v == "same-site")
     {
         return Err(forbidden("cross-site requests are not allowed"));
@@ -254,7 +255,9 @@ fn allowed(method: &Method, path: &str) -> bool {
     if ["%2e", "%2f", "%5c"].iter().any(|escape| lower.contains(escape)) {
         return false;
     }
-    let reads = path.starts_with("/sentry/v1/") || path.starts_with("/otel/api/v1/");
+    let reads = path.starts_with("/sentry/v1/")
+        || path.starts_with("/otel/api/v1/")
+        || ["/api/v1/apps", "/api/v1/find"].contains(&path);
     match *method {
         Method::GET => reads,
         Method::PATCH => {

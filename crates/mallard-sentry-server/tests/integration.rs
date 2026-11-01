@@ -408,7 +408,7 @@ async fn filters_cursors_and_releases() {
     // S15: off unless enabled.
     let (s, v) = t.api(reqwest::Method::POST, "/v1/sql", Some(json!({"query": "SELECT 1"}))).await;
     assert_eq!((s, v["error"].as_str()), (403, Some("disabled")), "{v}");
-    assert!(v["message"].as_str().unwrap().contains("enable_sql"), "{v}");
+    assert!(v["message"].as_str().unwrap().contains("sentry.query.enable_sql"), "{v}");
     t.stop().await;
 }
 
@@ -671,6 +671,38 @@ async fn host_hooks_and_in_process_events() {
     let id = t.server.create_project("Checkout", "checkout", Some("python")).await.unwrap();
     assert_eq!(t.server.create_project("Checkout", "checkout", None).await.unwrap(), id, "existing slug");
     assert!(t.server.create_project("x", "42", None).await.is_err(), "numeric slug");
+    t.stop().await;
+}
+
+/// A name without a slug means the app of that name. A project with that slug under the slug
+/// rule already is that app, and a second one would take its services (issue 0149).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_name_without_a_slug_compares_through_the_slug_rule() {
+    let t = TestServer::start().await;
+    let post = |body: Value| t.api(reqwest::Method::POST, "/v1/projects", Some(body));
+    let (s, mine) = post(json!({"name": "x", "slug": "my_app"})).await;
+    assert_eq!(s, 201, "`_` stays allowed in a slug: {mine}");
+
+    for name in ["my_app", "my-app", "My App", "my__app"] {
+        let (s, v) = post(json!({"name": name})).await;
+        assert_eq!(s, 409, "{name}: {v}");
+        assert_eq!(v["error"], "conflict", "{v}");
+        assert!(v["message"].as_str().unwrap().contains("\"my_app\""), "says which one: {v}");
+    }
+    let (s, v) = post(json!({"name": "my_app two"})).await;
+    assert_eq!((s, v["slug"].as_str()), (201, Some("my-app-two")), "another name is another app: {v}");
+
+    // A slug that was asked for is taken as is, also next to such a project (issue 0150).
+    let (s, v) = post(json!({"name": "x", "slug": "my-app"})).await;
+    assert_eq!((s, v["slug"].as_str()), (201, Some("my-app")), "{v}");
+    let (s, v) = post(json!({"name": "x", "slug": "my_app"})).await;
+    assert_eq!(s, 409, "the same slug twice: {v}");
+
+    // Bad names say the same as before.
+    assert_eq!(post(json!({"name": "42"})).await.0, 400, "numeric slug");
+    assert_eq!(post(json!({"name": "!!"})).await.0, 400, "empty slug");
+    let slugs: Vec<_> = t.get("/v1/projects").await.as_array().unwrap().iter().map(|p| p["slug"].clone()).collect();
+    assert_eq!(slugs, ["my_app", "my-app-two", "my-app"]);
     t.stop().await;
 }
 

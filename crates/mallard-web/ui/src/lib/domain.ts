@@ -110,17 +110,29 @@ export const SORTS = [
   { value: "users", label: "Users" },
 ] as const;
 
-export const ERROR_WINDOWS = [
+/** One list for both sides (ADR 0028), with the bars the errors side draws. */
+export const WINDOWS = [
+  { w: "5m", interval: "10s" },
+  { w: "15m", interval: "30s" },
   { w: "1h", interval: "1m" },
+  { w: "6h", interval: "10m" },
   { w: "24h", interval: "30m" },
   { w: "7d", interval: "3h" },
   { w: "14d", interval: "6h" },
   { w: "30d", interval: "12h" },
 ] as const;
-export const DEFAULT_ERROR_WINDOW = "24h";
+export const DEFAULT_WINDOW = "1h";
 
-export const TELEMETRY_WINDOWS = ["5m", "15m", "1h", "6h", "24h", "7d"] as const;
-export const DEFAULT_TELEMETRY_WINDOW = "1h";
+export const intervalOf = (w: string): string => WINDOWS.find((x) => x.w === w)?.interval ?? "30m";
+
+/** The presets every side accepts. Each server says its own limit; one not known yet
+ *  (or a side that is down) does not limit anything. Always leaves the smallest. */
+export function windowsWithin(limits: (number | null | undefined)[]): string[] {
+  const known = limits.filter((l): l is number => typeof l === "number" && l > 0);
+  const max = known.length ? Math.min(...known) : Infinity;
+  const fits = WINDOWS.map((x) => x.w as string).filter((w) => windowSeconds(w) <= max);
+  return fits.length ? fits : [WINDOWS[0].w];
+}
 
 export function windowSeconds(w: string): number {
   const m = /^(\d+)([smhd])$/.exec(w);

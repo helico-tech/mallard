@@ -41,12 +41,13 @@ export class ApiError extends Error {
   }
 }
 
-export type Params = Record<string, string | number | boolean | null | undefined>;
+export type Params = Record<string, string | string[] | number | boolean | null | undefined>;
 
 export function qs(params: Params = {}): string {
   const out = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") out.set(k, String(v));
+    if (Array.isArray(v)) for (const one of v) out.append(k, one);
+    else if (v !== undefined && v !== null && v !== "") out.set(k, String(v));
   }
   const s = out.toString();
   return s ? `?${s}` : "";

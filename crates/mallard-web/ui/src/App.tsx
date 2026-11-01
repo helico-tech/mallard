@@ -8,8 +8,10 @@ import { get, setUnauthorizedHandler, type Session } from "@/api/client";
 import { ErrorBoundary } from "@/app/ErrorBoundary";
 import { Login } from "@/app/Login";
 import { Shell } from "@/app/Shell";
+import { ScopeProvider } from "@/app/window";
+import { TelemetryScope } from "@/components/scope-states";
 import { IssuePage } from "@/features/errors/IssuePage";
-import { IssuesPage, ProjectRedirect } from "@/features/errors/IssuesPage";
+import { ErrorsLanding, IssuesPage } from "@/features/errors/IssuesPage";
 import { TraceErrorsPage } from "@/features/errors/TraceErrorsPage";
 import { LogsPage } from "@/features/telemetry/LogsPage";
 import { MetricsPage } from "@/features/telemetry/MetricsPage";
@@ -20,6 +22,12 @@ import { TracesPage } from "@/features/telemetry/TracesPage";
 // ECharts is the biggest dependency: load it with the screens that draw lines.
 const OverviewPage = lazy(() => import("@/features/telemetry/OverviewPage"));
 const MetricPage = lazy(() => import("@/features/telemetry/MetricPage"));
+
+/** Keeps what a link says about the app and the window. */
+function Home() {
+  const { search } = useLocation();
+  return <Navigate to={{ pathname: "/telemetry/overview", search }} replace />;
+}
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="grid h-full min-h-40 place-items-center">{children}</div>;
@@ -48,27 +56,29 @@ export function App() {
   if (!session.data.authenticated) return <Login />;
 
   return (
+    <ScopeProvider>
     <Shell session={session.data}>
       <ErrorBoundary resetKey={pathname}>
       <Suspense fallback={<Centered><Loader /></Centered>}>
         <Routes>
-          <Route path="/" element={<Navigate to="/errors" replace />} />
-          <Route path="/errors" element={<ProjectRedirect />} />
+          <Route path="/" element={<Home />} />
+          <Route path="/errors" element={<ErrorsLanding />} />
           <Route path="/errors/:project" element={<IssuesPage />} />
           <Route path="/errors/:project/issues/:issueId" element={<IssuePage />} />
           <Route path="/errors-by-trace/:traceId" element={<TraceErrorsPage />} />
-          <Route path="/telemetry" element={<Navigate to="/telemetry/overview" replace />} />
+          <Route path="/telemetry" element={<Home />} />
           <Route path="/telemetry/overview" element={<OverviewPage />} />
-          <Route path="/telemetry/traces" element={<TracesPage />} />
+          <Route path="/telemetry/traces" element={<TelemetryScope><TracesPage /></TelemetryScope>} />
           <Route path="/telemetry/traces/:traceId" element={<TracePage />} />
-          <Route path="/telemetry/logs" element={<LogsPage />} />
-          <Route path="/telemetry/metrics" element={<MetricsPage />} />
-          <Route path="/telemetry/metrics/:name" element={<MetricPage />} />
+          <Route path="/telemetry/logs" element={<TelemetryScope><LogsPage /></TelemetryScope>} />
+          <Route path="/telemetry/metrics" element={<TelemetryScope><MetricsPage /></TelemetryScope>} />
+          <Route path="/telemetry/metrics/:name" element={<TelemetryScope><MetricPage /></TelemetryScope>} />
           <Route path="/telemetry/status" element={<StatusPage />} />
-          <Route path="*" element={<Navigate to="/errors" replace />} />
+          <Route path="*" element={<Home />} />
         </Routes>
       </Suspense>
       </ErrorBoundary>
     </Shell>
+    </ScopeProvider>
   );
 }

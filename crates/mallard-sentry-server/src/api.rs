@@ -48,7 +48,7 @@ type ApiResult<T> = Result<Json<T>, ApiErr>;
 
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// Resolve `since`/`from`/`to` against `default` and `query.max_window`.
+/// Resolve `since`/`from`/`to` against `default` and `sentry.query.max_window`.
 fn window(state: &AppState, since: Option<&str>, r: &WindowRange, default: Duration) -> Result<Window, ApiErr> {
     Ok(Window::resolve(r.from, r.to, since, default, state.cfg.query.max_window)?)
 }
@@ -79,7 +79,7 @@ fn tag_filters(raw: Option<&str>) -> Result<Vec<(String, String)>, ApiErr> {
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
         ArtifactBundle, ApiError, EventsByTrace, TraceEvents, TraceEvent, Release, ReleaseList,
-        SqlRequest, SqlResponse, SqlColumn, Schema, SchemaTable
+        SqlRequest, SqlResponse, SqlColumn, Schema, SchemaTable, TagStats, TagCount
     )),
     modifiers(&BearerAuth),
     security(("bearer" = []))
@@ -101,6 +101,7 @@ fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(get_event))
         .routes(routes!(project_stats))
         .routes(routes!(list_releases))
+        .routes(routes!(tag_stats))
         .routes(routes!(list_sourcemaps))
         .routes(routes!(run_maintenance))
         .routes(routes!(run_sql))
@@ -145,6 +146,59 @@ async fn require_token_sentry(State(state): S, req: Request, next: Next) -> Resp
         return sentry_err(StatusCode::UNAUTHORIZED, "Invalid token");
     }
     next.run(req).await
+}
+
+/// Longest a lookup for `mallard-server` may take: one event id over the whole
+/// lake is the slowest read there is.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reads for `mallard-server`, which sees both sides. It knows the answers, not
+/// the tables.
+impl AppState {
+    /// All projects, read now. Unlike the list behind `/v1/projects`, this fails
+    /// when the catalog cannot be read.
+    pub(crate) async fn all_projects(&self) -> Result<Vec<Project>, ApiErr> {
+        self.db.load_projects(LOOKUP_TIMEOUT).await?.ok_or_else(|| timeout(LOOKUP_TIMEOUT))?;
+        self.db.caches.projects().into_iter().map(|p| to_project(self, p)).collect()
+    }
+
+    pub(crate) async fn project_ref(&self, r: &str) -> Option<Project> {
+        self.db.project_by_ref(r).await.and_then(|p| to_project(self, p).ok())
+    }
+
+    /// The events of one trace in `w`, newest first (the default page of `/v1/events`).
+    pub(crate) async fn trace_events(&self, w: Window, trace_id: uuid::Uuid) -> Result<Vec<EventSummary>, ApiErr> {
+        let run = self.db.read_for(LOOKUP_TIMEOUT, move |c, ns| read::events_by_trace(c, ns, trace_id, None, &w, 50));
+        Ok(run.await?.ok_or_else(|| timeout(LOOKUP_TIMEOUT))?.events)
+    }
+
+    /// One event by id, in any project.
+    pub(crate) async fn event_by_id(&self, id: uuid::Uuid) -> Result<Option<EventDetail>, ApiErr> {
+        let run = self.db.read_for(LOOKUP_TIMEOUT, move |c, ns| read::event_detail(c, ns, None, id, None));
+        run.await?.ok_or_else(|| timeout(LOOKUP_TIMEOUT))
+    }
+
+    /// One issue id in `project`, or in every project that has it. Counts as
+    /// `GET /v1/projects/{p}/issues/{id}` does, with its default window.
+    pub(crate) async fn issues_by_id(
+        &self,
+        group: u64,
+        project: Option<u32>,
+    ) -> Result<Vec<(u32, IssueDetail)>, ApiErr> {
+        let w = window(self, None, &WindowRange::default(), 14 * DAY)?;
+        let run = self.db.read_for(LOOKUP_TIMEOUT, move |c, ns| {
+            let mut out = Vec::new();
+            for pid in read::projects_with_issue(c, ns, group)? {
+                if project.is_none_or(|p| p == pid)
+                    && let Some(d) = read::issue_detail(c, ns, pid, group, &w)?
+                {
+                    out.push((pid, d));
+                }
+            }
+            Ok(out)
+        });
+        run.await?.ok_or_else(|| timeout(LOOKUP_TIMEOUT))
+    }
 }
 
 impl AppState {
@@ -226,11 +280,21 @@ async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
     responses((status = 201, body = Project), (status = 400, body = ApiError), (status = 409, body = ApiError)))]
 async fn create_project(State(state): S, J(req): J<CreateProject>) -> Result<(StatusCode, Json<Project>), ApiErr> {
     let CreateProject { name, slug, platform } = req;
+    let derived = slug.is_none();
     let slug = slug.unwrap_or_else(|| slugify(&name));
     check_slug(&slug).map_err(bad)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(bad("name is required"));
+    }
+    // A name means the app of that name. A project `my_app` already is the app `my-app`, and
+    // a second one would take its services (ADR 0029). A slug that was asked for is taken as is.
+    if derived {
+        state.db.refresh_projects().await;
+        let projects = state.db.caches.projects();
+        if let Some((_, taken)) = app_projects(projects.iter().map(|p| (p.id, p.slug.as_str()))).get(&slug) {
+            return Err(WriteError::SlugTaken(taken.to_string()).into());
+        }
     }
     let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await?;
     Ok((StatusCode::CREATED, Json(to_project(&state, row)?)))
@@ -459,6 +523,46 @@ async fn list_releases(
     Ok(Json(state.db.read(move |c, ns| read::list_releases(c, ns, pid, &w, limit)).await?))
 }
 
+/// Longest a tag suggestion may take. Suggestions are asked for while someone
+/// types; a slow answer is of no use, and the connection is shared with ingest.
+const TAGS_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[utoipa::path(get, path = "/v1/projects/{project}/tags", params(("project" = String, Path), TagQuery, WindowRange),
+    description = "Tag keys of the project's events in the window (default 14d), or the top values of `key`, \
+        most frequent first, with counts from a sample. For suggestions while typing a filter.",
+    responses((status = 200, body = TagStats), (status = 400, body = ApiError), (status = 404, body = ApiError),
+        (status = 504, body = ApiError)))]
+async fn tag_stats(
+    State(state): S,
+    Path(p): Path<String>,
+    Q(q): Q<TagQuery>,
+    Q(r): Q<WindowRange>,
+) -> ApiResult<TagStats> {
+    let pid = project(&state, &p).await?.id;
+    let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
+    if q.key.as_deref().is_some_and(|k| k.trim().is_empty()) {
+        return Err(bad("key must not be empty"));
+    }
+    let limit = match q.limit {
+        None => 50,
+        Some(0) => return Err(bad("limit must be at least 1")),
+        Some(n) => n.min(1000),
+    };
+    let run = state.db.read_for(TAGS_TIMEOUT, move |c, ns| {
+        let search = read::TagSearch { key: q.key.as_deref(), prefix: q.prefix.as_deref(), limit };
+        read::tag_stats(c, ns, pid, &w, &search)
+    });
+    run.await?.map(Json).ok_or_else(|| timeout(TAGS_TIMEOUT))
+}
+
+fn timeout(limit: Duration) -> ApiErr {
+    ApiErr::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        "timeout",
+        format!("query exceeded the {} time limit", humantime_secs(limit)),
+    )
+}
+
 #[utoipa::path(get, path = "/v1/projects/{project}/sourcemaps", params(("project" = String, Path)),
     responses((status = 200, body = Vec<ArtifactBundle>), (status = 404, body = ApiError)))]
 async fn list_sourcemaps(State(state): S, Path(p): Path<String>) -> ApiResult<Vec<ArtifactBundle>> {
@@ -483,7 +587,7 @@ async fn get_schema(State(state): S) -> ApiResult<Schema> {
 
 #[utoipa::path(post, path = "/v1/sql", request_body = SqlRequest,
     description = "Read-only SQL over `events`, `issues` and `issue_activity` (ADR 0011). Off unless \
-        `query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `query.sql_timeout`.",
+        `sentry.query.enable_sql` is set; one SELECT, checked before it runs, interrupted after `sentry.query.sql_timeout`.",
     responses((status = 200, body = SqlResponse), (status = 400, body = ApiError), (status = 403, body = ApiError),
         (status = 504, body = ApiError)))]
 async fn run_sql(State(state): S, J(req): J<SqlRequest>) -> ApiResult<SqlResponse> {
@@ -505,11 +609,7 @@ async fn run_sql(State(state): S, J(req): J<SqlRequest>) -> ApiResult<SqlRespons
         .read_for(timeout, move |c, _| Ok(mallard_duck::sql::run(c, crate::SCHEMA, &tables, &req.query, limit)))
         .await?;
     match run {
-        None => Err(ApiErr::new(
-            StatusCode::GATEWAY_TIMEOUT,
-            "timeout",
-            format!("query exceeded the {} time limit", humantime_secs(timeout)),
-        )),
+        None => Err(self::timeout(timeout)),
         Some(Ok(r)) => Ok(Json(SqlResponse {
             columns: r.columns.into_iter().map(|(name, data_type)| SqlColumn { name, data_type }).collect(),
             rows: r.rows,

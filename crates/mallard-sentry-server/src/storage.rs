@@ -96,12 +96,7 @@ impl Storage {
                 };
                 s3_store(&loc.bucket, &gcs, Some(gcs_keys(opts)?), None)?
             }
-            Kind::Azure => Arc::new(
-                object_store::azure::MicrosoftAzureBuilder::from_env()
-                    .with_container_name(&loc.bucket)
-                    .build()
-                    .context("configuring Azure blob storage")?,
-            ),
+            Kind::Azure => azure_store(&loc.bucket, opts)?,
             Kind::Local => Arc::new(object_store::local::LocalFileSystem::new_with_prefix(&loc.bucket)?),
         };
         let artifacts = ObjPath::from(format!("{}artifacts", with_slash(&loc.prefix)).trim_start_matches('/'));
@@ -173,6 +168,25 @@ fn s3_store(
     Ok(Arc::new(b.build().context("configuring S3 storage")?))
 }
 
+/// `o` holds the account name, its key and the blob endpoint, from the `azure`
+/// secret's connection string. What is unset comes from `AZURE_STORAGE_*`.
+fn azure_store(container: &str, o: &ObjectStoreOptions) -> Result<Arc<dyn ObjectStore>> {
+    let mut b = object_store::azure::MicrosoftAzureBuilder::from_env().with_container_name(container);
+    if let Some(account) = &o.key_id {
+        b = b.with_account(account);
+    }
+    if let Some(key) = &o.secret {
+        b = b.with_access_key(key);
+    }
+    if let Some(ep) = &o.endpoint {
+        b = b.with_endpoint(ep.clone()).with_allow_http(ep.starts_with("http://"));
+    }
+    let store = b.build().context(
+        "configuring Azure blob storage (use an azure secret with a connection_string, or AZURE_STORAGE_ACCOUNT_NAME)",
+    )?;
+    Ok(Arc::new(store))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +203,53 @@ mod tests {
         };
         let s = Storage::new("s3://bucket/some/prefix/", &opts).unwrap();
         assert_eq!(s.artifact_path_multi("chunks/ab").as_ref(), "some/prefix/artifacts/chunks/ab");
+    }
+
+    fn azure_opts(account: &str, key: &str) -> ObjectStoreOptions {
+        ObjectStoreOptions { key_id: Some(account.into()), secret: Some(key.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn azure_artifact_paths() {
+        let s = Storage::new("az://c/some/prefix", &azure_opts("acct", "aGVsbG8=")).unwrap();
+        assert_eq!(s.artifact_path_multi("chunks/ab").as_ref(), "some/prefix/artifacts/chunks/ab");
+        assert_eq!(s.describe(), "az://c/some/prefix/");
+    }
+
+    #[test]
+    fn a_bad_azure_key_fails_without_showing_it() {
+        let err = Storage::new("az://c/x", &azure_opts("acct", "not base64!!")).err().unwrap();
+        let text = format!("{err:#}");
+        assert!(text.contains("Azure") && !text.contains("not base64!!"), "{text}");
+    }
+
+    /// `r2://` and `abfss://` work for the lake but not here; the error says what does.
+    #[test]
+    fn unsupported_schemes_name_the_ones_that_work() {
+        for url in ["r2://b/x", "abfss://c@a.dfs.core.windows.net/x"] {
+            let err = Storage::new(url, &ObjectStoreOptions::default()).err().unwrap().to_string();
+            assert!(err.contains("use s3://, gs://, az:// or a local path"), "{err}");
+        }
+    }
+
+    /// Against Azurite, or any account. The container must exist, e.g.
+    /// `docker run -p 10000:10000 mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0`,
+    /// `az storage container create -n artifacts --connection-string "$MALLARD_TEST_AZURITE"`, and
+    /// `MALLARD_TEST_AZURITE='AccountName=devstoreaccount1;AccountKey=...;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1'`.
+    #[tokio::test]
+    #[ignore]
+    async fn azure_roundtrip() {
+        let conn = std::env::var("MALLARD_TEST_AZURITE").expect("MALLARD_TEST_AZURITE");
+        let st: mallard_duck::StorageConfig =
+            serde_json::from_value(serde_json::json!({"secrets": [{"type": "azure", "connection_string": conn}]}))
+                .unwrap();
+        let url = "az://artifacts/test";
+        let s = Storage::new(url, &mallard_duck::object_store_options(&st, url)).unwrap();
+        s.put("chunks/abc", Bytes::from_static(b"hi")).await.unwrap();
+        assert!(s.exists("chunks/abc").await.unwrap());
+        assert_eq!(s.get("chunks/abc").await.unwrap().unwrap(), Bytes::from_static(b"hi"));
+        s.delete("chunks/abc").await.unwrap();
+        assert!(s.get("chunks/abc").await.unwrap().is_none());
     }
 
     #[tokio::test]

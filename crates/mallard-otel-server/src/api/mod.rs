@@ -6,8 +6,8 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::{FromRequestParts, Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, request::Parts},
     middleware,
 };
 use mallard_common::{
@@ -105,6 +105,33 @@ fn resolve<Q: HasWindow>(st: &ApiState, q: &Q, default: std::time::Duration) -> 
     Ok(Window::resolve(w.from, w.to, w.since.as_deref(), default, st.reader.max_window)?)
 }
 
+/// A query struct and the values of its `service` parameter, which may be
+/// repeated (ADR 0028). The struct's own `service` stays empty: it can hold one
+/// value, and the query string format of `Q` refuses a repeated key.
+struct Services<T>(T, Vec<String>);
+
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> FromRequestParts<S> for Services<T> {
+    type Rejection = ApiErr;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiErr> {
+        let mut services = Vec::new();
+        let mut rest = url::form_urlencoded::Serializer::new(String::from("/?"));
+        for (k, v) in url::form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()) {
+            if k == "service" {
+                services.push(v.into_owned());
+            } else {
+                rest.append_pair(&k, &v);
+            }
+        }
+        if services.len() > MAX_SERVICE_FILTERS {
+            return Err(ApiErr::bad_request(format!("at most {MAX_SERVICE_FILTERS} service parameters")));
+        }
+        let uri = rest.finish().parse().map_err(|_| ApiErr::bad_request("invalid query string"))?;
+        let Query(q) = Query::<T>::try_from_uri(&uri).map_err(|e| ApiErr::bad_request(e.body_text()))?;
+        Ok(Services(q, services))
+    }
+}
+
 /// Routes behind the bearer-token check.
 fn protected_routes() -> OpenApiRouter<Arc<ApiState>> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -183,31 +210,27 @@ async fn services(State(st): S, Q(q): Q<ServiceQuery>) -> R<Vec<ServiceSummary>>
 #[utoipa::path(get, path = "/api/v1/operations", tag = "traces", params(OperationQuery), security(("bearer" = [])),
     responses((status = 200, description = "RED metrics per operation", body = Vec<OperationSummary>),
               (status = 400, body = ApiError)))]
-async fn operations(State(st): S, Q(q): Q<OperationQuery>) -> R<Vec<OperationSummary>> {
+async fn operations(State(st): S, Services(q, service): Services<OperationQuery>) -> R<Vec<OperationSummary>> {
     let w = window(&st, &q)?;
     let entry = q.entry_only.unwrap_or(true);
-    Ok(Json(st.reader.run(move |c| traces::operations(c, &w, q.service.as_deref(), entry)).await?))
+    Ok(Json(st.reader.run(move |c| traces::operations(c, &w, &service, entry)).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/spans/series", tag = "traces", params(SpanSeriesQuery), security(("bearer" = [])),
     responses((status = 200, description = "Request rate, errors and latency over time", body = SpanSeries),
               (status = 400, body = ApiError)))]
-async fn span_series(State(st): S, Q(q): Q<SpanSeriesQuery>) -> R<SpanSeries> {
+async fn span_series(State(st): S, Services(q, service): Services<SpanSeriesQuery>) -> R<SpanSeries> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
     let entry = q.entry_only.unwrap_or(true);
-    Ok(Json(
-        st.reader
-            .run(move |c| traces::span_series(c, &w, step, q.service.as_deref(), q.operation.as_deref(), entry))
-            .await?,
-    ))
+    Ok(Json(st.reader.run(move |c| traces::span_series(c, &w, step, &service, q.operation.as_deref(), entry)).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/traces", tag = "traces", params(TraceQuery), security(("bearer" = [])),
     responses((status = 200, description = "Matching traces, newest first", body = Vec<TraceSummary>,
                headers(("x-next-cursor" = String, description = "Pass as `cursor` for the next page; missing on the last page"))),
               (status = 400, body = ApiError)))]
-async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> Page<TraceSummary> {
+async fn search_traces(State(st): S, Services(q, service): Services<TraceQuery>) -> Page<TraceSummary> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 50, 1000)?;
     page(
@@ -217,7 +240,7 @@ async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> Page<TraceSummary> 
                     c,
                     &w,
                     &traces::TraceSearch {
-                        service: q.service.as_deref(),
+                        service: &service,
                         operation: q.operation.as_deref(),
                         errors_only: q.errors_only.unwrap_or(false),
                         min_duration_ms: q.min_duration_ms,
@@ -255,7 +278,7 @@ async fn get_span(State(st): S, Path(span_id): Path<String>, Q(q): Q<TraceGetQue
     responses((status = 200, body = Vec<LogRecord>,
                headers(("x-next-cursor" = String, description = "Pass as `cursor` for the next page; missing on the last page"))),
               (status = 400, body = ApiError)))]
-async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> Page<LogRecord> {
+async fn search_logs(State(st): S, Services(q, service): Services<LogQuery>) -> Page<LogRecord> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 100, 5000)?;
     let ascending = q.order == Some(LogOrder::Asc);
@@ -266,7 +289,7 @@ async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> Page<LogRecord> {
                     c,
                     &w,
                     &logs::LogSearch {
-                        service: q.service.as_deref(),
+                        service: &service,
                         min_severity: q.min_severity,
                         q: q.q.as_deref(),
                         trace_id: q.trace_id.as_deref(),
@@ -283,22 +306,22 @@ async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> Page<LogRecord> {
 
 #[utoipa::path(get, path = "/api/v1/logs/series", tag = "logs", params(LogSeriesQuery), security(("bearer" = [])),
     responses((status = 200, body = LogSeries), (status = 400, body = ApiError)))]
-async fn log_series(State(st): S, Q(q): Q<LogSeriesQuery>) -> R<LogSeries> {
+async fn log_series(State(st): S, Services(q, service): Services<LogSeriesQuery>) -> R<LogSeries> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
-    Ok(Json(st.reader.run(move |c| logs::series(c, &w, step, q.service.as_deref(), q.q.as_deref())).await?))
+    Ok(Json(st.reader.run(move |c| logs::series(c, &w, step, &service, q.q.as_deref())).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/metrics", tag = "metrics", params(MetricListQuery), security(("bearer" = [])),
     responses((status = 200, body = Vec<MetricInfo>), (status = 400, body = ApiError)))]
-async fn list_metrics(State(st): S, Q(q): Q<MetricListQuery>) -> R<Vec<MetricInfo>> {
+async fn list_metrics(State(st): S, Services(q, service): Services<MetricListQuery>) -> R<Vec<MetricInfo>> {
     let w = window(&st, &q)?;
-    Ok(Json(st.reader.run(move |c| metrics::list(c, &w, q.service.as_deref(), q.q.as_deref())).await?))
+    Ok(Json(st.reader.run(move |c| metrics::list(c, &w, &service, q.q.as_deref())).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/metrics/query", tag = "metrics", params(MetricQuery), security(("bearer" = [])),
     responses((status = 200, body = MetricQueryResult), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
-async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult> {
+async fn query_metric(State(st): S, Services(q, service): Services<MetricQuery>) -> R<MetricQueryResult> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
     Ok(Json(
@@ -309,7 +332,7 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
                     &w,
                     &metrics::MetricRequest {
                         name: &q.name,
-                        service: q.service.as_deref(),
+                        service: &service,
                         agg: q.agg.as_deref(),
                         group_by: q.group_by.as_deref(),
                         attributes: q.attributes.as_deref(),
@@ -322,7 +345,7 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
                         &w,
                         &exemplars::ExemplarRequest {
                             name: &q.name,
-                            service: q.service.as_deref(),
+                            service: &service,
                             group_by: q.group_by.as_deref(),
                             attributes: q.attributes.as_deref(),
                             step,
@@ -338,7 +361,7 @@ async fn query_metric(State(st): S, Q(q): Q<MetricQuery>) -> R<MetricQueryResult
 #[utoipa::path(get, path = "/api/v1/attributes", tag = "schema", params(AttributeQuery), security(("bearer" = [])),
     responses((status = 200, description = "Attribute keys, or the values of `key`, most frequent first", body = AttributeStats),
               (status = 400, body = ApiError)))]
-async fn attribute_stats(State(st): S, Q(q): Q<AttributeQuery>) -> R<AttributeStats> {
+async fn attribute_stats(State(st): S, Services(q, service): Services<AttributeQuery>) -> R<AttributeStats> {
     let w = window(&st, &q)?;
     let limit = clamp_limit(q.limit, 50, 1000)?;
     Ok(Json(
@@ -349,9 +372,10 @@ async fn attribute_stats(State(st): S, Q(q): Q<AttributeQuery>) -> R<AttributeSt
                     &w,
                     &attributes::AttributeSearch {
                         signal: q.signal,
-                        service: q.service.as_deref(),
+                        service: &service,
                         metric: q.metric.as_deref(),
                         key: q.key.as_deref(),
+                        prefix: q.prefix.as_deref(),
                         limit,
                     },
                 )
@@ -374,7 +398,7 @@ async fn run_sql(State(st): S, J(req): J<SqlRequest>) -> R<SqlResponse> {
         return Err(ApiErr::new(
             StatusCode::FORBIDDEN,
             "disabled",
-            "ad-hoc SQL is disabled; set query.enable_sql = true (requires auth.api_tokens)",
+            "ad-hoc SQL is disabled; set otel.query.enable_sql = true in the mallard config",
         ));
     }
     let limit = clamp_limit(req.limit, 1000, 100_000)?;

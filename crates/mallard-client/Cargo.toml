@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 mallard-sentry-client.workspace = true
 mallard-otel-client.workspace = true
+mallard-api.workspace = true
 chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true

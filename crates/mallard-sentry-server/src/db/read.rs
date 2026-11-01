@@ -389,6 +389,15 @@ pub fn list_issues(
     Ok(IssueList { issues, window_start: w.from, window_end: w.to, next_cursor })
 }
 
+/// The projects that have an issue with this id, in id order. Issue ids are
+/// hashes of the fingerprint, so two projects can share one.
+pub fn projects_with_issue(conn: &Connection, ns: &Ns, group: u64) -> Result<Vec<u32>> {
+    let mut stmt =
+        conn.prepare(&ns.sql("SELECT DISTINCT project_id FROM $S.issues WHERE group_hash = ? ORDER BY 1"))?;
+    let rows = stmt.query_map(params![group], |r| Ok(r.get::<_, i32>(0)? as u32))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 pub fn issue_detail(
     conn: &Connection,
     ns: &Ns,
@@ -529,6 +538,99 @@ fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Windo
         }
     }
     Ok(facets)
+}
+
+/// At most this many matching events are counted for tag suggestions.
+pub const TAG_SAMPLE_ROWS: u64 = 10_000;
+
+/// Enough events to sample from. Only the newest part of the window with this
+/// many events is read, so a wide window costs about the same as a narrow one on
+/// a busy project: the tags map is slow to read, and DuckDB's threads are shared
+/// with ingest.
+const ENOUGH_TAG_ROWS: i64 = 500_000;
+
+/// What `/v1/projects/{project}/tags` asks for.
+pub struct TagSearch<'a> {
+    pub key: Option<&'a str>,
+    pub prefix: Option<&'a str>,
+    pub limit: u32,
+}
+
+/// The newest part of the window with [`ENOUGH_TAG_ROWS`] events, or else all of it.
+fn tag_part_to_read(conn: &Connection, ns: &Ns, project_id: u32, w: &Window) -> Result<Window> {
+    let parts = w.newest_first();
+    for part in &parts[..parts.len() - 1] {
+        let rows: i64 = conn.query_row(
+            &ns.sql(
+                "SELECT count(*) FROM $S.events
+                 WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)",
+            ),
+            params![project_id as i32, start_us(part), end_us(part)],
+            |r| r.get(0),
+        )?;
+        if rows >= ENOUGH_TAG_ROWS {
+            return Ok(*part);
+        }
+    }
+    Ok(*w)
+}
+
+/// Tag keys with the number of sampled events that have them, or, with `key`,
+/// the values of that key, from the newest part of the window that has enough
+/// events. Like the telemetry side's attributes.
+pub fn tag_stats(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, q: &TagSearch) -> Result<TagStats> {
+    let read = tag_part_to_read(conn, ns, project_id, w)?;
+    let mut filter = "project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)".to_string();
+    let mut p: Vec<Box<dyn ToSql>> =
+        vec![Box::new(project_id as i32), Box::new(start_us(&read)), Box::new(end_us(&read))];
+    if let Some(k) = q.key {
+        filter.push_str(" AND tags[?] IS NOT NULL");
+        p.push(Box::new(k.to_string()));
+        // In the rows, not after the sample: a rare value is found too.
+        if let Some(prefix) = q.prefix {
+            filter.push_str(" AND starts_with(lower(tags[?]), lower(?))");
+            p.push(Box::new(k.to_string()));
+            p.push(Box::new(prefix.to_string()));
+        }
+    }
+    let total: i64 = conn.query_row(
+        &ns.sql(&format!("SELECT count(*) FROM $S.events WHERE {filter}")),
+        params_from_iter(p.iter().map(|b| b.as_ref())),
+        |r| r.get(0),
+    )?;
+    let sample =
+        format!("WITH s AS (SELECT tags FROM $S.events WHERE {filter} USING SAMPLE reservoir({TAG_SAMPLE_ROWS} ROWS))");
+    let limit = q.limit as i64;
+    let items = match q.key {
+        None => {
+            let sql = format!(
+                "{sample} SELECT k, count(*) FROM (SELECT unnest(map_keys(tags)) AS k FROM s)
+                 WHERE starts_with(lower(k), lower(?)) GROUP BY k ORDER BY 2 DESC, 1 LIMIT ?"
+            );
+            p.push(Box::new(q.prefix.unwrap_or_default().to_string()));
+            p.push(Box::new(limit));
+            let mut stmt = conn.prepare(&ns.sql(&sql))?;
+            let rows = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+                Ok(TagCount { key: r.get(0)?, value: None, count: r.get::<_, i64>(1)? as u64 })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        }
+        Some(key) => {
+            let sql = format!(
+                "{sample} SELECT v, count(*) FROM (SELECT tags[?] AS v FROM s)
+                 WHERE v IS NOT NULL GROUP BY v ORDER BY 2 DESC, 1 LIMIT ?"
+            );
+            p.push(Box::new(key.to_string()));
+            p.push(Box::new(limit));
+            let mut stmt = conn.prepare(&ns.sql(&sql))?;
+            let rows = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+                Ok(TagCount { key: key.to_string(), value: r.get(0)?, count: r.get::<_, i64>(1)? as u64 })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    let total = total.max(0) as u64;
+    Ok(TagStats { total_rows: total, sampled_rows: total.min(TAG_SAMPLE_ROWS), counted_from: read.from, items })
 }
 
 const EVENT_COLUMNS: &str = "event_id::VARCHAR, group_hash, epoch_us(timestamp), epoch_us(received_at), title, level,

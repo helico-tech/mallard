@@ -10,7 +10,7 @@ decided something (ADR 0006, 0008), the TUI wins; differences are listed at the 
 - [S] Details open in a non-modal side panel, so the list stays visible; no modals over rows.
 - [S] Data text 14px, headings 16px and up, inline monospace about 0.9em (Kumo).
 - [S] Numbers use `tabular-nums`.
-- [J] Fixed left nav; one top bar with the time window and live state; every detail has its own URL.
+- [J] Fixed left nav; one top bar with the app, the time window and live state; every detail has its own URL.
 - [J] Monospace only for ids, hashes, log bodies, code and frames; never for labels.
 - [J] Fixed widths for time, level and numbers; one flexible column. Truncate at the
   end, ids and paths in the middle or on the left.
@@ -81,7 +81,7 @@ with no link to its logs and errors.
 
 ## Where the TUI decides otherwise
 - Refresh every 5s (sources advise a minute or more): the TUI's cadence, with a pause button.
-- Per-side window presets stay different, as in the TUI.
+- One app and one time window for the whole UI, in the address (ADR 0028). A preset a side refuses is not offered.
 
 ## Sources
 [NN/g data tables](https://www.nngroup.com/articles/data-tables/),

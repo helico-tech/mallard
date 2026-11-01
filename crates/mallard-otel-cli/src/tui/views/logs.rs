@@ -8,7 +8,7 @@ use std::{
 use chrono::{TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use mallard_otel_client::{LogTail, api::*};
-use mallard_term::tui::keys;
+use mallard_term::{text::clean, tui::keys};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -99,12 +99,26 @@ pub fn cycle_level(query: &str) -> (String, Option<u8>) {
         Some(n) if n < 17 => Some(("error", 17)),
         Some(_) => None,
     };
-    let mut rest: Vec<String> =
-        toks.into_iter().filter(|t| !is_level(t)).map(|t| if t.contains(' ') { quote(&t) } else { t }).collect();
+    let mut rest: Vec<String> = toks
+        .into_iter()
+        .filter(|t| !is_level(t))
+        .map(|t| if t.contains(char::is_whitespace) { quote(&t) } else { t })
+        .collect();
     if let Some((name, _)) = next {
         rest.insert(0, format!("level={name}"));
     }
     (rest.join(" "), next.map(|(_, n)| n))
+}
+
+/// The query without its `service=` token (the picker changed).
+pub fn without_service(query: &str) -> String {
+    let is_service = |t: &str| t.split_once('=').is_some_and(|(k, _)| matches!(k, "service" | "svc" | "s"));
+    tokenize(query)
+        .into_iter()
+        .filter(|t| !is_service(t))
+        .map(|t| if t.contains(char::is_whitespace) { quote(&t) } else { t })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn quote(t: &str) -> String {
@@ -128,10 +142,10 @@ impl State {
         self.error = None;
     }
 
-    fn base_query(&self, since: String) -> LogQuery {
+    fn base_query(&self, since: String, service: Vec<String>) -> LogQuery {
         LogQuery {
             since: Some(since),
-            service: self.filter.service.clone(),
+            service,
             min_severity: self.filter.level,
             q: self.filter.text.clone(),
             trace_id: self.filter.trace.clone(),
@@ -169,22 +183,41 @@ impl State {
 }
 
 impl Embedded {
+    /// The services of the log queries. A filter on one trace follows that trace across
+    /// services, like the trace view it comes from.
+    fn log_services(&self) -> Vec<String> {
+        match (&self.logs.filter.service, &self.logs.filter.trace) {
+            (None, Some(_)) => vec![],
+            (service, _) => self.scoped(service.as_deref()),
+        }
+    }
+
     pub(crate) fn refresh_logs(&mut self) {
         let since = self.since().to_string();
         if !self.logs.requested && self.logs.retry_at.is_none_or(|t| Instant::now() >= t) {
-            let mut q = self.logs.base_query(since.clone());
+            let mut q = self.logs.base_query(since.clone(), self.log_services());
             q.limit = Some(1000);
             q.order = Some(LogOrder::Desc);
             let c = self.client.clone();
+            let tail_query = LogQuery { since: None, ..self.logs.base_query(String::new(), self.log_services()) };
             self.loader.cancel(Kind::LogTail);
-            if self.loader.spawn(Kind::Logs, async move { c.logs(&q).await }, Data::Logs) {
+            let page = async move {
+                let records = c.logs(&q).await?;
+                // Now, before the text is cleaned: the tail compares what it polls, as the
+                // server has it, with these. It must not return what this page shows.
+                let start = records.first().map(|r| r.time).unwrap_or_else(|| Utc::now() - TimeDelta::seconds(5));
+                let mut tail = LogTail::new(c, tail_query, start);
+                tail.mark_seen(&records);
+                Ok((records, Box::new(tail)))
+            };
+            if self.loader.spawn(Kind::Logs, page, |(records, tail)| Data::LogPage { records, tail }) {
                 self.logs.requested = true;
             }
         }
         if due(self.logs.refreshed, Duration::from_secs(5)) {
             let q = LogSeriesQuery {
                 since: Some(since),
-                service: self.logs.filter.service.clone(),
+                service: self.log_services(),
                 q: self.logs.filter.text.clone(),
                 ..Default::default()
             };
@@ -212,20 +245,14 @@ impl Embedded {
         }
     }
 
-    pub(crate) fn logs_loaded(&mut self, mut v: Vec<LogRecord>) {
+    pub(crate) fn logs_loaded(&mut self, mut v: Vec<LogRecord>, tail: LogTail) {
         v.reverse();
         let l = &mut self.logs;
         l.records.clear();
         l.loaded = true;
         l.error = None;
         l.retry_at = None;
-        let start = v.last().map(|r| r.time).unwrap_or_else(|| Utc::now() - TimeDelta::seconds(5));
         l.follow = true;
-        let q = l.base_query(String::new());
-        let q = LogQuery { since: None, ..q };
-        let mut tail = LogTail::new(self.client.clone(), q, start);
-        // The tail must not return what the initial load already shows.
-        tail.mark_seen(&v);
         l.append(v, false);
         l.sel.select(l.records.len().checked_sub(1));
         l.tail = Some(Arc::new(tokio::sync::Mutex::new(tail)));
@@ -241,6 +268,10 @@ impl Embedded {
 
     pub(crate) fn set_log_filter(&mut self, q: &str) {
         match parse_log_filter(q) {
+            Ok(f) if !self.filter_fits(f.service.as_deref()) => {
+                let service = mallard_term::text::clean(f.service.as_deref().unwrap_or("")).into_owned();
+                self.flash_error(format!("service {service} is not in this app"));
+            }
             Ok(f) => {
                 self.logs.query = q.to_string();
                 self.logs.filter = f;
@@ -260,6 +291,10 @@ impl Embedded {
     pub(crate) fn key_logs(&mut self, k: &KeyEvent) -> Option<Outcome> {
         if let Some(scroll) = self.logs.detail {
             match k.code {
+                // The app picker works on every screen; the popup goes with what it shows.
+                KeyCode::Char(keys::APP_PICKER) if self.hosted => {
+                    return None;
+                }
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.logs.detail = None,
                 KeyCode::Down | KeyCode::Char('j') => self.logs.detail = Some(scroll.saturating_add(1)),
                 KeyCode::Up | KeyCode::Char('k') => self.logs.detail = Some(scroll.saturating_sub(1)),
@@ -415,7 +450,7 @@ impl Embedded {
             if l.query.is_empty() {
                 Span::styled("all logs · press / to filter, s for severity", theme::faint())
             } else {
-                Span::styled(l.query.clone(), theme::bold())
+                Span::styled(clean(&l.query).into_owned(), theme::bold())
             },
         ]);
         f.render_widget(filter_line, fl);

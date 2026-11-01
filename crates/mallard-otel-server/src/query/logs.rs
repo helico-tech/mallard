@@ -5,10 +5,15 @@ use std::collections::HashMap;
 use mallard_duck::duckdb::{Connection, params_from_iter, types::Value};
 use mallard_otel_api::{LogRecord, LogSeries, LogSeriesPoint};
 
-use super::{Cursor, Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
+use super::{
+    Counted, Cursor, Filter, QResult, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex,
+};
+
+/// Most log records counted for one trace (what `mallard trace` shows).
+const MAX_TRACE_LOGS: u32 = 1000;
 
 pub struct LogSearch<'a> {
-    pub service: Option<&'a str>,
+    pub service: &'a [String],
     pub min_severity: Option<u8>,
     pub q: Option<&'a str>,
     pub trace_id: Option<&'a str>,
@@ -18,12 +23,10 @@ pub struct LogSearch<'a> {
     pub cursor: Option<&'a str>,
 }
 
-fn filter(w: &Window, service: Option<&str>, q: Option<&str>) -> Filter {
+fn filter(w: &Window, service: &[String], q: Option<&str>) -> Filter {
     let mut f = Filter::default();
     f.window("time", w);
-    if let Some(s) = service {
-        f.add("service_name = ?", [Value::Text(s.into())]);
-    }
+    f.services(service);
     if let Some(q) = q.filter(|q| !q.is_empty()) {
         // contains() on lower-cased text: no LIKE wildcards to escape.
         f.add("contains(lower(body), lower(?))", [Value::Text(q.into())]);
@@ -92,7 +95,22 @@ pub fn search(conn: &Connection, w: &Window, s: &LogSearch) -> QResult<(Vec<LogR
     Ok((rows.into_iter().map(|(r, _)| r).collect(), cursor))
 }
 
-pub fn series(conn: &Connection, w: &Window, step: u64, service: Option<&str>, q: Option<&str>) -> QResult<LogSeries> {
+/// The log records of one trace in the window: how many (up to
+/// [`MAX_TRACE_LOGS`]) and the time of the first, without reading them.
+pub fn count_of_trace(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Counted> {
+    let tid = parse_trace_id(trace_id)?;
+    let sql = format!(
+        "SELECT count(*), epoch_us(min(time)) FROM (SELECT time FROM logs \
+         WHERE trace_id = ?::UUID AND time >= ? AND time < ? LIMIT {MAX_TRACE_LOGS})"
+    );
+    let (count, first) =
+        conn.query_row(&sql, params_from_iter([Value::Text(tid), super::ts(w.from), super::ts(w.to)]), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+        })?;
+    Ok(Counted { count: count as u64, first: first.map(from_micros) })
+}
+
+pub fn series(conn: &Connection, w: &Window, step: u64, service: &[String], q: Option<&str>) -> QResult<LogSeries> {
     let f = filter(w, service, q);
     let step_us = step as i64 * 1_000_000;
     let sql = format!(

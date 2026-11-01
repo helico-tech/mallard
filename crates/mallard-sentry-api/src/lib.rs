@@ -2,6 +2,8 @@
 //! OpenAPI schema from them with the `openapi` feature), the client, the
 //! CLI and the TUI, so all of them always agree on the wire format.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -86,11 +88,50 @@ pub fn slugify(name: &str) -> String {
     s.trim_end_matches('-').to_string()
 }
 
+/// A valid project slug for a service name (`unknown_service:node` →
+/// `unknown-service-node`). The one slug rule (ADR 0027, 0029): a project and a service with
+/// the same slug under it are one app, and the bridge sends exceptions there. Project slugs
+/// go through it too, see [`app_projects`].
+pub fn service_slug(service: &str) -> String {
+    let mut s = slugify(service);
+    s.truncate(64);
+    let s = s.trim_end_matches('-').to_string();
+    if s.is_empty() {
+        "unknown-service".into()
+    } else if s.bytes().all(|b| b.is_ascii_digit()) {
+        format!("service-{s}")
+    } else {
+        s
+    }
+}
+
+/// The project that takes each [`service_slug`], from `(id, slug)`. A project may have a slug
+/// the rule never gives (`my_app`), and it still joins the service `my_app`. If several
+/// projects share a slug under the rule, the one whose slug is exactly that wins, and then
+/// the oldest. The others stay apps of their own.
+pub fn app_projects<'a>(projects: impl IntoIterator<Item = (u32, &'a str)>) -> HashMap<String, (u32, &'a str)> {
+    let mut found: HashMap<String, (u32, &str)> = HashMap::new();
+    for (id, slug) in projects {
+        let key = service_slug(slug);
+        let rank = |(id, slug): (u32, &str)| (slug != key, id);
+        match found.get_mut(&key) {
+            Some(best) if rank((id, slug)) < rank(*best) => *best = (id, slug),
+            Some(_) => {}
+            None => {
+                found.insert(key, (id, slug));
+            }
+        }
+    }
+    found
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateProject {
     pub name: String,
-    /// URL-safe identifier. Derived from `name` when omitted.
+    /// URL-safe identifier. Derived from `name` when omitted; then a project that has that
+    /// slug under the slug rule (`my_app` for the name `my-app`) is a 409, because a second
+    /// project would take its services.
     pub slug: Option<String>,
     pub platform: Option<String>,
 }
@@ -274,10 +315,10 @@ pub struct ServerInfo {
     /// How long events are kept, in seconds (0 = forever).
     #[serde(default)]
     pub retention_secs: Option<u64>,
-    /// Longest query window (`query.max_window`), in seconds.
+    /// Longest query window (`sentry.query.max_window`), in seconds.
     #[serde(default)]
     pub max_window_secs: Option<u64>,
-    /// `POST /v1/sql` is on (`query.enable_sql`).
+    /// `POST /v1/sql` is on (`sentry.query.enable_sql`).
     #[serde(default)]
     pub sql: Option<bool>,
 }
@@ -502,6 +543,48 @@ pub struct WindowRange {
     pub to: Option<DateTime<Utc>>,
     /// Bucket size for time series, e.g. `1h` (same as `interval`).
     pub step: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct TagQuery {
+    /// Window, e.g. `1h`, `14d`, ending at `to` (default `14d`). Ignored when `from` is set.
+    pub since: Option<String>,
+    /// Top values of this tag instead of the tag keys.
+    pub key: Option<String>,
+    /// Only keys, or with `key` only values, that start with this (any case).
+    pub prefix: Option<String>,
+    /// Max keys or values returned (default 50, max 1000).
+    pub limit: Option<u32>,
+}
+
+/// Tag keys (or values of one key) with how many sampled events have them.
+/// The same shape as the telemetry side's `/api/v1/attributes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TagStats {
+    /// Matching events since `counted_from`.
+    pub total_rows: u64,
+    /// Events counted: a sample of at most 10,000 of the matching events.
+    pub sampled_rows: u64,
+    /// The events looked at start here: the newest part of the window with enough
+    /// events (at least 500,000), or the start of the window. A value seen only
+    /// before this is not listed.
+    pub counted_from: DateTime<Utc>,
+    /// Most frequent first.
+    pub items: Vec<TagCount>,
+}
+
+/// One tag key, or one value of the key asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TagCount {
+    pub key: String,
+    /// The value, when a `key` was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Sampled events with this key (or value).
+    pub count: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -25,18 +25,25 @@ mod stats;
 mod store;
 
 pub use otlp::{IngestError, IngestHook};
+pub use query::{Counted, attributes::MAX_SERVICE_NAMES};
 pub use store::SCHEMA;
 
-use std::{future::Future, sync::Arc, time::Instant};
+use std::{
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::Router;
-use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::info;
 
-use mallard_common::auth::{AuthPolicy, Tokens};
+use mallard_common::{
+    auth::{AuthPolicy, Tokens},
+    http::ApiErr,
+    window::Window,
+};
+use mallard_otel_api::Span;
 
 use crate::{
     api::ApiState,
@@ -199,6 +206,36 @@ impl Server {
         api::openapi()
     }
 
+    /// The longest window the query API accepts (`otel.query.max_window`).
+    pub fn max_window(&self) -> Duration {
+        self.cfg.query.max_window
+    }
+
+    /// The services with any span, log or metric in the window, sorted, at most
+    /// [`MAX_SERVICE_NAMES`]; `true` when there are more.
+    pub async fn service_names(&self, w: Window) -> std::result::Result<(Vec<String>, bool), ApiErr> {
+        Ok(self.api_state.reader.run(move |c| query::attributes::service_names(c, &w)).await?)
+    }
+
+    /// How many spans of this trace are in the window, and the first start time.
+    pub async fn trace_spans(&self, w: Window, trace_id: String) -> std::result::Result<Counted, ApiErr> {
+        Ok(self.api_state.reader.run(move |c| query::traces::count(c, &w, &trace_id)).await?)
+    }
+
+    /// How many log records of this trace are in the window, and the first time.
+    pub async fn trace_logs(&self, w: Window, trace_id: String) -> std::result::Result<Counted, ApiErr> {
+        Ok(self.api_state.reader.run(move |c| query::logs::count_of_trace(c, &w, &trace_id)).await?)
+    }
+
+    /// The span with this id in the window.
+    pub async fn find_span(&self, w: Window, span_id: String) -> std::result::Result<Option<Span>, ApiErr> {
+        match self.api_state.reader.run(move |c| query::traces::span(c, &w, &span_id)).await {
+            Ok(s) => Ok(Some(s)),
+            Err(query::QueryError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Ready to serve: the last flush (if any) succeeded and the catalog
     /// answers. The error is a short reason (details are logged).
     pub async fn ready(&self) -> std::result::Result<(), String> {
@@ -242,82 +279,6 @@ impl Server {
             flusher.stop();
         })
         .await?;
-        Ok(())
-    }
-
-    /// Bind the configured addresses and serve OTLP/gRPC, OTLP/HTTP and the
-    /// query API until `shutdown` is cancelled.
-    pub async fn serve(self, shutdown: CancellationToken) -> Result<()> {
-        let s = &self.cfg.server;
-        let http_l =
-            TcpListener::bind(&s.otlp_http_addr).await.with_context(|| format!("binding {}", s.otlp_http_addr))?;
-        let api_l = TcpListener::bind(&s.api_addr).await.with_context(|| format!("binding {}", s.api_addr))?;
-        // Bind all listeners up front so a busy port fails start-up.
-        let grpc_l =
-            TcpListener::bind(&s.otlp_grpc_addr).await.with_context(|| format!("binding {}", s.otlp_grpc_addr))?;
-        info!(grpc = %s.otlp_grpc_addr, http = %s.otlp_http_addr, api = %s.api_addr, "listening");
-
-        let receivers_down = CancellationToken::new();
-        let otlp_http = self.otlp_http_router().layer(TraceLayer::new_for_http());
-        let api = self.api_router().layer(CompressionLayer::new()).layer(TraceLayer::new_for_http());
-        let grpc = tonic::transport::Server::builder().add_routes(self.grpc_routes());
-
-        let t1 = {
-            let sd = shutdown.clone();
-            tokio::spawn(async move {
-                let r = axum::serve(http_l, otlp_http)
-                    .with_graceful_shutdown(sd.clone().cancelled_owned())
-                    .await
-                    .map_err(anyhow::Error::from);
-                sd.cancel(); // one listener failing stops the others
-                r
-            })
-        };
-        let t2 = {
-            let sd = shutdown.clone();
-            tokio::spawn(async move {
-                let r = axum::serve(api_l, api)
-                    .with_graceful_shutdown(sd.clone().cancelled_owned())
-                    .await
-                    .map_err(anyhow::Error::from);
-                sd.cancel();
-                r
-            })
-        };
-        let t3 = {
-            let sd = shutdown.clone();
-            tokio::spawn(async move {
-                let incoming = tonic::transport::server::TcpIncoming::from(grpc_l);
-                let r = grpc
-                    .serve_with_incoming_shutdown(incoming, sd.clone().cancelled_owned())
-                    .await
-                    .map_err(anyhow::Error::from);
-                sd.cancel();
-                r
-            })
-        };
-        let rd = receivers_down.clone();
-        let sd = shutdown.clone();
-        let background = async move {
-            let r = self.run_background(async move { rd.cancelled().await }).await;
-            // If the flusher or maintenance cannot start, stop the receivers:
-            // they would accept data that is never written.
-            if r.is_err() {
-                sd.cancel();
-            }
-            r
-        };
-        let receivers = async {
-            let (a, b, c) = tokio::join!(t1, t2, t3);
-            receivers_down.cancel();
-            a??;
-            b??;
-            c??;
-            anyhow::Ok(())
-        };
-        let (r, b) = tokio::join!(receivers, background);
-        r?;
-        b?;
         Ok(())
     }
 }

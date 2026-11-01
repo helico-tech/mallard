@@ -119,8 +119,9 @@ actions), except `ctrl-c` / `ctrl-q` quit and `ctrl-u` clears the search.
 |---|---|---|
 | issue list | `tab` `← →` `1-4` | status tab (unresolved / resolved / ignored / all) |
 | | `s` | cycle sort (last seen, first seen, events, users) |
-| | `t` / `T` | cycle time window (1h, 24h, 7d, 14d, 30d) |
-| | `p` | switch project |
+| | `t` / `T` | cycle time window (1h, 24h, 7d, 14d, 30d; in `mallard tui` one window for both tabs) |
+| | `p` | switch project (in `mallard tui`: choose the app) |
+| | `/` | search; `key=value` is a tag filter, `tab` accepts a suggestion |
 | | `R` `I` `U` | resolve / ignore / unresolve |
 | issue detail | `tab` `← →` `1-5` | section |
 | | `[` `]` | older / newer event |

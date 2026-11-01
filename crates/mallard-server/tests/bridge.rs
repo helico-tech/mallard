@@ -94,6 +94,21 @@ fn captured_span_envelope(trace: &str) -> String {
     format!("{header}\n{item}\n{payload}\n")
 }
 
+/// An INP span envelope captured from @sentry/browser 10.78 in headless
+/// Chromium with `sendDefaultPii` (issue 0094; nothing removed), moved to the
+/// last few seconds. A whole number of seconds keeps the digits of its times.
+fn captured_inp_envelope() -> String {
+    let text = include_str!("fixtures/sentry-browser-10-inp.envelope");
+    let mut lines = text.lines();
+    let (header, item) = (lines.next().unwrap(), lines.next().unwrap());
+    let mut span: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    let shift = (now_secs() - 1.0 - span["timestamp"].as_f64().unwrap()).round();
+    for k in ["start_timestamp", "timestamp"] {
+        span[k] = json!(span[k].as_f64().unwrap() + shift);
+    }
+    format!("{header}\n{item}\n{span}\n")
+}
+
 async fn post_envelope(http: &reqwest::Client, url: &str, project: &Project, body: String) {
     let r = http
         .post(format!("{url}/sentry/api/{}/envelope/", project.id))
@@ -197,8 +212,8 @@ async fn sentry_span_items_become_traces() {
     let http = reqwest::Client::new();
     let trace = "abf92f3577b34da6a3ce929d0e0e4742";
 
-    // An INP span of @sentry/browser 10 (standalone: no content type). Written
-    // from the SDK's source, see `inp_span` in bridge/span.rs.
+    // An INP span of @sentry/browser 10 (standalone: no content type), trimmed;
+    // `captured_browser_10_inp_span_becomes_an_otel_span` sends a real one.
     let inp_trace = "bbf92f3577b34da6a3ce929d0e0e4743";
     let t = now_secs() - 1.0;
     let inp = json!({"trace_id": inp_trace, "span_id": "1111111111111111",
@@ -282,6 +297,47 @@ async fn sentry_span_items_become_traces() {
     srv.stop().await;
 }
 
+/// ADR 0022 against what a running SDK sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn captured_browser_10_inp_span_becomes_an_otel_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| c.bridge.dedupe_window = Duration::from_millis(200)).await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let shop = project(&client, "shop").await;
+    post_envelope(&reqwest::Client::new(), &srv.url, &shop, captured_inp_envelope()).await;
+
+    let trace = "b806bb9d3a1344b491944a0f8a35a997";
+    let inp = eventually("the INP span", || async {
+        client.trace_overview(trace, None).await.unwrap().spans.into_iter().next()
+    })
+    .await;
+    assert_eq!(inp.span_id, "9d4ccd2b8dce23b0");
+    assert_eq!(inp.trace_id, trace);
+    assert_eq!(inp.parent_span_id, None, "no span was active when the SDK reported it");
+    assert_eq!(inp.name, "body > main#app > button#checkout.primary");
+    assert_eq!(inp.kind, SpanKind::Internal);
+    assert_eq!(inp.duration_ns, 344_000_000);
+    assert_eq!(inp.status_code, SpanStatus::Unset, "the SDK sets no status");
+
+    assert_eq!(inp.service_name, "shop", "service = project slug");
+    assert_eq!(inp.resource_attributes.get("service.version").map(String::as_str), Some("shop-web@2.4.0"));
+    assert_eq!(inp.resource_attributes.get("deployment.environment.name").map(String::as_str), Some("e2e"));
+    assert_eq!(inp.scope_name, "sentry", "the envelope has no sdk header");
+    assert_eq!(inp.scope_version, "");
+
+    let attr = |k: &str| inp.attributes.get(k).map(String::as_str);
+    assert_eq!(attr("browser.web_vital.inp.value"), Some("344"));
+    assert_eq!(attr("sentry.op"), Some("ui.interaction.click"));
+    assert_eq!(attr("sentry.origin"), Some("auto.http.browser.inp"));
+    assert_eq!(attr("sentry.exclusive_time"), Some("344"));
+    assert_eq!(attr("transaction"), Some("/"));
+    assert!(attr("user_agent.original").is_some_and(|ua| ua.contains("HeadlessChrome/")));
+    assert_eq!(attr("client.address"), Some("127.0.0.1"), "`{{auto}}` is the address of the request");
+    assert_eq!(attr("release"), None, "on the resource");
+    assert_eq!(attr("environment"), None, "on the resource");
+    srv.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn otel_exceptions_become_issues_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -349,6 +405,38 @@ async fn otel_exceptions_become_issues_once() {
             ("000000000000000d".to_string(), "RuntimeError: gateway down".to_string()),
         ]
     );
+    srv.stop().await;
+}
+
+/// A project slug may hold `_`, which the slug rule turns into `-`. Its service's
+/// exceptions go to that project and open no project `my-app` (issue 0142).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn otel_exceptions_find_a_project_with_an_underscore() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| {
+        c.bridge.dedupe_window = Duration::from_millis(100);
+        c.bridge.default_project = "catch-all".into();
+    })
+    .await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let req = CreateProject { name: "Mine".into(), slug: Some("my_app".into()), platform: None };
+    let mine = client.sentry.create_project(&req).await.unwrap();
+
+    let span = otel_span("5bf92f3577b34da6a3ce929d0e0e4738", "000000000000000a", "work", Some("ValueError"));
+    let spans = json!({"resourceSpans": [{
+        "resource": {"attributes": [kv("service.name", "my_app")]},
+        "scopeSpans": [{"spans": [span]}]}]});
+    let http = reqwest::Client::new();
+    assert!(http.post(format!("{}/v1/traces", srv.otlp_url)).json(&spans).send().await.unwrap().status().is_success());
+
+    let issues = eventually("the issue in project my_app", || async {
+        let list = client.sentry.issues("my_app", &IssueQuery::default()).await.ok()?;
+        (!list.issues.is_empty()).then_some(list.issues)
+    })
+    .await;
+    assert_eq!(issues[0].project_id, mine.id);
+    let slugs: Vec<String> = client.sentry.projects().await.unwrap().into_iter().map(|p| p.slug).collect();
+    assert_eq!(slugs, ["my_app"], "no second project, and not the default one");
     srv.stop().await;
 }
 

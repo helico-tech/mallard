@@ -6,11 +6,13 @@
 //! - `/api/0/...`   sentry-cli's API again (it only accepts a URL root)
 //! - `/otel/...`    telemetry query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
+//! - `/api/v1/apps`, `/api/v1/find`  what spans both sides (ADR 0027)
 //! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
 //!   when that is set)
 //!
 //! OTLP/gRPC is served on `server.otlp_grpc_addr`.
 
+pub mod api;
 pub mod bridge;
 pub mod commands;
 pub mod config;
@@ -109,7 +111,9 @@ impl Platform {
     /// Everything served on `server.http_addr`.
     pub fn http_router(&self) -> Router {
         let (sentry, otel) = (self.sentry.clone(), self.otel.clone());
+        let api_state = Arc::new(api::ApiState { otel: self.otel.clone(), sentry: self.sentry.clone() });
         let mut r = Router::new()
+            .merge(api::router(api_state, &self.cfg.server.api_tokens))
             .nest(SENTRY_PREFIX, self.sentry.router())
             .nest_service(SENTRY_CLI_PREFIX, sentry_cli_at_root(self.sentry.router()))
             .nest(OTEL_PREFIX, self.otel.api_router())
@@ -304,6 +308,46 @@ async fn bind(addr: &str) -> Result<TcpListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// If a background job cannot start, the receivers stop and `serve_on` returns
+    /// the error, instead of accepting data that is never flushed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serve_stops_when_background_fails_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["t".into()];
+        cfg.storage.catalog = dir.path().join("catalog.ducklake").display().to_string();
+        cfg.storage.data_path = format!("{}/lake/", dir.path().display());
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
+        let otel = Arc::new(
+            mallard_otel_server::Server::with_connection(cfg.otel_config(), conn.try_clone().unwrap()).await.unwrap(),
+        );
+        let sentry = mallard_sentry_server::Server::with_connection(
+            cfg.sentry.clone(),
+            cfg.sentry_host(),
+            conn.try_clone().unwrap(),
+        )
+        .await
+        .unwrap();
+        let bridge = bridge::install(&cfg.bridge, &sentry, &otel).unwrap();
+        let platform = Platform { cfg: Arc::new(cfg), otel, sentry, bridge, metrics: None };
+        // New connections can no longer select the lake schema, so the flusher fails to start.
+        conn.execute_batch("DETACH lake").unwrap();
+        let bound = || TcpListener::bind("127.0.0.1:0");
+        let listeners = Listeners {
+            http: bound().await.unwrap(),
+            otlp_http: bound().await.unwrap(),
+            otlp_grpc: bound().await.unwrap(),
+            metrics: None,
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            platform.serve_on(listeners, CancellationToken::new()),
+        )
+        .await
+        .expect("serve_on must return when a background job fails");
+        assert!(r.is_err());
+    }
 
     #[tokio::test]
     async fn a_busy_port_fails_start_up() {

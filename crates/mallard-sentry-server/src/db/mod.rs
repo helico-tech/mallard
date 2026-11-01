@@ -333,6 +333,13 @@ impl Db {
         }
     }
 
+    /// Read the projects from the catalog now, and say when that fails. `None`:
+    /// not done in time.
+    pub async fn load_projects(&self, timeout: Duration) -> Result<Option<()>> {
+        let caches = self.caches.clone();
+        self.read_for(timeout, move |c, ns| writer::load_projects(c, ns, &caches)).await
+    }
+
     /// Stop maintenance, write what is queued, flush inlined data and stop
     /// the writer thread. Idempotent. Later writes fail with "writer stopped".
     pub async fn shutdown(&self) {

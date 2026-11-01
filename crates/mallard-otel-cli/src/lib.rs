@@ -305,13 +305,25 @@ pub struct Ctx {
     out: Out,
     hints: Hints,
     errors: Option<Arc<dyn ErrorLookup>>,
+    services: Vec<String>,
 }
 
 impl Ctx {
     /// Text output, colour as `--color=auto` says, [`HINTS`].
     pub fn new(client: Client) -> Self {
         let output = Output::default();
-        Ctx { client, out: output.out, output, hints: HINTS, errors: None }
+        Ctx { client, out: output.out, output, hints: HINTS, errors: None, services: vec![] }
+    }
+
+    /// Commands without `-S` are scoped to these services (the host's `--app`).
+    pub fn with_services(mut self, services: Vec<String>) -> Self {
+        self.services = services;
+        self
+    }
+
+    /// What to send as `service`: the `-S` of the command, or the scope.
+    fn services(&self, service: Option<&String>) -> Vec<String> {
+        service.map_or_else(|| self.services.clone(), |s| vec![s.clone()])
     }
 
     /// Print JSON instead of tables (`--json`).
@@ -406,6 +418,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         }
         Command::Ops(OpsArgs { w, service, all_spans, compare: None }) => {
             let (win, (from, to, since)) = window(&w)?;
+            let service = ctx.services(service.as_ref());
             let v = c.operations(&OperationQuery { from, to, since, service, entry_only: Some(!all_spans) }).await?;
             print_list(ctx, List::new(v).window(win), operations_text)
         }
@@ -416,7 +429,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                 from: Some(from),
                 to: Some(to),
                 since: None,
-                service: service.clone(),
+                service: ctx.services(service.as_ref()),
                 entry_only: Some(!all_spans),
             };
             let (q_now, q_before) = (q(win.from, win.to), q(win.from - back, win.to - back));
@@ -432,7 +445,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     from,
                     to,
                     since,
-                    service: a.service.clone(),
+                    service: ctx.services(a.service.as_ref()),
                     operation: a.operation.clone(),
                     errors_only: Some(a.errors),
                     min_duration_ms: a.min_ms,
@@ -488,6 +501,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         Command::Logs(a) => logs(ctx, a).await,
         Command::Metrics(MetricListArgs { w, service, query }) => {
             let (win, (from, to, since)) = window(&w)?;
+            let service = ctx.services(service.as_ref());
             let v = c.metrics(&MetricListQuery { from, to, since, service, q: query }).await?;
             print_list(ctx, List::new(v).window(win), metrics_text)
         }
@@ -499,7 +513,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     from,
                     to,
                     since,
-                    service,
+                    service: ctx.services(service.as_ref()),
                     agg,
                     group_by: by,
                     attributes: attrs(&attr),
@@ -526,9 +540,10 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     from,
                     to,
                     since,
-                    service: a.service,
+                    service: ctx.services(a.service.as_ref()),
                     metric: a.metric,
                     key: a.key,
+                    prefix: None,
                     limit: Some(a.limit),
                 })
                 .await?;
@@ -593,7 +608,7 @@ async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
         from: Some(win.from),
         to: if a.follow { None } else { Some(win.to) },
         since: None,
-        service: a.service.clone(),
+        service: ctx.services(a.service.as_ref()),
         min_severity,
         q: a.query.clone(),
         trace_id: a.trace.clone(),

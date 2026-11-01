@@ -1,0 +1,21 @@
+[package]
+name = "mallard-api"
+description = "Types of the API mallard-server adds over both sides: apps and find"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+mallard-common = { workspace = true, features = ["openapi"] }
+chrono.workspace = true
+serde.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Breadcrumbs, Button, Select, Sidebar, Text, Tooltip, useKumoToastManager, useSidebar } from "@cloudflare/kumo";
 import {
   ArrowsClockwiseIcon, BugIcon, ChartLineIcon, GaugeIcon, GraphIcon, HeartbeatIcon, KeyboardIcon, ListMagnifyingGlassIcon,
-  MoonIcon, PauseIcon, PlayIcon, SignOutIcon, SunIcon,
+  MoonIcon, PauseIcon, PlayIcon, SignOutIcon, SunIcon, WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { matchPath, useLocation, useNavigate } from "react-router-dom";
@@ -19,7 +19,8 @@ import { leaveMenu, REFRESH_EVENT, useKeys } from "./keys";
 import { lastTelemetryView, record, screenAddress } from "./history";
 import { useInterval, useSettings } from "./settings";
 import { HelpDialog } from "./Help";
-import { useWindow, windowsOf, type Side } from "./window";
+import { SearchPalette } from "./SearchPalette";
+import { useScope, useWindow, type Side } from "./window";
 import { Logo } from "./Logo";
 
 function useSide(): Side {
@@ -55,6 +56,7 @@ function useCrumbs(side: Side): Crumb[] {
   }
   const view = pathname.split("/")[2] ?? "overview";
   const name = VIEWS[view] ?? "Overview";
+  if (view === "overview" && !param.get("service")) return [{ label: "Overview" }];
   const detail = matchPath("/telemetry/:view/:id", pathname);
   if (detail) {
     const id = clean(detail.params.id!);
@@ -94,10 +96,59 @@ function hasWindow(pathname: string): boolean {
   );
 }
 
-function WindowControl({ side }: { side: Side }) {
-  const { w, setW, cycle } = useWindow(side);
+/** Which sides an app has: telemetry only counts in this window. */
+function sidesOf(project: boolean, services: number): string {
+  return [project ? "errors" : "", services ? "telemetry" : ""].filter(Boolean).join(", ");
+}
+
+const ALL_APPS = "*";
+
+/** The one app picker: it scopes every screen (ADR 0028). `p` opens it. */
+function AppPicker() {
+  const { app, apps, setApp, warnings } = useScope();
+  const [open, setOpen] = useState(false);
+  useKeys({ p: () => setOpen(true) });
+  const items: Record<string, string> = { [ALL_APPS]: "All apps" };
+  for (const a of apps) items[a.slug] = a.name;
+  if (app && !items[app]) items[app] = clean(app);
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      <Select
+        aria-label="App"
+        className="w-40"
+        open={open}
+        onOpenChange={(o) => {
+          setOpen(o);
+          leaveMenu(o);
+        }}
+        value={app || ALL_APPS}
+        onValueChange={(v) => setApp(!v || v === ALL_APPS ? "" : (v as string))}
+        items={items}
+      >
+        <Select.Option value={ALL_APPS}>All apps</Select.Option>
+        {app && !apps.some((a) => a.slug === app) && <Select.Option value={app}>{clean(app)}</Select.Option>}
+        {apps.map((a) => (
+          <Select.Option key={a.slug} value={a.slug}>
+            <span className="flex items-baseline justify-between gap-3">
+              <span className="truncate">{a.name}</span>
+              <span className="shrink-0 text-xs text-kumo-subtle">{sidesOf(a.project !== null && a.project !== undefined, a.services.length)}</span>
+            </span>
+          </Select.Option>
+        ))}
+      </Select>
+      {warnings.length > 0 && (
+        <Tooltip content={warnings.join("; ")} asChild>
+          <span role="img" aria-label={`The list of apps may be incomplete: ${warnings.join("; ")}`} className="text-kumo-warning"><WarningCircleIcon /></span>
+        </Tooltip>
+      )}
+    </div>
+  );
+}
+
+function WindowControl() {
+  const { w, windows, setW, cycle } = useWindow();
   useKeys({ t: () => cycle(1), T: () => cycle(-1) });
-  const items = Object.fromEntries(windowsOf(side).map((x) => [x, `Last ${x}`]));
+  const items = Object.fromEntries(windows.map((x) => [x, `Last ${x}`]));
   return (
     <div className="flex items-center gap-2">
       <Tooltip content={<span>Time window (t / T). All times are UTC.</span>} asChild>
@@ -162,12 +213,14 @@ function TopBar({ side }: { side: Side }) {
   };
   useKeys({ r: refresh, "?": () => setHelpOpen(true) });
   return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-kumo-line bg-kumo-base px-5">
+    <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-kumo-line bg-kumo-base px-5 py-1.5">
       <Sidebar.Trigger aria-label="Show or hide the navigation" />
+      <AppPicker />
       <Crumbs side={side} />
       <div className="ml-auto flex shrink-0 items-center gap-2">
         <LiveState side={side} />
-        {hasWindow(pathname) && <WindowControl side={side} />}
+        {hasWindow(pathname) && <WindowControl />}
+        <SearchPalette />
         <Tooltip content={paused ? "Resume auto refresh" : "Pause auto refresh"} asChild>
           <Button variant="ghost" shape="square" aria-label={paused ? "Resume auto refresh" : "Pause auto refresh"} aria-pressed={paused} onClick={() => setPaused(!paused)} icon={paused ? <PlayIcon /> : <PauseIcon />} />
         </Tooltip>
@@ -179,13 +232,15 @@ function TopBar({ side }: { side: Side }) {
   );
 }
 
+const OVERVIEW = { key: "overview", label: "Overview", icon: GaugeIcon };
+
 const TELEMETRY_VIEWS = [
-  { key: "overview", label: "Overview", icon: GaugeIcon },
+  OVERVIEW,
   { key: "traces", label: "Traces", icon: GraphIcon },
   { key: "logs", label: "Logs", icon: ListMagnifyingGlassIcon },
   { key: "metrics", label: "Metrics", icon: ChartLineIcon },
   { key: "status", label: "Status", icon: HeartbeatIcon },
-] as const;
+];
 
 function Nav({ session, side }: { session: Session; side: Side }) {
   const { pathname } = useLocation();
@@ -217,12 +272,19 @@ function Nav({ session, side }: { session: Session; side: Side }) {
   return (
     <Sidebar>
       <Sidebar.Header className="h-12 shrink-0">
-        <a href="/" onClick={(e) => { e.preventDefault(); navigate("/errors"); }} className="flex items-center gap-2 px-1 py-0.5 font-semibold text-kumo-strong">
+        <a href="/" onClick={(e) => { e.preventDefault(); navigate(screenAddress("/telemetry/overview")); }} className="flex items-center gap-2 px-1 py-0.5 font-semibold text-kumo-strong">
           <Logo className="size-6 shrink-0" />
           {state === "expanded" || isMobile ? <Text bold>mallard</Text> : null}
         </a>
       </Sidebar.Header>
       <Sidebar.Content>
+        <Sidebar.Group>
+          <Sidebar.Menu>
+            <Sidebar.MenuButton icon={OVERVIEW.icon} active={pathname.startsWith("/telemetry/overview") || pathname === "/telemetry"} href={screenAddress("/telemetry/overview")}>
+              {OVERVIEW.label}
+            </Sidebar.MenuButton>
+          </Sidebar.Menu>
+        </Sidebar.Group>
         <Sidebar.Group>
           <Sidebar.GroupLabel>Errors</Sidebar.GroupLabel>
           <Sidebar.Menu>
@@ -234,8 +296,8 @@ function Nav({ session, side }: { session: Session; side: Side }) {
         <Sidebar.Group>
           <Sidebar.GroupLabel>Telemetry</Sidebar.GroupLabel>
           <Sidebar.Menu>
-            {TELEMETRY_VIEWS.map((v) => (
-              <Sidebar.MenuButton key={v.key} icon={v.icon} active={pathname.startsWith(`/telemetry/${v.key}`) || (v.key === "overview" && pathname === "/telemetry")} href={screenAddress(`/telemetry/${v.key}`)}>
+            {TELEMETRY_VIEWS.filter((v) => v !== OVERVIEW).map((v) => (
+              <Sidebar.MenuButton key={v.key} icon={v.icon} active={pathname.startsWith(`/telemetry/${v.key}`)} href={screenAddress(`/telemetry/${v.key}`)}>
                 {v.label}
               </Sidebar.MenuButton>
             ))}

@@ -37,9 +37,12 @@ pub use config::{
 };
 pub use hooks::{EventObserver, IngestError, SpanSink, Spans, Transaction, TransactionSink};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use db::Db;
 use mallard_common::auth::{AuthPolicy, Tokens};
+use mallard_common::http::ApiErr;
+use mallard_common::window::Window;
+use mallard_sentry_api::{EventDetail, EventSummary, IssueDetail, Project};
 use sourcemaps::SourceMaps;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -77,7 +80,7 @@ impl Server {
     /// belong to the host and are left untouched (except
     /// `host.maintenance_threads`, which must be 0 on a shared connection).
     pub async fn with_connection(cfg: Config, host: Host, conn: mallard_duck::duckdb::Connection) -> Result<Server> {
-        cfg.validate().context("sentry")?;
+        cfg.validate()?;
         host.validate()?;
         let c = cfg.clone();
         let maintenance =
@@ -177,6 +180,11 @@ impl Server {
         self.state.db.caches.projects.read().expect("lock").values().find(|p| p.slug == slug).map(|p| p.id)
     }
 
+    /// The id and slug of every project this process knows. Reads no catalog; [`Self::projects`] does.
+    pub fn project_slugs(&self) -> Vec<(u32, String)> {
+        self.state.db.caches.projects().into_iter().map(|p| (p.id, p.slug)).collect()
+    }
+
     /// Create a project (same rules as `POST /v1/projects`) and return its
     /// id. When the slug is taken, the existing project's id.
     pub async fn create_project(&self, name: &str, slug: &str, platform: Option<&str>) -> Result<u32> {
@@ -192,6 +200,37 @@ impl Server {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// The longest window the query API accepts (`sentry.query.max_window`).
+    pub fn max_window(&self) -> std::time::Duration {
+        self.state.cfg.query.max_window
+    }
+
+    /// All projects, read from the catalog now; fails when it cannot be read.
+    pub async fn projects(&self) -> Result<Vec<Project>, ApiErr> {
+        self.state.all_projects().await
+    }
+
+    /// The project with this id or slug.
+    pub async fn project(&self, r: &str) -> Option<Project> {
+        self.state.project_ref(r).await
+    }
+
+    /// The events of one trace in the window, across projects (at most 50).
+    pub async fn trace_events(&self, w: Window, trace_id: uuid::Uuid) -> Result<Vec<EventSummary>, ApiErr> {
+        self.state.trace_events(w, trace_id).await
+    }
+
+    /// One event by id, in any project.
+    pub async fn find_event(&self, id: uuid::Uuid) -> Result<Option<EventDetail>, ApiErr> {
+        self.state.event_by_id(id).await
+    }
+
+    /// One issue by id (a 16 hex group hash), with the id of its project, in
+    /// `project` or in all projects.
+    pub async fn find_issues(&self, group: u64, project: Option<u32>) -> Result<Vec<(u32, IssueDetail)>, ApiErr> {
+        self.state.issues_by_id(group, project).await
     }
 
     /// Ready to serve: the writer runs and the catalog answers. The error

@@ -1,6 +1,6 @@
 //! The typed client against a real server over TCP.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use mallard_otel_client::{Client, LogTail, api::*};
 use mallard_otel_server::{Server, config::Config};
@@ -11,7 +11,15 @@ use opentelemetry_proto::tonic::{
     resource::v1::Resource,
 };
 use prost::Message;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+/// Serve `app` on `listener` until `shutdown`.
+fn serve(listener: TcpListener, app: axum::Router, shutdown: CancellationToken) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned()).await.unwrap();
+    })
+}
 
 fn logs(n: usize, t0: u64) -> Vec<u8> {
     let recs = (0..n)
@@ -48,18 +56,16 @@ async fn client_against_server() {
     cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     cfg.auth.api_tokens = vec!["tok".into()];
-    // Pick free ports.
-    let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
-    cfg.server.api_addr = free();
-    cfg.server.otlp_http_addr = free();
-    cfg.server.otlp_grpc_addr = free();
-    let api = format!("http://{}", cfg.server.api_addr);
-    let otlp = format!("http://{}/v1/logs", cfg.server.otlp_http_addr);
-    let server = Server::new(cfg).await.unwrap();
+    let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let otlp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", api_listener.local_addr().unwrap());
+    let otlp = format!("http://{}/v1/logs", otlp_listener.local_addr().unwrap());
+    let server = Arc::new(Server::new(cfg).await.unwrap());
     let shutdown = CancellationToken::new();
+    let api_task = serve(api_listener, server.api_router(), shutdown.clone());
+    let otlp_task = serve(otlp_listener, server.otlp_http_router(), shutdown.clone());
     let sd = shutdown.clone();
-    let task = tokio::spawn(async move { server.serve(sd).await.unwrap() });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let bg = tokio::spawn(async move { server.run_background(sd.cancelled_owned()).await.unwrap() });
 
     let c = Client::new(&api, Some("tok")).unwrap();
     assert_eq!(c.health().await.unwrap().status, "ok");
@@ -73,7 +79,7 @@ async fn client_against_server() {
 
     let mut tail = LogTail::new(
         c.clone(),
-        LogQuery { service: Some("web".into()), ..Default::default() },
+        LogQuery { service: vec!["web".into()], ..Default::default() },
         chrono::Utc::now() - chrono::TimeDelta::minutes(5),
     );
     let mut got = Vec::new();
@@ -99,6 +105,16 @@ async fn client_against_server() {
         .await
         .unwrap();
     assert_eq!(errs.len(), 3);
+    // Several service values: the client sends them all (ADR 0028).
+    let of = |service: &[&str]| LogQuery {
+        since: Some("10m".into()),
+        service: service.iter().map(|s| s.to_string()).collect(),
+        limit: Some(1),
+        ..Default::default()
+    };
+    assert_eq!(c.logs(&of(&["web", "nope"])).await.unwrap().len(), 1, "any of them");
+    assert_eq!(c.logs(&of(&["nope", "also-not"])).await.unwrap().len(), 0);
+    assert_eq!(c.logs_page(&of(&["nope", "web"])).await.unwrap().0.len(), 1);
     // Pages over inlined rows (the default inlining keeps these in the catalog).
     let mut q = LogQuery { since: Some("10m".into()), limit: Some(3), ..Default::default() };
     let mut seen = Vec::new();
@@ -126,9 +142,10 @@ async fn client_against_server() {
             from: None,
             to: None,
             since: Some("10m".into()),
-            service: None,
+            service: vec![],
             metric: None,
             key: None,
+            prefix: None,
             limit: None,
         })
         .await
@@ -145,5 +162,7 @@ async fn client_against_server() {
     assert_eq!(stats.ingest.signals[1].accepted, 10);
 
     shutdown.cancel();
-    task.await.unwrap();
+    api_task.await.unwrap();
+    otlp_task.await.unwrap();
+    bg.await.unwrap();
 }

@@ -50,6 +50,7 @@ impl App {
             return match self.input.as_mut() {
                 Some(input) if k.modifiers == KeyModifiers::CONTROL && k.code == KeyCode::Char('u') => {
                     input.clear();
+                    self.suggest.edited("", 0, Instant::now());
                     done(vec![])
                 }
                 _ => ignored(),
@@ -92,6 +93,7 @@ impl App {
         }
         self.overlay = Overlay::None;
         self.input = None;
+        self.suggest.close();
         self.track(vec![Req::Trace { trace_id: trace_id.to_string() }])
     }
 
@@ -182,19 +184,35 @@ impl App {
     }
 
     fn on_key_search(&mut self, k: KeyEvent) -> Vec<Req> {
+        let now = Instant::now();
         let Some(input) = self.input.as_mut() else {
             return vec![];
         };
         match k.code {
-            KeyCode::Esc => self.input = None,
+            KeyCode::Esc => {
+                self.input = None;
+                self.suggest.close();
+            }
             KeyCode::Enter => {
                 self.query = self.input.take().unwrap_or_default().trim().to_string();
+                self.suggest.close();
                 return self.reload_list();
             }
+            KeyCode::Tab => {
+                if let Some((text, _)) = self.suggest.accept(now) {
+                    *input = text;
+                }
+            }
+            KeyCode::Down => self.suggest.select(1),
+            KeyCode::Up => self.suggest.select(-1),
             KeyCode::Backspace => {
                 input.pop();
+                self.suggest.edited(input, input.chars().count(), now);
             }
-            KeyCode::Char(c) => input.push(c),
+            KeyCode::Char(c) => {
+                input.push(c);
+                self.suggest.edited(input, input.chars().count(), now);
+            }
             _ => {}
         }
         vec![]
@@ -243,22 +261,24 @@ impl App {
                 self.reload_list()
             }
             KeyCode::Char(keys::SEARCH) => {
+                self.suggest.open(&self.query, self.query.chars().count(), Instant::now());
                 self.input = Some(self.query.clone());
                 vec![]
             }
+            KeyCode::Char('d') if self.offers_day() => return (vec![], Outcome::SetWindow("24h")),
             KeyCode::Char('s') => {
                 self.sort = cycle(&SortBy::ALL, self.sort, 1);
                 self.reload_list()
             }
-            KeyCode::Char(keys::WINDOW_NEXT) => {
+            KeyCode::Char(keys::WINDOW_NEXT) if !self.hosted => {
                 self.window = cycle(&Window::ALL, self.window, 1);
                 self.reload_list()
             }
-            KeyCode::Char(keys::WINDOW_PREV) => {
+            KeyCode::Char(keys::WINDOW_PREV) if !self.hosted => {
                 self.window = cycle(&Window::ALL, self.window, -1);
                 self.reload_list()
             }
-            KeyCode::Char('p') => {
+            KeyCode::Char('p') if !self.hosted => {
                 let selected =
                     self.current_project().and_then(|c| self.projects.iter().position(|p| p.id == c.id)).unwrap_or(0);
                 self.overlay = Overlay::Projects { selected };

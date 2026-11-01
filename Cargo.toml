@@ -24,6 +24,7 @@ mallard-otel-cli = { path = "crates/mallard-otel-cli" }
 mallard-common = { path = "crates/mallard-common" }
 mallard-duck = { path = "crates/mallard-duck" }
 mallard-server = { path = "crates/mallard-server" }
+mallard-api = { path = "crates/mallard-api" }
 mallard-client = { path = "crates/mallard-client" }
 mallard-term = { path = "crates/mallard-term" }
 mallard-web = { path = "crates/mallard-web" }

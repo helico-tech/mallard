@@ -277,6 +277,13 @@ export interface components {
         AttributeSignal: "spans" | "logs" | "metrics";
         /** @description Attribute keys (or values of one key) with how many sampled rows have them. */
         AttributeStats: {
+            /**
+             * Format: date-time
+             * @description The rows looked at start here: the newest part of the window with enough
+             *     rows (at least 500,000), or the start of the window. A value seen only
+             *     before this is not listed.
+             */
+            counted_from: string;
             /** @description Most frequent first. */
             items: components["schemas"]["AttributeCount"][];
             /**
@@ -286,7 +293,7 @@ export interface components {
             sampled_rows: number;
             /**
              * Format: int64
-             * @description Matching rows in the window.
+             * @description Matching rows since `counted_from`.
              */
             total_rows: number;
         };
@@ -297,20 +304,20 @@ export interface components {
         Capabilities: {
             /**
              * Format: double
-             * @description Buffered data is written at least this often (`ingest.flush_interval`),
+             * @description Buffered data is written at least this often (`otel.ingest.flush_interval`),
              *     so new data can take this long to show up in queries.
              */
             flush_interval_secs: number;
-            /** @description OTLP ingest needs a bearer token (`auth.ingest_tokens` is set). */
+            /** @description OTLP ingest needs a bearer token (`server.ingest_tokens` is set). */
             ingest_auth: boolean;
             /**
              * Format: int64
-             * @description Longest query window (`query.max_window`), in seconds.
+             * @description Longest query window (`otel.query.max_window`), in seconds.
              */
             max_window_secs: number;
             /** @description How long data is kept, in seconds (0 = forever). */
             retention_secs: components["schemas"]["RetentionSecs"];
-            /** @description `POST /api/v1/sql` is enabled (`query.enable_sql`). */
+            /** @description `POST /api/v1/sql` is enabled (`otel.query.enable_sql`). */
             sql: boolean;
         };
         /**
@@ -745,11 +752,14 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                service?: string;
+                /** @description Only this service; repeat for several (at most 50). */
+                service?: string[];
                 /** @description Only this metric (signal `metrics` only). */
                 metric?: string;
                 /** @description Top values of this key instead of the keys. */
                 key?: string;
+                /** @description Only keys, or with `key` only values, that start with this (any case). */
+                prefix?: string;
                 /** @description Max keys or values returned (default 50, max 1000). */
                 limit?: number;
             };
@@ -807,7 +817,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                service?: string;
+                /** @description Only this service; repeat for several (at most 50). */
+                service?: string[];
                 /** @description Minimum severity number (1-24). 9=INFO, 13=WARN, 17=ERROR, 21=FATAL. */
                 min_severity?: number;
                 /** @description Case-insensitive substring match on the body. */
@@ -861,7 +872,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                service?: string;
+                /** @description Only this service; repeat for several (at most 50). */
+                service?: string[];
                 q?: string;
                 step?: string;
             };
@@ -898,7 +910,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                service?: string;
+                /** @description Only this service; repeat for several (at most 50). */
+                service?: string[];
                 /** @description Substring filter on the metric name. */
                 q?: string;
             };
@@ -937,7 +950,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                service?: string;
+                /** @description Only this service; repeat for several (at most 50). */
+                service?: string[];
                 /**
                  * @description Aggregation: `avg` (default for gauges), `min`, `max`, `sum`,
                  *     `rate` (per-second increase, default for monotonic sums), `increase`,
@@ -997,8 +1011,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                /** @description Only operations of this service. */
-                service?: string;
+                /** @description Only operations of this service; repeat for several (at most 50). */
+                service?: string[];
                 /** @description Only entry spans (kind SERVER/CONSUMER or root spans). Default true. */
                 entry_only?: boolean;
             };
@@ -1093,7 +1107,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                service?: string;
+                /** @description Only this service; repeat for several (at most 50). */
+                service?: string[];
                 operation?: string;
                 /** @description Bucket width, e.g. `30s`, `5m`. Default picks ~60 buckets. */
                 step?: string;
@@ -1246,8 +1261,8 @@ export interface operations {
                 to?: string;
                 /** @description Relative window ending at `to`, e.g. `15m`, `1h`, `7d`. Ignored when `from` is set. */
                 since?: string;
-                /** @description Match traces with a span from this service. */
-                service?: string;
+                /** @description Match traces with a span from this service; repeat for several (at most 50). */
+                service?: string[];
                 /** @description Match traces with a span with this name. */
                 operation?: string;
                 /** @description Only traces that contain an error span. */

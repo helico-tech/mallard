@@ -8,7 +8,7 @@ from one mallard server. This guide is also built in: `mallard help agents`.
 ```sh
 export MALLARD_URL=http://localhost:8080   # the server
 export MALLARD_TOKEN=…                     # one of server.api_tokens
-export MALLARD_PROJECT=web                 # Sentry project (optional with one project)
+export MALLARD_PROJECT=web                 # Sentry project (optional with one project; ignored where none applies)
 export MALLARD_FORMAT=json                 # or pass --json / --format ndjson
 mallard status                             # exit 0: both sides up
 ```
@@ -47,7 +47,7 @@ Exit codes:
 | 1 | internal error | report it |
 | 2 | usage: bad flag, id, window or field | fix the call (see `--help`) |
 | 3 | auth: missing or wrong token | set `MALLARD_TOKEN` |
-| 4 | not found (or `find` found nothing) | check the id, widen `--since` |
+| 4 | not found (or `find` found nothing; `--app`: no such app, or it lacks that side) | check the id, widen `--since` |
 | 5 | conflict | |
 | 6 | unavailable: server down, busy, timeout; `status` with a side down | retry later |
 | 7 | turned off on the server (SQL) | ask for `otel.query.enable_sql = true` (`sql --errors`: `sentry.query.enable_sql`) |
@@ -71,6 +71,26 @@ mallard events list --trace <trace-id> --wait 30s --json
 mallard find <trace-id> --wait 30s
 mallard logs -S checkout -q "order 42" --since 5m --wait 20s
 ```
+
+**Which apps are there?** An app is a project and the services with the same slug, or
+either alone. `project` is null without a project, `services` empty without telemetry
+in the window. Use the slug with `--app`: it means the project on `issues`, `events`,
+`releases`, `sourcemaps`, `find` and `series errors`, and all its service names on `traces list`,
+`logs`, `ops`, `metrics`, `schema attrs` and `series spans|logs`.
+```sh
+mallard apps --since 7d --json --fields slug,project,services
+mallard issues list --app checkout --since 1h
+mallard logs --app checkout -l warn --since 10m
+```
+`--app` replaces `-p` and `-S`: both together is exit 2 (`MALLARD_PROJECT` just gives way), and so
+is `--app` on a command that uses neither, or `events list --trace`. An app without that side, or
+an unknown app, is exit 4, not an empty list; the message says what to do. If the list of apps
+is incomplete then it is exit 6: retry. Services count with data in the command's window or the
+last 24h, so `--wait` does not wait for an app's first data: use `-S <name> --wait` then.
+
+`-p` works on `issues`, `events`, `releases`, `sourcemaps`, `find`, `series errors` and `tui`. Elsewhere,
+and on `events list --trace`, which looks in all projects, the flag is exit 2: it never gives an
+answer for another scope. `MALLARD_PROJECT` is only a default, so those commands ignore it.
 
 **What is this id?** (pasted from a log or a bug report)
 ```sh
@@ -103,7 +123,9 @@ mallard issues resolve <issue-id> --reason "fixed in #123" --json
 # {"results":[{"id":"…","status":"resolved","changed":true}]}
 ```
 
-**Set up a new app** (safe to repeat; never fails because the project exists):
+**Set up a new app** (safe to repeat; never fails because the project exists; a project with the
+same slug under the slug rule counts, so `setup my_app` next to a project `my_app` gets that one,
+and `OTEL_SERVICE_NAME` is its slug):
 ```sh
 mallard setup checkout --platform node >> .env
 # SENTRY_DSN, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL, OTEL_SERVICE_NAME
