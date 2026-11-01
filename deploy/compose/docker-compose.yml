@@ -6,6 +6,11 @@
 #
 # Point your OpenTelemetry SDKs / Collector at localhost:4317 (gRPC) or
 # http://localhost:4318 (HTTP). Query API: http://localhost:8080/docs
+#
+# Ports are published on 127.0.0.1 only, because auth is off by default and
+# the query API can read all telemetry. To accept traffic from other hosts,
+# set ODL_AUTH__API_TOKENS (and ODL_AUTH__INGEST_TOKENS) below first, then
+# remove the "127.0.0.1:" prefixes.
 
 name: otel-ducklake
 
@@ -16,9 +21,9 @@ services:
       context: ../..
       dockerfile: Dockerfile
     ports:
-      - "4317:4317"   # OTLP/gRPC
-      - "4318:4318"   # OTLP/HTTP
-      - "8080:8080"   # query API + /docs
+      - "127.0.0.1:4317:4317"   # OTLP/gRPC
+      - "127.0.0.1:4318:4318"   # OTLP/HTTP
+      - "127.0.0.1:8080:8080"   # query API + /docs
     volumes:
       - otel-data:/data
     environment:
@@ -28,6 +33,7 @@ services:
       ODL_RETENTION__METRICS: 30d
       ODL_DUCKDB__MEMORY_LIMIT: 1GB
       # ODL_AUTH__API_TOKENS: '["change-me"]'
+      # ODL_AUTH__INGEST_TOKENS: '["change-me-too"]'
     healthcheck:
       test: ["CMD", "odl", "--url", "http://localhost:8080", "health"]
       interval: 10s

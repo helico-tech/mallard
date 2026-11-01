@@ -4,7 +4,8 @@
 # (`odl`) and the load generator (`odl-loadgen`).
 #
 #   docker build -t otel-ducklake .
-#   docker run -p 4317:4317 -p 4318:4318 -p 8080:8080 -v otel-data:/data otel-ducklake
+#   docker run -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 -p 127.0.0.1:8080:8080 -v otel-data:/data otel-ducklake
+#   (auth is off by default: publish on all interfaces only with ODL_AUTH__API_TOKENS set)
 #
 # DuckDB extensions (ducklake, httpfs, aws, azure, postgres, sqlite, ...) are
 # installed at build time for the target platform, so the image runs without
@@ -14,13 +15,16 @@ ARG RUST_VERSION=1.99
 ARG DEBIAN=trixie
 
 FROM rust:${RUST_VERSION}-${DEBIAN} AS build
+ARG TARGETPLATFORM
 WORKDIR /src
 COPY . .
-# Cache the registry and target dir between builds; copy the binaries out of
-# the cache mount in the same step.
+# Cache the registry and target dir between builds (one target cache per
+# platform, so multi-arch builds on one builder don't thrash it); copy the
+# binaries out of the cache mount in the same step. Note: cache mounts are
+# local to the builder; CI's type=gha cache stores layers, not these mounts.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/src/target,sharing=locked \
+    --mount=type=cache,id=odl-target-${TARGETPLATFORM},target=/src/target,sharing=locked \
     cargo build --release --locked -p odl-server -p odl-cli -p odl-loadgen \
  && mkdir -p /out \
  && cp target/release/otel-ducklake target/release/odl target/release/odl-loadgen /out/

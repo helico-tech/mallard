@@ -12,14 +12,16 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/otel-ducklake
 
 jobs:
+  # Linux binaries are built on Ubuntu 22.04 so they need glibc >= 2.35
+  # (Debian 12, Ubuntu 22.04+, RHEL 10). Use the container image elsewhere.
   binaries:
     strategy:
       matrix:
         include:
           - target: linux-amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - target: linux-arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
           - target: macos-arm64
             runner: macos-14
     runs-on: ${{ matrix.runner }}
@@ -100,10 +102,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # `latest` is added automatically for non-prerelease versions only
+          # (flavor latest=auto); v1.2.3-rc.1 does not move it.
+          flavor: |
+            latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
       - name: create manifest
         working-directory: /tmp/digests
         run: |
@@ -129,4 +134,13 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            Container image: `ghcr.io/${{ github.repository_owner }}/otel-ducklake:${{ github.ref_name }}` (linux/amd64, linux/arm64).
+            Linux binaries need glibc >= 2.35 (Debian 12, Ubuntu 22.04+); otherwise use the image.
           files: dist/*
+      # One-time setup: GHCR creates the package as private on the first push.
+      # Make it public (Package settings → Change visibility) so the Helm chart
+      # and `docker pull` work without imagePullSecrets.
+      - name: reminder
+        run: echo "::notice::If this was the first release, make the GHCR package public (Package settings → Change visibility)."

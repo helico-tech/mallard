@@ -78,25 +78,37 @@ query:
   enableSql: false
 
 auth:
-  # When enabled, the query API (and optionally OTLP ingest) require a bearer token.
+  # When enabled, the query API requires a bearer token. Required when
+  # ingress.enabled is true (rendering fails otherwise).
   enabled: false
-  # Use an existing Secret with keys `api-token` and `ingest-token`.
+  # Use an existing Secret with key `api-token` (and `ingest-token` when
+  # ingestAuth is true). Values must not be empty: the server refuses to
+  # start with an empty token.
   existingSecret: ""
-  # Or let the chart create one (stored in a Secret, not the ConfigMap).
+  # Or let the chart create the Secret (stored in a Secret, not the ConfigMap).
   apiToken: ""
-  # Empty = OTLP ingest without authentication (typical inside a cluster).
+  # Also require a bearer token for OTLP ingest (needs ingestToken, or the
+  # ingest-token key in existingSecret). false = in-cluster ingest without auth.
+  ingestAuth: false
   ingestToken: ""
 
 duckdb:
   # DuckDB buffer limit. Peak pod memory is about
-  #   memoryLimit + ingest.maxBufferBytes + 0.5 GB (Parquet writers, allocator)
-  # measured at saturation (2 CPU, 2Gi: 1GB + 256MB + 0.5GB fits).
-  memoryLimit: 1GB
+  #   memoryLimit + ingest.maxBufferBytes + 1 GB
+  # (Parquet writers, compaction, allocator: 0.84 GB overhead measured during
+  # compaction with a 1 GB limit). 768MB + 256MB + 1GB fits the 2Gi limit.
+  memoryLimit: 768MB
   threads: 0
 
 logFormat: json
 
-# Raw TOML appended to the generated config (advanced).
+# Raw TOML appended to the generated config. Only extra [[storage.secrets]]
+# blocks are valid here: every other section is already rendered and TOML
+# forbids repeating a section. Set other keys with environment overrides in
+# extraEnv instead, e.g.
+#   extraEnv:
+#     - {name: ODL_STORAGE__SCHEMA, value: otel}
+#     - {name: ODL_MAINTENANCE__SNAPSHOT_RETENTION, value: 2h}
 extraConfig: ""
 
 # Extra environment, e.g. credentials referenced as ${NAME} in storage.*:
@@ -141,6 +153,7 @@ ingress:
           pathType: Prefix
   tls: []
 
+# shared mode only (one replica cannot satisfy minAvailable: 1).
 podDisruptionBudget:
   enabled: false
   minAvailable: 1

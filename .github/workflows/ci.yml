@@ -45,10 +45,22 @@ jobs:
           helm template t charts/otel-ducklake -f charts/otel-ducklake/ci/single-values.yaml > /dev/null
           helm template t charts/otel-ducklake -f charts/otel-ducklake/ci/shared-values.yaml > /dev/null
       - name: invalid values are rejected
+        # `! cmd` does not fail a bash -e script; check each case explicitly.
         run: |
-          ! helm template t charts/otel-ducklake --set mode=shared 2>/dev/null
-          ! helm template t charts/otel-ducklake --set auth.enabled=true 2>/dev/null
-          ! helm template t charts/otel-ducklake --set query.enableSql=true 2>/dev/null
+          must_fail() {
+            if helm template t charts/otel-ducklake "$@" >/dev/null 2>&1; then
+              echo "::error::helm template $* should have failed"
+              exit 1
+            fi
+            echo "rejected as expected: $*"
+          }
+          must_fail --set mode=shared
+          must_fail --set mode=shared --set storage.catalog=/data/c.ducklake --set storage.dataPath=s3://b/
+          must_fail --set auth.enabled=true
+          must_fail --set auth.ingestAuth=true
+          must_fail --set auth.enabled=true --set auth.apiToken=x --set auth.ingestAuth=true
+          must_fail --set query.enableSql=true
+          must_fail --set ingress.enabled=true
 
   docker:
     runs-on: ubuntu-latest
@@ -66,10 +78,26 @@ jobs:
           cache-to: type=gha,mode=max
       - name: smoke test
         run: |
-          docker run -d --name odl -p 4318:4318 -p 8080:8080 otel-ducklake:ci
-          for i in $(seq 1 30); do curl -sf localhost:8080/api/v1/health && break; sleep 1; done
-          docker exec odl odl-loadgen --endpoint http://localhost:4318 --rate 20 --duration 10s
-          sleep 7
+          set -euo pipefail
+          docker run -d --name odl -p 127.0.0.1:4318:4318 -p 127.0.0.1:8080:8080 \
+            -e ODL_INGEST__FLUSH_INTERVAL=1s otel-ducklake:ci
+          trap 'docker logs odl 2>&1 | tail -40; docker rm -f odl >/dev/null' EXIT
+          healthy=0
+          for i in $(seq 1 60); do
+            if docker exec odl odl health; then healthy=1; break; fi
+            sleep 1
+          done
+          if [ "$healthy" != 1 ]; then echo "::error::server never became healthy"; exit 1; fi
+          docker exec odl odl-loadgen --endpoint http://localhost:4318 --rate 20 --duration 10s --metrics-interval 2s
+          # Data must be queryable after the flush interval.
+          for i in $(seq 1 20); do
+            if docker exec odl odl -o json services --since 5m | jq -e 'length > 0' >/dev/null; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ "${ok:-0}" != 1 ]; then echo "::error::no services returned after ingest"; exit 1; fi
           docker exec odl odl services --since 5m
-          docker logs odl 2>&1 | tail -20
-          docker rm -f odl
+          docker exec odl odl -o json traces --since 5m --limit 5 | jq -e 'length > 0' >/dev/null
+          docker exec odl odl -o json logs --since 5m -n 5 | jq -e 'length > 0' >/dev/null
+          docker exec odl odl -o json metrics --since 5m | jq -e 'length > 0' >/dev/null

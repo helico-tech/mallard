@@ -8,7 +8,9 @@ metadata:
 type: Opaque
 stringData:
   api-token: {{ .Values.auth.apiToken | quote }}
+  {{- if .Values.auth.ingestAuth }}
   ingest-token: {{ .Values.auth.ingestToken | quote }}
+  {{- end }}
 ---
 {{- end }}
 {{- if .Values.serviceAccount.create }}
@@ -25,7 +27,8 @@ metadata:
 automountServiceAccountToken: false
 ---
 {{- end }}
-{{- if .Values.podDisruptionBudget.enabled }}
+{{- /* With one replica, minAvailable: 1 would block node drains: shared mode only. */}}
+{{- if and .Values.podDisruptionBudget.enabled (eq .Values.mode "shared") }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

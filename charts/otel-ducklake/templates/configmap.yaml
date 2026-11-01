@@ -56,10 +56,12 @@ data:
     [auth]
     {{- if .Values.auth.enabled }}
     api_tokens = ["${ODL_API_TOKEN}"]
-    # An empty ingest-token disables authentication for OTLP ingest.
-    ingest_tokens = ["${ODL_INGEST_TOKEN}"]
     {{- else }}
     api_tokens = []
+    {{- end }}
+    {{- if and .Values.auth.enabled .Values.auth.ingestAuth }}
+    ingest_tokens = ["${ODL_INGEST_TOKEN}"]
+    {{- else }}
     ingest_tokens = []
     {{- end }}
 
@@ -71,5 +73,6 @@ data:
     autoinstall_extensions = false
     {{- with .Values.extraConfig }}
 
-    {{ . | nindent 4 }}
+    # extraConfig (only extra [[storage.secrets]] blocks are valid here)
+    {{- . | nindent 4 }}
     {{- end }}
