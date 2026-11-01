@@ -23,11 +23,11 @@
 
 | crate | role |
 |---|---|
-| `mallard` | The CLI/TUI binary (ADR 0007): `status`, `trace`, `errors …` (= `sdl-cli`), `telemetry …` (= `odl-cli`), `tui`. HTTP only; no DuckDB, no server code. |
+| `mallard` | The CLI/TUI binary (ADR 0007): one flat command tree (ADR 0008) mounting `sdl-cli` and `odl-cli` commands, plus `status`, `setup`, `find`, `trace`, `help agents`, `tui`; `errors …`/`telemetry …` are hidden aliases. HTTP only; no DuckDB, no server code. |
 | `mallard-server` | Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. Its `mallard-server` binary installs logging and the Prometheus recorder (`mallard-common`). |
 | `mallard-common` | Shared by both sides (ADR 0005): duration/size parsing, query windows, the `ApiError` body; with feature `server` the config loader, bearer tokens, HTTP helpers (`ApiErr`, `Q`, `J`, `require_bearer`, CORS, docs page, readiness), logging, signals, Prometheus. |
 | `mallard-duck` | The only crate that depends on `duckdb`: `[storage]`/`[duckdb]` types, `open_connection`, extensions, secrets, SQL quoting, identifier check, redaction, object-store options for sourcemaps. |
-| `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables, formats, colour, error lines, TUI theme, keys and `Outcome` (ADR 0006). Depends on neither client. |
+| `mallard-term` | Terminal output shared by both CLIs, both TUIs and the host: cleaning untrusted text, tables (plain when piped), formats, colour, error kinds and exit codes, the output contract (`--format`, `--fields`, list envelope) and window flags (ADR 0006, 0008), TUI theme, keys and `Outcome`. Depends on neither client. |
 | `mallard-client` | Wraps `sdl-client` (`<url>/sentry`) and `odl-client` (`<url>/otel`) behind one base URL + token; trace correlation (spans + errors + logs). |
 | `sdl-*` | Sentry side. See [sentry/architecture.md](sentry/architecture.md). |
 | `odl-*` | OpenTelemetry side. See [otel/architecture.md](otel/architecture.md). |

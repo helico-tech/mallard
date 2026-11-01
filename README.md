@@ -48,11 +48,9 @@ Screenshots come from the real TUI and demo data (`scripts/screenshots.sh`).
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 export MALLARD_URL=http://localhost:8080 MALLARD_TOKEN=dev-token
 
-# Errors: create a project and put the DSN it returns in your Sentry SDK.
-mallard errors projects create web        # or: curl -XPOST $MALLARD_URL/sentry/v1/projects ...
-
-# Traces/logs/metrics: point OpenTelemetry at mallard.
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+# Create a project; prints SENTRY_DSN and the OTEL_EXPORTER_OTLP_* env vars
+# for your app (Sentry SDK + OpenTelemetry SDK). Safe to run again.
+mallard setup web >> .env
 
 mallard status
 mallard tui
@@ -95,19 +93,24 @@ folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
 
 ```sh
 mallard-server -c mallard.toml            # run the server (separate binary)
-mallard status                            # health of both sides
+mallard status                            # health of both sides (exit 6 when one is down)
+mallard setup web                         # project + DSN + OTLP env vars
+mallard issues list --since 1h            # errors: issues, events, projects
+mallard find <id>                         # trace, event or issue id: what is it?
 mallard trace <trace-id>                  # spans + errors + logs of one trace
-mallard errors issues list                # Sentry side: projects, issues, events, sourcemaps
-mallard telemetry traces --errors         # OTel side: services, traces, logs, metrics, sql
+mallard traces list --errors              # telemetry: traces, logs, services, ops, metrics, sql
+mallard logs --around <time> -S checkout  # logs around an error
 mallard tui                               # F1 errors, F2 telemetry
-mallard errors issues list -s 24h -n 20 --json    # same flags on both sides
+mallard issues list -n 20 --json --fields id,title,count
 ```
 
-Client commands read `MALLARD_URL` and `MALLARD_TOKEN`. Both sides share
-flags (`--json`, `--color`, `-s/--since`, `-n/--limit`, `-q`, `-t/--trace`),
-one output style (times in UTC) and one set of TUI keys (`r` refresh, `t`
-time window, `x` same trace on the other tab, `?` help). See
-[docs/cli.md](docs/cli.md).
+Client commands read `MALLARD_URL` and `MALLARD_TOKEN`. One flat command
+tree with shared flags (`--format text|json|ndjson`, `--fields`, `--raw`,
+`-s/--since`, `--from/--to`, `-n/--limit`, `-q`, `-t/--trace`, `--color`),
+typed exit codes, JSON errors on stderr, plain text and compact JSON when
+piped, times in UTC, and one set of TUI keys (`r` refresh, `t` time window,
+`x` same trace on the other tab, `?` help). See [docs/cli.md](docs/cli.md).
+**AI agents**: [docs/agents.md](docs/agents.md) (also `mallard help agents`).
 
 ## Configuration
 

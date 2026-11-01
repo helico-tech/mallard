@@ -6,18 +6,29 @@ pieces live in `crates/mallard-term`.
 
 ## Commands
 
+One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
+`mallard help agents`. Every command's `--help` has examples.
+
 | command | what |
 |---|---|
-| `mallard status` | health of both sides |
-| `mallard trace <trace-id> [-s 7d]` | spans, Sentry errors and logs of one trace |
-| `mallard errors …` | Sentry side: `info`, `projects`, `issues`, `events`, `stats`, `sourcemaps`, `maintenance`, `send-test`, `tui` |
-| `mallard telemetry …` | OTel side: `health`, `status`, `services`, `ops`, `traces`, `trace`, `logs`, `metrics`, `metric`, `sql`, `tui` |
+| `mallard status` | health of both sides and what the server allows (SQL, windows, retention); exit 6 when a side is down |
+| `mallard setup <name> [--platform p]` | get or create the project; print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars |
+| `mallard find <id>` | a trace or event id (32 hex) or an issue id (16 hex): what it is and the command to see more |
+| `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`; status changes take `--reason` |
+| `mallard events list\|show` | error events; `show --json` is concise, `--raw` adds the Sentry payload |
+| `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs |
+| `mallard traces list\|show`, `mallard trace <id>` | search traces; one trace with its spans, Sentry errors and logs |
+| `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`), follow (`-f`), or `--around <time> --window 1m` |
+| `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation |
+| `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`) |
+| `mallard sql "<select>"` | read-only SQL over the telemetry tables (exit 7 when off) |
+| `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
 | `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |
 
-`mallard errors …` is the `sdl` binary's command set and `mallard
-telemetry …` is `odl`'s; the standalone binaries still work. Side details:
-[crates/sdl-cli/README.md](../crates/sdl-cli/README.md),
-[otel/cli.md](otel/cli.md).
+The old paths still work, hidden: `mallard errors …` (= the `sdl` command
+set: `info`, `stats`, `maintenance`, …) and `mallard telemetry …` (= `odl`:
+`health`, `status`, `metric`, waterfall `trace`, …). Side details:
+[crates/sdl-cli/README.md](../crates/sdl-cli/README.md), [otel/cli.md](otel/cli.md).
 
 ## Shared flags
 
@@ -25,36 +36,51 @@ Global (any position):
 
 | flag | env | meaning |
 |---|---|---|
-| `--url` | `MALLARD_URL` (`SDL_URL`, `ODL_URL`) | server base URL |
-| `--token` | `MALLARD_TOKEN` (`SDL_TOKEN`, `ODL_TOKEN`) | API token |
-| `--json` | | JSON instead of tables (`odl -o json` still works) |
+| `--url` | `MALLARD_URL` | server base URL |
+| `--token` | `MALLARD_TOKEN` | API token |
+| `-p, --project` | `MALLARD_PROJECT` | Sentry project id or slug; optional with one project |
+| `--format text\|json\|ndjson` | `MALLARD_FORMAT` | output format; `--json` = `--format json` |
+| `--fields a,b` | | keep only these top-level fields (unknown field: exit 2) |
+| `--raw` | | include raw payloads (Sentry `payload`, resource attributes) |
 | `--color auto\|always\|never` | `NO_COLOR` | `auto`: colour only on a terminal, without `NO_COLOR` and with `TERM` not `dumb` |
-| `-p, --project` | `MALLARD_PROJECT` (`SDL_PROJECT`) | errors side only; optional with one project |
 
 Per command, the same letter for the same thing on both sides:
 
 | flag | meaning |
 |---|---|
-| `-s, --since 1h` | time window ending now (`--from`/`--to` RFC 3339 on the telemetry side) |
-| `-n, --limit N` | max rows (`-l` still works for `telemetry traces`) |
+| `-s, --since 1h` | time window ending at `--to` or now |
+| `--from`, `--to` | RFC 3339 or a duration ago (`--from 2h --to 1h`) |
+| `-n, --limit N` | max rows (`-l` still works for `traces list`) |
 | `-q, --query text` | text search |
-| `-t, --trace id` | only this trace (`errors events list`, `telemetry logs`) |
+| `-t, --trace id` | only this trace (`events list`, `logs`) |
 | `-S, --service name` | only this service (telemetry) |
 
-Defaults differ where the data does: the telemetry window is `1h`, the
-errors window is the server's (14 days for issues).
+Default windows differ where the data does: issues 14d, events all (30d
+with `--trace`), traces/logs/metrics 1h, `trace` and `find` 7d.
 
 ## Output
 
-- Tables: one style (rounded, bold headers).
+- stdout is data only; errors and notes go to stderr. Nothing prompts.
+- Text on a terminal: tables in one style (rounded, bold headers),
+  sparklines, colour. **Piped**: plain text, one row per line, columns two
+  spaces apart, no boxes, sparklines or colour.
+- JSON: pretty on a terminal, compact when piped. Lists are an envelope
+  `{"items","count","limit","truncated","next_cursor","window"}`;
+  `ndjson` prints one item per line. `logs -f` prints NDJSON in both JSON
+  formats.
 - Numbers: `1.2k`, `3.4M`, `2G`; sizes in decimal units (`1.5 MB`), as the
   config files write them; durations `12.3ms`, `2.50s`.
 - Times are **UTC**, in the CLI and in the TUIs.
 - Text from events, spans and logs is cleaned: control and bidi characters
-  are shown as escapes (`\u{1b}`) and never reach the terminal. `--json`
+  are shown as escapes (`\u{1b}`) and never reach the terminal. JSON
   escapes them as `\uXXXX`.
-- Errors: one line on stderr, `error: <what went wrong> (<what to try>)`,
-  exit code 1. Output into a closed pipe (`… | head`) is not an error.
+- Errors: one line on stderr, `error: <what went wrong> (<what to try>)`;
+  with `--format json|ndjson` one JSON line
+  `{"error":{"code","message","status","retryable","hint"}}`. Output into a
+  closed pipe (`… | head`) is not an error.
+
+Exit codes: 0 ok, 1 internal, 2 usage, 3 auth, 4 not found, 5 conflict,
+6 unavailable (retry), 7 disabled on the server, 8 condition not met.
 
 ## TUI keys
 
