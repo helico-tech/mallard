@@ -735,7 +735,7 @@ fn sentry_errors() -> crate::TraceErrors {
     crate::TraceErrors { count: 2, events: vec![ev("e1"), ev("e2")] }
 }
 
-/// Without a lookup (standalone odl) the trace views stay as they were.
+/// Without a lookup (no error tracker) the trace views stay as they were.
 #[test]
 fn no_error_lookup_no_sentry_markers() {
     let mut e = fixture();

@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "otel-ducklake query API",
-    "description": "Query traces, logs and metrics stored in DuckLake by otel-ducklake.",
+    "title": "mallard telemetry API",
+    "description": "Query traces, logs and metrics stored in DuckLake by mallard.",
     "license": {
       "name": "MIT OR Apache-2.0"
     },

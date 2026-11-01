@@ -296,7 +296,7 @@ impl Flusher {
         let schema = lake.schema.clone();
         let buf = buffer.clone();
         let handle = std::thread::Builder::new()
-            .name("odl-flusher".into())
+            .name("otel-flusher".into())
             .spawn(move || run(conn, schema, buf, interval, stats))?;
         Ok(Self { handle: Some(handle), buffer })
     }

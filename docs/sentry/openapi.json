@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "sentry-ducklake API",
-    "description": "Query and manage errors stored by sentry-ducklake. Ingest uses the Sentry protocol at /api/{project_id}/envelope/.",
+    "title": "mallard errors API",
+    "description": "Query and manage errors stored by mallard. Ingest uses the Sentry protocol at /api/{project_id}/envelope/.",
     "license": {
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"

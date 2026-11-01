@@ -1,10 +1,10 @@
-//! mallard: sentry-ducklake and otel-ducklake in one process, on one
+//! mallard: the Sentry side and the OpenTelemetry side in one process, on one
 //! DuckLake catalog (see docs/adr/0001-shared-ducklake-connection.md).
 //!
 //! Routes on `server.http_addr`:
-//! - `/sentry/...`  everything of sentry-ducklake (ingest, `/v1` API, sentry-cli)
+//! - `/sentry/...`  everything of the Sentry side (ingest, `/v1` API, sentry-cli)
 //! - `/api/0/...`   sentry-cli's API again (it only accepts a URL root)
-//! - `/otel/...`    otel-ducklake query API (`/otel/api/v1/...`, `/otel/docs`)
+//! - `/otel/...`    telemetry query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
 //! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
 //!   when that is set)

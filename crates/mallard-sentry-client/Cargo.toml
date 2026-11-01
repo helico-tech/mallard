@@ -1,6 +1,6 @@
 [package]
 name = "mallard-sentry-client"
-description = "Typed async client for the sentry-ducklake /v1 API"
+description = "Typed async client for the mallard errors API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

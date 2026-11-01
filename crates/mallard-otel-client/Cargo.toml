@@ -1,6 +1,6 @@
 [package]
 name = "mallard-otel-client"
-description = "Async HTTP client for the otel-ducklake query API"
+description = "Async HTTP client for the mallard telemetry API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

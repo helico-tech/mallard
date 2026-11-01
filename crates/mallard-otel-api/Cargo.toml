@@ -1,6 +1,6 @@
 [package]
 name = "mallard-otel-api"
-description = "Shared HTTP API types for otel-ducklake"
+description = "Shared HTTP API types of the mallard telemetry API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

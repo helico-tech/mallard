@@ -1,5 +1,5 @@
 //! `mallard tui`: hosts the TUIs of both libraries as tabs (ADR 0002).
-//! F1 errors (sentry-ducklake), F2 telemetry (otel-ducklake). Jumps between
+//! F1 errors (mallard-sentry-cli), F2 telemetry (mallard-otel-cli). Jumps between
 //! them go by trace id.
 
 use std::time::Duration;

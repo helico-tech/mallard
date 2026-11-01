@@ -308,7 +308,7 @@ fn waterfall_wide_names_align() {
     assert_eq!(x1, x2, "duration columns misaligned");
 }
 
-// 13: `odl trace` shows every span, also with parent loops; empty traces don't panic.
+// 13: `mallard telemetry trace` shows every span, also with parent loops; empty traces don't panic.
 #[test]
 fn cli_trace_shows_cycles() {
     let a = span("0000000000000001", Some("0000000000000002"), 0, 10);

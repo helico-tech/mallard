@@ -51,7 +51,7 @@ fn red_cells(r: &RedStats) -> Vec<Cell> {
 
 pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
     let mut out = String::new();
-    put!(out, "{} {} {}", bold("otel-ducklake"), clean(&s.version), dim(&format!("({url})")));
+    put!(out, "{} {} {}", bold("mallard telemetry"), clean(&s.version), dim(&format!("({url})")));
     put!(
         out,
         "uptime {}   catalog {}   data {}   snapshot {}",

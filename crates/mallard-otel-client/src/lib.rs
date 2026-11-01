@@ -1,4 +1,4 @@
-//! Async client for the otel-ducklake query API, typed on [`mallard_otel_api`].
+//! Async client for the mallard telemetry API, typed on [`mallard_otel_api`].
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), mallard_otel_client::Error> {
@@ -90,7 +90,7 @@ impl Client {
         }
         let http = reqwest::Client::builder()
             .timeout(TIMEOUT)
-            .user_agent(concat!("odl-client/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mallard-otel-client/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let token = token.filter(|t| !t.is_empty()).map(str::to_string);
         Ok(Self { http, base: base_url.trim_end_matches('/').to_string(), token })

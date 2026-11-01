@@ -1,5 +1,5 @@
 //! Client for mallard. One base URL and token reach both libraries:
-//! sentry-ducklake under `<url>/sentry` and otel-ducklake under `<url>/otel`.
+//! the errors API under `<url>/sentry` and the telemetry API under `<url>/otel`.
 //! It also correlates them by trace id.
 //!
 //! ```no_run

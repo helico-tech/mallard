@@ -70,7 +70,7 @@ pub(super) async fn info(ctx: &Ctx) -> Result<()> {
         return ctx.print_json(&i);
     }
     let i = fmt::sanitize(i, true)?;
-    out!(o, "{} {}", p::bold("sentry-ducklake"), i.version);
+    out!(o, "{} {}", p::bold("mallard errors"), i.version);
     kv(o, "server", ctx.url())?;
     kv(o, "duckdb", &i.duckdb_version)?;
     kv(o, "catalog", &i.catalog)?;

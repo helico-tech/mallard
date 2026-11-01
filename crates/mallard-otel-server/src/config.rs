@@ -229,7 +229,9 @@ impl Config {
             bail!("query.enable_sql requires auth.api_tokens to be set");
         }
         if !self.storage.artifacts_path.is_empty() {
-            bail!("storage.artifacts_path is a mallard setting (Sentry sourcemaps); otel-ducklake does not use it");
+            bail!(
+                "storage.artifacts_path is a mallard setting (Sentry sourcemaps); the telemetry side does not use it"
+            );
         }
         if q.max_concurrent == 0 {
             bail!("query.max_concurrent must be at least 1");

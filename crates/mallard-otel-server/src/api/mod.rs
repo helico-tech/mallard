@@ -47,8 +47,8 @@ const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "otel-ducklake query API",
-        description = "Query traces, logs and metrics stored in DuckLake by otel-ducklake.",
+        title = "mallard telemetry API",
+        description = "Query traces, logs and metrics stored in DuckLake by mallard.",
         license(name = "MIT OR Apache-2.0")
     ),
     modifiers(&BearerAuth),
@@ -137,7 +137,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .merge(public_routes())
         .with_state(state)
         .split_for_parts();
-    api.merge(docs_routes(&openapi, "otel-ducklake API"))
+    api.merge(docs_routes(&openapi, "mallard telemetry API"))
 }
 
 /// The OpenAPI document without building a server (for `tests/openapi.rs`).

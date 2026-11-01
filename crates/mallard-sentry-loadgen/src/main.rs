@@ -220,7 +220,8 @@ async fn ingest(
     let client = mallard_sentry_client::Client::new(&cli.sentry_url(), Some(&cli.token))?;
     let project = ensure_project(&client, &cli.project).await?;
     let url = format!("{}/api/{}/envelope/", cli.sentry_url(), project.id);
-    let auth = format!("Sentry sentry_version=7, sentry_client=sdl-loadgen/0.1, sentry_key={}", project.public_key);
+    let auth =
+        format!("Sentry sentry_version=7, sentry_client=mallard-sentry-loadgen/0.1, sentry_key={}", project.public_key);
     let http = reqwest::Client::builder().pool_max_idle_per_host(concurrency).build()?;
     let counters = Arc::new(Counters::default());
     let hist = Arc::new(Mutex::new(Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)?));

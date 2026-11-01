@@ -55,7 +55,7 @@ impl Maintenance {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::Builder::new()
-            .name("odl-maintenance".into())
+            .name("otel-maintenance".into())
             .spawn(move || run(conn, schema, m, r, stats, stop2))?;
         Ok(Self { stop, handle: Some(handle) })
     }

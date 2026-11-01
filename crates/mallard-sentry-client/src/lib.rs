@@ -1,4 +1,4 @@
-//! Typed async client for the sentry-ducklake `/v1` API.
+//! Typed async client for the mallard errors API (`/v1`).
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), mallard_sentry_client::Error> {
@@ -99,7 +99,7 @@ impl Client {
             return Err(Error::InvalidUrl(format!("scheme must be http or https, not {:?}", parsed.scheme())));
         }
         let http = reqwest::Client::builder()
-            .user_agent(concat!("sdl-client/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mallard-sentry-client/", env!("CARGO_PKG_VERSION")))
             .timeout(TIMEOUT)
             .build()?;
         let token = token.filter(|t| !t.is_empty()).map(str::to_string);

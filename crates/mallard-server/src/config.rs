@@ -117,7 +117,7 @@ impl Default for ServerConfig {
     }
 }
 
-/// `[otel]`: the settings otel-ducklake owns.
+/// `[otel]`: the settings the telemetry side owns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OtelConfig {
@@ -178,7 +178,7 @@ impl Config {
         Ok(())
     }
 
-    /// The otel-ducklake config with the shared settings applied.
+    /// The telemetry config with the shared settings applied.
     pub fn otel_config(&self) -> mallard_otel_server::config::Config {
         let o = &self.otel;
         mallard_otel_server::config::Config {

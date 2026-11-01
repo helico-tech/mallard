@@ -1,6 +1,6 @@
-//! Shared HTTP API types for otel-ducklake.
+//! Shared HTTP API types of the mallard telemetry API.
 //!
-//! The server derives its OpenAPI document from these types, and the `odl`
+//! The server derives its OpenAPI document from these types, and the telemetry
 //! CLI/TUI deserializes responses into them. Changing a type here changes the
 //! public API: regenerate `docs/otel/openapi.json`
 //! (`UPDATE_OPENAPI=1 cargo test -p mallard-otel-server --test openapi`).

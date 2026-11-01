@@ -1,6 +1,6 @@
 //! Error events of traces from an error tracker the host knows about.
 //!
-//! odl itself has none. A host that has one (`mallard`: the Sentry side)
+//! This crate itself has none. A host that has one (`mallard`: the Sentry side)
 //! gives the CLI ([`crate::Ctx::with_error_lookup`]) and the TUI
 //! ([`crate::Embedded::set_error_lookup`]) an [`ErrorLookup`]; trace lists
 //! then show an error count per trace and waterfalls mark the spans.

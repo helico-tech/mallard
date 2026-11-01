@@ -1,4 +1,4 @@
-//! sdl: command-line tool and terminal UI for sentry-ducklake.
+//! The Sentry side of mallard's command line and terminal UI.
 //!
 //! Also a library, so other programs can mount the commands or embed the
 //! TUI:

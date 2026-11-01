@@ -74,7 +74,7 @@ fn tag_filters(raw: Option<&str>) -> Result<Vec<(String, String)>, ApiErr> {
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "sentry-ducklake API", description = "Query and manage errors stored by sentry-ducklake. Ingest uses the Sentry protocol at /api/{project_id}/envelope/."),
+    info(title = "mallard errors API", description = "Query and manage errors stored by mallard. Ingest uses the Sentry protocol at /api/{project_id}/envelope/."),
     components(schemas(
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
@@ -131,7 +131,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 pub fn meta_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .merge(docs_routes(&openapi(), "sentry-ducklake API"))
+        .merge(docs_routes(&openapi(), "mallard errors API"))
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|State(state): S| async move { readiness(state.ready().await) }))
         .with_state(state)

@@ -5,7 +5,7 @@ set -euo pipefail
 CPUS=${1:-2}; MEM=${2:-2g}; DMEM=${3:-1200MB}; shift 3 || true
 RATES=${*:-"100 500 1500 3000"}
 IMG=${MALLARD_IMAGE:-mallard:dev}   # docker build -f deploy/docker/Dockerfile -t mallard:dev .
-LOADGEN=${LOADGEN:-odl-loadgen}
+LOADGEN=${LOADGEN:-mallard-otel-loadgen}
 docker rm -f mallard-bench >/dev/null 2>&1 || true
 docker volume rm mallard-bench >/dev/null 2>&1 || true
 docker run -d --name mallard-bench --cpus="$CPUS" --memory="$MEM" -v mallard-bench:/data \

@@ -18,10 +18,10 @@ Sentry.setTag("build", __BUILD_ID__);
 
 declare global {
   interface Window {
-    sdlFlush: () => Promise<boolean>;
+    mallardFlush: () => Promise<boolean>;
   }
 }
-window.sdlFlush = () => Sentry.flush(10_000);
+window.mallardFlush = () => Sentry.flush(10_000);
 
 function handleCheckoutClick(): void {
   const status = document.getElementById("status")!;

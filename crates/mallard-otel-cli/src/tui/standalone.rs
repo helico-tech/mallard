@@ -1,4 +1,4 @@
-//! `odl tui`: the component in a terminal of its own.
+//! `mallard telemetry tui`: the component in a terminal of its own.
 
 use std::time::Duration;
 

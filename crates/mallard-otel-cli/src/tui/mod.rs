@@ -1,10 +1,10 @@
-//! Terminal UI for otel-ducklake.
+//! Terminal UI for the telemetry side.
 //!
 //! [`Embedded`] is the whole UI as a component: the host owns the terminal
 //! (raw mode, alternate screen) and the event loop, and calls
 //! [`Embedded::draw`], [`Embedded::handle_event`] and [`Embedded::tick`]
 //! (~4x per second). Loading runs on the tokio runtime in the background and
-//! never blocks input. [`run_standalone`] wraps it for `odl tui`.
+//! never blocks input. [`run_standalone`] wraps it for `mallard telemetry tui`.
 //!
 //! F1 and F2 are reserved for the host and always return [`Outcome::Ignored`],
 //! and so do keys with Ctrl or Alt (except Ctrl-C, which quits, or cancels

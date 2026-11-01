@@ -13,7 +13,7 @@ use mallard_term::output::{Format, Output};
 use serde::Serialize;
 
 /// `println!` through [`Out`] (colour stripped when off) that returns the
-/// error instead of panicking; a closed pipe (`sdl issues list | head`) is
+/// error instead of panicking; a closed pipe (`mallard issues list | head`) is
 /// then reported as success by the binary.
 macro_rules! out {
     ($o:expr) => {

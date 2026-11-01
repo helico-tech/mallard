@@ -1,8 +1,8 @@
-//! `sdl tui`: interactive dashboard.
+//! `mallard errors tui`: interactive dashboard.
 //!
 //! [`Embedded`] is the whole TUI as a component without terminal setup, so
 //! a host program (e.g. mallard) can draw it inside its own screen and
-//! event loop. [`run`] is the standalone `sdl tui`: terminal setup, event
+//! event loop. [`run`] is `mallard errors tui`: terminal setup, event
 //! loop and panic-safe restore around `Embedded`.
 
 mod app;
@@ -212,7 +212,7 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
     }
 }
 
-/// Standalone `sdl tui`.
+/// `mallard errors tui`.
 pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
     use futures::StreamExt;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {

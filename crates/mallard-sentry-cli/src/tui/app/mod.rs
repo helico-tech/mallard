@@ -418,7 +418,7 @@ pub(super) struct App {
     /// Last failed load of the issue list / the stats panel.
     pub issues_error: Option<String>,
     pub stats_error: Option<String>,
-    /// A background load panicked; the standalone TUI quits on this.
+    /// A background load panicked; `mallard errors tui` quits on this.
     pub fatal: Option<String>,
     /// Loads in flight, per kind. Every request gets exactly one response
     /// (a panic becomes `Resp::Panicked`), so the counts never leak.

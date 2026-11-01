@@ -1,4 +1,4 @@
-//! `sdl send-test`: send one error event to a DSN with the Sentry envelope
+//! `mallard send-test`: send one error event to a DSN with the Sentry envelope
 //! protocol, so a DSN can be checked without installing an SDK.
 
 use anyhow::{Context, Result, bail};
@@ -43,18 +43,18 @@ pub(crate) fn test_event(event_id: &str, message: &str) -> Value {
         "timestamp": now.timestamp_millis() as f64 / 1000.0,
         "platform": "other",
         "level": "error",
-        "logger": "sdl.send-test",
+        "logger": "mallard.send-test",
         "environment": "test",
-        "release": concat!("sdl@", env!("CARGO_PKG_VERSION")),
-        "sdk": {"name": "sdl.send-test", "version": env!("CARGO_PKG_VERSION")},
-        "tags": {"source": "sdl-send-test"},
+        "release": concat!("mallard@", env!("CARGO_PKG_VERSION")),
+        "sdk": {"name": "mallard.send-test", "version": env!("CARGO_PKG_VERSION")},
+        "tags": {"source": "mallard-send-test"},
         "exception": {"values": [{
-            "type": "SdlTestError",
+            "type": "MallardTestError",
             "value": message,
             "mechanism": {"type": "generic", "handled": true},
             "stacktrace": {"frames": [
-                {"function": "main", "module": "sdl", "filename": "sdl/main.rs", "lineno": 1, "in_app": false},
-                {"function": "send_test", "module": "sdl::send_test", "filename": "sdl/send_test.rs", "lineno": 42,
+                {"function": "main", "module": "mallard", "filename": "mallard/main.rs", "lineno": 1, "in_app": false},
+                {"function": "send_test", "module": "mallard::send_test", "filename": "mallard/send_test.rs", "lineno": 42,
                  "in_app": true,
                  "pre_context": ["fn send_test(dsn: &Dsn) {", "    // verify the DSN end to end"],
                  "context_line": format!("    raise(\"{message}\");"),
@@ -62,7 +62,7 @@ pub(crate) fn test_event(event_id: &str, message: &str) -> Value {
             ]}
         }]},
         "breadcrumbs": {"values": [
-            {"timestamp": now.timestamp_millis() as f64 / 1000.0, "category": "sdl", "level": "info",
+            {"timestamp": now.timestamp_millis() as f64 / 1000.0, "category": "mallard", "level": "info",
              "message": "sending test event"}
         ]}
     })
@@ -84,7 +84,7 @@ pub(crate) fn envelope(dsn_str: &str, event: &Value) -> Vec<u8> {
 }
 
 pub(crate) fn auth_header(key: &str) -> String {
-    format!("Sentry sentry_version=7, sentry_key={key}, sentry_client=sdl-cli/{}", env!("CARGO_PKG_VERSION"))
+    format!("Sentry sentry_version=7, sentry_key={key}, sentry_client=mallard-sentry-cli/{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Send and return the event id the server accepted.

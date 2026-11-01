@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn redacts_credentials() {
-        let e = r#"Unable to connect to Postgres at "host=pg user=odl password=SuperSecret123x dbname=d": refused"#;
+        let e = r#"Unable to connect to Postgres at "host=pg user=mallard password=SuperSecret123x dbname=d": refused"#;
         let r = redact(e);
         assert!(!r.contains("SuperSecret"), "{r}");
         assert!(r.contains("host=pg") && r.contains("dbname=d"));

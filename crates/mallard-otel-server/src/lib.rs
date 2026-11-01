@@ -1,4 +1,4 @@
-//! otel-ducklake: an OpenTelemetry (OTLP) collector that stores traces, logs
+//! The telemetry side of mallard: an OpenTelemetry (OTLP) collector that stores traces, logs
 //! and metrics in DuckLake and serves them through an OpenAPI query API.
 //!
 //! `mallard-server` embeds it; on its own (tests) it opens its own lake:
@@ -131,7 +131,7 @@ impl Server {
         let api_state = Arc::new(ApiState {
             reader,
             stats: stats.clone(),
-            // Standalone, an empty list leaves the API open (documented);
+            // An empty list leaves the API open;
             // mallard always configures tokens.
             tokens: Tokens::new(&cfg.auth.api_tokens, AuthPolicy::OpenIfEmpty),
             schema: lake.schema.clone(),

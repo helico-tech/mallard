@@ -1,4 +1,4 @@
-//! `odl` command line and terminal UI, usable as a library.
+//! The OpenTelemetry side of mallard's command line and terminal UI, usable as a library.
 //!
 //! - [`Command`] + [`run`]: mount the commands in another CLI (global flags
 //!   such as the URL and token live in the host and arrive via [`Ctx`]).
@@ -202,7 +202,7 @@ pub struct SqlArgs {
     pub limit: u32,
 }
 
-/// All `odl` commands. Embedders can mount this as a subcommand, or single
+/// All telemetry commands. Embedders can mount this as a subcommand, or single
 /// commands through their `*Args`.
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
@@ -378,7 +378,7 @@ pub fn classify(e: &mallard_otel_client::Error, url: &str, hints: &Hints) -> Des
 
 /// Run one command. Client errors become one friendly line ([`describe`]).
 ///
-/// Output errors are returned too: a closed pipe (`odl logs | head`) is an
+/// Output errors are returned too: a closed pipe (`mallard logs | head`) is an
 /// [`std::io::Error`] of kind `BrokenPipe` in the chain, which
 /// `mallard_term::error::report` treats as success.
 pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
@@ -733,7 +733,7 @@ mod tests {
     }
 
     fn parse(args: &[&str]) -> std::result::Result<Command, clap::Error> {
-        Cli::try_parse_from(std::iter::once("odl").chain(args.iter().copied())).map(|c| c.cmd)
+        Cli::try_parse_from(std::iter::once("mallard").chain(args.iter().copied())).map(|c| c.cmd)
     }
 
     // Review finding 14: `--to` would be ignored by `--follow`.
