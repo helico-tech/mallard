@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use sdl_client::types::*;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub const STATUSES: [&str; 4] = ["unresolved", "resolved", "ignored", "all"];
@@ -56,18 +56,32 @@ pub enum Req {
     Trace { trace_id: String },
 }
 
+/// What a request loads; used to count the loads in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Info,
+    Projects,
+    Issues,
+    Stats,
+    Issue,
+    Events,
+    Event,
+    Status,
+    Trace,
+}
+
 impl Req {
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> Kind {
         match self {
-            Req::Info => "info",
-            Req::Projects => "projects",
-            Req::Issues(_) => "issues",
-            Req::Stats { .. } => "stats",
-            Req::Issue { .. } => "issue",
-            Req::Events { .. } => "events",
-            Req::Event { .. } => "event",
-            Req::SetStatus { .. } => "status",
-            Req::Trace { .. } => "trace",
+            Req::Info => Kind::Info,
+            Req::Projects => Kind::Projects,
+            Req::Issues(_) => Kind::Issues,
+            Req::Stats { .. } => Kind::Stats,
+            Req::Issue { .. } => Kind::Issue,
+            Req::Events { .. } => Kind::Events,
+            Req::Event { .. } => Kind::Event,
+            Req::SetStatus { .. } => Kind::Status,
+            Req::Trace { .. } => Kind::Trace,
         }
     }
 }
@@ -137,23 +151,26 @@ pub enum Resp {
         trace_id: String,
         result: Res<EventList>,
     },
-    /// A background load panicked (message).
-    Panicked(String),
+    /// A background load of this kind panicked.
+    Panicked {
+        kind: Kind,
+        msg: String,
+    },
 }
 
 impl Resp {
-    fn kind(&self) -> &'static str {
+    fn kind(&self) -> Kind {
         match self {
-            Resp::Info(_) => "info",
-            Resp::Projects(_) => "projects",
-            Resp::Issues(..) => "issues",
-            Resp::Stats { .. } => "stats",
-            Resp::Issue { .. } => "issue",
-            Resp::Events { .. } => "events",
-            Resp::Event { .. } => "event",
-            Resp::SetStatus { .. } => "status",
-            Resp::Trace { .. } => "trace",
-            Resp::Panicked(_) => "panicked",
+            Resp::Info(_) => Kind::Info,
+            Resp::Projects(_) => Kind::Projects,
+            Resp::Issues(..) => Kind::Issues,
+            Resp::Stats { .. } => Kind::Stats,
+            Resp::Issue { .. } => Kind::Issue,
+            Resp::Events { .. } => Kind::Events,
+            Resp::Event { .. } => Kind::Event,
+            Resp::SetStatus { .. } => Kind::Status,
+            Resp::Trace { .. } => Kind::Trace,
+            Resp::Panicked { kind, .. } => *kind,
         }
     }
 }
@@ -349,7 +366,9 @@ pub struct App {
     pub stats_error: Option<String>,
     /// A background load panicked; the standalone TUI quits on this.
     pub fatal: Option<String>,
-    pub pending: HashSet<&'static str>,
+    /// Loads in flight, per kind. Every request gets exactly one response
+    /// (a panic becomes `Resp::Panicked`), so the counts never leak.
+    pub pending: HashMap<Kind, usize>,
     pub spinner: usize,
     pub now: DateTime<Utc>,
     pub last_refresh: Instant,
@@ -391,7 +410,7 @@ impl App {
             issues_error: None,
             stats_error: None,
             fatal: None,
-            pending: HashSet::new(),
+            pending: HashMap::new(),
             spinner: 0,
             now: Utc::now(),
             last_refresh: Instant::now(),
@@ -413,9 +432,13 @@ impl App {
 
     fn track(&mut self, reqs: Vec<Req>) -> Vec<Req> {
         for r in &reqs {
-            self.pending.insert(r.kind());
+            *self.pending.entry(r.kind()).or_default() += 1;
         }
         reqs
+    }
+
+    pub fn in_flight(&self, kind: Kind) -> bool {
+        self.pending.contains_key(&kind)
     }
 
     pub fn loading(&self) -> bool {
@@ -467,17 +490,17 @@ impl App {
             self.toast = None;
         }
         let mut reqs = vec![];
-        if now.duration_since(self.last_info) >= INFO_EVERY && !self.pending.contains("info") {
+        if now.duration_since(self.last_info) >= INFO_EVERY && !self.in_flight(Kind::Info) {
             self.last_info = now;
             reqs.push(Req::Info);
         }
         if now.duration_since(self.last_refresh) >= REFRESH_EVERY {
             self.last_refresh = now;
-            if !self.projects_loaded && !self.pending.contains("projects") {
+            if !self.projects_loaded && !self.in_flight(Kind::Projects) {
                 reqs.push(Req::Projects);
             }
-            reqs.extend(self.list_requests().into_iter().filter(|r| !self.pending.contains(r.kind())));
-            reqs.extend(self.detail_requests().into_iter().filter(|r| !self.pending.contains(r.kind())));
+            reqs.extend(self.list_requests().into_iter().filter(|r| !self.in_flight(r.kind())));
+            reqs.extend(self.detail_requests().into_iter().filter(|r| !self.in_flight(r.kind())));
         }
         self.track(reqs)
     }
@@ -487,20 +510,24 @@ impl App {
         let mut r = vec![Req::Info, Req::Projects];
         r.extend(self.list_requests());
         r.extend(self.detail_requests());
-        self.track(r)
+        r
     }
 
     /// Filters changed: reload the list from the top.
     fn reload_list(&mut self) -> Vec<Req> {
         self.issues_state.select(if self.issues.is_empty() { None } else { Some(0) });
         self.last_refresh = Instant::now();
-        let r = self.list_requests();
-        self.track(r)
+        self.list_requests()
     }
 
     /// Handle a key press. Sets `ignored` when the key was not used and
     /// `quit` / `open_trace` when the user asked for that.
     pub fn on_key(&mut self, k: KeyEvent) -> Vec<Req> {
+        let reqs = self.key(k);
+        self.track(reqs)
+    }
+
+    fn key(&mut self, k: KeyEvent) -> Vec<Req> {
         self.ignored = false;
         if matches!(k.code, KeyCode::F(1) | KeyCode::F(2)) {
             // Reserved for an embedding host.
@@ -612,7 +639,7 @@ impl App {
             Req::Events { project: project.clone(), issue: e.issue_id.clone(), before: None },
             Req::Event { project, issue: e.issue_id.clone(), event_id: e.event_id.clone() },
         ]);
-        self.track(reqs)
+        reqs
     }
 
     fn on_key_projects(&mut self, k: KeyEvent, selected: usize) -> Vec<Req> {
@@ -724,7 +751,7 @@ impl App {
                 let selected =
                     self.current_project().and_then(|c| self.projects.iter().position(|p| p.id == c.id)).unwrap_or(0);
                 self.overlay = Overlay::Projects { selected };
-                return self.track(vec![Req::Projects]);
+                return vec![Req::Projects];
             }
             KeyCode::Char('r') => return self.set_selected_status(IssueStatus::Resolved),
             KeyCode::Char('i') => return self.set_selected_status(IssueStatus::Ignored),
@@ -740,10 +767,10 @@ impl App {
         };
         self.detail = Some(Detail { id: issue.id.clone(), summary: Some(issue.clone()), ..Default::default() });
         self.view = View::Detail;
-        self.track(vec![
+        vec![
             Req::Issue { project: project.clone(), id: issue.id.clone(), window: self.window },
             Req::Events { project, issue: issue.id, before: None },
-        ])
+        ]
     }
 
     fn set_selected_status(&mut self, status: IssueStatus) -> Vec<Req> {
@@ -769,7 +796,7 @@ impl App {
                 dd.summary.status = status;
             }
         }
-        self.track(vec![Req::SetStatus { project, id, status }])
+        vec![Req::SetStatus { project, id, status }]
     }
 
     fn on_key_detail(&mut self, k: KeyEvent) -> Vec<Req> {
@@ -784,8 +811,7 @@ impl App {
                 let from_trace = d.from_trace && self.trace.is_some();
                 self.detail = None;
                 self.view = if from_trace { View::Trace } else { View::Issues };
-                let r = self.list_requests();
-                return self.track(r);
+                return self.list_requests();
             }
             KeyCode::Char('t') => match d.trace_id() {
                 Some(t) => self.open_trace = Some(t.to_string()),
@@ -829,6 +855,7 @@ impl App {
 
     fn move_in_tab(&mut self, code: KeyCode) -> Vec<Req> {
         let project = self.project.clone();
+        let events_busy = self.in_flight(Kind::Events);
         let Some(d) = self.detail.as_mut() else {
             return vec![];
         };
@@ -868,11 +895,10 @@ impl App {
                 // Reached the end: fetch the next (older) page.
                 if n > 0
                     && d.events_state.selected() == Some(n - 1)
-                    && !self.pending.contains("events")
+                    && !events_busy
                     && let (Some(cursor), Some(project)) = (d.next_cursor.clone(), project)
                 {
-                    let r = vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
-                    return self.track(r);
+                    return vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
                 }
             }
         }
@@ -882,6 +908,7 @@ impl App {
     /// `delta` 1 = older, -1 = newer.
     fn step_event(&mut self, delta: isize) -> Vec<Req> {
         let project = self.project.clone();
+        let events_busy = self.in_flight(Kind::Events);
         let Some(d) = self.detail.as_mut() else {
             return vec![];
         };
@@ -892,14 +919,13 @@ impl App {
         }
         let target = target as usize;
         if target >= d.events.len() {
-            if d.want_older || self.pending.contains("events") {
+            if d.want_older || events_busy {
                 // The older page is already on its way.
                 return vec![];
             }
             if let (Some(cursor), Some(project)) = (d.next_cursor.clone(), project) {
                 d.want_older = true;
-                let r = vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
-                return self.track(r);
+                return vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
             }
             self.toast("already at the oldest event", false);
             return vec![];
@@ -920,8 +946,7 @@ impl App {
         d.event_idx = idx;
         d.event_id = Some(e.event_id.clone());
         d.events_state.select(Some(idx));
-        let r = vec![Req::Event { project, issue: d.id.clone(), event_id: e.event_id.clone() }];
-        self.track(r)
+        vec![Req::Event { project, issue: d.id.clone(), event_id: e.event_id.clone() }]
     }
 
     /// Remember a network failure (shown as "offline").
@@ -933,7 +958,12 @@ impl App {
 
     pub fn on_response(&mut self, resp: Resp) -> Vec<Req> {
         use crate::fmt::{clean, sanitize};
-        self.pending.remove(resp.kind());
+        if let Some(n) = self.pending.get_mut(&resp.kind()) {
+            *n -= 1;
+            if *n == 0 {
+                self.pending.remove(&resp.kind());
+            }
+        }
         let ok = !matches!(
             &resp,
             Resp::Info(Err(_))
@@ -945,7 +975,7 @@ impl App {
                 | Resp::Event { result: Err(_), .. }
                 | Resp::SetStatus { result: Err(_), .. }
                 | Resp::Trace { result: Err(_), .. }
-                | Resp::Panicked(_)
+                | Resp::Panicked { .. }
         );
         if ok {
             // Any answer from the server means it is reachable again.
@@ -953,7 +983,7 @@ impl App {
         }
         let mut out = vec![];
         match resp {
-            Resp::Panicked(msg) => {
+            Resp::Panicked { msg, .. } => {
                 let msg = clean(&msg);
                 self.toast(format!("internal error: {msg}"), true);
                 self.fatal = Some(msg);
@@ -1077,7 +1107,7 @@ impl App {
                             d.want_older = false;
                             if d.events.len() > before {
                                 out.extend(self.show_event(before));
-                                return out;
+                                return self.track(out);
                             }
                         } else if let Some(id) = d.event_id.clone() {
                             if let Some(i) = d.events.iter().position(|e| e.event_id == id) {
@@ -1326,6 +1356,37 @@ mod tests {
         app.on_response(Resp::Info(Ok(info())));
         assert_eq!(app.detail.as_ref().unwrap().event_error.as_deref(), Some("boom"));
         assert!(app.offline.is_none());
+    }
+
+    #[test]
+    fn a_panicked_load_is_no_longer_pending() {
+        let mut app = App::new("http://x", None);
+        app.start();
+        assert!(app.in_flight(Kind::Info));
+        app.on_response(Resp::Panicked { kind: Kind::Info, msg: "boom".into() });
+        assert!(!app.in_flight(Kind::Info), "the kind that panicked must be cleared");
+        app.on_response(Resp::Projects(Ok(vec![])));
+        assert!(!app.loading());
+        // The periodic refresh may load info again.
+        app.last_info = Instant::now() - INFO_EVERY;
+        assert!(app.on_tick(Instant::now()).contains(&Req::Info));
+    }
+
+    #[test]
+    fn a_stale_response_does_not_end_a_newer_load() {
+        let mut app = loaded_app();
+        assert!(!app.loading());
+        let first = app.on_key(key('s'));
+        app.on_key(key('s'));
+        let Req::Issues(old) = &first[1] else { panic!("{first:?}") };
+        let list = IssueList { issues: issues(), window_start: now(), window_end: now() };
+        app.on_response(Resp::Issues(old.clone(), Ok(list.clone())));
+        app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
+        assert!(app.in_flight(Kind::Issues) && app.in_flight(Kind::Stats), "the newer loads are still running");
+        assert!(app.loading());
+        app.on_response(Resp::Issues(app.issues_key().unwrap(), Ok(list)));
+        app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
+        assert!(!app.loading());
     }
 
     #[test]

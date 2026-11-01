@@ -154,7 +154,7 @@ pub fn loaded_app() -> App {
     let key = app.issues_key().unwrap();
     app.on_response(Resp::Issues(key, Ok(IssueList { issues: issues(), window_start: now(), window_end: now() })));
     app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
-    app.pending.clear();
+    assert!(!app.loading(), "{:?}", app.pending);
     app.now = now();
     app
 }
@@ -167,7 +167,7 @@ pub fn detail_app() -> App {
     app.on_response(Resp::Issue { id: "b2".into(), result: Ok(issue_detail()) });
     app.on_response(Resp::Events { issue: "b2".into(), append: false, result: Ok(event_list()) });
     app.on_response(Resp::Event { event_id: "e1".into(), result: Ok(event_detail()) });
-    app.pending.clear();
+    assert!(!app.loading(), "{:?}", app.pending);
     app.now = now();
     app
 }

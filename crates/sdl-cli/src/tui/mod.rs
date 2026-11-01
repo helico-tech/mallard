@@ -12,7 +12,7 @@ mod theme;
 mod ui;
 
 use crate::cli::{Hints, describe};
-use app::{App, FetchError, Req, Resp};
+use app::{App, FetchError, Kind, Req, Resp};
 use crossterm::event::{Event, KeyEventKind};
 use futures::FutureExt;
 use ratatui::Frame;
@@ -121,14 +121,15 @@ impl Embedded {
 
     fn dispatch(&self, reqs: Vec<Req>) {
         for r in reqs {
-            self.handle.spawn(guarded(fetch(self.client.clone(), r, self.app.hints), self.tx.clone()));
+            let kind = r.kind();
+            self.handle.spawn(guarded(kind, fetch(self.client.clone(), r, self.app.hints), self.tx.clone()));
         }
     }
 }
 
 /// Run a load and send its response; a panic inside becomes `Resp::Panicked`
 /// instead of a silently lost task.
-async fn guarded(fut: impl Future<Output = Resp>, tx: mpsc::UnboundedSender<Resp>) {
+async fn guarded(kind: Kind, fut: impl Future<Output = Resp>, tx: mpsc::UnboundedSender<Resp>) {
     let resp = match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(r) => r,
         Err(p) => {
@@ -137,7 +138,7 @@ async fn guarded(fut: impl Future<Output = Resp>, tx: mpsc::UnboundedSender<Resp
                 .map(|s| s.to_string())
                 .or_else(|| p.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "background task panicked".into());
-            Resp::Panicked(msg)
+            Resp::Panicked { kind, msg }
         }
     };
     let _ = tx.send(resp);
@@ -320,13 +321,13 @@ mod tests {
         async fn boom() -> Resp {
             panic!("boom in fetch")
         }
-        guarded(boom(), tx).await;
+        guarded(Kind::Stats, boom(), tx).await;
         match rx.recv().await {
-            Some(Resp::Panicked(m)) => assert!(m.contains("boom in fetch")),
+            Some(Resp::Panicked { kind: Kind::Stats, msg }) => assert!(msg.contains("boom in fetch")),
             other => panic!("unexpected {other:?}"),
         }
         let mut app = App::new("http://x", None);
-        app.on_response(Resp::Panicked("boom".into()));
+        app.on_response(Resp::Panicked { kind: Kind::Info, msg: "boom".into() });
         assert_eq!(app.fatal.as_deref(), Some("boom"));
     }
 }
