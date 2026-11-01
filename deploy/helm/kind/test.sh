@@ -102,7 +102,7 @@ check() {
   }
   retry 30 has_trace
   log "gRPC spans arrived"
-  retry 30 sh -c "curl -fsS -H 'Authorization: Bearer $token' 'localhost:18080/otel/api/v1/traces?service=kind-grpc&since=1h' | jq -e '(.traces // .items // .) | length > 0' >/dev/null"
+  retry 30 sh -c "curl -fsS -H 'Authorization: Bearer $token' 'localhost:18080/otel/api/v1/traces?service=kind-grpc&since=1h' | jq -e 'length > 0' >/dev/null"
 
   log "metrics and status"
   curl -fsS localhost:19090/metrics | grep -q '^# TYPE'
