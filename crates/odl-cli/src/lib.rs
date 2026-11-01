@@ -7,14 +7,17 @@
 //! The same shape as `sdl_cli`: `Command`, `Ctx::new(client).with_json(…)`,
 //! `describe`, `HINTS`, `Embedded::open_trace`.
 
+mod errors;
 mod fmt;
 mod severity;
 mod tui;
 mod waterfall;
 
+pub use errors::{ErrorEvent, ErrorLookup, ErrorMap, TraceErrors};
 pub use mallard_term::error::Hints;
 pub use tui::{Embedded, Outcome};
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -251,13 +254,14 @@ pub struct Ctx {
     output: Output,
     out: Out,
     hints: Hints,
+    errors: Option<Arc<dyn ErrorLookup>>,
 }
 
 impl Ctx {
     /// Text output, colour as `--color=auto` says, [`HINTS`].
     pub fn new(client: Client) -> Self {
         let output = Output::default();
-        Ctx { client, out: output.out, output, hints: HINTS }
+        Ctx { client, out: output.out, output, hints: HINTS, errors: None }
     }
 
     /// Print JSON instead of tables (`--json`).
@@ -284,6 +288,13 @@ impl Ctx {
 
     pub fn with_hints(mut self, hints: Hints) -> Self {
         self.hints = hints;
+        self
+    }
+
+    /// Error events from the host's error tracker: `traces` gets a
+    /// `sentry_errors` count per trace (text: a `sentry` column).
+    pub fn with_error_lookup(mut self, lookup: Arc<dyn ErrorLookup>) -> Self {
+        self.errors = Some(lookup);
         self
     }
 
@@ -364,7 +375,26 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     limit: Some(a.limit),
                 })
                 .await?;
-            print_list(ctx, List::new(v).limit(Some(a.limit)).window(win), traces_text)
+            let list = List::new(v).limit(Some(a.limit)).window(win);
+            let sentry = match &ctx.errors {
+                Some(l) => Some(sentry_counts(l.as_ref(), &list.items, win).await),
+                None => None,
+            };
+            if ctx.output.text() {
+                ctx.out.line(&traces_text(&list.items, sentry.as_deref()))?;
+                ctx.output.truncation_note(&list);
+                return Ok(());
+            }
+            let mut items = Vec::with_capacity(list.items.len());
+            for (i, t) in list.items.iter().enumerate() {
+                let mut item = serde_json::to_value(t)?;
+                if let Some(s) = &sentry {
+                    item["sentry_errors"] = serde_json::to_value(s[i])?;
+                }
+                items.push(item);
+            }
+            let List { count, limit, truncated, window, .. } = list;
+            ctx.output.list(&List { items, count, limit, truncated, next_cursor: None, window })
         }
         Command::Trace { trace_id, since, attributes } => {
             let id = &trace_id;
@@ -410,6 +440,19 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             print(ctx, &r, sql_text)
         }
         Command::Tui { since } => tui::run_standalone(c.clone(), &since).await,
+    }
+}
+
+/// The error count of each trace from the host's lookup; `None` for every
+/// trace when the lookup failed (with a warning on stderr).
+async fn sentry_counts(l: &dyn ErrorLookup, traces: &[TraceSummary], w: Window) -> Vec<Option<u64>> {
+    let ids = traces.iter().map(|t| t.trace_id.clone()).collect();
+    match l.errors(ids, w.from, w.to).await {
+        Ok(m) => traces.iter().map(|t| Some(m.get(&t.trace_id).map_or(0, |e| e.count))).collect(),
+        Err(e) => {
+            eprintln!("{} sentry errors: {}", alert("warning:"), clean(&e.to_string()));
+            vec![None; traces.len()]
+        }
     }
 }
 

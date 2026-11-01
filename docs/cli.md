@@ -17,7 +17,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`; status changes take `--reason` |
 | `mallard events list\|show` | error events; `show --json` is concise, `--raw` adds the Sentry payload |
 | `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs |
-| `mallard traces list\|show`, `mallard trace <id>` | search traces; one trace with its spans, Sentry errors and logs |
+| `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |
 | `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`), follow (`-f`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation |
 | `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`) |
@@ -107,7 +107,7 @@ Screen keys:
 |---|---|
 | errors, issue list | `s` sort, `p` project, `R` `I` `U` resolve / ignore / unresolve |
 | errors, issue detail | `[` `]` older / newer event, `a` in-app frames, `w` raw frames, `R` `I` `U` |
-| telemetry, traces | `E` errors only, `l` logs of the trace |
+| telemetry, traces | `E` errors only, `l` logs of the trace; `⚠ n`: Sentry errors of the trace or span, `x` on a marked span opens its error |
 | telemetry, logs | `s` severity, `space` follow, `o` open the trace, `c` clear filter |
 | telemetry, metrics | `a` `A` aggregation, `b` group by |
 

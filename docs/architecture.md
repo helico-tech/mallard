@@ -53,5 +53,9 @@
   (`/sentry/v1/events?trace_id=`, `/otel/api/v1/traces/{id}`,
   `/otel/api/v1/logs?trace_id=`). The server adds no API of its own, so it
   never depends on the libraries' table layout.
+- Trace lists and waterfalls mark Sentry errors without a call per trace:
+  `odl-cli` has an optional `ErrorLookup` hook (it never depends on
+  `sdl-*`); the `mallard` host answers it with one
+  `/sentry/v1/events/by-trace?trace_id=a,b,…` call per list.
 - Errors and traces correlate on `trace_id` (Sentry `contexts.trace.trace_id`
   = OTel span `trace_id`).

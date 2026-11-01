@@ -157,12 +157,19 @@ pub(crate) fn operations_text(v: &[OperationSummary]) -> String {
     t.to_string()
 }
 
-pub(crate) fn traces_text(v: &[TraceSummary]) -> String {
+/// `sentry`: the host's error count per trace (`None`: unknown), shown as a
+/// `sentry` column; no column without a host lookup.
+pub(crate) fn traces_text(v: &[TraceSummary], sentry: Option<&[Option<u64>]>) -> String {
     if v.is_empty() {
         return "no matching traces".into();
     }
-    let mut t = table(&["start", "trace id", "root", "duration", "spans", "errors", "services"]);
-    for tr in v {
+    let mut head = vec!["start", "trace id", "root", "duration", "spans", "errors"];
+    if sentry.is_some() {
+        head.push("sentry");
+    }
+    head.push("services");
+    let mut t = table(&head);
+    for (i, tr) in v.iter().enumerate() {
         let root = match (&tr.root_service, &tr.root_name) {
             (Some(s), Some(n)) => format!("{}: {}", clean(s), clean(n)),
             _ => "(root not received)".into(),
@@ -172,15 +179,24 @@ pub(crate) fn traces_text(v: &[TraceSummary]) -> String {
         } else {
             Cell::new(0).fg(Color::DarkGrey)
         };
-        t.add_row(vec![
+        let mut row = vec![
             Cell::new(tr.start_time.format("%m-%d %H:%M:%S%.3f")),
             Cell::new(clean(&tr.trace_id)).fg(Color::DarkGrey),
             Cell::new(root),
             Cell::new(ms(tr.duration_ms)).set_alignment(CellAlignment::Right),
             num(tr.span_count as f64),
             errs.set_alignment(CellAlignment::Right),
-            Cell::new(clean(&tr.services.join(", "))),
-        ]);
+        ];
+        if let Some(s) = sentry {
+            let cell = match s.get(i).copied().flatten() {
+                Some(0) => Cell::new(0).fg(Color::DarkGrey),
+                Some(n) => Cell::new(n).fg(Color::Red),
+                None => Cell::new("?").fg(Color::DarkGrey),
+            };
+            row.push(cell.set_alignment(CellAlignment::Right));
+        }
+        row.push(Cell::new(clean(&tr.services.join(", "))));
+        t.add_row(row);
     }
     t.to_string()
 }
@@ -433,5 +449,26 @@ mod tests {
             },
         };
         assert!(only_sgr(&services_text(&[svc])));
+    }
+
+    #[test]
+    fn sentry_column_only_with_a_lookup() {
+        let t = |id: &str| TraceSummary {
+            trace_id: id.into(),
+            start_time: chrono::Utc::now(),
+            duration_ms: 1.0,
+            root_service: Some("checkout".into()),
+            root_name: Some("POST /pay".into()),
+            span_count: 1,
+            error_count: 0,
+            services: vec!["checkout".into()],
+        };
+        let v = [t("a"), t("b"), t("c")];
+        assert!(!traces_text(&v, None).contains("sentry"));
+        let s = traces_text(&v, Some(&[Some(3), Some(0), None]));
+        assert!(s.contains("sentry"), "{s}");
+        let row = |id: &str| s.lines().find(|l| l.contains(&format!(" {id} "))).unwrap().to_string();
+        assert!(row("a").contains(" 3 "), "{s}");
+        assert!(row("c").contains(" ? "), "unknown when the lookup failed: {s}");
     }
 }

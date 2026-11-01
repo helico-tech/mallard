@@ -681,3 +681,86 @@ fn shared_keys_mean_the_same_as_on_the_errors_tab() {
     }
     assert!(s.contains("All times are UTC."), "{s}");
 }
+
+/// A host's error lookup with fixed answers; records what it was asked.
+#[derive(Debug, Default)]
+struct FakeErrors {
+    asked: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl crate::ErrorLookup for FakeErrors {
+    fn errors(
+        &self,
+        trace_ids: Vec<String>,
+        _from: chrono::DateTime<Utc>,
+        _to: chrono::DateTime<Utc>,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<crate::ErrorMap>> {
+        self.asked.lock().unwrap().push(trace_ids);
+        Box::pin(async { Ok([(TID.to_string(), sentry_errors())].into()) })
+    }
+}
+
+fn sentry_errors() -> crate::TraceErrors {
+    let ev = |id: &str| crate::ErrorEvent {
+        event_id: id.into(),
+        issue_id: "85fede14250ec6be".into(),
+        span_id: Some("0000000000000003".into()),
+        title: "PaymentDeclinedError: card expired".into(),
+    };
+    crate::TraceErrors { count: 2, events: vec![ev("e1"), ev("e2")] }
+}
+
+/// Without a lookup (standalone odl) the trace views stay as they were.
+#[test]
+fn no_error_lookup_no_sentry_markers() {
+    let mut e = fixture();
+    let _ = e.handle_event(&ch('2'));
+    assert!(!render(&mut e, 160, 40).contains("sentry"));
+    let _ = e.handle_event(&key(KeyCode::Enter));
+    e.traces.set_trace(trace_fixture());
+    let _ = e.handle_event(&ch('G'));
+    assert_eq!(e.handle_event(&ch('x')), Outcome::Jump(TID.into()));
+}
+
+/// The list shows the error count per trace, the waterfall marks the span
+/// and `x` on it asks the host for that event.
+#[tokio::test]
+async fn sentry_errors_in_trace_list_and_waterfall() {
+    let mut e = fixture();
+    let fake = std::sync::Arc::new(FakeErrors::default());
+    e.set_error_lookup(fake.clone());
+    let _ = e.handle_event(&ch('2'));
+    let list = e.traces.list.clone();
+    e.apply(Kind::Traces, Data::Traces(list));
+    let mut tries = 0;
+    while e.traces.errors.is_empty() && tries < 50 {
+        tokio::task::yield_now().await;
+        for l in e.loader.drain() {
+            e.apply(l.kind, l.result.unwrap());
+        }
+        tries += 1;
+    }
+    assert_eq!(fake.asked.lock().unwrap()[0], vec![TID.to_string()], "one lookup for the whole list");
+    let s = render(&mut e, 160, 40);
+    assert!(s.contains("sentry") && s.contains("⚠ 2"), "{s}");
+    all_sizes(&mut e);
+
+    let _ = e.handle_event(&key(KeyCode::Enter));
+    e.traces.set_trace(trace_fixture());
+    e.traces.set_errors(Kind::SpanErrors, [(TID.to_string(), sentry_errors())].into());
+    all_sizes(&mut e);
+    let s = render(&mut e, 160, 40);
+    assert!(s.contains("⚠ 2 sentry"), "{s}");
+    let marked: Vec<&str> = s.lines().filter(|l| l.contains("⚠ Charge")).collect();
+    assert_eq!(marked.len(), 1, "only the span with the event: {s}");
+    // The root span has no event: x is the whole trace.
+    assert_eq!(e.handle_event(&ch('x')), Outcome::Jump(TID.into()));
+    let _ = e.handle_event(&ch('G'));
+    let s = render(&mut e, 160, 40);
+    assert!(s.contains("Sentry errors (2)") && s.contains("PaymentDeclinedError: card expired"), "{s}");
+    assert_eq!(
+        e.handle_event(&ch('x')),
+        Outcome::JumpEvent { trace_id: TID.into(), event_id: "e1".into() },
+        "the newest event of the span"
+    );
+}

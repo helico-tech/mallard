@@ -18,13 +18,18 @@ use ratatui::{
 };
 
 /// One library TUI, as the host sees it. Both libraries return the shared
-/// [`Outcome`]; `Outcome::Jump(trace)` opens the trace on the other tab.
+/// [`Outcome`]; `Outcome::Jump(trace)` opens the trace on the other tab,
+/// `Outcome::JumpEvent` one event of it.
 trait Pane {
     fn title(&self) -> &'static str;
     fn draw(&mut self, f: &mut Frame, area: Rect);
     fn handle(&mut self, ev: &Event) -> Outcome;
     fn tick(&mut self);
     fn open_trace(&mut self, trace_id: &str);
+    /// One event of the trace; a tab without events shows the trace.
+    fn open_trace_event(&mut self, trace_id: &str, _event_id: &str) {
+        self.open_trace(trace_id)
+    }
     /// An internal error (a panicked background load) after `tick`.
     fn take_fatal(&mut self) -> Option<String> {
         None
@@ -46,6 +51,9 @@ impl Pane for sdl_cli::Embedded {
     }
     fn open_trace(&mut self, trace_id: &str) {
         sdl_cli::Embedded::open_trace(self, trace_id)
+    }
+    fn open_trace_event(&mut self, trace_id: &str, event_id: &str) {
+        sdl_cli::Embedded::open_trace_event(self, trace_id, event_id)
     }
     fn take_fatal(&mut self) -> Option<String> {
         sdl_cli::Embedded::take_fatal(self)
@@ -112,11 +120,8 @@ impl Host {
         match self.tabs[self.active].handle(ev) {
             Outcome::Consumed | Outcome::Ignored => true,
             Outcome::Quit => false,
-            Outcome::Jump(t) => {
-                // Two tabs: a jump always goes to the other one.
-                let other = if self.active == ERRORS { TELEMETRY } else { ERRORS };
-                self.jump(other, &t)
-            }
+            Outcome::Jump(t) => self.jump(&t, None),
+            Outcome::JumpEvent { trace_id, event_id } => self.jump(&trace_id, Some(&event_id)),
         }
     }
 
@@ -132,20 +137,26 @@ impl Host {
         Ok(())
     }
 
-    fn jump(&mut self, tab: usize, trace_id: &str) -> bool {
-        if let Some(p) = self.tabs.get_mut(tab) {
-            p.open_trace(trace_id);
-            self.active = tab;
+    /// Two tabs: a jump always goes to the other one.
+    fn jump(&mut self, trace_id: &str, event_id: Option<&str>) -> bool {
+        let other = if self.active == ERRORS { TELEMETRY } else { ERRORS };
+        if let Some(p) = self.tabs.get_mut(other) {
+            match event_id {
+                Some(e) => p.open_trace_event(trace_id, e),
+                None => p.open_trace(trace_id),
+            }
+            self.active = other;
         }
         true
     }
 }
 
-/// The otel TUI, with its "e: errors of this trace" jump enabled: the
-/// errors tab can answer it.
+/// The otel TUI, with its "x: errors of this trace" jump enabled (the
+/// errors tab can answer it) and Sentry errors marked on traces and spans.
 fn telemetry_pane(client: &Client) -> odl_cli::Embedded {
     let mut pane = odl_cli::Embedded::new(client.otel.clone());
     pane.set_errors_enabled(true);
+    pane.set_error_lookup(std::sync::Arc::new(crate::errors::SentryErrors(client.clone())));
     pane
 }
 
@@ -201,7 +212,7 @@ mod tests {
             self.title
         }
         fn draw(&mut self, f: &mut Frame, area: Rect) {
-            f.render_widget(Paragraph::new(format!("{} body", self.title)), area)
+            f.render_widget(Paragraph::new(format!("{} body {}", self.title, self.opened.join(","))), area)
         }
         fn handle(&mut self, ev: &Event) -> Outcome {
             match ev {
@@ -213,6 +224,9 @@ mod tests {
         fn tick(&mut self) {}
         fn open_trace(&mut self, trace_id: &str) {
             self.opened.push(trace_id.into())
+        }
+        fn open_trace_event(&mut self, trace_id: &str, event_id: &str) {
+            self.opened.push(format!("{trace_id}/{event_id}"))
         }
         fn take_fatal(&mut self) -> Option<String> {
             self.fatal.take()
@@ -269,6 +283,25 @@ mod tests {
         h.on_event(&key(KeyCode::Char('x')));
         assert_eq!(h.active, ERRORS);
         assert!(!h.on_event(&key(KeyCode::Char('q'))), "q quits");
+    }
+
+    /// `x` on a span with a Sentry event opens that event on the errors tab.
+    #[test]
+    fn event_jumps_carry_the_event_id() {
+        let mut h = host();
+        h.active = TELEMETRY;
+        h.tabs[TELEMETRY] = Box::new(Fake {
+            opened: vec![],
+            title: "Telemetry",
+            ask_on_x: || Outcome::JumpEvent { trace_id: "t2".into(), event_id: "e1".into() },
+            fatal: None,
+        });
+        h.on_event(&key(KeyCode::Char('x')));
+        assert_eq!(h.active, ERRORS);
+        assert!(screen(&mut h).contains("Errors body t2/e1"), "{}", screen(&mut h));
+        h.on_event(&key(KeyCode::Char('x')));
+        assert_eq!(h.active, TELEMETRY, "a plain jump back");
+        assert!(screen(&mut h).contains("Telemetry body t1"), "{}", screen(&mut h));
     }
 
     #[test]

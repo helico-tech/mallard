@@ -329,6 +329,49 @@ pub struct TraceQuery {
     pub limit: Option<u32>,
 }
 
+/// Most trace ids in one `GET /v1/events/by-trace`.
+pub const MAX_TRACES_PER_LOOKUP: usize = 200;
+/// Most events listed per trace by `GET /v1/events/by-trace` (`count` has them all).
+pub const MAX_EVENTS_PER_TRACE: u32 = 50;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct TracesQuery {
+    /// Trace ids (32 hex characters), comma separated; at most 200. Required.
+    pub trace_id: String,
+    /// Window to search, e.g. `1h`, `30d` (default `30d`).
+    pub since: Option<String>,
+}
+
+/// One error event of a trace, as `GET /v1/events/by-trace` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TraceEvent {
+    pub event_id: String,
+    pub issue_id: String,
+    pub project_id: u32,
+    /// Span id (16 hex) the event was captured in.
+    pub span_id: Option<String>,
+    pub title: String,
+}
+
+/// The error events of one trace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TraceEvents {
+    /// All events of the trace in the window.
+    pub count: u64,
+    /// The newest events, at most 50.
+    pub events: Vec<TraceEvent>,
+}
+
+/// Error events per trace id. Traces without events are left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct EventsByTrace {
+    pub traces: std::collections::BTreeMap<String, TraceEvents>,
+}
+
 /// Absolute window bounds and the bucket step, accepted next to `since` by
 /// every endpoint with a window (same names as the OTel API). `from` wins
 /// over `since`; `to` defaults to now.

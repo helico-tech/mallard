@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
-use mallard_term::tui::keys;
+use mallard_term::{text::clean, tui::keys};
 use odl_client::api::*;
 use ratatui::{
     Frame,
@@ -15,6 +15,7 @@ use ratatui::{
 };
 
 use crate::{
+    ErrorEvent, ErrorMap,
     fmt::{compact, ms},
     tui::{
         Embedded, Outcome, PromptTarget, View, due,
@@ -34,6 +35,8 @@ pub struct State {
     pub error: Option<String>,
     pub refreshed: Option<Instant>,
     pub detail: Option<Detail>,
+    /// Error events of the listed traces (host's error lookup).
+    pub errors: ErrorMap,
 }
 
 pub struct Detail {
@@ -54,6 +57,8 @@ pub struct Detail {
     pub short_window: bool,
     /// Failed lookups in a row, for the retry back-off.
     pub failures: u32,
+    /// Error events of this trace (host's error lookup).
+    pub errors: Vec<ErrorEvent>,
 }
 
 impl Detail {
@@ -72,6 +77,7 @@ impl Detail {
             retry_at: None,
             short_window: false,
             failures: 0,
+            errors: vec![],
         }
     }
 
@@ -94,6 +100,11 @@ impl Detail {
         let t = self.trace.as_ref()?;
         let r = self.rows.get(self.sel.selected()?)?;
         t.spans.get(r.span)
+    }
+
+    /// Error events captured in this span.
+    pub fn span_errors<'a>(&'a self, span_id: &'a str) -> impl Iterator<Item = &'a ErrorEvent> {
+        self.errors.iter().filter(move |e| e.span_id.as_deref() == Some(span_id))
     }
 }
 
@@ -141,6 +152,18 @@ impl State {
             if !refresh {
                 d.scroll = 0;
             }
+        }
+    }
+
+    /// Error events from the host: of the list, or of the open trace.
+    pub fn set_errors(&mut self, kind: Kind, mut m: ErrorMap) {
+        match kind {
+            Kind::SpanErrors => {
+                if let Some(d) = &mut self.detail {
+                    d.errors = m.remove(&d.trace_id).map(|t| t.events).unwrap_or_default();
+                }
+            }
+            _ => self.errors = m,
         }
     }
 
@@ -204,10 +227,38 @@ impl Embedded {
         }
     }
 
+    /// Error events of the listed traces: one lookup for the whole list.
+    pub(crate) fn load_trace_errors(&mut self) {
+        let Some(l) = self.errors.clone() else { return };
+        let ids: Vec<String> = self.traces.list.iter().map(|t| t.trace_id.clone()).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let to = Utc::now();
+        let from = to - TimeDelta::from_std(self.windows[self.win].1).unwrap_or(TimeDelta::hours(1));
+        let fut = async move { Ok(l.errors(ids, from, to).await.map_err(|e| e.to_string())) };
+        self.loader.spawn(Kind::TraceErrors, fut, Data::Errors);
+    }
+
+    /// Error events of the open trace, searched from an hour before its
+    /// first span to an hour after its end.
+    pub(crate) fn load_span_errors(&mut self) {
+        let (Some(l), Some(d)) = (self.errors.clone(), &self.traces.detail) else { return };
+        let Some(start) = d.trace.as_ref().and_then(|t| t.spans.iter().map(|s| s.start_time).min()) else {
+            return;
+        };
+        let from = start - TimeDelta::hours(1);
+        let to = start + TimeDelta::nanoseconds(d.total_ns) + TimeDelta::hours(1);
+        let ids = vec![d.trace_id.clone()];
+        let fut = async move { Ok(l.errors(ids, from, to).await.map_err(|e| e.to_string())) };
+        self.loader.spawn(Kind::SpanErrors, fut, Data::Errors);
+    }
+
     pub(crate) fn open_trace_detail(&mut self, id: String) {
         let hint = self.traces.list.iter().find(|t| t.trace_id == id).map(|t| t.start_time);
         self.loader.cancel(Kind::Trace);
         self.loader.cancel(Kind::TraceLogs);
+        self.loader.cancel(Kind::SpanErrors);
         self.traces.detail = Some(Detail::new(id, hint));
         self.refresh_traces(true);
     }
@@ -249,7 +300,15 @@ impl Embedded {
                     self.traces.refreshed = None;
                     return Some(Outcome::Consumed);
                 }
-                KeyCode::Char(keys::JUMP) => return Some(Outcome::Jump(d.trace_id.clone())),
+                KeyCode::Char(keys::JUMP) => {
+                    // On a span with an error event: that event.
+                    let event = d.selected_span().and_then(|s| d.span_errors(&s.span_id).next());
+                    let trace_id = d.trace_id.clone();
+                    return Some(match event {
+                        Some(e) => Outcome::JumpEvent { trace_id, event_id: e.event_id.clone() },
+                        None => Outcome::Jump(trace_id),
+                    });
+                }
                 KeyCode::Char('l') => {
                     let id = d.trace_id.clone();
                     self.logs_for_trace(&id);
@@ -319,6 +378,7 @@ impl Embedded {
 
     fn draw_trace_list(&mut self, f: &mut Frame, area: Rect) {
         let long = self.window_secs() > 86_400.0;
+        let with_errors = self.errors.is_some();
         let t = &mut self.traces;
         let q = t.filter.to_query();
         let filter_line = Line::from(vec![
@@ -347,7 +407,7 @@ impl Embedded {
                 let frac = tr.duration_ms / max_dur;
                 let filled = ((frac * 10.0).round() as usize).clamp(1, 10);
                 let bar_color = if tr.error_count > 0 { theme::RED } else { theme::ACCENT };
-                TRow::new(vec![
+                let mut cells = vec![
                     Cell::from(widgets::utc(tr.start_time, if long { "%m-%d %H:%M:%S" } else { "%H:%M:%S%.3f" }))
                         .style(theme::dim()),
                     Cell::from(Line::from(vec![
@@ -366,30 +426,41 @@ impl Embedded {
                     } else {
                         Cell::from(Line::from("·").right_aligned()).style(theme::faint())
                     },
-                    Cell::from(tr.services.join(" ")).style(theme::faint()),
-                ])
+                ];
+                if with_errors {
+                    cells.push(match t.errors.get(&tr.trace_id).map_or(0, |e| e.count) {
+                        0 => Cell::from(Line::from("·").right_aligned()).style(theme::faint()),
+                        n => Cell::from(Line::from(format!("{SENTRY_MARK} {n}")).right_aligned()).style(sentry_style()),
+                    });
+                }
+                cells.push(Cell::from(tr.services.join(" ")).style(theme::faint()));
+                TRow::new(cells)
             })
             .collect();
         let empty = rows.is_empty();
-        let header = TRow::new(vec![
+        let mut header = vec![
             Cell::from("start"),
             Cell::from("root"),
             Cell::from(Line::from("duration").right_aligned()),
             Cell::from(""),
             Cell::from(Line::from("spans").right_aligned()),
             Cell::from(Line::from("errors").right_aligned()),
-            Cell::from("services"),
-        ])
-        .style(theme::header_row());
-        let widths = [
+        ];
+        let mut widths = vec![
             Constraint::Length(if long { 14 } else { 12 }),
             Constraint::Fill(3),
             Constraint::Length(9),
             Constraint::Length(10),
             Constraint::Length(6),
             Constraint::Length(7),
-            Constraint::Fill(2),
         ];
+        if with_errors {
+            header.push(Cell::from(Line::from("sentry").right_aligned()));
+            widths.push(Constraint::Length(7));
+        }
+        header.push(Cell::from("services"));
+        widths.push(Constraint::Fill(2));
+        let header = TRow::new(header).style(theme::header_row());
         let sel = t.sel.selected();
         widgets::fit_offset(t.sel.offset_mut(), sel, t.list.len(), table_area.height.saturating_sub(1));
         f.render_stateful_widget(
@@ -436,6 +507,9 @@ impl Embedded {
         ];
         if errors > 0 {
             right.push(TSpan::styled(format!("· ✗ {errors} "), theme::error()));
+        }
+        if !d.errors.is_empty() {
+            right.push(TSpan::styled(format!("· {SENTRY_MARK} {} sentry ", d.errors.len()), sentry_style()));
         }
         if !d.logs.is_empty() {
             right.push(TSpan::styled(format!("· {} logs ", d.logs.len()), theme::dim()));
@@ -488,6 +562,11 @@ impl Embedded {
                 let rest = label_w.saturating_sub(used + widgets::width(&svc) + 1);
                 label.push(TSpan::styled(svc.clone(), Style::new().fg(svc_color)));
                 label.push(TSpan::raw(" "));
+                let mut rest = rest;
+                if d.span_errors(&s.span_id).next().is_some() && rest > 4 {
+                    label.push(TSpan::styled(format!("{SENTRY_MARK} "), sentry_style()));
+                    rest -= 2;
+                }
                 let name = widgets::trunc(&s.name, rest);
                 let pad = rest.saturating_sub(widgets::width(&name));
                 label.push(TSpan::styled(
@@ -515,6 +594,14 @@ impl Embedded {
         let block = widgets::panel(&widgets::trunc(&title, info_area.width.saturating_sub(6) as usize), false);
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((d.scroll, 0)).block(block), info_area);
     }
+}
+
+/// Marks traces and spans with error events from the host's error tracker
+/// (`✗` marks spans with error status).
+const SENTRY_MARK: &str = "⚠";
+
+fn sentry_style() -> Style {
+    Style::new().fg(theme::ORANGE).add_modifier(Modifier::BOLD)
 }
 
 fn section(title: &str) -> Line<'static> {
@@ -556,6 +643,21 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
     ];
     if !s.status_message.is_empty() {
         out.push(Line::from(TSpan::styled(format!("  {}", s.status_message), theme::error())));
+    }
+    let errors: Vec<&ErrorEvent> = d.span_errors(&s.span_id).collect();
+    if !errors.is_empty() {
+        out.push(Line::raw(""));
+        out.push(section(&format!("Sentry errors ({})", errors.len())));
+        for e in errors {
+            out.push(Line::from(vec![
+                TSpan::styled(format!("  {SENTRY_MARK} "), sentry_style()),
+                TSpan::styled(clean(&e.title).into_owned(), theme::text()),
+            ]));
+            let ids = format!("    issue {} · event {}", clean(&e.issue_id), clean(&e.event_id));
+            out.push(Line::from(TSpan::styled(ids, theme::dim())));
+        }
+        out.push(Line::from(TSpan::styled("  x: the first one on the errors tab", theme::faint())));
+        out.push(Line::raw(""));
     }
     out.push(kv_line("span  ", &s.span_id));
     if let Some(p) = &s.parent_span_id {

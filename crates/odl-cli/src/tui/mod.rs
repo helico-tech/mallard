@@ -29,6 +29,7 @@ mod tests;
 
 use std::{
     collections::HashSet,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -109,6 +110,8 @@ pub struct Embedded {
     flash: Option<(String, bool, Instant)>,
     spin: usize,
     errors_enabled: bool,
+    /// The host's error tracker: marks traces and spans with error events.
+    errors: Option<Arc<dyn crate::ErrorLookup>>,
     /// Kinds whose last load failed: only the first failure flashes.
     failing: HashSet<Kind>,
 }
@@ -177,6 +180,7 @@ impl Embedded {
             flash: None,
             spin: 0,
             errors_enabled: false,
+            errors: None,
             failing: HashSet::new(),
         }
     }
@@ -186,6 +190,13 @@ impl Embedded {
     /// error tracker is connected). Off by default.
     pub fn set_errors_enabled(&mut self, enabled: bool) {
         self.errors_enabled = enabled;
+    }
+
+    /// Mark traces and spans that have error events in the host's error
+    /// tracker: a `sentry` column in the trace list, `⚠` on spans, and `x` on
+    /// such a span returns [`Outcome::JumpEvent`].
+    pub fn set_error_lookup(&mut self, lookup: Arc<dyn crate::ErrorLookup>) {
+        self.errors = Some(lookup);
     }
 
     /// Start with a given time window (e.g. `15m`, `6h`, `2d`, `1h30m`).
@@ -299,6 +310,13 @@ impl Embedded {
     }
 
     fn apply(&mut self, kind: Kind, data: Data) {
+        if let Data::Errors(Err(e)) = &data {
+            // Flash when the lookup starts failing; keep the last markers.
+            if self.failing.insert(kind) {
+                self.flash_error(format!("sentry errors: {e}"));
+            }
+            return;
+        }
         self.failing.remove(&kind);
         match data {
             Data::Stats(s) => {
@@ -320,8 +338,15 @@ impl Embedded {
                 Kind::LogVolume => self.logs.series = Some(s),
                 _ => self.overview.log_series = Some(s),
             },
-            Data::Traces(v) => self.traces.set_list(v),
-            Data::Trace(t) => self.traces.set_trace(*t),
+            Data::Traces(v) => {
+                self.traces.set_list(v);
+                self.load_trace_errors();
+            }
+            Data::Trace(t) => {
+                self.traces.set_trace(*t);
+                self.load_span_errors();
+            }
+            Data::Errors(r) => self.traces.set_errors(kind, r.unwrap_or_default()),
             Data::Logs(v) => match kind {
                 Kind::TraceLogs => self.traces.set_trace_logs(v),
                 _ => self.logs_loaded(v),
@@ -360,6 +385,8 @@ impl Embedded {
                 }
             }
             Kind::MetricList => self.metrics.error = Some(e),
+            // Error lookups report their failures as data.
+            Kind::TraceErrors | Kind::SpanErrors => {}
             Kind::MetricQuery => {
                 if let Some(c) = &mut self.metrics.chart {
                     c.error = Some(e);

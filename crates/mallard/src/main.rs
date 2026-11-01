@@ -6,6 +6,7 @@
 //! live here. The old `errors …` / `telemetry …` paths stay as hidden
 //! aliases of the same commands.
 
+mod errors;
 mod find;
 mod help;
 mod setup;
@@ -134,7 +135,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum TracesCmd {
-    /// Search traces (default window 1h).
+    /// Search traces (default window 1h), with the Sentry error count of each.
     List(odl_cli::TraceListArgs),
     /// Spans, Sentry errors and logs of one trace.
     Show(TraceShowArgs),
@@ -179,8 +180,12 @@ impl Run {
             .with_hints(ERRORS_HINTS)
     }
 
+    /// Trace lists get the Sentry error count per trace.
     fn otel(&self) -> odl_cli::Ctx {
-        odl_cli::Ctx::new(self.client.otel.clone()).with_output(self.output.clone()).with_hints(TELEMETRY_HINTS)
+        odl_cli::Ctx::new(self.client.otel.clone())
+            .with_output(self.output.clone())
+            .with_hints(TELEMETRY_HINTS)
+            .with_error_lookup(std::sync::Arc::new(errors::SentryErrors(self.client.clone())))
     }
 }
 

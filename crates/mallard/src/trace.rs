@@ -45,6 +45,13 @@ pub(crate) async fn run(r: &Run, trace_id: &str, window: &WindowArgs) -> Result<
 /// `resources` instead of on every span, and dropped from logs.
 pub(crate) fn concise(t: &TraceOverview, raw: bool) -> Result<Value> {
     let mut v = serde_json::to_value(t)?;
+    // Each span: how many of the trace's Sentry errors were captured in it.
+    if let Some(spans) = v["spans"].as_array_mut() {
+        for s in spans {
+            let n = sentry_errors(t, s["span_id"].as_str().unwrap_or_default());
+            s["sentry_errors"] = n.into();
+        }
+    }
     if raw {
         return Ok(v);
     }
@@ -66,6 +73,11 @@ pub(crate) fn concise(t: &TraceOverview, raw: bool) -> Result<Value> {
     }
     v["resources"] = Value::Object(resources);
     Ok(v)
+}
+
+/// The Sentry errors captured in this span.
+fn sentry_errors(t: &TraceOverview, span_id: &str) -> usize {
+    t.errors.iter().filter(|e| e.span_id.as_deref() == Some(span_id)).count()
 }
 
 pub fn render(t: &TraceOverview) -> String {
@@ -109,9 +121,13 @@ pub fn render(t: &TraceOverview) -> String {
         let pad = "  ".repeat(depth);
         let offset = start.map(|st| (s.start_time - st).num_microseconds().unwrap_or(0) as f64 / 1000.0).unwrap_or(0.0);
         let mark = if s.status_code == mallard_client::odl_client::api::SpanStatus::Error { "✖" } else { "•" };
+        let sentry = match sentry_errors(t, &s.span_id) {
+            0 => String::new(),
+            n => format!("  ⚠ {n}"),
+        };
         let _ = writeln!(
             out,
-            "{pad}{mark} {}  {}  {}  (+{})  {}",
+            "{pad}{mark} {}  {}  {}  (+{})  {}{sentry}",
             clean(&s.service_name),
             clean(&s.name),
             ms(s.duration_ns as f64 / 1e6),
@@ -256,6 +272,52 @@ mod tests {
         assert_eq!(v["resources"]["checkout"]["host.name"], "h1");
         let raw = concise(&t, true).unwrap();
         assert!(raw["spans"][0].get("resource_attributes").is_some() && raw.get("resources").is_none());
+    }
+
+    fn error_in(span_id: &str) -> mallard_client::sdl_client::types::EventSummary {
+        mallard_client::sdl_client::types::EventSummary {
+            event_id: "e1".into(),
+            project_id: 1,
+            issue_id: "85fede14250ec6be".into(),
+            timestamp: chrono::Utc::now(),
+            received_at: chrono::Utc::now(),
+            title: "TypeError: boom".into(),
+            level: "error".into(),
+            platform: "node".into(),
+            environment: None,
+            release: None,
+            user: None,
+            message: None,
+            trace_id: Some("0af7651916cd43dd8448eb211c80319c".into()),
+            span_id: Some(span_id.into()),
+        }
+    }
+
+    #[test]
+    fn spans_with_sentry_errors_are_marked() {
+        let mut a = span("1", None);
+        a.name = "GET /".into();
+        let mut b = span("2", Some("1"));
+        b.name = "charge".into();
+        let t = TraceOverview {
+            trace_id: mallard_client::TraceId::parse("0af7651916cd43dd8448eb211c80319c").unwrap(),
+            spans: vec![a, b],
+            errors: vec![error_in("2"), error_in("2")],
+            logs: vec![],
+            logs_truncated: false,
+            warnings: vec![],
+        };
+        for raw in [false, true] {
+            let v = concise(&t, raw).unwrap();
+            assert_eq!(
+                (v["spans"][0]["sentry_errors"].as_u64(), v["spans"][1]["sentry_errors"].as_u64()),
+                (Some(0), Some(2))
+            );
+        }
+        let out = render(&t);
+        let line = |name: &str| out.lines().find(|l| l.contains(name)).unwrap().to_string();
+        assert!(line("charge").ends_with("⚠ 2"), "{out}");
+        assert!(!line("GET /").contains('⚠'), "{out}");
     }
 
     #[test]

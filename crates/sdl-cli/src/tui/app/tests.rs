@@ -127,6 +127,30 @@ fn trace_view_opens_event_detail() {
     assert_eq!(app.view(), View::Issues);
 }
 
+/// `x` on a span with an error (telemetry tab): the trace's events, then
+/// that event's issue; Esc returns to the trace's events.
+#[test]
+fn trace_event_opens_that_event() {
+    let mut app = loaded_app();
+    let t = "b7644661850f40e69380d8c9ea253e84";
+    app.show_trace_event(t, "e2");
+    assert_eq!(app.view(), View::Trace);
+    let r = app.on_response(Resp::Trace { trace_id: t.into(), result: Ok(event_list()) });
+    assert!(r.iter().any(|r| matches!(r, Req::Event { event_id, .. } if event_id == "e2")), "{r:?}");
+    assert_eq!(app.view(), View::Detail);
+    press(&mut app, KeyEvent::from(KeyCode::Esc));
+    assert_eq!(app.view(), View::Trace);
+    assert_eq!(app.trace().unwrap().state.selected(), Some(1), "the event stays selected");
+    // A refresh of the list does not open it again.
+    let r = app.on_response(Resp::Trace { trace_id: t.into(), result: Ok(event_list()) });
+    assert!(r.is_empty() && app.view() == View::Trace, "{r:?}");
+
+    // An unknown event: the list stays in front.
+    app.show_trace_event(t, "nope");
+    let r = app.on_response(Resp::Trace { trace_id: t.into(), result: Ok(event_list()) });
+    assert!(r.is_empty() && app.view() == View::Trace, "{r:?}");
+}
+
 #[test]
 fn loads_reach_screens_behind_the_front_one() {
     let mut app = loaded_app();

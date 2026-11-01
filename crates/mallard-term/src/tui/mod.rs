@@ -26,6 +26,9 @@ pub enum Outcome {
     /// The user pressed [`keys::JUMP`]: show this trace id on the other
     /// side (errors ↔ telemetry).
     Jump(String),
+    /// [`keys::JUMP`] on a span with an error event: show this event of
+    /// this trace on the errors side.
+    JumpEvent { trace_id: String, event_id: String },
 }
 
 /// Keys that mean the same on every tab and every screen. Each component
