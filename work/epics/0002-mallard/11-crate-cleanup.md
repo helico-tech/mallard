@@ -46,6 +46,7 @@ Must not change: the `meta` lease, schemas, table names, anything on disk, and
 wire names that SDKs or sentry-cli rely on.
 
 ## Progress log
-- 2026-11-01: baseline binary and test count taken from `d9218d6` before any edit.
+- 2026-11-01: baseline binary and test count taken from `d9218d6` before any edit: 499 passed, 4 ignored.
+- 2026-11-01: steps 1 to 6 done, one commit each. No `SDL_*` variable was read in production: only `Standalone` read them, and mallard never built it. All settings that matter have a `[sentry.*]`, `[server]`, `[storage]` or `[duckdb]` key (mapping in ADR 0024). `SDL_CATALOG_WIDE_MAINTENANCE` and `SDL_MAINTENANCE_THREADS` have no equal, and never had one in mallard.
 
 ## Follow-ups
