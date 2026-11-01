@@ -101,6 +101,7 @@ pub(super) fn issue_detail() -> IssueDetail {
             status: IssueStatus::Resolved,
             reason: "user".into(),
         }],
+        changed: None,
     }
 }
 
@@ -144,6 +145,9 @@ pub(super) fn info() -> ServerInfo {
         storage: "s".into(),
         queue_depth: 12,
         queue_capacity: 20000,
+        public_url: None,
+        retention_secs: None,
+        max_window_secs: None,
     }
 }
 
@@ -159,6 +163,9 @@ pub(super) fn loaded_app() -> App {
         storage: "s".into(),
         queue_depth: 12,
         queue_capacity: 20000,
+        public_url: None,
+        retention_secs: None,
+        max_window_secs: None,
     })));
     let key = app.issues_key().unwrap();
     app.on_response(Resp::Issues(key, Ok(IssueList { issues: issues(), window_start: now(), window_end: now() })));

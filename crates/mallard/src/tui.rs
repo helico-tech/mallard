@@ -151,7 +151,7 @@ fn telemetry_pane(client: &Client) -> odl_cli::Embedded {
 
 pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
     // Fail fast with a clear message instead of an empty screen.
-    client.sentry.info().await.map_err(|e| anyhow::anyhow!("cannot reach {}: {e}", client.base_url()))?;
+    client.sentry.info().await.map_err(|e| crate::described(mallard_client::Error::Sentry(e), client.base_url()))?;
     let tabs: Vec<Box<dyn Pane>> = vec![
         Box::new(sdl_cli::Embedded::new(client.sentry.clone(), project).with_hints(crate::ERRORS_HINTS)),
         Box::new(telemetry_pane(client)),

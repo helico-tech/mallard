@@ -473,6 +473,11 @@ async fn auth_sql_stats_and_maintenance() {
     let spans = stats.storage.tables.iter().find(|t| t.name == "spans").unwrap();
     assert!(spans.files >= 2, "expected several small files, got {}", spans.files);
     assert_eq!(stats.ingest.signals[0].accepted, 15);
+    let caps = stats.capabilities.expect("capabilities");
+    assert!(caps.sql && !caps.ingest_auth, "{caps:?}");
+    assert_eq!(caps.flush_interval_secs, 0.1);
+    assert_eq!(caps.max_window_secs, Config::default().query.max_window.as_secs());
+    assert_eq!(caps.retention_secs.traces, Config::default().retention.traces.as_secs());
 
     // SQL endpoint
     let sql = |q: &str| {

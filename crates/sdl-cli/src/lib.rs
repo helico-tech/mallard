@@ -9,17 +9,19 @@
 #![warn(unreachable_pub)]
 
 mod cli;
+pub mod concise;
 mod event_view;
 mod fmt;
 mod paint;
 mod send_test;
 mod tui;
 
-pub use cli::{Ctx, HINTS, describe, run};
+pub use cli::{Ctx, HINTS, classify, create_or_get, describe, run};
 pub use mallard_term::error::Hints;
 pub use tui::{Embedded, Outcome};
 
 use clap::{Args, Subcommand, ValueEnum};
+use mallard_term::window::WindowArgs;
 
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
@@ -35,11 +37,10 @@ pub enum Command {
     /// List and inspect events.
     #[command(subcommand)]
     Events(EventsCmd),
-    /// Event counts over time for the project.
+    /// Event counts over time for the project (default window 24h).
     Stats {
-        /// Window, e.g. 1h, 24h, 7d.
-        #[arg(short, long, default_value = "24h")]
-        since: String,
+        #[command(flatten)]
+        window: WindowArgs,
         /// Bucket size, e.g. 1h (default: window / 24).
         #[arg(long)]
         interval: Option<String>,
@@ -55,7 +56,7 @@ pub enum Command {
         #[arg(long, env = "SENTRY_DSN")]
         dsn: String,
         /// Error message of the test event.
-        #[arg(long, default_value = "sdl send-test: hello from the sdl CLI")]
+        #[arg(long, default_value = "send-test: hello from the mallard CLI")]
         message: String,
     },
     /// Interactive terminal dashboard.
@@ -76,6 +77,9 @@ pub enum ProjectsCmd {
         /// SDK platform, e.g. node, javascript, python.
         #[arg(long)]
         platform: Option<String>,
+        /// Print the existing project instead of failing when the slug is taken.
+        #[arg(long)]
+        if_not_exists: bool,
     },
     /// One project, with its DSN.
     Show { project: String },
@@ -145,15 +149,21 @@ pub struct IssueListArgs {
     /// Text search in title and culprit.
     #[arg(long, short = 'q')]
     pub query: Option<String>,
-    /// Window, e.g. 1h, 24h, 14d (server default 14d).
-    #[arg(short, long)]
-    pub since: Option<String>,
+    /// Issues with events in this window (default 14d).
+    #[command(flatten)]
+    pub window: WindowArgs,
+    /// Only issues first seen in the window (new issues).
+    #[arg(long)]
+    pub new: bool,
+    /// Only issues first seen in this release.
+    #[arg(long)]
+    pub first_release: Option<String>,
     #[arg(long, value_enum, default_value = "last_seen")]
     pub sort: SortBy,
     /// Only this environment.
     #[arg(long)]
     pub env: Option<String>,
-    /// Only this release.
+    /// Only issues with events in this release.
     #[arg(long)]
     pub release: Option<String>,
     /// Max issues (server default 50, max 500).
@@ -166,28 +176,29 @@ pub struct IssueListArgs {
 pub enum IssuesCmd {
     /// Issues with counts and a trend sparkline.
     List(IssueListArgs),
-    /// One issue: details, releases and tag breakdown.
+    /// One issue: details, releases, tag breakdown and (JSON) the latest event.
     Show {
         id: String,
-        /// Window for counts and tags, e.g. 24h (server default 14d).
-        #[arg(short, long)]
-        since: Option<String>,
+        /// Window for counts and tags (default 14d).
+        #[command(flatten)]
+        window: WindowArgs,
     },
     /// Mark issues resolved (they reopen on a new event).
-    Resolve {
-        #[arg(required = true)]
-        ids: Vec<String>,
-    },
+    Resolve(SetStatusArgs),
     /// Mark issues ignored.
-    Ignore {
-        #[arg(required = true)]
-        ids: Vec<String>,
-    },
+    Ignore(SetStatusArgs),
     /// Mark issues unresolved again.
-    Unresolve {
-        #[arg(required = true)]
-        ids: Vec<String>,
-    },
+    Unresolve(SetStatusArgs),
+}
+
+/// Issue ids and why. Already in that status: nothing changes (`changed: false`).
+#[derive(Args, Debug)]
+pub struct SetStatusArgs {
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    /// Why, e.g. "fixed in #123" (shown in the issue's activity).
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -201,11 +212,15 @@ pub enum EventsCmd {
         /// Only events of this trace id (searches all projects).
         #[arg(short, long, conflicts_with = "issue")]
         trace: Option<String>,
-        /// Max events.
+        /// Max events (default 50, max 500).
         #[arg(short = 'n', long)]
         limit: Option<u32>,
+        /// Only events in this window (default: all; with --trace 30d).
+        #[command(flatten)]
+        window: WindowArgs,
     },
-    /// One event: exception, stack trace, breadcrumbs, tags, user, request.
+    /// One event: exception, stack trace, breadcrumbs, tags, user, request
+    /// (JSON: concise; --raw adds the Sentry payload).
     Show {
         event_id: String,
         /// Issue of the event (makes the lookup much faster).

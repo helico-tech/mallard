@@ -178,6 +178,32 @@ pub struct Stats {
     pub uptime_secs: u64,
     pub ingest: IngestStats,
     pub storage: StorageStats,
+    /// What this server allows and keeps. Missing from older servers.
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
+}
+
+/// Server settings a client needs to know before it queries or sends data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Capabilities {
+    /// `POST /api/v1/sql` is enabled (`query.enable_sql`).
+    pub sql: bool,
+    /// Longest query window (`query.max_window`), in seconds.
+    pub max_window_secs: u64,
+    /// How long data is kept, in seconds (0 = forever).
+    pub retention_secs: RetentionSecs,
+    /// Buffered data is written at least this often (`ingest.flush_interval`),
+    /// so new data can take this long to show up in queries.
+    pub flush_interval_secs: f64,
+    /// OTLP ingest needs a bearer token (`auth.ingest_tokens` is set).
+    pub ingest_auth: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RetentionSecs {
+    pub traces: u64,
+    pub logs: u64,
+    pub metrics: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

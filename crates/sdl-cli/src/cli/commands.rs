@@ -1,23 +1,39 @@
 //! The commands: fetch with `sdl-client`, print tables or JSON.
 
-use super::{Ctx, describe};
+use super::{Ctx, classify};
+use crate::concise::ConciseEvent;
 use crate::event_view as ev;
 use crate::fmt;
 use crate::paint as p;
-use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd};
-use anyhow::{Result, bail};
+use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SetStatusArgs};
+use anyhow::Result;
 use chrono::Utc;
 use comfy_table::{Attribute, Cell, Color, Table, presets};
 use mallard_term::color::Out;
 use mallard_term::error::Hints;
-use mallard_term::table::{right, table};
+use mallard_term::output::List;
+use mallard_term::table::{fancy, right, table};
+use mallard_term::window::{Window, WindowArgs};
 use sdl_client::types::*;
+use serde::Serialize;
+use std::time::Duration;
 
-/// Table with a line between rows, for multi-line cells.
+const DAY: Duration = Duration::from_secs(86_400);
+
+/// Default window of issue lists and details (the server's default too).
+const ISSUE_WINDOW: Duration = Duration::from_secs(14 * 86_400);
+
+/// Table with a line between rows, for multi-line cells (on a terminal).
 fn table_with_row_lines(headers: &[&str]) -> Table {
     let mut t = table(headers);
-    t.load_style(presets::UTF8_FULL.with_rounded_corners());
+    if fancy() {
+        t.load_style(presets::UTF8_FULL.with_rounded_corners());
+    }
     t
+}
+
+fn range(w: &Window) -> WindowRange {
+    WindowRange { from: Some(w.from), to: Some(w.to), step: None }
 }
 
 fn level_cell(l: &str) -> Cell {
@@ -49,7 +65,7 @@ fn kv(o: Out, key: &str, value: &str) -> Result<()> {
 pub(super) async fn info(ctx: &Ctx) -> Result<()> {
     let o = ctx.out;
     let i = ctx.client.info().await.map_err(|e| ctx.err(e))?;
-    if ctx.json {
+    if !ctx.output.text() {
         return ctx.print_json(&i);
     }
     let i = fmt::sanitize(i, true)?;
@@ -67,8 +83,8 @@ pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
     match cmd {
         ProjectsCmd::List => {
             let ps = ctx.client.projects().await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                return ctx.print_json(&ps);
+            if !ctx.output.text() {
+                return ctx.output.list(&List::new(ps));
             }
             let ps = fmt::sanitize(ps, true)?;
             if ps.is_empty() {
@@ -88,26 +104,54 @@ pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             out!(o, "{t}");
             Ok(())
         }
-        ProjectsCmd::Create { name, slug, platform } => {
-            let pr =
-                ctx.client.create_project(&CreateProject { name, slug, platform }).await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
+        ProjectsCmd::Create { name, slug, platform, if_not_exists } => {
+            let (pr, created) = if if_not_exists {
+                create_or_get(ctx, &name, slug, platform).await?
+            } else {
+                let req = CreateProject { name, slug, platform };
+                (ctx.client.create_project(&req).await.map_err(|e| ctx.err(e))?, true)
+            };
+            if !ctx.output.text() {
                 return ctx.print_json(&pr);
             }
             let pr = fmt::sanitize(pr, true)?;
-            out!(o, "{} created project {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
+            let what = if created { "created project" } else { "project exists:" };
+            out!(o, "{} {what} {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
             print_project(ctx.out, &pr, &ctx.hints)?;
             Ok(())
         }
         ProjectsCmd::Show { project } => {
             let pr = ctx.client.project(&project).await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
+            if !ctx.output.text() {
                 return ctx.print_json(&pr);
             }
             let pr = fmt::sanitize(pr, true)?;
             print_project(ctx.out, &pr, &ctx.hints)?;
             Ok(())
         }
+    }
+}
+
+/// The project with this slug (derived from the name when not given),
+/// created when it does not exist. `true` when it was created.
+pub async fn create_or_get(
+    ctx: &Ctx,
+    name: &str,
+    slug: Option<String>,
+    platform: Option<String>,
+) -> Result<(Project, bool)> {
+    let slug = slug.unwrap_or_else(|| slugify(name));
+    match ctx.client.project(&slug).await {
+        Ok(p) => return Ok((p, false)),
+        Err(e) if e.is_not_found() => {}
+        Err(e) => return Err(ctx.err(e)),
+    }
+    let req = CreateProject { name: name.to_string(), slug: Some(slug.clone()), platform };
+    match ctx.client.create_project(&req).await {
+        Ok(p) => Ok((p, true)),
+        // Created by someone else in between.
+        Err(e) if e.status() == Some(409) => Ok((ctx.client.project(&slug).await.map_err(|e| ctx.err(e))?, false)),
+        Err(e) => Err(ctx.err(e)),
     }
 }
 
@@ -131,12 +175,32 @@ fn issue_query(a: &IssueListArgs) -> IssueQuery {
     IssueQuery {
         status: Some(a.status.as_str().into()),
         query: a.query.clone(),
-        since: a.since.clone(),
+        since: None,
         sort: Some(a.sort.as_str().into()),
         environment: a.env.clone(),
         release: a.release.clone(),
         limit: a.limit,
+        new: a.new.then_some(true),
+        first_release: a.first_release.clone(),
     }
+}
+
+/// `issues show` in JSON: the issue and its latest event, concise.
+#[derive(Serialize)]
+struct IssueShow {
+    #[serde(flatten)]
+    detail: IssueDetail,
+    latest_event: Option<ConciseEvent>,
+}
+
+/// One line of `issues resolve|ignore|unresolve` in JSON.
+#[derive(Serialize)]
+struct StatusResult {
+    id: String,
+    status: Option<IssueStatus>,
+    changed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<mallard_term::error::ErrorBody>,
 }
 
 pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
@@ -144,9 +208,12 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
     let project = ctx.resolve_project().await?;
     match cmd {
         IssuesCmd::List(a) => {
-            let list = ctx.client.issues(&project, &issue_query(&a)).await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                return ctx.print_json(&list);
+            let w = a.window.resolve(ISSUE_WINDOW)?;
+            let list = ctx.client.issues_in(&project, &issue_query(&a), &range(&w)).await.map_err(|e| ctx.err(e))?;
+            if !ctx.output.text() {
+                let w = Window { from: list.window_start, to: list.window_end };
+                let limit = Some(a.limit.unwrap_or(50).clamp(1, 500));
+                return ctx.output.list(&List::new(list.issues).limit(limit).window(w));
             }
             let list = fmt::sanitize(list, true)?;
             if list.issues.is_empty() {
@@ -154,23 +221,31 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
                 return Ok(());
             }
             let now = Utc::now();
-            let mut t =
-                table_with_row_lines(&["ID", "LEVEL", "ISSUE", "EVENTS", "USERS", "TREND", "LAST SEEN", "STATUS"]);
+            // Piped: one row per line, no sparkline.
+            let fancy = fancy();
+            let mut headers = vec!["ID", "LEVEL", "ISSUE", "EVENTS", "USERS", "TREND", "LAST SEEN", "STATUS"];
+            if !fancy {
+                headers.retain(|h| *h != "TREND");
+            }
+            let mut t = table_with_row_lines(&headers);
             for i in &list.issues {
+                let sep = if fancy { "\n" } else { " · " };
                 let title = match &i.culprit {
-                    Some(c) if !c.is_empty() => format!("{}\n{}", i.title, c),
+                    Some(c) if !c.is_empty() => format!("{}{sep}{}", i.title, c),
                     _ => i.title.clone(),
                 };
-                t.add_row(vec![
+                let mut row = vec![
                     Cell::new(&i.id).fg(Color::DarkGrey),
                     level_cell(&i.level),
                     Cell::new(title),
                     right(fmt::compact(i.count)),
                     right(fmt::compact(i.user_count)),
-                    Cell::new(fmt::sparkline(&fmt::resample(&i.trend, 12))).fg(Color::Magenta),
-                    Cell::new(fmt::relative_time(i.last_seen, now)),
-                    status_cell(i.status),
-                ]);
+                ];
+                if fancy {
+                    row.push(Cell::new(fmt::sparkline(&fmt::resample(&i.trend, 12))).fg(Color::Magenta));
+                }
+                row.extend([Cell::new(fmt::relative_time(i.last_seen, now)), status_cell(i.status)]);
+                t.add_row(row);
             }
             out!(o, "{t}");
             out!(
@@ -180,21 +255,30 @@ pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             );
             Ok(())
         }
-        IssuesCmd::Show { id, since } => {
+        IssuesCmd::Show { id, window } => {
+            let w = window.resolve(ISSUE_WINDOW)?;
             let d = ctx
                 .client
-                .issue(&project, &id, &WindowQuery { since, interval: None })
+                .issue_in(&project, &id, &WindowQuery::default(), &range(&w))
                 .await
                 .map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                return ctx.print_json(&d);
+            if !ctx.output.text() {
+                let latest_event = match &d.latest_event_id {
+                    Some(e) => match ctx.client.event(&project, e, Some(&d.summary.id)).await {
+                        Ok(e) => Some(ConciseEvent::new(e, ctx.output.raw)),
+                        Err(e) if e.is_not_found() => None,
+                        Err(e) => return Err(ctx.err(e)),
+                    },
+                    None => None,
+                };
+                return ctx.print_json(&IssueShow { detail: d, latest_event });
             }
             print_issue(ctx.out, &fmt::sanitize(d, true)?, &fmt::clean(&project), &ctx.hints)?;
             Ok(())
         }
-        IssuesCmd::Resolve { ids } => set_status(ctx, &project, &ids, IssueStatus::Resolved).await,
-        IssuesCmd::Ignore { ids } => set_status(ctx, &project, &ids, IssueStatus::Ignored).await,
-        IssuesCmd::Unresolve { ids } => set_status(ctx, &project, &ids, IssueStatus::Unresolved).await,
+        IssuesCmd::Resolve(a) => set_status(ctx, &project, a, IssueStatus::Resolved).await,
+        IssuesCmd::Ignore(a) => set_status(ctx, &project, a, IssueStatus::Ignored).await,
+        IssuesCmd::Unresolve(a) => set_status(ctx, &project, a, IssueStatus::Unresolved).await,
     }
 }
 
@@ -216,7 +300,9 @@ fn print_issue(o: Out, d: &IssueDetail, project: &str, h: &Hints) -> Result<()> 
     kv(o, "first release", d.first_release.as_deref().unwrap_or("-"))?;
     kv(o, "last release", d.last_release.as_deref().unwrap_or("-"))?;
     kv(o, "latest event", d.latest_event_id.as_deref().unwrap_or("-"))?;
-    kv(o, "trend", &p::magenta(&fmt::sparkline(&s.trend)))?;
+    if fancy() {
+        kv(o, "trend", &p::magenta(&fmt::sparkline(&s.trend)))?;
+    }
     if !d.tags.is_empty() {
         out!(o);
         out!(o, "{}", p::bold("Tags"));
@@ -252,36 +338,56 @@ fn print_issue(o: Out, d: &IssueDetail, project: &str, h: &Hints) -> Result<()> 
     Ok(())
 }
 
-async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatus) -> Result<()> {
+async fn set_status(ctx: &Ctx, project: &str, a: SetStatusArgs, status: IssueStatus) -> Result<()> {
     let o = ctx.out;
-    let mut failed = 0;
-    let mut done = Vec::new();
-    for id in ids {
-        match ctx.client.set_issue_status(project, id, status).await {
+    let mut last_err = None;
+    let mut results = Vec::new();
+    let req = UpdateIssue { status, reason: a.reason.clone() };
+    for id in &a.ids {
+        match ctx.client.update_issue(project, id, &req).await {
             Ok(d) => {
-                if !ctx.json {
+                // Servers before `changed` was added: treat as changed.
+                let changed = d.changed.unwrap_or(true);
+                if ctx.output.text() {
+                    let (mark, what) = if changed {
+                        (p::green("✓"), status.as_str().to_string())
+                    } else {
+                        (p::dim("·"), format!("already {status}"))
+                    };
                     out!(
                         o,
-                        "{} {} {}  {}",
-                        p::green("✓"),
-                        status.as_str(),
+                        "{mark} {what} {}  {}",
                         p::bold(id),
                         p::dim(&fmt::truncate(&fmt::clean(&d.summary.title), 70))
                     );
                 }
-                done.push(d);
+                results.push(StatusResult {
+                    id: id.clone(),
+                    status: Some(d.summary.status),
+                    changed: Some(changed),
+                    error: None,
+                });
             }
             Err(e) => {
-                failed += 1;
-                eprintln!("{} {}: {}", p::red("✗"), fmt::clean(id), describe(&e, ctx.url(), &ctx.hints));
+                let d = classify(&e, ctx.url(), &ctx.hints);
+                if ctx.output.text() {
+                    eprintln!("{} {}: {d}", p::red("✗"), fmt::clean(id));
+                }
+                results.push(StatusResult { id: id.clone(), status: None, changed: None, error: Some(d.body()) });
+                last_err = Some(d);
             }
         }
     }
-    if ctx.json {
-        ctx.print_json(&done)?;
+    if !ctx.output.text() {
+        ctx.print_json(&serde_json::json!({ "results": results }))?;
     }
-    if failed > 0 {
-        bail!("{failed} of {} issues not updated", ids.len());
+    if let Some(d) = last_err {
+        let failed = results.iter().filter(|r| r.error.is_some()).count();
+        let msg = format!("{failed} of {} issues not updated: {}", a.ids.len(), d.message);
+        let mut e = mallard_term::error::Described::new(d.kind, msg);
+        e.hint = d.hint;
+        e.status = d.status;
+        return Err(anyhow::Error::new(e));
     }
     Ok(())
 }
@@ -289,18 +395,30 @@ async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatu
 pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
     let o = ctx.out;
     match cmd {
-        EventsCmd::List { issue, trace, limit } => {
+        EventsCmd::List { issue, trace, limit, window } => {
             let by_trace = trace.is_some();
+            // Trace ids are searched in the last 30 days by default.
+            let w = if by_trace {
+                Some(window.resolve(30 * DAY)?)
+            } else {
+                window.is_set().then(|| window.resolve(DAY)).transpose()?
+            };
+            let r = w.as_ref().map(range).unwrap_or_default();
             let list = if let Some(trace_id) = trace {
                 let q = TraceQuery { trace_id, limit, ..Default::default() };
-                ctx.client.events_by_trace_query(&q).await
+                ctx.client.events_by_trace_in(&q, &r).await
             } else {
                 let project = ctx.resolve_project().await?;
-                ctx.client.events(&project, &EventQuery { issue, limit, ..Default::default() }).await
+                ctx.client.events_in(&project, &EventQuery { issue, limit, ..Default::default() }, &r).await
             }
             .map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                return ctx.print_json(&list);
+            if !ctx.output.text() {
+                let mut l =
+                    List::new(list.events).limit(Some(limit.unwrap_or(50).clamp(1, 500))).cursor(list.next_cursor);
+                if let Some(w) = w {
+                    l = l.window(w);
+                }
+                return ctx.output.list(&l);
             }
             let list = fmt::sanitize(list, true)?;
             if list.events.is_empty() {
@@ -339,8 +457,8 @@ pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
         EventsCmd::Show { event_id, issue } => {
             let project = ctx.resolve_project().await?;
             let e = ctx.client.event(&project, &event_id, issue.as_deref()).await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                return ctx.print_json(&e);
+            if !ctx.output.text() {
+                return ctx.print_json(&ConciseEvent::new(e, ctx.output.raw));
             }
             print_event(ctx.out, &fmt::sanitize(e, true)?)?;
             Ok(())
@@ -461,15 +579,16 @@ fn print_event(o: Out, e: &EventDetail) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()> {
+pub(super) async fn stats(ctx: &Ctx, window: WindowArgs, interval: Option<String>) -> Result<()> {
     let o = ctx.out;
     let project = ctx.resolve_project().await?;
+    let w = window.resolve(DAY)?;
     let s = ctx
         .client
-        .stats(&project, &WindowQuery { since: Some(since.clone()), interval })
+        .stats_in(&project, &WindowQuery { since: None, interval }, &range(&w))
         .await
         .map_err(|e| ctx.err(e))?;
-    if ctx.json {
+    if !ctx.output.text() {
         return ctx.print_json(&s);
     }
     let s = fmt::sanitize(s, true)?;
@@ -477,7 +596,12 @@ pub(super) async fn stats(ctx: &Ctx, since: String, interval: Option<String>) ->
         o,
         "{} {}",
         p::bold("Project stats"),
-        p::dim(&format!("last {since} · buckets of {}", fmt::duration(s.interval_seconds)))
+        p::dim(&format!(
+            "{} .. {} · buckets of {}",
+            fmt::timestamp(s.window_start),
+            fmt::timestamp(s.window_end),
+            fmt::duration(s.interval_seconds)
+        ))
     );
     out!(o);
     out!(
@@ -493,8 +617,10 @@ pub(super) async fn stats(ctx: &Ctx, since: String, interval: Option<String>) ->
         p::bold(&s.affected_users.to_string())
     );
     let events: Vec<u64> = s.buckets.iter().map(|b| b.events).collect();
-    out!(o);
-    out!(o, "  {}", p::magenta(&fmt::sparkline(&events)));
+    if fancy() {
+        out!(o);
+        out!(o, "  {}", p::magenta(&fmt::sparkline(&events)));
+    }
     out!(o);
     let max = events.iter().copied().max().unwrap_or(0);
     for b in &s.buckets {
@@ -516,8 +642,8 @@ pub(super) async fn sourcemaps(ctx: &Ctx) -> Result<()> {
     let o = ctx.out;
     let project = ctx.resolve_project().await?;
     let list = ctx.client.sourcemaps(&project).await.map_err(|e| ctx.err(e))?;
-    if ctx.json {
-        return ctx.print_json(&list);
+    if !ctx.output.text() {
+        return ctx.output.list(&List::new(list));
     }
     let list = fmt::sanitize(list, true)?;
     if list.is_empty() {
@@ -543,8 +669,8 @@ pub(super) async fn sourcemaps(ctx: &Ctx) -> Result<()> {
 pub(super) async fn send_test(dsn: &str, message: &str, ctx: &Ctx) -> Result<()> {
     let o = ctx.out;
     let (d, id) = crate::send_test::send(dsn, message).await?;
-    if ctx.json {
-        out!(o, "{}", serde_json::json!({"id": id, "project_id": d.project_id, "url": d.envelope_url}));
+    if !ctx.output.text() {
+        ctx.print_json(&serde_json::json!({"id": id, "project_id": d.project_id, "url": d.envelope_url}))?;
     } else {
         out!(o, "{} sent test event {} to project {}", p::green("✓"), p::bold(&id), d.project_id);
         out!(o, "  {}", p::dim(&format!("POST {}", d.envelope_url)));

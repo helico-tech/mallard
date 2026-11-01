@@ -138,6 +138,17 @@ impl Server {
             data_path: lake.data_path.clone(),
             max_buffer_bytes,
             enable_sql: cfg.query.enable_sql,
+            capabilities: odl_api::Capabilities {
+                sql: cfg.query.enable_sql,
+                max_window_secs: cfg.query.max_window.as_secs(),
+                retention_secs: odl_api::RetentionSecs {
+                    traces: cfg.retention.traces.as_secs(),
+                    logs: cfg.retention.logs.as_secs(),
+                    metrics: cfg.retention.metrics.as_secs(),
+                },
+                flush_interval_secs: cfg.ingest.flush_interval.as_secs_f64(),
+                ingest_auth: !cfg.auth.ingest_tokens.is_empty(),
+            },
             started: Instant::now(),
         });
         Ok(Self { cfg, lake, stats, buffer, ingest, api_state })

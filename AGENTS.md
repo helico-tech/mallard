@@ -2,8 +2,8 @@
 
 One observability app: Sentry-compatible error tracking plus an
 OpenTelemetry collector (traces, logs, metrics), stored together in one
-DuckLake catalog (DuckDB 2.0 + Parquet on disk or object storage). One
-binary, `mallard`: server, CLI and TUI.
+DuckLake catalog (DuckDB 2.0 + Parquet on disk or object storage). Two
+binaries: `mallard-server` runs it, `mallard` is the CLI and TUI (ADR 0007).
 
 ## Build and test
 
@@ -13,7 +13,7 @@ cargo test --workspace                # unit + integration (real DuckLake in tem
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 MALLARD_API_TOKEN=dev cargo run -p mallard-server -- -c config/mallard.example.toml
-cargo run -p mallard -- --help        # status, trace, errors, telemetry, tui
+cargo run -p mallard -- --help        # status, setup, find, issues, traces, logs, … (ADR 0008)
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
@@ -27,19 +27,19 @@ the rendered `mallard.toml` must pass `mallard-server check -c <file>`.
 
 | path | what |
 |---|---|
-| `crates/mallard` | the `mallard` binary: `serve`, `status`, `trace`, `errors …`, `telemetry …`, `tui` |
+| `crates/mallard` | the `mallard` CLI/TUI: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases |
 | `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, readiness, shutdown |
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
-| `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error lines, TUI theme/keys/`Outcome` (ADR 0006) |
+| `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error kinds and exit codes, `--format`/`--fields`/list envelope (`output`), `--since/--from/--to` (`window`), TUI theme/keys/`Outcome` (ADR 0006, 0008) |
 | `crates/sdl-*` | Sentry side: `sdl-protocol` (pure protocol), `sdl-server` (ingest, writer, `/v1` API), `sdl-types`, `sdl-client`, `sdl-cli` (commands + TUI component), `sdl-loadgen` |
 | `crates/odl-*` | OpenTelemetry side: `odl-server` (OTLP receivers, storage, maintenance, query API), `odl-api`, `odl-client`, `odl-cli` (commands + TUI component), `odl-loadgen` |
 | `config/` | example configs |
 | `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
 | `bench/otel/` | reproducible experiments and capacity runs |
-| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
+| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 `sdl-server` and `odl-server` still build their standalone binaries
@@ -75,6 +75,10 @@ The product is `mallard`.
 - Errors and traces join on `trace_id` (UUID) and `span_id` (UBIGINT).
 - CLIs and TUIs print through `mallard-term`: server text goes through
   `text::clean`, shared TUI keys come from `tui::keys` (ADR 0006).
+- CLI output follows the agent contract (ADR 0008): data on stdout only,
+  `Output::object`/`Output::list` for JSON (envelope, `--fields`), errors as
+  `error::Described` with a `Kind` (exit code). `docs/agents.md` is built
+  into the binary; keep it in step with the commands.
 
 ## Work
 

@@ -41,7 +41,7 @@ async fn main() -> std::process::ExitCode {
         Ok(client) => run(cli.cmd, &Ctx::new(client).with_json(json).with_color(cli.color)).await,
         Err(e) => Err(anyhow::anyhow!(odl_cli::describe(&e, &cli.url, &odl_cli::HINTS))),
     };
-    mallard_term::error::report(result, cli.color)
+    mallard_term::error::report_as(result, cli.color, json)
 }
 
 #[cfg(test)]

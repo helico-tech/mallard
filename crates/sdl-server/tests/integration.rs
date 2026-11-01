@@ -215,6 +215,85 @@ async fn resolve_regression_ignore_and_maintenance() {
     t.stop().await;
 }
 
+/// The endpoints the agent CLI needs (spec S1–S4, S7): reason + idempotent
+/// status changes, new/first-release filters, event windows, event lookup
+/// across projects, info for setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_endpoints() {
+    let t = TestServer::start().await;
+    let project = t.create_project("web").await;
+    let key = project["public_key"].as_str().unwrap();
+    let send = |msg: &'static str, release: &'static str| {
+        let url = format!("{}/api/1/store/?sentry_key={key}&sentry_version=7", t.base);
+        let http = t.http.clone();
+        async move {
+            let body = json!({"message": msg, "level": "error", "release": release});
+            let r = http.post(url).body(body.to_string()).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string()
+        }
+    };
+    send("old", "web@1").await;
+    let event_id = send("new", "web@2").await;
+    let issues = t.get("/v1/projects/web/issues").await;
+    let id_of = |title: &str| {
+        issues["issues"].as_array().unwrap().iter().find(|i| i["title"] == title).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let new_id = id_of("new");
+
+    // S2: first seen in a release, first seen in the window.
+    let v = t.get("/v1/projects/web/issues?first_release=web@2").await;
+    let titles: Vec<&str> = v["issues"].as_array().unwrap().iter().map(|i| i["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["new"], "{v}");
+    assert_eq!(t.get("/v1/projects/web/issues?new=true&since=1h").await["issues"].as_array().unwrap().len(), 2);
+    let hours_ago = |h: i64| urlencode(&(chrono::Utc::now() - chrono::Duration::hours(h)).to_rfc3339());
+    let (two, one) = (hours_ago(2), hours_ago(1));
+    // Both were first seen in the last day; neither between 2h and 1h ago.
+    let v = t.get(&format!("/v1/projects/web/issues?new=true&since=1d&to={}", hours_ago(-1))).await;
+    assert_eq!(v["issues"].as_array().unwrap().len(), 2, "{v}");
+    let v = t.get(&format!("/v1/projects/web/issues?new=true&from={two}&to={one}")).await;
+    assert!(v["issues"].as_array().unwrap().is_empty(), "{v}");
+
+    // S3: a reason, and the same status twice is not a change.
+    let path = format!("/v1/projects/web/issues/{new_id}");
+    let patch = |body: Value| t.api(reqwest::Method::PATCH, &path, Some(body));
+    let (s, v) = patch(json!({"status": "resolved", "reason": "fixed in #123"})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["status"].as_str(), v["changed"].as_bool()), (Some("resolved"), Some(true)), "{v}");
+    assert_eq!(v["activity"][0]["reason"], "fixed in #123");
+    let (_, v) = patch(json!({"status": "resolved", "reason": "again"})).await;
+    assert_eq!(v["changed"], false, "{v}");
+    assert_eq!(v["activity"].as_array().unwrap().len(), 1, "nothing written: {v}");
+    let (s, v) = patch(json!({"status": "ignored", "reason": "x".repeat(501)})).await;
+    assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{v}");
+    let detail = t.get(&format!("/v1/projects/web/issues/{new_id}")).await;
+    assert!(detail.get("changed").is_none(), "only PATCH answers have `changed`: {detail}");
+
+    // S1: a window on the event list (none by default).
+    assert_eq!(t.get("/v1/projects/web/events?since=1h").await["events"].as_array().unwrap().len(), 2);
+    let v = t.get(&format!("/v1/projects/web/events?from={two}&to={one}")).await;
+    assert!(v["events"].as_array().unwrap().is_empty(), "{v}");
+
+    // S7: an event by id without its project.
+    let e = t.get(&format!("/v1/events/{event_id}")).await;
+    assert_eq!((e["event_id"].as_str(), e["project_id"].as_u64()), (Some(event_id.as_str()), Some(1)));
+    let (s, v) = t.api(reqwest::Method::GET, &format!("/v1/events/{}", "0".repeat(32)), None).await;
+    assert_eq!((s, v["error"].as_str()), (404, Some("not_found")), "{v}");
+
+    // S4: what `mallard setup` and `status` need.
+    let info = t.get("/v1/info").await;
+    assert_eq!(info["public_url"].as_str(), Some(t.base.as_str()), "{info}");
+    assert!(info["retention_secs"].as_u64().is_some() && info["max_window_secs"].as_u64().unwrap() > 0, "{info}");
+    t.stop().await;
+}
+
+fn urlencode(s: &str) -> String {
+    s.replace('+', "%2B").replace(':', "%3A")
+}
+
 fn walk(p: &std::path::Path) -> Vec<String> {
     let mut out = vec![];
     if let Ok(rd) = std::fs::read_dir(p) {

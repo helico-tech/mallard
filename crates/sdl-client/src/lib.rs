@@ -163,6 +163,16 @@ impl Client {
         self.send(self.http.get(self.url(path)).query(q)).await
     }
 
+    /// GET with two query structs, e.g. a filter and a [`WindowRange`].
+    async fn get2<T: DeserializeOwned, A: Serialize + ?Sized, B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        a: &A,
+        b: &B,
+    ) -> Result<T, Error> {
+        self.send(self.http.get(self.url(path)).query(a).query(b)).await
+    }
+
     pub async fn info(&self) -> Result<ServerInfo, Error> {
         self.get("/v1/info", &()).await
     }
@@ -188,6 +198,29 @@ impl Client {
         self.get(&format!("/v1/projects/{}/issues/{}", segment(project)?, segment(issue_id)?), q).await
     }
 
+    /// [`Client::issues`] with an absolute window (`from`/`to` win over `since`).
+    pub async fn issues_in(&self, project: &str, q: &IssueQuery, w: &WindowRange) -> Result<IssueList, Error> {
+        self.get2(&format!("/v1/projects/{}/issues", segment(project)?), q, w).await
+    }
+
+    /// [`Client::issue`] with an absolute window.
+    pub async fn issue_in(
+        &self,
+        project: &str,
+        issue_id: &str,
+        q: &WindowQuery,
+        w: &WindowRange,
+    ) -> Result<IssueDetail, Error> {
+        self.get2(&format!("/v1/projects/{}/issues/{}", segment(project)?, segment(issue_id)?), q, w).await
+    }
+
+    /// Set the status with a reason. The answer's `changed` is false when
+    /// the issue already had that status.
+    pub async fn update_issue(&self, project: &str, issue_id: &str, req: &UpdateIssue) -> Result<IssueDetail, Error> {
+        let url = self.url(&format!("/v1/projects/{}/issues/{}", segment(project)?, segment(issue_id)?));
+        self.send(self.http.patch(url).json(req)).await
+    }
+
     pub async fn set_issue_status(
         &self,
         project: &str,
@@ -195,12 +228,17 @@ impl Client {
         status: IssueStatus,
     ) -> Result<IssueDetail, Error> {
         let url = self.url(&format!("/v1/projects/{}/issues/{}", segment(project)?, segment(issue_id)?));
-        self.send(self.http.patch(url).json(&UpdateIssue { status })).await
+        self.send(self.http.patch(url).json(&UpdateIssue { status, reason: None })).await
     }
 
     /// Newest events first; set `q.issue` to restrict to one issue.
     pub async fn events(&self, project: &str, q: &EventQuery) -> Result<EventList, Error> {
         self.get(&format!("/v1/projects/{}/events", segment(project)?), q).await
+    }
+
+    /// [`Client::events`] with an absolute window.
+    pub async fn events_in(&self, project: &str, q: &EventQuery, w: &WindowRange) -> Result<EventList, Error> {
+        self.get2(&format!("/v1/projects/{}/events", segment(project)?), q, w).await
     }
 
     /// Events of one trace across all projects (last 30 days by default).
@@ -212,6 +250,16 @@ impl Client {
         self.get("/v1/events", q).await
     }
 
+    /// [`Client::events_by_trace_query`] with an absolute window.
+    pub async fn events_by_trace_in(&self, q: &TraceQuery, w: &WindowRange) -> Result<EventList, Error> {
+        self.get2("/v1/events", q, w).await
+    }
+
+    /// One event by id in any project.
+    pub async fn find_event(&self, event_id: &str) -> Result<EventDetail, Error> {
+        self.get(&format!("/v1/events/{}", segment(event_id)?), &()).await
+    }
+
     /// Pass the issue id when known: it makes the lookup much cheaper.
     pub async fn event(&self, project: &str, event_id: &str, issue_id: Option<&str>) -> Result<EventDetail, Error> {
         let q: Vec<(&str, &str)> = issue_id.map(|i| vec![("issue", i)]).unwrap_or_default();
@@ -220,6 +268,11 @@ impl Client {
 
     pub async fn stats(&self, project: &str, q: &WindowQuery) -> Result<ProjectStats, Error> {
         self.get(&format!("/v1/projects/{}/stats", segment(project)?), q).await
+    }
+
+    /// [`Client::stats`] with an absolute window.
+    pub async fn stats_in(&self, project: &str, q: &WindowQuery, w: &WindowRange) -> Result<ProjectStats, Error> {
+        self.get2(&format!("/v1/projects/{}/stats", segment(project)?), q, w).await
     }
 
     pub async fn sourcemaps(&self, project: &str) -> Result<Vec<ArtifactBundle>, Error> {

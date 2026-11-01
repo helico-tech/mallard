@@ -3,7 +3,7 @@
 1. [0002/01 monorepo](epics/0002-mallard/01-monorepo.md)
 2. [0002/02 review and idiomatic Rust](epics/0002-mallard/02-review-refactor.md)
 3. [0002/07 split server and CLI/TUI](epics/0002-mallard/07-split-server-and-cli.md)
-4. [0002/08 CLI for agents](epics/0002-mallard/08-agent-cli.md)
+4. [issue 0004 agent CLI: the P1 list](issues/0004-agent-cli-p1.md)
 
 5. [0002/03 Sentry transactions as traces](epics/0002-mallard/03-sentry-transactions-as-traces.md)
 6. [0002/04 OTel exceptions as issues](epics/0002-mallard/04-otel-exceptions-as-issues.md)

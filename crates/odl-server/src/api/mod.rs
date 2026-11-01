@@ -36,6 +36,7 @@ pub struct ApiState {
     pub data_path: String,
     pub max_buffer_bytes: u64,
     pub enable_sql: bool,
+    pub capabilities: Capabilities,
     pub started: Instant,
 }
 
@@ -147,6 +148,7 @@ async fn stats(State(st): S) -> R<odl_api::Stats> {
             tables,
             last_maintenance: st.stats.last_maintenance(),
         },
+        capabilities: Some(st.capabilities.clone()),
     }))
 }
 

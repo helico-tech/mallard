@@ -28,6 +28,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let json = cli.json;
     let result = match sdl_client::Client::new(&cli.url, cli.token.as_deref()) {
         Ok(client) => {
             let ctx = sdl_cli::Ctx::new(client).with_project(cli.project).with_json(cli.json).with_color(cli.color);
@@ -35,5 +36,5 @@ async fn main() -> std::process::ExitCode {
         }
         Err(e) => Err(anyhow::anyhow!(sdl_cli::describe(&e, &cli.url, &sdl_cli::HINTS))),
     };
-    mallard_term::error::report(result, cli.color)
+    mallard_term::error::report_as(result, cli.color, json)
 }

@@ -13,6 +13,7 @@
 pub use odl_client;
 pub use sdl_client;
 
+use chrono::{DateTime, Utc};
 use odl_client::api::{LogQuery, LogRecord, Span, TraceGetQuery};
 use sdl_client::types::EventSummary;
 use serde::Serialize;
@@ -127,10 +128,31 @@ impl Client {
     /// same window (`since`, e.g. `24h`; default [`DEFAULT_TRACE_WINDOW`]).
     /// Fails only when the id is invalid or every source fails.
     pub async fn trace_overview(&self, trace_id: &str, since: Option<&str>) -> Result<TraceOverview, Error> {
-        let id = TraceId::parse(trace_id)?;
         let since = since.unwrap_or(DEFAULT_TRACE_WINDOW).to_string();
+        self.overview(trace_id, Some(since), None, None).await
+    }
+
+    /// [`Client::trace_overview`] over an absolute window (`from` inclusive,
+    /// `to` exclusive).
+    pub async fn trace_overview_in(
+        &self,
+        trace_id: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<TraceOverview, Error> {
+        self.overview(trace_id, None, Some(from), Some(to)).await
+    }
+
+    async fn overview(
+        &self,
+        trace_id: &str,
+        since: Option<String>,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<TraceOverview, Error> {
+        let id = TraceId::parse(trace_id)?;
         let spans = async {
-            let q = TraceGetQuery { since: Some(since.clone()), ..Default::default() };
+            let q = TraceGetQuery { since: since.clone(), from, to };
             match self.otel.trace(id.as_str(), &q).await {
                 Ok(t) => Ok(t.spans),
                 Err(e) if e.status() == Some(404) => Ok(vec![]),
@@ -138,17 +160,17 @@ impl Client {
             }
         };
         let errors = async {
-            let q = sdl_client::types::TraceQuery {
-                trace_id: id.to_string(),
-                since: Some(since.clone()),
-                ..Default::default()
-            };
-            Ok::<_, Error>(self.sentry.events_by_trace_query(&q).await?.events)
+            let q =
+                sdl_client::types::TraceQuery { trace_id: id.to_string(), since: since.clone(), ..Default::default() };
+            let w = sdl_client::types::WindowRange { from, to, step: None };
+            Ok::<_, Error>(self.sentry.events_by_trace_in(&q, &w).await?.events)
         };
         let logs = async {
             let q = LogQuery {
                 trace_id: Some(id.to_string()),
-                since: Some(since.clone()),
+                since: since.clone(),
+                from,
+                to,
                 order: Some(odl_client::api::LogOrder::Asc),
                 limit: Some(TRACE_LOG_LIMIT + 1),
                 ..Default::default()

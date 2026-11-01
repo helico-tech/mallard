@@ -4,10 +4,69 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
+use std::time::Duration;
 
+use anyhow::Result;
 use mallard_client::TraceOverview;
 use mallard_term::fmt::ms;
 use mallard_term::text::clean;
+use mallard_term::window::WindowArgs;
+use serde_json::{Map, Value};
+
+use crate::Run;
+
+/// Default window of `mallard trace`.
+const WINDOW: Duration = Duration::from_secs(7 * 86_400);
+
+/// `mallard trace <id>` / `traces show <id>`. Not found anywhere: exit 4.
+pub(crate) async fn run(r: &Run, trace_id: &str, window: &WindowArgs) -> Result<()> {
+    let w = window.resolve(WINDOW)?;
+    let t = r
+        .client
+        .trace_overview_in(trace_id, w.from, w.to)
+        .await
+        .map_err(|e| crate::described(e, r.client.base_url()))?;
+    let empty = t.spans.is_empty() && t.errors.is_empty() && t.logs.is_empty();
+    if r.output.text() {
+        r.output.out.line(&render(&t))?;
+    } else {
+        let mut v = concise(&t, r.output.raw)?;
+        v["window"] = serde_json::to_value(w)?;
+        r.output.object(&v)?;
+    }
+    if empty {
+        return Err(mallard_term::error::not_found(format!("trace {} not found", t.trace_id)));
+    }
+    Ok(())
+}
+
+/// The trace as JSON. Without `raw`, resource attributes (the same for
+/// every span and log of a service) are listed once per service under
+/// `resources` instead of on every span, and dropped from logs.
+pub(crate) fn concise(t: &TraceOverview, raw: bool) -> Result<Value> {
+    let mut v = serde_json::to_value(t)?;
+    if raw {
+        return Ok(v);
+    }
+    let mut resources = Map::new();
+    if let Some(spans) = v["spans"].as_array_mut() {
+        for s in spans {
+            let service = s["service_name"].as_str().unwrap_or_default().to_string();
+            if let Some(attrs) = s.as_object_mut().and_then(|o| o.remove("resource_attributes")) {
+                resources.entry(service).or_insert(attrs);
+            }
+        }
+    }
+    if let Some(logs) = v["logs"].as_array_mut() {
+        for l in logs {
+            if let Some(o) = l.as_object_mut() {
+                o.remove("resource_attributes");
+            }
+        }
+    }
+    v["resources"] = Value::Object(resources);
+    Ok(v)
+}
 
 pub fn render(t: &TraceOverview) -> String {
     let mut out = String::new();
@@ -171,6 +230,32 @@ mod tests {
             attributes: Default::default(),
             resource_attributes: Default::default(),
         }
+    }
+
+    #[test]
+    fn concise_json_lists_resources_once() {
+        let mut a = span("1", None);
+        a.service_name = "checkout".into();
+        a.resource_attributes.insert("host.name".into(), "h1".into());
+        let mut b = span("2", Some("1"));
+        b.service_name = "checkout".into();
+        b.resource_attributes = a.resource_attributes.clone();
+        let mut l = log(Some("1"));
+        l.resource_attributes = a.resource_attributes.clone();
+        let t = TraceOverview {
+            trace_id: mallard_client::TraceId::parse("0af7651916cd43dd8448eb211c80319c").unwrap(),
+            spans: vec![a, b],
+            errors: vec![],
+            logs: vec![l],
+            logs_truncated: false,
+            warnings: vec![],
+        };
+        let v = concise(&t, false).unwrap();
+        assert!(v["spans"].as_array().unwrap().iter().all(|s| s.get("resource_attributes").is_none()));
+        assert!(v["logs"][0].get("resource_attributes").is_none());
+        assert_eq!(v["resources"]["checkout"]["host.name"], "h1");
+        let raw = concise(&t, true).unwrap();
+        assert!(raw["spans"][0].get("resource_attributes").is_some() && raw.get("resources").is_none());
     }
 
     #[test]

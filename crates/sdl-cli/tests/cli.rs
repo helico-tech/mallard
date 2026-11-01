@@ -193,7 +193,7 @@ fn color_flag_and_short_flags() {
 #[test]
 fn errors_print_one_friendly_line() {
     let out = sdl("http://127.0.0.1:9", &["info", "--color", "never"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(6), "unreachable is exit code 6 (ADR 0008)");
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(err.lines().count(), 1, "{err}");
     assert!(err.starts_with("error: cannot reach server at http://127.0.0.1:9 (is it running? set SDL_URL)"), "{err}");

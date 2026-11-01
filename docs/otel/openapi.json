@@ -1045,6 +1045,42 @@
           "type": "string"
         }
       },
+      "Capabilities": {
+        "type": "object",
+        "description": "Server settings a client needs to know before it queries or sends data.",
+        "required": [
+          "sql",
+          "max_window_secs",
+          "retention_secs",
+          "flush_interval_secs",
+          "ingest_auth"
+        ],
+        "properties": {
+          "flush_interval_secs": {
+            "type": "number",
+            "format": "double",
+            "description": "Buffered data is written at least this often (`ingest.flush_interval`),\nso new data can take this long to show up in queries."
+          },
+          "ingest_auth": {
+            "type": "boolean",
+            "description": "OTLP ingest needs a bearer token (`auth.ingest_tokens` is set)."
+          },
+          "max_window_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Longest query window (`query.max_window`), in seconds.",
+            "minimum": 0
+          },
+          "retention_secs": {
+            "$ref": "#/components/schemas/RetentionSecs",
+            "description": "How long data is kept, in seconds (0 = forever)."
+          },
+          "sql": {
+            "type": "boolean",
+            "description": "`POST /api/v1/sql` is enabled (`query.enable_sql`)."
+          }
+        }
+      },
       "CatalogType": {
         "type": "string",
         "description": "DuckLake catalog backend.",
@@ -1534,6 +1570,31 @@
           }
         }
       },
+      "RetentionSecs": {
+        "type": "object",
+        "required": [
+          "traces",
+          "logs",
+          "metrics"
+        ],
+        "properties": {
+          "logs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "metrics": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "traces": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "ServiceSummary": {
         "allOf": [
           {
@@ -1880,6 +1941,17 @@
           "storage"
         ],
         "properties": {
+          "capabilities": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Capabilities",
+                "description": "What this server allows and keeps. Missing from older servers."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "ingest": {
             "$ref": "#/components/schemas/IngestStats"
           },

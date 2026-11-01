@@ -5,10 +5,10 @@
 use crate::fmt;
 use crate::paint as p;
 use crate::{Command, SourcemapsCmd};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use mallard_term::color::{ColorChoice, Out};
-use mallard_term::error::{Described, Failure, Hints};
-use mallard_term::text::json_safe;
+use mallard_term::error::{Described, Failure, Hints, Kind};
+use mallard_term::output::{Format, Output};
 use sdl_client::Client;
 use serde::Serialize;
 
@@ -26,6 +26,8 @@ macro_rules! out {
 
 mod commands;
 
+pub use commands::create_or_get;
+
 /// Hints for the standalone `sdl` binary.
 pub const HINTS: Hints =
     Hints { command: "sdl", url_env: "SDL_URL", token_env: "SDL_TOKEN", project_env: "SDL_PROJECT" };
@@ -33,12 +35,17 @@ pub const HINTS: Hints =
 /// One-line, actionable message for a client error. Safe to print: server
 /// text in it is cleaned.
 pub fn describe(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
+    classify(e, url, hints).to_string()
+}
+
+/// [`describe`] with the [`Kind`] (exit code) and the hint apart.
+pub fn classify(e: &sdl_client::Error, url: &str, hints: &Hints) -> Described {
     use sdl_client::Error as E;
     let f = match e {
-        E::Api { status, message, .. } => Failure::Status { status: *status, message },
+        E::Api { status, code, message } => Failure::Status { status: *status, code, message },
         E::InvalidUrl(m) => Failure::InvalidUrl(m),
         E::InvalidSegment(_) => {
-            return fmt::clean(&format!("{e}: ids and slugs can't be empty, '.' or '..'")).into_owned();
+            return Described::new(Kind::Usage, format!("{e}: ids and slugs can't be empty, '.' or '..'"));
         }
         E::Http(h) if h.is_connect() => Failure::Connect,
         E::Http(h) if h.is_timeout() => Failure::Timeout,
@@ -46,28 +53,29 @@ pub fn describe(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
         E::Http(h) => Failure::Other(h.to_string()),
         e => Failure::Other(e.to_string()),
     };
-    mallard_term::error::describe(f, url, hints)
+    mallard_term::error::classify(f, url, hints)
 }
 
 /// What the commands need besides their own arguments. A host that mounts
 /// [`Command`] builds this from its own global flags:
-/// `Ctx::new(client).with_project(p).with_json(true)`. `odl_cli::Ctx` has
+/// `Ctx::new(client).with_project(p).with_output(o)`. `odl_cli::Ctx` has
 /// the same builder.
 #[derive(Debug)]
 pub struct Ctx {
     pub(crate) client: Client,
     /// Project id or slug; optional when the server has only one project.
     pub(crate) project: Option<String>,
-    /// Print raw JSON instead of tables.
-    pub(crate) json: bool,
+    /// Format, fields, raw (ADR 0008).
+    pub(crate) output: Output,
     pub(crate) out: Out,
     pub(crate) hints: Hints,
 }
 
 impl Ctx {
-    /// No project, table output, colour as `--color=auto` says, [`HINTS`].
+    /// No project, text output, colour as `--color=auto` says, [`HINTS`].
     pub fn new(client: Client) -> Self {
-        Ctx { client, project: None, json: false, out: Out::stdout(ColorChoice::Auto), hints: HINTS }
+        let output = Output::default();
+        Ctx { client, project: None, out: output.out, output, hints: HINTS }
     }
 
     /// Project id or slug; optional when the server has only one project.
@@ -76,15 +84,25 @@ impl Ctx {
         self
     }
 
-    /// Print raw JSON instead of tables.
+    /// Print JSON instead of tables (`--json`).
     pub fn with_json(mut self, json: bool) -> Self {
-        self.json = json;
+        if json {
+            self.output.format = Format::Json;
+        }
+        self
+    }
+
+    /// Format, colour, `--fields` and `--raw` at once.
+    pub fn with_output(mut self, output: Output) -> Self {
+        self.out = output.out;
+        self.output = output;
         self
     }
 
     /// The `--color` flag (for stdout).
     pub fn with_color(mut self, color: ColorChoice) -> Self {
         self.out = Out::stdout(color);
+        self.output.out = self.out;
         self
     }
 
@@ -97,14 +115,14 @@ impl Ctx {
     /// host can still downcast it. The server's message in the source is
     /// cleaned too: hosts may print the whole chain.
     pub(crate) fn err(&self, e: sdl_client::Error) -> anyhow::Error {
-        let msg = describe(&e, self.url(), &self.hints);
+        let msg = classify(&e, self.url(), &self.hints);
         let e = match e {
             sdl_client::Error::Api { status, code, message } => {
                 sdl_client::Error::Api { status, code, message: fmt::clean(&message).into_owned() }
             }
             e => e,
         };
-        anyhow::Error::new(e).context(Described(msg))
+        anyhow::Error::new(e).context(msg)
     }
 
     fn url(&self) -> &str {
@@ -120,17 +138,23 @@ impl Ctx {
         let h = &self.hints;
         match projects.as_slice() {
             [one] => Ok(one.slug.clone()),
-            [] => bail!("no projects yet (create one: {} projects create <name>)", h.command),
+            [] => Err(anyhow::Error::new(
+                Described::new(Kind::NotFound, "no projects yet")
+                    .hint(format!("create one: {} projects create <name>", h.command)),
+            )),
             many => {
                 let slugs: Vec<String> = many.iter().map(|p| fmt::clean(&p.slug).into_owned()).collect();
-                bail!("several projects; pick one with -p or {} ({})", h.project_env, slugs.join(", "))
+                Err(anyhow::Error::new(Described::new(Kind::Usage, "several projects; pick one").hint(format!(
+                    "-p or {}: {}",
+                    h.project_env,
+                    slugs.join(", ")
+                ))))
             }
         }
     }
 
     fn print_json<T: Serialize>(&self, v: &T) -> Result<()> {
-        out!(self.out, "{}", json_safe(&serde_json::to_string_pretty(v)?));
-        Ok(())
+        self.output.object(v)
     }
 }
 
@@ -150,12 +174,12 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         Command::Projects(c) => commands::projects(ctx, c).await,
         Command::Issues(c) => commands::issues(ctx, c).await,
         Command::Events(c) => commands::events(ctx, c).await,
-        Command::Stats { since, interval } => commands::stats(ctx, since, interval).await,
+        Command::Stats { window, interval } => commands::stats(ctx, window, interval).await,
         Command::Sourcemaps(SourcemapsCmd::List) => commands::sourcemaps(ctx).await,
         Command::Maintenance => {
             ctx.client.maintenance().await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                out!(ctx.out, "{{\"ok\":true}}");
+            if !ctx.output.text() {
+                ctx.output.object(&serde_json::json!({"ok": true}))?;
             } else {
                 out!(ctx.out, "{} maintenance done (flushed, compacted, expired)", p::green("✓"));
             }
@@ -193,7 +217,8 @@ mod tests {
         assert_eq!(d(api(404, "")), "not found");
         assert_eq!(d(api(404, "no issue")), "not found: no issue");
         assert_eq!(d(api(400, "bad since")), "request rejected (400): bad since");
-        assert_eq!(d(api(503, "down\x1b[2J")), "server error (503): down\\u{1b}[2J");
+        assert_eq!(d(api(500, "down\x1b[2J")), "server error (500): down\\u{1b}[2J");
+        assert_eq!(d(api(503, "busy")), "server busy (503): busy (try again)");
         let e = block_on(sdl_client::Client::new("http://x", None).unwrap().project("..")).unwrap_err();
         assert_eq!(d(e), "invalid path segment \"..\": ids and slugs can't be empty, '.' or '..'");
     }
@@ -225,7 +250,7 @@ mod tests {
     fn json_output_escapes_c1_and_bidi_but_stays_equal() {
         let v = serde_json::json!({"t": "a\u{9b}31m\u{202e}b\u{1b}c\nd"});
         let pretty = serde_json::to_string_pretty(&v).unwrap();
-        let out = json_safe(&pretty);
+        let out = mallard_term::text::json_safe(&pretty);
         assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
         assert!(out.contains("\\u009b") && out.contains("\\u202e"));
         assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), v);

@@ -72,6 +72,20 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
 }
 
+/// The slug the server derives from a project name when none is given:
+/// lowercase ASCII letters and digits, other runs as one `-`.
+pub fn slugify(name: &str) -> String {
+    let mut s = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_lowercase());
+        } else if !s.ends_with('-') && !s.is_empty() {
+            s.push('-');
+        }
+    }
+    s.trim_end_matches('-').to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateProject {
@@ -138,6 +152,10 @@ pub struct IssueDetail {
     pub latest_event_id: Option<String>,
     pub tags: Vec<TagFacet>,
     pub activity: Vec<IssueActivity>,
+    /// Only in `PATCH` answers: false when the issue already had that status
+    /// (nothing was written).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +171,10 @@ pub struct IssueActivity {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct UpdateIssue {
     pub status: IssueStatus,
+    /// Why, e.g. `fixed in #123` (max 500 characters; default `user`).
+    /// Shown in the issue's activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +264,15 @@ pub struct ServerInfo {
     pub storage: String,
     pub queue_depth: u64,
     pub queue_capacity: u64,
+    /// Base URL the DSNs are built from, e.g. `https://errors.example.com/sentry`.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// How long events are kept, in seconds (0 = forever).
+    #[serde(default)]
+    pub retention_secs: Option<u64>,
+    /// Longest query window (`query.max_window`), in seconds.
+    #[serde(default)]
+    pub max_window_secs: Option<u64>,
 }
 
 /// Error body of every non-2xx `/v1` response: `error` is a code such as
@@ -263,6 +294,10 @@ pub struct IssueQuery {
     pub release: Option<String>,
     /// Max issues (default 50, max 500).
     pub limit: Option<u32>,
+    /// Only issues first seen inside the window (new issues).
+    pub new: Option<bool>,
+    /// Only issues first seen in this release.
+    pub first_release: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -276,6 +311,9 @@ pub struct EventQuery {
     pub limit: Option<u32>,
     /// Cursor from a previous page.
     pub before: Option<String>,
+    /// Only events received in this window, e.g. `1h` (with `from`/`to`;
+    /// default: no window).
+    pub since: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -324,6 +362,12 @@ mod tests {
             assert_eq!(s.to_string().parse::<IssueStatus>(), Ok(s));
         }
         assert_eq!("all".parse::<IssueStatus>(), Err(UnknownStatus("all".into())));
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slugify("My Web App!"), "my-web-app");
+        assert_eq!(slugify("  API  "), "api");
     }
 
     #[test]
