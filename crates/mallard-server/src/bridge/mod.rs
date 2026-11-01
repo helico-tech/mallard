@@ -214,7 +214,9 @@ impl mallard_sentry_server::SpanSink for Transactions {
                 return;
             }
         };
-        self.queue(kind(span::Defaults::from_headers(s.envelope_headers)), s.project_slug, s.payload);
+        let mut defaults = span::Defaults::from_headers(s.envelope_headers);
+        defaults.client_ip = s.client_ip.map(str::to_string);
+        self.queue(kind(defaults), s.project_slug, s.payload);
     }
 }
 
