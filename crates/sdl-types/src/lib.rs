@@ -77,9 +77,7 @@ pub struct Project {
 pub struct CreateProject {
     pub name: String,
     /// URL-safe identifier. Derived from `name` when omitted.
-    #[serde(default)]
     pub slug: Option<String>,
-    #[serde(default)]
     pub platform: Option<String>,
 }
 
@@ -256,23 +254,16 @@ pub struct ApiError {
 #[cfg_attr(feature = "openapi", derive(IntoParams))]
 pub struct IssueQuery {
     /// `unresolved` (default), `resolved`, `ignored` or `all`.
-    #[serde(default)]
     pub status: Option<String>,
     /// Case-insensitive text search in title and culprit.
-    #[serde(default)]
     pub query: Option<String>,
     /// Window, e.g. `24h`, `14d` (default `14d`).
-    #[serde(default)]
     pub since: Option<String>,
     /// `last_seen` (default), `first_seen`, `count`, `users`.
-    #[serde(default)]
     pub sort: Option<String>,
-    #[serde(default)]
     pub environment: Option<String>,
-    #[serde(default)]
     pub release: Option<String>,
     /// Max issues (default 50, max 500).
-    #[serde(default)]
     pub limit: Option<u32>,
 }
 
@@ -280,16 +271,12 @@ pub struct IssueQuery {
 #[cfg_attr(feature = "openapi", derive(IntoParams))]
 pub struct EventQuery {
     /// Only events of this issue (16 hex characters).
-    #[serde(default)]
     pub issue: Option<String>,
     /// Only events of this trace (32 hex characters).
-    #[serde(default)]
     pub trace_id: Option<String>,
     /// Max events (default 50, max 500).
-    #[serde(default)]
     pub limit: Option<u32>,
     /// Cursor from a previous page.
-    #[serde(default)]
     pub before: Option<String>,
 }
 
@@ -299,13 +286,10 @@ pub struct TraceQuery {
     /// Trace id (32 hex characters). Required.
     pub trace_id: String,
     /// Only the event captured in this span (16 hex characters).
-    #[serde(default)]
     pub span_id: Option<String>,
     /// Window to search, e.g. `24h`, `30d` (default `30d`).
-    #[serde(default)]
     pub since: Option<String>,
     /// Max events (default 50, max 500).
-    #[serde(default)]
     pub limit: Option<u32>,
 }
 
@@ -313,10 +297,8 @@ pub struct TraceQuery {
 #[cfg_attr(feature = "openapi", derive(IntoParams))]
 pub struct WindowQuery {
     /// Window, e.g. `24h`, `14d` (default `24h` for stats, `14d` for issues).
-    #[serde(default)]
     pub since: Option<String>,
     /// Bucket size for time series, e.g. `1h` (default: window / 24).
-    #[serde(default)]
     pub interval: Option<String>,
 }
 
@@ -330,5 +312,13 @@ mod tests {
             assert_eq!(s.to_string().parse::<IssueStatus>(), Ok(s));
         }
         assert_eq!("all".parse::<IssueStatus>(), Err(UnknownStatus("all".into())));
+    }
+
+    #[test]
+    fn missing_optional_fields_are_none() {
+        let q: IssueQuery = serde_json::from_str("{}").unwrap();
+        assert!(q.status.is_none() && q.limit.is_none());
+        let p: CreateProject = serde_json::from_str(r#"{"name": "x"}"#).unwrap();
+        assert!(p.slug.is_none() && p.platform.is_none());
     }
 }
