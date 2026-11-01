@@ -13,15 +13,18 @@ A DuckLake lake has two parts, configured independently:
 |---|---|---|---|
 | DuckDB file | `data/catalog.ducklake` (any path) | **one** | default; tested |
 | SQLite file | `sqlite:data/catalog.sqlite` | **one** | tested |
-| PostgreSQL | `postgres:host=pg port=5432 dbname=ducklake user=odl password=${PGPASSWORD}` | many | tested with 2 replicas (compose and Kubernetes) |
+| PostgreSQL | `postgres:host=pg port=5432 dbname=ducklake user=odl` (password from `PGPASSWORD`) | many | tested with 2 replicas (compose and Kubernetes) |
 | MySQL | `mysql:host=... database=... user=...` | many | supported by DuckLake, not tested here |
 
 - Use a DuckDB or SQLite file for a single node. With PostgreSQL, several
   collector replicas (and other tools) can read and write the same lake at
   the same time.
-- The PostgreSQL value after `postgres:` is a libpq connection string. Use
-  `${ENV}` for the password. The database must exist; tables are created on
-  first start.
+- The PostgreSQL value after `postgres:` is a libpq connection string.
+  Leave the password out of it and set the standard libpq environment
+  variable `PGPASSWORD` (or `PGPASSFILE`) instead: libpq reads it, and it
+  never appears in a connection string. Error messages are scrubbed of
+  `password=` anyway. The database must exist; tables are created on first
+  start.
 - Managed PostgreSQL (RDS, Cloud SQL, Azure Database, Neon, Supabase) works
   like any PostgreSQL. A connection pooler in *transaction* mode is not
   recommended (DuckLake uses multi-statement transactions).
@@ -48,7 +51,7 @@ real cloud services were not part of the automated tests.
 ```toml
 # AWS S3 with IAM (IRSA / instance profile / env vars)
 [storage]
-catalog = "postgres:host=pg dbname=ducklake user=odl password=${PGPASSWORD}"
+catalog = "postgres:host=pg dbname=ducklake user=odl"   # password: PGPASSWORD env var
 data_path = "s3://acme-telemetry/otel/"
 [[storage.secrets]]
 type = "s3"
@@ -108,6 +111,8 @@ account_id = "${R2_ACCOUNT_ID}"
 - **Latency matters for flushes**, not for ingest acknowledgements:
   receivers answer once data is in memory. A slow store only fills the buffer
   (see [operations.md](operations.md)).
-- **Cost on object storage**: one PUT per table and day partition per flush
-  (5 s), so ~50k PUTs/day before compaction, plus compaction rewrites. That's
-  cents per month on S3 pricing.
+- **Cost on object storage**: at most one PUT per table and day partition per
+  flush (5 s). Busy tables: ~17k PUTs/day each; quiet tables are inlined into
+  the catalog instead. With spans, logs and metrics busy that is ~1.5 M PUTs
+  per month, about $7.50/month at S3 standard prices, plus compaction
+  rewrites. Raise `ingest.flush_interval` (e.g. `15s`) to cut it.

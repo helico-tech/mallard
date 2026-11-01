@@ -28,7 +28,7 @@ needed for throughput.
 Option 1. Requests are converted to Arrow and kept in a bounded buffer
 (`ingest.max_buffer_bytes`). They are flushed every `flush_interval` (5 s) in
 one transaction. When the buffer is full, receivers return retryable errors
-(HTTP 429 / gRPC `RESOURCE_EXHAUSTED`). Failed flushes are retried, never
+(HTTP 429 / gRPC `UNAVAILABLE`). Failed flushes are retried, never
 dropped. On SIGTERM the buffer is flushed.
 
 ## Consequences

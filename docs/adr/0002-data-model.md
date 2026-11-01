@@ -23,8 +23,11 @@ full reasoning and measurements are in [docs/data-model.md](../data-model.md).
 - `SORTED BY (date_trunc('hour', time), service_name, time)` for spans and
   logs, `SORTED BY (metric_name, series_id, time)` for metrics, chosen by
   measurement (bench/sort-order).
-- `series_id` = xxh3 of resource attributes + metric name + point attributes.
-- Columns are append-only; new columns are added at the end.
+- `series_id` = xxh3 of resource attributes + instrumentation scope + metric
+  name + data point kind + point attributes (the OTel stream identity).
+- Columns are append-only; new columns are added at the end. Rows are
+  appended by column name, so versions that differ by added columns can write
+  to the same tables.
 
 ## Consequences
 

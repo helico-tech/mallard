@@ -77,8 +77,8 @@ scope = "s3://otel"               # optional: only use for this prefix
 |---|---|---|
 | `flush_interval` | `5s` | Max time data waits in memory. Also the max loss on a hard crash. |
 | `flush_rows` | `200000` | Flush early at this many buffered rows. |
-| `max_buffer_bytes` | `512MB` | Above this, receivers answer HTTP 429 / gRPC `RESOURCE_EXHAUSTED` (retryable). |
-| `max_request_bytes` | `32MB` | Max OTLP request size after decompression. |
+| `max_buffer_bytes` | `512MB` | Above this, receivers answer HTTP 429 / gRPC `UNAVAILABLE` (retryable). |
+| `max_request_bytes` | `32MB` | Max OTLP request size after decompression. A request whose in-memory form would exceed `max_buffer_bytes` (resource attributes repeat on every row) is refused with 413 / `INVALID_ARGUMENT`. |
 
 ## `[retention]`
 
@@ -120,6 +120,9 @@ without rewriting files.
 |---|---|---|
 | `api_tokens` | `[]` | Accepted `Authorization: Bearer <token>` values for the query API. Empty = no auth. `/api/v1/health`, `/openapi.json` and `/docs` are always open. |
 | `ingest_tokens` | `[]` | Bearer tokens for OTLP receivers. Empty = no auth. |
+
+An empty string in either list is refused at start-up (it usually means a
+secret or environment variable was not set). Intervals must be greater than 0.
 
 For OTel SDKs set `OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <token>"`.
 Use TLS in front (ingress, load balancer, or service mesh); the server

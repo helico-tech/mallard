@@ -24,7 +24,7 @@ What to watch:
 
 See [capacity.md](capacity.md). Short version: 1-2 vCPU and 2 GiB RAM
 handle small/mid traffic with large headroom. Keep container memory ≥
-`duckdb.memory_limit` + `ingest.max_buffer_bytes` + 0.5 GB.
+`duckdb.memory_limit` + `ingest.max_buffer_bytes` + 1 GB.
 
 ## Retention and disk usage
 
@@ -33,7 +33,8 @@ span and per log record with varied synthetic attributes
 ([capacity.md](capacity.md)); plan for 2-3× with real data. Example:
 10 M spans/day × 60 B × 7 days ≈ 4 GB.
 
-Changing `[retention]` takes effect on the next retention run (hourly).
+Configuration is read at start-up: after changing `[retention]`, restart;
+the next retention run (hourly) applies it.
 
 ## Backups
 
@@ -53,9 +54,14 @@ never modified in place, only added and (after expiry) deleted.
 - The catalog format follows DuckLake (1.1). A DuckLake spec upgrade will be
   documented in the release notes; DuckLake requires explicit migration
   (`AUTOMATIC_MIGRATION`), which otel-ducklake will not run silently.
-- Rolling upgrades with a PostgreSQL catalog: replicas of different minor
-  versions can run side by side as long as the release notes do not say
-  otherwise.
+- Rolling upgrades with a PostgreSQL catalog: rows are appended by column
+  name, so a replica of the previous version keeps writing after a newer one
+  has added columns (those columns stay NULL for its rows), and an older
+  binary starts against a table with extra columns (it logs a warning). A
+  release that changes or removes columns would say so in its notes.
+- Duplicates are possible in one rare case: the catalog commits a flush but
+  the connection breaks before the server sees the reply. The flush is then
+  retried (at-least-once). Nothing removes such duplicates.
 
 ## Querying the raw data
 

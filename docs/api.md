@@ -2,7 +2,8 @@
 
 Base URL: `http://<host>:8080`. The OpenAPI 3.1 document is served at
 `/openapi.json` (also committed as [openapi.json](openapi.json)). An
-interactive reference is at `/docs`.
+interactive reference is at `/docs` (its script loads from a CDN, so the
+browser needs internet access; `/openapi.json` works offline).
 
 All endpoints except `/api/v1/health`, `/openapi.json` and `/docs` need
 `Authorization: Bearer <token>` when `auth.api_tokens` is set.
@@ -14,16 +15,20 @@ All endpoints except `/api/v1/health`, `/openapi.json` and `/docs` need
   is the last hour; for `GET /traces/{id}` it is the last 7 days. The window
   may not exceed `query.max_window` (31 days).
 - **Buckets**: `step=30s`/`5m`. Default: about 60 buckets on a round
-  boundary. At most 5000 buckets.
+  boundary. At most 5000 buckets; a step larger than the window is reduced
+  to the window.
 - **Attribute filters**: `attributes=key=value,key2=value2` matches span/log/
   point attributes **or** resource attributes. URL-encode `=` as `%3D` if
   your client doesn't.
 - IDs are lowercase hex: trace ids 32 chars, span ids 16 chars.
 - Durations: `*_ms` as float milliseconds; `duration_ns` as integer
   nanoseconds.
-- Errors: non-2xx with `{"error": "<code>", "message": "..."}`. Codes:
-  `bad_request` (400), `unauthorized` (401), `disabled` (403),
-  `not_found` (404), `internal` (500), `busy` (503), `timeout` (504).
+- Errors: non-2xx with `{"error": "<code>", "message": "..."}` (also for
+  malformed parameters and bodies). Codes: `bad_request` (400),
+  `unauthorized` (401), `disabled` (403), `not_found` (404), `internal`
+  (500, details only in the server log), `busy` (503), `timeout` (504).
+- Requests that are cancelled (client disconnect) or time out interrupt the
+  running query.
 
 ## Endpoints
 
@@ -78,14 +83,14 @@ and other sums, `p95` for histograms and summaries.
 | `avg` `min` `max` | over all points in the bucket | same | `avg` = sum/count of the increase | `avg` = sum/count increase |
 | `sum` | sum over series of each series' average | same | – | – |
 | `count` | number of points | number of points | number of observations (increase) | same |
-| `increase` | – | per series: last value in bucket minus last value in previous bucket (a drop = counter reset); summed | observations | observations |
+| `increase` | – (400) | per series: last value in bucket minus last value in previous bucket (a drop = counter reset); summed | observations | observations |
 | `rate` | – | increase / step (per second) | observations / step | same |
 | `p50`, `p95`, `p99.9`, … | – | – | percentile of the merged bucket increase within the time bucket (linear interpolation within a bucket) | average across series of the reported quantile closest to the requested one |
 
 - Delta temporality is supported: the increase is the sum of the values.
 - `group_by=route,service.name` splits series by attribute values
-  (`service.name` maps to the service column). At most 5 keys and 500
-  resulting series.
+  (`service.name` maps to the service column). At most 5 keys, 500 series and
+  200,000 points per response.
 - Exponential histograms are converted to explicit buckets
   (`base = 2^(2^-scale)`); zero and negative buckets fold into one "≤ 0"
   bucket.
@@ -97,7 +102,10 @@ Off by default (`query.enable_sql`, requires API tokens). Accepts one
 `metric_histograms`, `metric_exp_histograms`, `metric_summaries`, optionally
 qualified as `lake.otel.`). Rows come back as JSON arrays; types without a
 JSON equivalent (timestamps, UUIDs) as strings, maps as objects, NaN/Inf as
-null. See [ADR 0005](adr/0005-sql-endpoint.md) for the safety checks.
+null. Errors in the query are 400 with DuckDB's message. Table and CTE names
+must be plain identifiers; `SHOW`/`DESCRIBE`/`SUMMARIZE` and a few functions
+(`repeat`, `lpad`, `rpad`, file/settings/env access) are refused. See
+[ADR 0005](adr/0005-sql-endpoint.md).
 
 ## Examples
 

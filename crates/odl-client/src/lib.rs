@@ -175,7 +175,13 @@ impl LogTail {
     /// `query` are kept (`limit` caps each poll, default 500); its window and
     /// order are managed by the tail.
     pub fn new(client: Client, query: LogQuery, start: DateTime<Utc>) -> Self {
-        Self { client, query, lookback: TimeDelta::seconds(30), cursor: start, seen: HashSet::new() }
+        Self {
+            client,
+            query,
+            lookback: TimeDelta::seconds(30),
+            cursor: start,
+            seen: HashSet::new(),
+        }
     }
 
     /// How far each poll looks back for late records (default 30 s).

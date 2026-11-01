@@ -8,7 +8,7 @@
 //!
 //! Back-pressure: when buffered bytes exceed `ingest.max_buffer_bytes`, pushes
 //! are refused and receivers answer with a retryable error (HTTP 429 / gRPC
-//! RESOURCE_EXHAUSTED). OTLP exporters retry these with back-off.
+//! UNAVAILABLE). OTLP exporters retry these with back-off.
 //!
 //! Failure: if a flush fails (e.g. object store down) the batches are put back
 //! and retried with exponential back-off; nothing is dropped. Data that was

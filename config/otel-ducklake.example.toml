@@ -13,7 +13,8 @@ log_format = "text"               # text | json
 # DuckLake catalog (metadata). One of:
 #   "data/catalog.ducklake"                               DuckDB file  (single process)
 #   "sqlite:data/catalog.sqlite"                          SQLite file  (single process)
-#   "postgres:host=pg dbname=ducklake user=odl password=${PGPASSWORD}"   (multi-replica)
+#   "postgres:host=pg dbname=ducklake user=odl"   (multi-replica; password from the
+#                                                   PGPASSWORD env var, read by libpq)
 catalog = "data/catalog.ducklake"
 # Where Parquet data files go: local path, s3://, gs://, az://, abfss://, r2://, hf:// ...
 data_path = "data/lake/"
@@ -50,7 +51,7 @@ extensions = []                    # e.g. ["azure"]
 [ingest]
 flush_interval = "5s"              # max time data sits in memory before it is written
 flush_rows = 200000                # flush early when this many rows are buffered
-max_buffer_bytes = "512MB"         # above this, receivers answer 429 / RESOURCE_EXHAUSTED
+max_buffer_bytes = "512MB"         # above this, receivers answer 429 / UNAVAILABLE
 max_request_bytes = "32MB"         # per OTLP request, after decompression
 
 [retention]                        # "0" keeps data forever

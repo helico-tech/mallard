@@ -14,7 +14,9 @@ through an OpenAPI query API, a CLI and a TUI.
 - `config/`: example config; `deploy/`: compose files; `charts/`: Helm chart
 - `bench/`: reproducible experiments and capacity runs
 - `docs/`: [architecture](docs/architecture.md), [data model](docs/data-model.md),
-  [configuration](docs/configuration.md), [API](docs/api.md), [ADRs](docs/adr/)
+  [configuration](docs/configuration.md), [API](docs/api.md),
+  [deployment](docs/deployment.md), [operations](docs/operations.md),
+  [capacity](docs/capacity.md), [ADRs](docs/adr/)
 - `work/`: [queue](work/queue.md), epics, issues
 
 ## Build and test
@@ -22,7 +24,7 @@ through an OpenAPI query API, a CLI and a TUI.
 ```sh
 cargo build --release                 # first build compiles DuckDB (~2 min)
 cargo test --workspace                # unit + e2e (real DuckLake in temp dirs)
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all
 cargo run -p odl-server -- openapi > docs/openapi.json   # after API changes (a test checks it)
 ```

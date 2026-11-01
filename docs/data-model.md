@@ -216,8 +216,9 @@ read in ad-hoc SQL.
   `explicit_bounds DOUBLE[]`, `scale`, `quantiles STRUCT(...)[]`, ...) and
   no sparse nullable columns. Gauges and sums share `metric_points`,
   distinguished by `metric_type` and `is_monotonic`.
-- `series_id UBIGINT` = xxh3 hash of (resource attributes, metric name, point
-  attributes). It identifies a time series without comparing maps. Rates use
+- `series_id UBIGINT` = xxh3 hash of (resource attributes, instrumentation
+  scope, metric name, data point kind, point attributes), i.e. the OTel stream
+  identity. It identifies a time series without comparing maps. Rates use
   `lag(value) OVER (PARTITION BY series_id ORDER BY time)`.
 - `temporality` is kept per point (`cumulative`, `delta`, or empty for
   gauges). The query API handles both: increase = difference of last values
@@ -239,18 +240,19 @@ transparently.
 
 ### 12. Schema evolution
 
-Columns are matched by position when appending. New columns are only ever
-appended at the end. On start-up, missing columns are added with
-`ALTER TABLE ... ADD COLUMN`. Old files simply return `NULL` for them; no
-rewrite. The server refuses to start if a table has unexpected columns
-(someone changed it by hand).
+Rows are appended by column name. New columns are only ever added at the
+end. On start-up, missing columns are added with `ALTER TABLE ... ADD
+COLUMN`, and old files simply return `NULL` for them, with no rewrite. Columns
+the running version does not know (added by a newer version) are left
+`NULL`, with a warning in the log, so mixed versions can share a catalog
+during a rolling upgrade.
 
 ## Write path, briefly
 
 1. A receiver decodes the OTLP request and converts it to Arrow record
    batches (one per table touched), off the async runtime.
 2. The batches go into an in-memory buffer (bounded; full → HTTP 429 / gRPC
-   `RESOURCE_EXHAUSTED`).
+   `UNAVAILABLE`).
 3. Every `ingest.flush_interval` (5 s) or `flush_rows` (200k), one flusher
    appends all buffered batches through DuckDB's Arrow appender in **one
    transaction**. That gives one DuckLake snapshot, with at most one new file

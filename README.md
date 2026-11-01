@@ -51,7 +51,7 @@ $ odl services -s 15m
 - `odl` CLI: tables or JSON, `logs -f`, trace waterfalls in the terminal.
 - `odl tui`: overview dashboard, trace search plus waterfall with span
   details and logs, live logs, metric charts, status.
-- Back-pressure (429 / `RESOURCE_EXHAUSTED`) instead of dropping data or
+- Back-pressure (HTTP 429 / gRPC `UNAVAILABLE`) instead of dropping data or
   running out of memory. Automatic compaction, retention and snapshot expiry.
 - Bearer-token auth for ingest and query.
 - Usable as Rust libraries: embed the server, client, CLI or TUI

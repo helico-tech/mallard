@@ -78,7 +78,7 @@ pub struct IngestStats {
     pub buffered_rows: u64,
     /// Approximate bytes waiting in memory for the next flush.
     pub buffered_bytes: u64,
-    /// Requests are rejected (HTTP 429 / gRPC RESOURCE_EXHAUSTED) above this.
+    /// Requests are rejected (HTTP 429 / gRPC UNAVAILABLE) above this.
     pub max_buffer_bytes: u64,
     pub flushes: u64,
     pub flush_errors: u64,

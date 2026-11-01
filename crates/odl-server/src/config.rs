@@ -43,7 +43,7 @@ pub struct StorageConfig {
     /// DuckLake catalog connection. Examples:
     /// - `data/catalog.ducklake` (DuckDB file, single process)
     /// - `sqlite:data/catalog.sqlite`
-    /// - `postgres:host=pg dbname=ducklake user=odl password=${PGPASSWORD}`
+    /// - `postgres:host=pg dbname=ducklake user=odl` (password via `PGPASSWORD`)
     pub catalog: String,
     /// Where Parquet files go: local dir, `s3://`, `gs://`, `az://`/`abfss://`, `r2://`, ...
     pub data_path: String,

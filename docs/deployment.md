@@ -8,8 +8,15 @@ Three reference setups, all tested:
 | [Docker, shared storage](#docker-postgresql--s3) | PostgreSQL | S3-compatible | ≥1 | HA, or data in a bucket |
 | [Kubernetes (Helm)](#kubernetes-helm) | DuckDB file or PostgreSQL | PVC or object storage | 1 or more | clusters |
 
-Not containerized: download a release binary (or `cargo build --release`) and
-run `otel-ducklake serve` with a config file.
+Not containerized: download a release binary (Linux builds target glibc
+2.35+, i.e. Ubuntu 22.04 / Debian 12 or newer) or `cargo build --release`,
+and run `otel-ducklake serve` with a config file.
+
+> **Security:** authentication is off by default. Anyone who can reach the
+> ports can read all telemetry (8080) and write into the lake (4317/4318).
+> The examples bind to `127.0.0.1`. Before exposing the ports, set
+> `auth.api_tokens` (and `auth.ingest_tokens`, or keep ingest on a private
+> network) and put TLS in front.
 
 ## Container image
 
@@ -30,7 +37,7 @@ contains `otel-ducklake`, `odl` and `odl-loadgen`.
 - Size: about 156 MB compressed (most of it DuckDB extensions).
 
 ```sh
-docker run -d --name otel -p 4317:4317 -p 4318:4318 -p 8080:8080 \
+docker run -d --name otel -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 -p 127.0.0.1:8080:8080 \
   -v otel-data:/data -e ODL_DUCKDB__MEMORY_LIMIT=1GB \
   ghcr.io/helico-tech/otel-ducklake:latest
 docker exec otel odl services
@@ -87,7 +94,7 @@ helm install otel charts/otel-ducklake -n observability -f my-values.yaml
 mode: shared
 replicaCount: 2
 storage:
-  catalog: "postgres:host=pg.db dbname=ducklake user=odl password=${PGPASSWORD}"
+  catalog: "postgres:host=pg.db dbname=ducklake user=odl"   # password: PGPASSWORD env (envFrom)
   dataPath: "s3://my-bucket/otel/"
   secrets:
     - type: s3
@@ -101,7 +108,7 @@ auth:
 resources:
   limits: {cpu: "2", memory: 2Gi}
 duckdb:
-  memoryLimit: 1200MB              # ≈ memory limit − 600 MB
+  memoryLimit: 768MB               # memory limit ≥ this + ingest buffer + 1 GB
 ```
 
 Tested on a local cluster: single mode keeps all data across pod deletion.

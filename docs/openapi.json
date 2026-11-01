@@ -1136,7 +1136,7 @@
           "max_buffer_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Requests are rejected (HTTP 429 / gRPC RESOURCE_EXHAUSTED) above this.",
+            "description": "Requests are rejected (HTTP 429 / gRPC UNAVAILABLE) above this.",
             "minimum": 0
           },
           "signals": {

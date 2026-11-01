@@ -47,7 +47,7 @@ sampled every 5 s.
 At saturation the receivers answer 429. The load generator, like any OTLP
 exporter, retries, and nothing was lost (0 failed). Memory at saturation =
 DuckDB buffer (1.2 GB) + the full ingest buffer (512 MB) + overhead. That is
-why the Helm chart defaults to 1 GB + 256 MB for a 2 GiB pod.
+why the Helm chart defaults to 768 MB + 256 MB for a 2 GiB pod.
 
 The "upper mid" peak of ~2,500 spans/s uses **about 2-5% of one core**.
 
@@ -126,14 +126,16 @@ How to read it:
 | | small | mid | upper mid |
 |---|---|---|---|
 | CPU | 0.5 vCPU | 1 vCPU | 2 vCPU |
-| memory (container) | 1 GiB | 2 GiB | 2-4 GiB |
-| `duckdb.memory_limit` | 512MB | 1GB | 1-2.5GB |
+| memory (container) | 1.5 GiB | 2 GiB | 3-4 GiB |
+| `duckdb.memory_limit` | 256MB | 768MB | 1-2.5GB |
 | `ingest.max_buffer_bytes` | 128MB | 256MB | 256-512MB |
 | disk, 7 days (spans + logs) | < 1 GB | 3-6 GB | 15-30 GB |
 | catalog | DuckDB file | DuckDB file | DuckDB file, or PostgreSQL for HA |
 
 Memory rule: **container ≥ `duckdb.memory_limit` + `ingest.max_buffer_bytes`
-+ 0.5 GB.**
++ 1 GB.** The 1 GB covers Parquet writers and allocator overhead; the worst
+measured case was compaction of a whole unmerged day (0.84 GB above DuckDB's
+limit).
 
 When to scale out: not for ingest, which can handle 10-50× these volumes per
 replica. Run 2+ replicas with a PostgreSQL catalog and object storage when

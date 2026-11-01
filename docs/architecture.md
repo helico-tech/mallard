@@ -60,7 +60,7 @@ that talks HTTP only.
 
 - A mutex-protected list of record batches per table, with row and byte
   counters. When it holds more than `ingest.max_buffer_bytes`, new requests
-  get **HTTP 429 / gRPC `RESOURCE_EXHAUSTED`**. OTLP exporters retry those
+  get **HTTP 429 / gRPC `UNAVAILABLE`**. OTLP exporters retry those
   with back-off, so a slow or unavailable object store slows senders down
   instead of losing data or running out of memory.
 - One flusher thread wakes every `flush_interval` or when `flush_rows` is
@@ -126,7 +126,7 @@ cleanup are catalog-wide, and can be switched off per instance
 
 | failure | effect |
 |---|---|
-| object store / catalog unavailable | flushes fail and are retried; buffer fills; receivers return 429/`RESOURCE_EXHAUSTED`; exporters retry. Queries fail with 500. |
+| object store / catalog unavailable | flushes fail and are retried; buffer fills; receivers return 429/`UNAVAILABLE`; exporters retry. Queries fail with 500. |
 | process killed (SIGKILL, OOM) | up to `flush_interval` of acknowledged data in memory is lost. |
 | SIGTERM / Ctrl-C | receivers stop accepting, buffer is flushed, maintenance stops, exit. |
 | query too slow | interrupted after `query.timeout` → 504. |
