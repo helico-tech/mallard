@@ -2456,11 +2456,12 @@
       },
       "Temporality": {
         "type": "string",
-        "description": "Aggregation temporality of sums and histograms; empty for gauges and summaries.",
+        "description": "Aggregation temporality of sums and histograms; empty for gauges and\nsummaries. `mixed`: the metric catalog's value for a metric with both\ndelta and cumulative points.",
         "enum": [
           "Unspecified",
           "Delta",
-          "Cumulative"
+          "Cumulative",
+          "Mixed"
         ]
       },
       "Trace": {

@@ -61,13 +61,14 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
         s.storage.snapshot_id
     );
     let i = &s.ingest;
-    let mut t = table(&["signal", "requests", "accepted", "throttled", "invalid"]);
+    let mut t = table(&["signal", "requests", "accepted", "throttled", "throttled requests", "invalid"]);
     for sig in &i.signals {
         t.add_row(vec![
             Cell::new(sig.signal),
             num(sig.requests as f64),
             num(sig.accepted as f64),
             num(sig.throttled as f64),
+            num(sig.throttled_requests as f64),
             num(sig.invalid as f64),
         ]);
     }

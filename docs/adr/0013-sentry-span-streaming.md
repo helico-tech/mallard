@@ -1,7 +1,8 @@
 # 0013 — Sentry span streaming goes through the bridge too
 
 ## Status
-accepted (amends 0009 and 0010: `span` items are treated like transactions)
+accepted (amends 0009 and 0010: `span` items are treated like transactions);
+amended by 0021 (standalone spans of older SDKs are stored too)
 
 ## Context
 Since SDK 11, `@sentry/node` streams spans by default

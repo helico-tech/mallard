@@ -97,7 +97,9 @@ pub fn list(conn: &Connection, w: &Window, service: Option<&str>, q: Option<&str
         .collect();
     let sql = format!(
         "SELECT metric_name, any_value(t), any_value(metric_unit), any_value(metric_description), \
-            any_value(temporality), count(DISTINCT series_id), count(*), \
+            CASE WHEN count(DISTINCT nullif(temporality, '')) > 1 THEN 'mixed' \
+                ELSE coalesce(any_value(nullif(temporality, '')), '') END, \
+            count(DISTINCT series_id), count(*), \
             to_json(list(DISTINCT service_name ORDER BY service_name)), epoch_us(max(time)) \
          FROM ({}) GROUP BY 1 ORDER BY 1 LIMIT 5000",
         parts.join(" UNION ALL ")

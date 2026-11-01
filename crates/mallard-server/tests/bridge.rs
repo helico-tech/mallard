@@ -197,11 +197,25 @@ async fn sentry_span_items_become_traces() {
     let http = reqwest::Client::new();
     let trace = "abf92f3577b34da6a3ce929d0e0e4742";
 
-    // A standalone span of older SDKs (no v2 content type) is not stored.
-    let old_trace = "bbf92f3577b34da6a3ce929d0e0e4743";
-    let old = json!({"trace_id": old_trace, "span_id": "1111111111111111", "description": "INP",
-        "start_timestamp": now_secs() - 1.0, "timestamp": now_secs()});
-    send_envelope_item(&http, &srv.url, shop.id, &shop.public_key, "span", &old).await;
+    // An INP span of @sentry/browser 10 (standalone: no content type). Written
+    // from the SDK's source, see `inp_span` in bridge/span.rs.
+    let inp_trace = "bbf92f3577b34da6a3ce929d0e0e4743";
+    let t = now_secs() - 1.0;
+    let inp = json!({"trace_id": inp_trace, "span_id": "1111111111111111",
+        "description": "body > main > button#checkout", "op": "ui.interaction.click",
+        "origin": "auto.http.browser.inp", "start_timestamp": t, "timestamp": t + 0.232,
+        "is_segment": true, "segment_id": "1111111111111111", "exclusive_time": 232,
+        "measurements": {"inp": {"value": 232, "unit": "millisecond"}},
+        "data": {"sentry.op": "ui.interaction.click", "sentry.origin": "auto.http.browser.inp",
+            "release": "shop-web@2.4.0", "environment": "production", "transaction": "/checkout"}});
+    let header = json!({"sent_at": "2026-11-01T12:00:00.000Z",
+        "trace": {"trace_id": inp_trace, "public_key": shop.public_key, "environment": "production", "release": "shop-web@2.4.0"}});
+    post_envelope(&http, &srv.url, &shop, format!("{header}\n{{\"type\":\"span\"}}\n{inp}\n")).await;
+    // A span item with a content type we do not know is not stored.
+    let future_trace = "cbf92f3577b34da6a3ce929d0e0e4744";
+    let future = json!({"trace_id": future_trace, "span_id": "1111111111111111", "timestamp": t});
+    let v9 = json!({"type": "span", "content_type": "application/vnd.sentry.items.span.v9+json"});
+    post_envelope(&http, &srv.url, &shop, format!("{{}}\n{v9}\n{future}\n")).await;
     // Garbage in a span item does not fail the request.
     let v2 = json!({"type": "span", "content_type": "application/vnd.sentry.items.span.v2+json"});
     post_envelope(&http, &srv.url, &shop, format!("{{}}\n{v2}\nnot json\n")).await;
@@ -256,7 +270,15 @@ async fn sentry_span_items_become_traces() {
         "the error sits under the span it was thrown in"
     );
 
-    assert!(client.trace_overview(old_trace, None).await.unwrap().spans.is_empty(), "v1 span items are dropped");
+    let inp = eventually("the INP span", || async {
+        client.trace_overview(inp_trace, None).await.unwrap().spans.into_iter().next()
+    })
+    .await;
+    assert_eq!(inp.name, "body > main > button#checkout");
+    assert_eq!(inp.service_name, "shop");
+    assert_eq!(inp.resource_attributes.get("service.version").map(String::as_str), Some("shop-web@2.4.0"));
+    assert_eq!(inp.attributes.get("browser.web_vital.inp.value").map(String::as_str), Some("232"));
+    assert!(client.trace_overview(future_trace, None).await.unwrap().spans.is_empty(), "unknown content type");
     srv.stop().await;
 }
 

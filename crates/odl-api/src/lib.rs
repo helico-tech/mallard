@@ -98,11 +98,14 @@ string_enum! {
 }
 
 string_enum! {
-    /// Aggregation temporality of sums and histograms; empty for gauges and summaries.
+    /// Aggregation temporality of sums and histograms; empty for gauges and
+    /// summaries. `mixed`: the metric catalog's value for a metric with both
+    /// delta and cumulative points.
     Temporality: "temporality" {
         Unspecified = "",
         Delta = "delta",
         Cumulative = "cumulative",
+        Mixed = "mixed",
     }
 }
 

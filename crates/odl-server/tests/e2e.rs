@@ -1471,6 +1471,12 @@ async fn mixed_temporality_in_one_metric() {
     })
     .await;
 
+    let catalog: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+    for m in &catalog {
+        assert_eq!(m.temporality, Temporality::Mixed, "{}", m.name);
+    }
+    assert_eq!(catalog.len(), 2);
+
     let per_src = |r: MetricQueryResult, want: [(&str, f64); 2]| {
         assert_eq!(r.series.len(), 2, "{r:?}");
         for (src, v) in want {

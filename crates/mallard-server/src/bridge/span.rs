@@ -1,5 +1,6 @@
-//! Sentry span items (span streaming, `span.v2`) → OTLP spans. The mapping
-//! table is in docs/adr/0013-sentry-span-streaming.md.
+//! Sentry span items → OTLP spans: span streaming (`span.v2`, mapping table
+//! in docs/adr/0013-sentry-span-streaming.md) and the standalone spans of
+//! SDKs before 11 (docs/adr/0022-sentry-standalone-spans.md).
 //!
 //! A v2 item is `{"version": 2, "items": [span, …]}`; each span has
 //! `trace_id`, `span_id`, `parent_span_id`, `name`, `start_timestamp`,
@@ -8,6 +9,9 @@
 //! `links`. Release, environment and SDK are attributes on every span
 //! (`sentry.release`, …); the envelope's `trace` and `sdk` headers fill in
 //! when a span lacks them.
+//!
+//! A standalone item is one span in the format of a transaction's `spans[]`,
+//! without a content type. Its `data` holds `release` and `environment`.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +23,7 @@ use opentelemetry_proto::tonic::{
 };
 use serde_json::{Map, Value};
 
-use super::transaction::{Attrs, any_value, nanos, op_kind, span_id_bytes, str_of, trace_id_bytes};
+use super::transaction::{Attrs, any_value, nanos, op_kind, sentry_span, span_id_bytes, str_of, trace_id_bytes};
 
 /// The item content type of span streaming.
 pub const V2_CONTENT_TYPE: &str = "application/vnd.sentry.items.span.v2+json";
@@ -86,7 +90,34 @@ pub fn to_otlp(item: &Value, defaults: &Defaults, project_slug: &str) -> Option<
         };
         groups.entry(group).or_default().push(span);
     }
+    Some(request(groups))
+}
 
+/// One OTLP request for a standalone span. `None` without valid ids or an end
+/// time.
+pub fn standalone_to_otlp(s: &Value, defaults: &Defaults, project_slug: &str) -> Option<ExportTraceServiceRequest> {
+    let mut span = sentry_span(s, None, &[])?;
+    let data = s.get("data");
+    let moved = |key: &str| data.and_then(|d| str_of(d, key)).map(str::to_string);
+    let group = Group {
+        service: project_slug.to_string(),
+        release: moved("release").or_else(|| defaults.release.clone()),
+        environment: moved("environment").or_else(|| defaults.environment.clone()),
+        sdk_name: defaults.sdk_name.clone().unwrap_or_else(|| "sentry".into()),
+        sdk_version: defaults.sdk_version.clone().unwrap_or_default(),
+    };
+    span.attributes.retain(|kv| kv.key != "release" && kv.key != "environment");
+    // Web vitals are measurements here; SDK 11 sends the same attribute.
+    for (name, m) in s.get("measurements").and_then(Value::as_object).into_iter().flatten() {
+        if let Some(value) = m.get("value").and_then(any_value) {
+            let key = format!("browser.web_vital.{name}.value");
+            span.attributes.push(KeyValue { key, value: Some(value), ..Default::default() });
+        }
+    }
+    Some(request(BTreeMap::from([(group, vec![span])])))
+}
+
+fn request(groups: BTreeMap<Group, Vec<Span>>) -> ExportTraceServiceRequest {
     let resource_spans = groups
         .into_iter()
         .map(|(g, spans)| {
@@ -102,7 +133,7 @@ pub fn to_otlp(item: &Value, defaults: &Defaults, project_slug: &str) -> Option<
             }
         })
         .collect();
-    Some(ExportTraceServiceRequest { resource_spans })
+    ExportTraceServiceRequest { resource_spans }
 }
 
 /// One v2 span. `None` without valid ids or any timestamp.
@@ -242,6 +273,76 @@ mod tests {
                 "plain": "bare"}},
             {"name": "no ids", "start_timestamp": 1793538736.9}
         ]})
+    }
+
+    /// What @sentry/browser 10.78 sends for an INP (slow interaction): written
+    /// from its source (`createSpanEnvelope`, `SentrySpan.getSpanJSON`,
+    /// `startStandaloneWebVitalSpan`, `_onInp`), not captured from a browser.
+    fn inp_span() -> Value {
+        json!({
+            "data": {
+                "sentry.origin": "auto.http.browser.inp",
+                "sentry.op": "ui.interaction.click",
+                "sentry.exclusive_time": 232,
+                "release": "shop-web@2.4.0",
+                "environment": "production",
+                "transaction": "/checkout",
+                "user": "dev@example.com",
+                "user_agent.original": "Mozilla/5.0 (Macintosh) Chrome/141.0.0.0 Safari/537.36",
+                "sentry.sample_rate": 1
+            },
+            "description": "body > main > button#checkout",
+            "op": "ui.interaction.click",
+            "parent_span_id": "a1b2c3d4e5f60718",
+            "span_id": "9c1f0e2d3b4a5968",
+            "start_timestamp": 1793538736.5,
+            "timestamp": 1793538736.732,
+            "trace_id": "96840ee330eb4f48adfeda513ab13381",
+            "origin": "auto.http.browser.inp",
+            "exclusive_time": 232,
+            "measurements": {"inp": {"value": 232, "unit": "millisecond"}},
+            "is_segment": true,
+            "segment_id": "9c1f0e2d3b4a5968"
+        })
+    }
+
+    #[test]
+    fn standalone_spans_become_otel_spans() {
+        let headers =
+            json!({"trace": {"release": "from-dsc", "environment": "from-dsc", "trace_id": "x", "public_key": "y"}});
+        let defaults = Defaults::from_headers(headers.as_object().unwrap());
+        let req = standalone_to_otlp(&inp_span(), &defaults, "shop").unwrap();
+        assert_eq!(req.resource_spans.len(), 1);
+        let rs = &req.resource_spans[0];
+        let res = &rs.resource.as_ref().unwrap().attributes;
+        assert_eq!(attr(res, "service.name"), Some(&s("shop")));
+        assert_eq!(attr(res, "service.version"), Some(&s("shop-web@2.4.0")));
+        assert_eq!(attr(res, "deployment.environment.name"), Some(&s("production")));
+        assert_eq!(rs.scope_spans[0].scope.as_ref().unwrap().name, "sentry", "the envelope has no sdk header");
+
+        let span = &rs.scope_spans[0].spans[0];
+        assert_eq!(hex::encode(&span.trace_id), "96840ee330eb4f48adfeda513ab13381");
+        assert_eq!(hex::encode(&span.span_id), "9c1f0e2d3b4a5968");
+        assert_eq!(hex::encode(&span.parent_span_id), "a1b2c3d4e5f60718");
+        assert_eq!(span.name, "body > main > button#checkout");
+        assert_eq!(span.kind, SpanKind::Internal as i32);
+        assert_eq!(span.end_time_unix_nano - span.start_time_unix_nano, 232_000_000);
+        assert_eq!(attr(&span.attributes, "browser.web_vital.inp.value"), Some(&any_value::Value::IntValue(232)));
+        assert_eq!(attr(&span.attributes, "transaction"), Some(&s("/checkout")));
+        assert_eq!(attr(&span.attributes, "sentry.op"), Some(&s("ui.interaction.click")));
+        assert_eq!(attr(&span.attributes, "release"), None, "on the resource");
+        assert_eq!(attr(&span.attributes, "environment"), None, "on the resource");
+
+        // Without release and environment in `data`, the envelope's are used.
+        let mut bare = inp_span();
+        bare["data"] = json!({});
+        let req = standalone_to_otlp(&bare, &defaults, "shop").unwrap();
+        let res = &req.resource_spans[0].resource.as_ref().unwrap().attributes;
+        assert_eq!(attr(res, "service.version"), Some(&s("from-dsc")));
+
+        let mut no_id = inp_span();
+        no_id["trace_id"] = json!("nope");
+        assert!(standalone_to_otlp(&no_id, &defaults, "shop").is_none());
     }
 
     #[test]
