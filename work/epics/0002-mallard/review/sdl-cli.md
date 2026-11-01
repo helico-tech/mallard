@@ -169,6 +169,8 @@ Fixed on branch `fix/review-sdl-cli`: 31 fixed (19, 21, 24, 25 with a part defer
 
     **Status:** fixed in 1d958ae (`is_bidi_control`, `Exception::mechanism_label`), e981c6f (`switch_project`, `Detail::older_page`) and 0bf3524 (one `screen()` test helper). `Req::kind`/`Resp::kind` now return a typed `Kind` (13c7c36); both stay, because a panicked response must still name its kind. TTY/`NO_COLOR` check: deferred: cross-side (it goes with #26).
 
+    **Status (cross-side part):** fixed in 139395a: the TTY/`NO_COLOR` check exists once, in `mallard_term::color::ColorChoice::enabled` (also `TERM=dumb` and the new `--color` flag); `main.rs` and `paint.rs` no longer have their own.
+
 25. **low**: dead or redundant API.
     - `Client::resolve`/`ignore`/`unresolve` (`sdl-client/src/lib.rs:129-139`) are not used anywhere in the workspace, because `set_issue_status` covers them.
     - `cli::print_event` is `pub` but cannot be reached from outside.
@@ -184,6 +186,8 @@ Fixed on branch `fix/review-sdl-cli`: 31 fixed (19, 21, 24, 25 with a part defer
     *Fix:* compute a `Painter { color: bool }` once in `run` and pass it to the printers.
 
     **Status:** deferred: cross-side (the shared terminal-output crate will own color detection for both sides).
+
+    **Status (cross-side):** fixed in 139395a: no global state. Styling is always added and `mallard_term::color::Out` (in `Ctx`, decided once per run) strips it when colour is off, so two commands can run at once.
 
 27. **low**: wrong or stale docs.
     - `tui/mod.rs:4` says "obs-ducklake"; the host is `mallard`.

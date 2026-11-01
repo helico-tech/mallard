@@ -29,6 +29,8 @@ Severity scale: **bug** = wrong behaviour today, **high** = security, performanc
 
     **Status:** fixed in 6e8ae15: `fmt::clean` escapes control and bidi characters in every server value before styling (also error messages); JSON output escapes what serde_json leaves raw. Test `output_is_cleaned`. Deferred: cross-side: `crates/mallard/src/trace.rs` (`mallard trace`) still prints span names and log bodies raw, and `clean` should move to the shared terminal-output crate.
 
+    **Status (cross-side part):** fixed in 9e5419e (`clean` moved to `mallard_term::text`, merged with sdl-cli's), 7003a37 (odl-cli uses it) and d164331 (`mallard trace` cleans every server string; test).
+
 4. **high (performance)** — `crates/odl-cli/src/tui/views/logs.rs:420-452`, `crates/odl-cli/src/tui/views/traces.rs:457-485`
    `draw` rebuilds a `Row` for **every** record on every frame: up to 5000 log records, each with a local-time conversion, a `format!`, `trunc(body, 400)` and several `String` clones. The trace waterfall does the same for every span, and traces can have thousands. `draw` runs 4 times a second plus once per key or resize. The service-column width at `logs.rs:452` also scans all records on every frame.
    *Fix:* call `fit_offset` first, then build rows only for `records[offset..offset + height]`. Render them with a `TableState` whose offset is 0 and whose selection is shifted by the offset, or use `Table::rows` on the slice. Alternatively, cache the formatted cells when records are added.
@@ -40,6 +42,8 @@ Severity scale: **bug** = wrong behaviour today, **high** = security, performanc
    *Fix:* keep `Result<Data, odl_client::Error>` in `Loaded` and turn it into text only when displaying it. Add a typed check on the client, such as `Error::is_window_too_large()`, keyed on a stable `ApiError.error` code. This needs the server to send a dedicated code such as `"window_too_large"`, which is outside this scope. Print a note to stderr when the CLI falls back.
 
     **Status:** fixed in 50c0c94 + f002eed: `Loaded` keeps `odl_client::Error`; the only text match left is `Error::is_window_too_large()` in the client; the CLI prints a note when it falls back. Deferred: cross-side: the server sends a generic `bad_request` for this (`odl-server/src/query/mod.rs:202`); it needs a dedicated code such as `window_too_large` and should report its `max_window`, so the 24h fallback is not hard-coded.
+
+    **Status (cross-side part):** deferred again: it needs a new error code in `odl-server` (`query/mod.rs`), which belongs to the server-side branch (`mallard-common` error bodies, review cross-cutting 2.F). The client side is ready: `Error::Api` now carries `code`.
 
 6. **medium (bug)** — `crates/odl-cli/src/tui/input.rs:53-57`, `crates/odl-cli/src/tui/mod.rs:399-406`
    While a prompt is open, every key goes to `Input::handle`, and `KeyCode::Char(c)` ignores modifiers. So Ctrl-S inserts "s", Alt-x inserts "x", and host shortcuts other than F1/F2 never reach the host. This contradicts the module doc (`mod.rs:9-11`). Separately, `Input`'s Ctrl-C → Cancel branch (`input.rs:33`) can never run, because `handle_event` turns Ctrl-C into `Quit` first (`mod.rs:392`).
@@ -220,6 +224,8 @@ Severity scale: **bug** = wrong behaviour today, **high** = security, performanc
     *Fix:* say so in the panel title (for example "Volume · service/text"), or add the fields to the API, which is outside this scope.
 
     **Status:** fixed in 3759de6 (panel title says "service and text filter only" when other filters are set). Adding the filters to `LogSeriesQuery` is deferred: cross-side (API change).
+
+    **Status (cross-side part):** deferred again: it is an `odl-api`/`odl-server` query change, not terminal work; it belongs to the server-side branch.
 
 31. **low** — `crates/odl-cli/src/tui/views/logs.rs:229`, `crates/odl-cli/src/lib.rs:324-327`
     The first tail poll uses the *client* clock: `Utc::now() - 5s` when the initial page is empty, or `now - since` in the CLI. The `LogTail` doc (`odl-client/src/lib.rs:136-138`) says clock skew does not matter, which is only true from the second poll on.

@@ -104,6 +104,8 @@ same on the OTLP listener. Add an e2e assertion on `user.ip_address`.
 
 **Fix:** pass every server string through one shared `clean()` (2.N).
 
+**Status:** fixed in d164331 (`mallard trace` cleans every server string with `mallard_term::text::clean`, bidi included; durations via the shared `ms()`; test with OSC/CSI/C1/bidi payloads) and f28d3e6 (`mallard status` cleans server text and errors; tested).
+
 ### 1.M2 (medium): `/metrics` is public, and histograms differ from the standalone binary
 `crates/mallard/src/server_cmd.rs:27`, `crates/mallard-server/src/lib.rs:68-70`
 - `/metrics` is served only on the public `http_addr`. The Helm ingress routes `/`, so the metrics
@@ -381,6 +383,8 @@ One `install_recorder()` with the buckets (1.M2) in `mallard-common`.
 - sdl's API accepts `from`, `to` and `step`, with `interval` kept as an alias, and gains a maximum
   window.
 
+**Status:** CLI part fixed in 139395a: one window flag style, `-s/--since` on both sides (telemetry also `--from`/`--to`). Deferred: the API side (`from`/`to`/`step`, max window on the Sentry API) is server work.
+
 ### 2.I (medium): the two client crates have different constructors, errors and timeouts
 - **sdl-client** (`crates/sdl-client/src/lib.rs:17-63`):
   - `new(&str, &str)`; validates with `url::Url::parse`;
@@ -404,6 +408,8 @@ of plumbing.
   `InvalidUrl`, `Http`, `Api { status, code, message }`, with both `status()` and `is_not_found()`.
 - Both parse the shared `ApiError` (2.F) and use the same timeout.
 - Move `segment()` to `mallard-common`.
+
+**Status:** fixed in fd049b7: both clients `Client::new(&str, Option<&str>)`, URL parsed and http(s) only, 60 s timeout, `#[non_exhaustive]` `Error` with `InvalidUrl`, `Http` (cause in `source()`), `Api { status, code, message }`, `status()` and `is_not_found()`; sdl-client reads both error body shapes. Deferred: one `ApiError` body on the server (2.F) and a shared `segment()` (server-side `mallard-common` work).
 
 ### 2.J (medium): two ways to build OpenAPI docs
 - **sdl:** a hand-maintained `#[openapi(paths(...))]` list (`crates/sdl-server/src/api.rs:51-63`).
@@ -468,6 +474,8 @@ Checked with `target/debug/mallard`:
 - mallard's `main` prints every error through one `describe()` from `mallard-term`, then exits with
   code 1.
 
+**Status:** fixed in 139395a, 7003a37 and f28d3e6: `-p` is global (it already was on this branch; test kept); both sides take `Hints` (`mallard_term::error::Hints`) and name `mallard errors` / `mallard telemetry` and `MALLARD_*`; every error goes through `mallard_term::error::report`: `error: <one line>`, exit 1, closed pipe = success (test `both_sides_report_errors_alike`).
+
 ### 2.N (high): the telemetry CLI prints untrusted OTLP text raw; the errors CLI cleans it
 - `crates/odl-cli/src/fmt.rs:340-350` (log body, service name) and `trace_lines` (`:265`) print raw.
 - `strip_ansi` (`:24`) only runs when stdout is not a terminal, and it only removes CSI sequences.
@@ -478,6 +486,8 @@ Checked with `target/debug/mallard`:
 
 **Plan:** move sdl's `clean`, `clean_text` and `json_safe` to `mallard-term`. odl-cli, the odl TUI
 (`widgets::trunc` already replaces control characters, but not bidi) and `mallard trace` (1.M1) all use them.
+
+**Status:** fixed in 9e5419e (one `mallard_term::text::clean`/`clean_text`/`json_safe`: both test sets kept; stricter union: bidi, one line, tabs as spaces, visible `\u{..}` escapes), 139395a/7003a37 (both CLIs use it; table headers cleaned), 4e43d9e (odl TUI `trunc` cleans bidi too) and d164331 (`mallard trace`).
 
 ### 2.O (medium): the two TUI tabs have different themes and conflicting keys
 - **Theme:** sdl uses the 256-color palette (`crates/sdl-cli/src/tui/theme.rs:6-22`); odl uses
@@ -502,6 +512,8 @@ Checked with `target/debug/mallard`:
 - One key map: `r` = refresh everywhere; resolve/ignore/unresolve move to `R`/`I`/`U` or an action
   menu; the same jump key on both tabs (for example `g`).
 - Record the key map in an ADR, since ADR 0002 already reserves F1 and F2.
+
+**Status:** fixed in 4e43d9e: one 256-colour theme (`mallard_term::tui::theme`, used by both tabs and the mallard bar); one `Outcome { Consumed, Ignored, Quit, Jump(trace_id) }`; `Pane` implemented directly on both `Embedded` types (adapter enum gone); shared key map `mallard_term::tui::keys` shown at the top of both help screens and in `docs/cli.md`: `r` refresh on both tabs (resolve/ignore/unresolve → `R`/`I`/`U`), `x` jump on both (was `t`/`e`), `t`/`T` window everywhere (odl `w`/`W` aliases removed), `tab`/digits = the tabs of the current screen on both. Tests on both tabs and in the host (TestBackend). The key map is recorded in ADR 0006 (d29485e). Severity labels use the same words; the badge padding stays per tab. Truecolor option: not added (not needed for one look).
 
 ### 2.P (medium): different crates or versions for the same job
 - **Tables and colors:** comfy-table **7** (`crates/sdl-cli/Cargo.toml`) and **8**
@@ -529,6 +541,8 @@ Checked with `target/debug/mallard`:
 - **Percentiles in loadgens:** `hdrhistogram` in sdl-loadgen versus sort-then-index in odl-loadgen.
   Low impact; fine to leave.
 
+**Status:** terminal part fixed in 9e5419e/139395a/7003a37/190cd77: ratatui, crossterm, comfy-table (8 only; 7 is gone), unicode-width and url are workspace dependencies; owo-colors and futures-util are gone; odl-cli uses `odl-client.workspace`. Deferred: rand, base64, toml/figment/envy, sdl-server inline deps and the `openapi` feature of odl-api (server-side work, other branch).
+
 ### 2.Q (medium): the same kind of setting has different units and names
 - **Retention:** `[sentry] retention_days = 90` (an integer, 0 = forever) versus
   `[otel.retention] traces = "7d"` (a string, "0" = forever). Helm has `retention.errorsDays` next
@@ -550,6 +564,8 @@ Checked with `target/debug/mallard`:
   (`crates/mallard/src/tui.rs:146-150`).
 
 **Plan:** use the same names and the same `Ctx` shape (an `Output` enum plus `Hints`).
+
+**Status:** fixed in 7003a37 and 4e43d9e: `odl_cli::Command` (was `Cmd`), `odl_cli::Embedded` at the root (`tui` is private), the same `Ctx` builder on both (`new`, `with_json`, `with_color`, `with_hints`), `describe` and `HINTS` on both, `open_trace` on both `Embedded`. `set_errors_enabled` stays on the telemetry side: the jump hint is only shown when the host can answer it.
 
 ### 2.M2 (medium): flags and output style differ between the two CLIs
 - **Flags:**
@@ -583,6 +599,8 @@ Checked with `target/debug/mallard`:
 - width-aware `trunc`;
 - shared clap `WindowArgs` (`-s/--since`, `--from`, `--to`) and one flag table:
   `-n/--limit`, `-q/--query`, `-S/--service`, `-t/--trace`, `--json`.
+
+**Status:** fixed in 139395a/7003a37/4e43d9e/d29485e: flags `-s/--since`, `-n/--limit` (odl `traces -l` kept as alias), `-t/--trace`, `--json` on both (odl `-o json` kept hidden), new `--color auto|always|never`; one table style; one colour rule (TTY + `NO_COLOR` + `TERM=dumb`, decided when writing, no global state); closed pipes handled once in `report`; one `compact` (`1.2k/3.4M/2G`), decimal byte sizes (`kB`, as configs write them), one `ms`; **UTC everywhere** (odl TUI was local; help says so); width-aware `truncate`. Not unified on purpose: sparklines (counts from zero vs metric min-max). Documented in `docs/cli.md`.
 
 ### 2.T (low): test and load-generation helpers are written several times
 - **OTLP request builders:** `crates/odl-server/tests/e2e.rs:31-200`,
