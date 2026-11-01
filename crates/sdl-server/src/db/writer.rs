@@ -89,12 +89,20 @@ pub struct Writer {
     retention_days: u32,
     catalog_wide_maintenance: bool,
     snapshot_retention: Duration,
+    maintenance_threads: usize,
     last_flush: Instant,
-    last_commit: Instant,
     inlined_since_flush: usize,
     flush_rows: usize,
     last_compact: Instant,
 }
+
+/// A drained queue with at least this many events commits without waiting
+/// for the batch window.
+const EARLY_COMMIT_EVENTS: usize = 200;
+
+/// Files merged per table and maintenance run (bounds how long one run blocks
+/// the writer; the rest is merged in later runs).
+const MAX_COMPACTED_FILES: usize = 1000;
 
 /// Tables compacted by periodic maintenance.
 const COMPACTED_TABLES: &[&str] = &["events", "issues", "issue_activity", "artifact_files"];
@@ -164,11 +172,17 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     }
     let n_issues = issues.len();
     drop(issues);
-    let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id FROM $S.artifact_bundles"))?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32)))?;
+    let mut stmt = conn.prepare(&ns.sql("SELECT DISTINCT bundle_id, project_id, release FROM $S.artifact_bundles"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as u32, r.get::<_, Option<String>>(2)?)))?;
     let mut bundles = caches.bundles.write().expect("lock");
+    let mut releases = caches.bundle_releases.write().expect("lock");
     for row in rows {
-        bundles.insert(row?);
+        let (b, p, r) = row?;
+        bundles.insert((b, p));
+        if let Some(r) = r {
+            releases.insert((p, r));
+        }
     }
     tracing::info!(
         projects = caches.projects.read().expect("lock").len(),
@@ -195,9 +209,9 @@ impl Writer {
             retention_days: cfg.retention_days,
             catalog_wide_maintenance: cfg.catalog_wide_maintenance,
             snapshot_retention: cfg.snapshot_retention,
+            maintenance_threads: cfg.maintenance_threads,
             last_flush: Instant::now(),
             last_compact: Instant::now(),
-            last_commit: Instant::now(),
             inlined_since_flush: 0,
             flush_rows: cfg.flush_rows.max(1),
         })
@@ -218,17 +232,19 @@ impl Writer {
             };
             match cmd {
                 WriteCmd::Event(e) => {
-                    // Group commit: take what is queued now; wait for more only
-                    // until `batch_window` has passed since the last commit
-                    // started. Under load commits run back to back (latency =
-                    // commit time); at low load there are at most
-                    // 1/batch_window commits (= DuckLake snapshots) per second.
+                    // Group commit. Collect for up to `batch_window` after the
+                    // first event, so a quiet server makes at most one commit
+                    // (= DuckLake snapshot) per window. Under load, commit as
+                    // soon as the queue is drained and the batch is big enough
+                    // to amortize a commit, so throughput is not capped by
+                    // clients / window.
                     let mut batch = vec![*e];
-                    let deadline = self.last_commit + self.batch_window;
+                    let deadline = Instant::now() + self.batch_window;
                     let mut pending = None;
                     while batch.len() < self.batch_max {
                         let next = match self.rx.try_recv() {
                             Ok(cmd) => Ok(cmd),
+                            Err(_) if batch.len() >= EARLY_COMMIT_EVENTS => break,
                             Err(_) if Instant::now() >= deadline => break,
                             Err(_) => self.rx.recv_deadline(deadline),
                         };
@@ -241,7 +257,6 @@ impl Writer {
                             Err(_) => break,
                         }
                     }
-                    self.last_commit = Instant::now();
                     self.write_events(batch);
                     match pending {
                         Some(WriteCmd::Shutdown { reply }) => shutdown_reply = Some(reply),
@@ -272,7 +287,7 @@ impl Writer {
         }
         // Flush inlined data so a clean shutdown leaves everything in Parquet.
         if let Err(e) = self.flush_inlined() {
-            tracing::warn!(error = %e, "final flush failed");
+            tracing::warn!(error = format!("{e:#}"), "final flush failed");
         }
         tracing::info!("writer stopped");
         if let Some(reply) = shutdown_reply {
@@ -289,13 +304,13 @@ impl Writer {
     fn periodic_maintenance(&mut self) {
         if self.last_flush.elapsed() >= self.flush_interval || self.inlined_since_flush >= self.flush_rows {
             if let Err(e) = self.flush_inlined() {
-                tracing::error!(error = %e, "flushing inlined data failed");
+                tracing::error!(error = format!("{e:#}"), "flushing inlined data failed");
             }
             self.last_flush = Instant::now();
         }
         if self.last_compact.elapsed() >= self.compact_interval {
             if let Err(e) = self.compact_and_expire() {
-                tracing::error!(error = %e, "compaction failed");
+                tracing::error!(error = format!("{e:#}"), "compaction failed");
             }
             self.last_compact = Instant::now();
         }
@@ -360,7 +375,7 @@ impl Writer {
             }
             Err(e) => {
                 metrics::counter!("sdl_write_errors_total").increment(1);
-                tracing::error!(events = n, error = %e, "batch failed");
+                tracing::error!(events = n, error = format!("{e:#}"), "batch failed");
             }
         }
         let reply = result.map_err(|e| e.to_string());
@@ -391,6 +406,8 @@ impl Writer {
             }
         }
 
+        // A failed append in an earlier batch may have left rows behind.
+        self.conn.execute_batch(&ns.sql("DELETE FROM $T.staging_events"))?;
         {
             let mut app = self.conn.appender_to_catalog_and_db("staging_events", &ns.staging, "main")?;
             for w in batch {
@@ -525,19 +542,21 @@ impl Writer {
         let ns = &self.ns.clone();
         let now = Utc::now().timestamp_micros();
         self.in_tx(|c| {
-            let existing: i64 = c.query_row(
-                &ns.sql("SELECT count(*) FROM $S.artifact_bundles WHERE bundle_id = ?"),
-                params![b.bundle_id],
-                |r| r.get(0),
-            )?;
-            if existing > 0 {
-                return Ok(());
-            }
             let mut sb =
                 c.prepare(&ns.sql("INSERT INTO $S.artifact_bundles VALUES (?, ?, ?, ?, ?, ?, ?, make_timestamp(?))"))?;
             let mut sf =
                 c.prepare(&ns.sql("INSERT INTO $S.artifact_files VALUES (?, ?, ?::UUID, ?, ?, ?, ?, ?, ?)"))?;
             for p in &b.project_ids {
+                // Idempotent per (bundle, project): the same bundle may be
+                // uploaded for several projects, or uploaded again.
+                let existing: i64 = c.query_row(
+                    &ns.sql("SELECT count(*) FROM $S.artifact_bundles WHERE bundle_id = ? AND project_id = ?"),
+                    params![b.bundle_id, *p as i32],
+                    |r| r.get(0),
+                )?;
+                if existing > 0 {
+                    continue;
+                }
                 sb.execute(params![
                     b.bundle_id,
                     *p as i32,
@@ -565,8 +584,12 @@ impl Writer {
             Ok(())
         })?;
         let mut cache = self.caches.bundles.write().expect("lock");
+        let mut releases = self.caches.bundle_releases.write().expect("lock");
         for p in &b.project_ids {
             cache.insert((b.bundle_id.clone(), *p));
+            if let Some(r) = &b.release {
+                releases.insert((*p, r.clone()));
+            }
         }
         Ok(())
     }
@@ -583,40 +606,69 @@ impl Writer {
     fn compact_and_expire(&mut self) -> Result<()> {
         let ns = &self.ns.clone();
         let started = Instant::now();
+        let mut errors = Vec::new();
         if self.retention_days > 0 {
-            let cutoff = (Utc::now() - chrono::Duration::days(self.retention_days as i64)).timestamp_micros();
-            let deleted = self
+            // Day-aligned cutoff: whole daily partitions are dropped without
+            // writing delete files.
+            let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
+            let cutoff = (today - chrono::Duration::days(self.retention_days as i64)).timestamp_micros();
+            match self
                 .conn
-                .execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])?;
-            if deleted > 0 {
-                tracing::info!(deleted, "retention removed old events");
+                .execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])
+            {
+                Ok(0) => {}
+                Ok(deleted) => tracing::info!(deleted, "retention removed old events"),
+                Err(e) => errors.push(format!("retention: {e}")),
             }
         }
+        // Sorted merges need memory per thread: compact with fewer threads,
+        // then restore the previous setting.
+        let restore_threads: Option<i64> = match self.maintenance_threads {
+            0 => None,
+            n => {
+                let current: Option<i64> =
+                    self.conn.query_row("SELECT current_setting('threads')::BIGINT", [], |r| r.get(0)).ok();
+                if current.is_some_and(|c| c > n as i64) {
+                    let _ = self.conn.execute_batch(&format!("SET threads = {n}"));
+                    current
+                } else {
+                    None
+                }
+            }
+        };
+        // Each step runs even if an earlier one failed, so snapshots keep
+        // expiring when e.g. one table cannot be compacted.
         for table in COMPACTED_TABLES {
             let sql = ns.sql(&format!(
-                "CALL ducklake_merge_adjacent_files($C, '{table}', schema => $N);
-                 CALL ducklake_rewrite_data_files($C, '{table}', schema => $N);"
+                "CALL ducklake_merge_adjacent_files($C, '{table}', schema => $N, max_compacted_files => {MAX_COMPACTED_FILES});
+                 CALL ducklake_rewrite_data_files($C, '{table}', schema => $N, max_compacted_files => {MAX_COMPACTED_FILES});"
             ));
-            self.conn.execute_batch(&sql).with_context(|| format!("compacting {table}"))?;
+            if let Err(e) = self.conn.execute_batch(&sql) {
+                errors.push(format!("compacting {table}: {e}"));
+            }
+        }
+        if let Some(t) = restore_threads {
+            let _ = self.conn.execute_batch(&format!("SET threads = {t}"));
         }
         if self.catalog_wide_maintenance {
             let cutoff = (Utc::now() - chrono::Duration::from_std(self.snapshot_retention).unwrap_or_default())
                 .timestamp_micros();
-            self.conn
-                .execute(
-                    &ns.sql("CALL ducklake_expire_snapshots($C, older_than => make_timestamp(?))"),
-                    params![cutoff],
-                )
-                .context("expiring snapshots")?;
-            self.conn
-                .execute(
-                    &ns.sql("CALL ducklake_cleanup_old_files($C, older_than => make_timestamp(?))"),
-                    params![cutoff],
-                )
-                .context("cleaning up old files")?;
+            for (what, sql) in [
+                ("expiring snapshots", "CALL ducklake_expire_snapshots($C, older_than => make_timestamp(?))"),
+                ("cleaning up old files", "CALL ducklake_cleanup_old_files($C, older_than => make_timestamp(?))"),
+            ] {
+                if let Err(e) = self.conn.execute(&ns.sql(sql), params![cutoff]) {
+                    errors.push(format!("{what}: {e}"));
+                }
+            }
         }
         metrics::histogram!("sdl_compact_seconds").record(started.elapsed().as_secs_f64());
-        tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");
-        Ok(())
+        if errors.is_empty() {
+            tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");
+            Ok(())
+        } else {
+            metrics::counter!("sdl_maintenance_errors_total").increment(errors.len() as u64);
+            Err(anyhow!(errors.join("; ")))
+        }
     }
 }

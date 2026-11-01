@@ -14,6 +14,12 @@ use uuid::Uuid;
 
 pub const MAX_TAG_KEY: usize = 200;
 pub const MAX_TAG_VALUE: usize = 200;
+/// Explicit tags kept per event (Relay keeps a similar number).
+pub const MAX_TAGS: usize = 200;
+/// Exceptions in a chain / threads kept per event.
+pub const MAX_EXCEPTIONS: usize = 32;
+/// Frames kept per stack trace (the first and last half, like Sentry).
+pub const MAX_FRAMES: usize = 250;
 
 #[derive(Debug, Clone)]
 pub struct NormalizeContext {
@@ -125,6 +131,10 @@ pub fn normalize_event(mut raw: Value, ctx: &NormalizeContext) -> Value {
     for key in ["exception", "threads"] {
         if let Some(v) = ev.remove(key) {
             let mut values = to_values(v);
+            if values.len() > MAX_EXCEPTIONS {
+                // Keep the newest (last) ones: they carry the title.
+                values.drain(..values.len() - MAX_EXCEPTIONS);
+            }
             for val in &mut values {
                 normalize_exception_like(val);
             }
@@ -300,8 +310,9 @@ fn user_key(ev: &Value) -> Option<String> {
 /// Tags users can facet on: explicit tags plus the ones Sentry derives.
 fn derive_tags(ev: &Value, handled: Option<bool>, user_key: Option<&str>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut push = |k: &str, v: &str| {
-        if !v.is_empty() && !out.iter().any(|(ek, _)| ek == k) {
+        if !v.is_empty() && seen.insert(k.to_string()) {
             out.push((truncate(k, MAX_TAG_KEY), truncate(v, MAX_TAG_VALUE)));
         }
     };
@@ -423,6 +434,13 @@ fn normalize_stacktrace(st: &mut Value) {
     let Some(o) = st.as_object_mut() else { return };
     if let Some(Value::Array(frames)) = o.get_mut("frames") {
         frames.retain(Value::is_object);
+        if frames.len() > MAX_FRAMES {
+            // Keep the outermost and innermost frames, drop the middle.
+            let keep_tail = MAX_FRAMES / 2;
+            let cut_from = MAX_FRAMES - keep_tail;
+            let cut_to = frames.len() - keep_tail;
+            frames.drain(cut_from..cut_to);
+        }
         for f in frames.iter_mut() {
             let fo = f.as_object_mut().expect("object");
             for k in ["lineno", "colno"] {
@@ -553,6 +571,7 @@ fn normalize_tags(v: Value) -> Map<String, Value> {
             (!k.is_empty() && !v.is_empty())
                 .then(|| (truncate(k, MAX_TAG_KEY), Value::String(truncate(&v, MAX_TAG_VALUE))))
         })
+        .take(MAX_TAGS)
         .collect()
 }
 
@@ -677,6 +696,26 @@ mod tests {
         assert!(p.tags.contains(&("handled".into(), "no".into())));
         assert!(p.tags.contains(&("mechanism".into(), "onerror".into())));
         assert_eq!(p.trace_id, None);
+    }
+
+    #[test]
+    fn caps_tags_frames_and_exceptions() {
+        let tags: serde_json::Map<String, Value> = (0..5000).map(|i| (format!("k{i}"), json!("v"))).collect();
+        let frames: Vec<Value> = (0..1000).map(|i| json!({"function": format!("f{i}")})).collect();
+        let excs: Vec<Value> =
+            (0..100).map(|i| json!({"type": format!("E{i}"), "stacktrace": {"frames": frames}})).collect();
+        let started = std::time::Instant::now();
+        let ev = normalize_event(json!({"tags": tags, "exception": excs}), &ctx());
+        let p = ProcessedEvent::from_normalized(ev, ctx().received_at);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(p.payload["tags"].as_object().unwrap().len(), MAX_TAGS);
+        let values = p.payload["exception"]["values"].as_array().unwrap();
+        assert_eq!(values.len(), MAX_EXCEPTIONS);
+        assert_eq!(values.last().unwrap()["type"], "E99");
+        let fr = values[0]["stacktrace"]["frames"].as_array().unwrap();
+        assert_eq!(fr.len(), MAX_FRAMES);
+        assert_eq!(fr[0]["function"], "f0");
+        assert_eq!(fr.last().unwrap()["function"], "f999");
     }
 
     #[test]

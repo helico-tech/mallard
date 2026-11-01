@@ -3581,6 +3581,7 @@ dependencies = [
 name = "sdl-client"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "reqwest",
  "sdl-types",
  "serde",
@@ -4449,6 +4450,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

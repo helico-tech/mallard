@@ -71,7 +71,25 @@ impl Req {
     }
 }
 
-pub type Res<T> = Result<T, String>;
+/// A failed load: a printable one-line message, and whether it was a
+/// network-level failure (server unreachable) rather than an API error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchError {
+    pub message: String,
+    pub offline: bool,
+}
+
+#[cfg(test)]
+impl FetchError {
+    pub fn api(message: impl Into<String>) -> Self {
+        FetchError { message: message.into(), offline: false }
+    }
+    pub fn offline(message: impl Into<String>) -> Self {
+        FetchError { message: message.into(), offline: true }
+    }
+}
+
+pub type Res<T> = Result<T, FetchError>;
 
 fn is_nav(code: KeyCode) -> bool {
     matches!(
@@ -91,12 +109,35 @@ pub enum Resp {
     Info(Res<ServerInfo>),
     Projects(Res<Vec<Project>>),
     Issues(IssuesKey, Res<IssueList>),
-    Stats { project: String, window: usize, result: Res<ProjectStats> },
-    Issue { id: String, result: Res<IssueDetail> },
-    Events { issue: String, append: bool, result: Res<EventList> },
-    Event { event_id: String, result: Res<EventDetail> },
-    SetStatus { id: String, status: IssueStatus, result: Res<IssueDetail> },
-    Trace { trace_id: String, result: Res<EventList> },
+    Stats {
+        project: String,
+        window: usize,
+        result: Res<ProjectStats>,
+    },
+    Issue {
+        id: String,
+        result: Res<IssueDetail>,
+    },
+    Events {
+        issue: String,
+        append: bool,
+        result: Res<EventList>,
+    },
+    Event {
+        event_id: String,
+        result: Res<EventDetail>,
+    },
+    SetStatus {
+        id: String,
+        status: IssueStatus,
+        result: Res<IssueDetail>,
+    },
+    Trace {
+        trace_id: String,
+        result: Res<EventList>,
+    },
+    /// A background load panicked (message).
+    Panicked(String),
 }
 
 impl Resp {
@@ -111,6 +152,7 @@ impl Resp {
             Resp::Event { .. } => "event",
             Resp::SetStatus { .. } => "status",
             Resp::Trace { .. } => "trace",
+            Resp::Panicked(_) => "panicked",
         }
     }
 }
@@ -164,6 +206,7 @@ pub struct TraceView {
     pub state: TableState,
     /// View to return to on Esc.
     pub back: Option<View>,
+    pub error: Option<String>,
 }
 
 /// One frame of the stack trace view, flattened over the exception chain.
@@ -193,6 +236,10 @@ pub struct Detail {
     pub json: Vec<String>,
     /// Waiting for an older page to step to the next older event.
     pub want_older: bool,
+    /// Last failed load of the issue itself, of the event list, of the shown event.
+    pub error: Option<String>,
+    pub events_error: Option<String>,
+    pub event_error: Option<String>,
     pub tab: Option<Tab>,
     pub scroll: usize,
     pub max_scroll: usize,
@@ -241,11 +288,13 @@ impl Detail {
         self.stack_frames().iter().position(|f| f.frame.in_app).unwrap_or(0)
     }
 
-    fn set_event(&mut self, e: EventDetail) {
+    /// `e` must already be sanitized; `json` is the pretty payload, cleaned per line.
+    fn set_event(&mut self, e: EventDetail, json: Vec<String>) {
         self.exceptions = ev::exceptions(&e.payload);
         self.crumbs = ev::breadcrumbs(&e.payload);
-        self.json = serde_json::to_string_pretty(&e.payload).unwrap_or_default().lines().map(str::to_string).collect();
+        self.json = json;
         self.event = Some(e);
+        self.event_error = None;
         self.frame = self.default_frame();
         self.crumbs_state.select(if self.crumbs.is_empty() { None } else { Some(0) });
         if self.tab() == Tab::Json {
@@ -290,8 +339,15 @@ pub struct App {
     pub trace: Option<TraceView>,
     pub overlay: Overlay,
     pub toast: Option<Toast>,
-    /// Last failed request; cleared by the next successful one.
-    pub error: Option<String>,
+    /// Server unreachable (network error of any load); cleared by any success.
+    pub offline: Option<String>,
+    /// API error of the info / projects loads (e.g. invalid token).
+    pub global_error: Option<String>,
+    /// Last failed load of the issue list / the stats panel.
+    pub issues_error: Option<String>,
+    pub stats_error: Option<String>,
+    /// A background load panicked; the standalone TUI quits on this.
+    pub fatal: Option<String>,
     pub pending: HashSet<&'static str>,
     pub spinner: usize,
     pub now: DateTime<Utc>,
@@ -327,7 +383,11 @@ impl App {
             trace: None,
             overlay: Overlay::None,
             toast: None,
-            error: None,
+            offline: None,
+            global_error: None,
+            issues_error: None,
+            stats_error: None,
+            fatal: None,
             pending: HashSet::new(),
             spinner: 0,
             now: Utc::now(),
@@ -445,6 +505,14 @@ impl App {
         }
         if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('q')) {
             self.quit = true;
+            return vec![];
+        }
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            // Only plain keys run actions; ctrl-r must not resolve an issue.
+            match self.input.as_mut() {
+                Some(input) if k.modifiers == KeyModifiers::CONTROL && k.code == KeyCode::Char('u') => input.clear(),
+                _ => self.ignored = true,
+            }
             return vec![];
         }
         match self.overlay.clone() {
@@ -587,7 +655,6 @@ impl App {
             KeyCode::Backspace => {
                 input.pop();
             }
-            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => input.clear(),
             KeyCode::Char(c) => input.push(c),
             _ => {}
         }
@@ -821,6 +888,10 @@ impl App {
         }
         let target = target as usize;
         if target >= d.events.len() {
+            if d.want_older || self.pending.contains("events") {
+                // The older page is already on its way.
+                return vec![];
+            }
             if let (Some(cursor), Some(project)) = (d.next_cursor.clone(), project) {
                 d.want_older = true;
                 let r = vec![Req::Events { project, issue: d.id.clone(), before: Some(cursor) }];
@@ -849,37 +920,78 @@ impl App {
         self.track(r)
     }
 
+    /// Remember a network failure (shown as "offline").
+    fn note(&mut self, e: &FetchError) {
+        if e.offline {
+            self.offline = Some(e.message.clone());
+        }
+    }
+
     pub fn on_response(&mut self, resp: Resp) -> Vec<Req> {
+        use crate::fmt::{clean, sanitize};
         self.pending.remove(resp.kind());
+        let ok = !matches!(
+            &resp,
+            Resp::Info(Err(_))
+                | Resp::Projects(Err(_))
+                | Resp::Issues(_, Err(_))
+                | Resp::Stats { result: Err(_), .. }
+                | Resp::Issue { result: Err(_), .. }
+                | Resp::Events { result: Err(_), .. }
+                | Resp::Event { result: Err(_), .. }
+                | Resp::SetStatus { result: Err(_), .. }
+                | Resp::Trace { result: Err(_), .. }
+                | Resp::Panicked(_)
+        );
+        if ok {
+            // Any answer from the server means it is reachable again.
+            self.offline = None;
+        }
         let mut out = vec![];
         match resp {
+            Resp::Panicked(msg) => {
+                let msg = clean(&msg);
+                self.toast(format!("internal error: {msg}"), true);
+                self.fatal = Some(msg);
+            }
             Resp::Info(r) => match r {
                 Ok(i) => {
-                    self.info = Some(i);
-                    self.error = None;
+                    self.info = Some(sanitize(i, false));
+                    self.global_error = None;
                 }
-                Err(e) => self.error = Some(e),
+                Err(e) => {
+                    self.note(&e);
+                    if !e.offline {
+                        self.global_error = Some(e.message);
+                    }
+                }
             },
             Resp::Projects(r) => match r {
                 Ok(ps) => {
-                    self.projects = ps;
+                    self.projects = sanitize(ps, false);
                     self.projects_loaded = true;
-                    let had = self.project.is_some();
+                    self.global_error = None;
+                    let before = self.project.clone();
                     match self.current_project().map(|p| p.slug.clone()) {
                         Some(slug) => self.project = Some(slug),
-                        None if had => {
-                            let p = self.project.clone().unwrap_or_default();
-                            self.error = Some(format!("project {p:?} not found (press p to pick one)"));
+                        None if before.is_some() => {
+                            let p = clean(before.as_deref().unwrap_or_default());
+                            self.issues_error = Some(format!("project {p:?} not found (press p to pick one)"));
                         }
-                        None => {
-                            self.project = self.projects.first().map(|p| p.slug.clone());
-                        }
+                        None => self.project = self.projects.first().map(|p| p.slug.clone()),
                     }
-                    if !had && self.project.is_some() {
+                    // Also when an id (`-p 1`) became its slug: loads made with
+                    // the old string are dropped as stale, so start new ones.
+                    if self.project.is_some() && self.project != before {
                         out.extend(self.reload_list());
                     }
                 }
-                Err(e) => self.error = Some(e),
+                Err(e) => {
+                    self.note(&e);
+                    if !e.offline {
+                        self.global_error = Some(e.message);
+                    }
+                }
             },
             Resp::Issues(key, r) => {
                 if Some(&key) != self.issues_key().as_ref() {
@@ -888,8 +1000,9 @@ impl App {
                 match r {
                     Ok(list) => {
                         let keep = self.selected_issue().map(|i| i.id.clone());
-                        self.issues = list.issues;
+                        self.issues = sanitize(list, false).issues;
                         self.issues_loaded = true;
+                        self.issues_error = None;
                         let idx = keep
                             .and_then(|id| self.issues.iter().position(|i| i.id == id))
                             .or_else(|| {
@@ -897,9 +1010,11 @@ impl App {
                             })
                             .or(Some(0));
                         self.issues_state.select(if self.issues.is_empty() { None } else { idx });
-                        self.error = None;
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => {
+                        self.note(&e);
+                        self.issues_error = Some(e.message);
+                    }
                 }
             }
             Resp::Stats { project, window, result } => {
@@ -907,25 +1022,42 @@ impl App {
                     return vec![];
                 }
                 match result {
-                    Ok(s) => self.stats = Some(s),
-                    Err(e) => self.error = Some(e),
+                    Ok(s) => {
+                        self.stats = Some(sanitize(s, false));
+                        self.stats_error = None;
+                    }
+                    Err(e) => {
+                        self.note(&e);
+                        self.stats_error = Some(e.message);
+                    }
                 }
             }
             Resp::Issue { id, result } => {
+                if let Err(e) = &result {
+                    self.note(e);
+                }
                 if let Some(d) = self.detail.as_mut().filter(|d| d.id == id) {
                     match result {
-                        Ok(detail) => d.detail = Some(detail),
-                        Err(e) => self.error = Some(e),
+                        Ok(detail) => {
+                            d.detail = Some(sanitize(detail, false));
+                            d.error = None;
+                        }
+                        Err(e) => d.error = Some(e.message),
                     }
                 }
             }
             Resp::Events { issue, append, result } => {
+                if let Err(e) = &result {
+                    self.note(e);
+                }
                 let project = self.project.clone();
                 let Some(d) = self.detail.as_mut().filter(|d| d.id == issue) else {
                     return vec![];
                 };
                 match result {
                     Ok(list) => {
+                        let list = sanitize(list, false);
+                        d.events_error = None;
                         let before = d.events.len();
                         if append {
                             d.events.extend(list.events);
@@ -954,32 +1086,52 @@ impl App {
                             out.push(Req::Event { project, issue: d.id.clone(), event_id: e.event_id.clone() });
                         }
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => {
+                        d.want_older = false;
+                        d.events_error = Some(e.message);
+                    }
                 }
             }
             Resp::Event { event_id, result } => {
+                if let Err(e) = &result {
+                    self.note(e);
+                }
                 if let Some(d) = self.detail.as_mut().filter(|d| d.current_event_id() == Some(event_id.as_str())) {
                     match result {
-                        Ok(e) => d.set_event(e),
-                        Err(e) => self.error = Some(e),
+                        Ok(e) => {
+                            // JSON view from the raw payload (serde escapes control
+                            // characters in strings), cleaned per line for C1 codes.
+                            let json = serde_json::to_string_pretty(&e.payload)
+                                .unwrap_or_default()
+                                .lines()
+                                .map(clean)
+                                .collect();
+                            d.set_event(sanitize(e, false), json);
+                        }
+                        Err(e) => d.event_error = Some(e.message),
                     }
                 }
             }
             Resp::Trace { trace_id, result } => {
+                if let Err(e) = &result {
+                    self.note(e);
+                }
                 if let Some(t) = self.trace.as_mut().filter(|t| t.trace_id == trace_id) {
                     match result {
                         Ok(list) => {
-                            t.events = list.events;
+                            t.events = sanitize(list, false).events;
                             t.loaded = true;
+                            t.error = None;
                             t.state.select(if t.events.is_empty() { None } else { Some(0) });
                         }
-                        Err(e) => self.error = Some(e),
+                        Err(e) => t.error = Some(e.message),
                     }
                 }
             }
             Resp::SetStatus { id, status, result } => {
                 match result {
                     Ok(d) => {
+                        let d = sanitize(d, false);
                         let verb = match status {
                             IssueStatus::Resolved => "resolved",
                             IssueStatus::Ignored => "ignored",
@@ -990,7 +1142,10 @@ impl App {
                             det.detail = Some(d);
                         }
                     }
-                    Err(e) => self.toast(format!("could not update {id}: {e}"), true),
+                    Err(e) => {
+                        self.note(&e);
+                        self.toast(format!("could not update {}: {}", clean(&id), e.message), true);
+                    }
                 }
                 out.extend(self.list_requests());
             }
@@ -1109,6 +1264,64 @@ mod tests {
         assert_eq!(app.view, View::Trace);
         app.on_key(KeyEvent::from(KeyCode::Esc));
         assert_eq!(app.view, View::Issues);
+    }
+
+    #[test]
+    fn ctrl_and_alt_keys_do_not_run_actions() {
+        let mut app = loaded_app();
+        let r = app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(r.is_empty() && app.ignored);
+        assert_eq!(app.issues[0].status, IssueStatus::Unresolved);
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT));
+        assert!(app.ignored && app.sort == 0);
+        app.on_key(key('/'));
+        app.on_key(key('x'));
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.as_deref(), Some(""));
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn project_id_is_replaced_by_slug_and_list_reloaded() {
+        let mut app = App::new("http://x", Some("1".into()));
+        let r = app.start();
+        let old = match &r[3] {
+            Req::Issues(k) => k.clone(),
+            other => panic!("{other:?}"),
+        };
+        let r = app.on_response(Resp::Projects(Ok(projects())));
+        assert_eq!(app.project.as_deref(), Some("web"));
+        assert!(r.iter().any(|r| matches!(r, Req::Issues(k) if k.project == "web")), "{r:?}");
+        // The response to the old request is stale and dropped.
+        app.on_response(Resp::Issues(old, Ok(IssueList { issues: issues(), window_start: now(), window_end: now() })));
+        assert!(!app.issues_loaded);
+        // With the slug already given, no extra reload.
+        let mut app = App::new("http://x", Some("web".into()));
+        app.start();
+        assert!(app.on_response(Resp::Projects(Ok(projects()))).is_empty());
+    }
+
+    #[test]
+    fn older_page_is_requested_once() {
+        let mut app = detail_app();
+        let d = app.detail.as_mut().unwrap();
+        d.next_cursor = Some("cursor-1".into());
+        d.event_idx = 1;
+        let r = app.on_key(key('['));
+        assert!(matches!(&r[..], [Req::Events { before: Some(c), .. }] if c == "cursor-1"));
+        assert!(app.on_key(key('[')).is_empty(), "second press must not load the same page again");
+    }
+
+    #[test]
+    fn view_errors_are_kept_per_view() {
+        let mut app = detail_app();
+        app.on_response(Resp::Event { event_id: "e1".into(), result: Err(FetchError::api("boom")) });
+        assert_eq!(app.detail.as_ref().unwrap().event_error.as_deref(), Some("boom"));
+        app.on_response(Resp::Info(Ok(info())));
+        assert_eq!(app.detail.as_ref().unwrap().event_error.as_deref(), Some("boom"));
+        assert!(app.offline.is_none());
     }
 
     #[test]

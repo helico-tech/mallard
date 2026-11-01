@@ -111,7 +111,7 @@ pub fn table_options() -> Vec<String> {
         "ALTER TABLE $S.events SET (parquet_compression = 'zstd')".into(),
         // Payloads are large and never filtered on: no min/max stats.
         "ALTER TABLE $S.events SET (skip_stats_columns = ['payload', 'message', 'exception_value'])".into(),
-        "ALTER TABLE $S.events SET (target_file_size = '256MB')".into(),
+        "ALTER TABLE $S.events SET (target_file_size = '64MB')".into(),
         "ALTER TABLE $S.issues SET (data_inlining_row_limit = 10000)".into(),
         "ALTER TABLE $S.issue_activity SET (data_inlining_row_limit = 10000)".into(),
         "ALTER TABLE $S.artifact_files SET (data_inlining_row_limit = 10000)".into(),

@@ -32,7 +32,7 @@ flate2.workspace = true
 xxhash-rust.workspace = true
 duckdb = { version = "=1.20000.1", features = ["bundled", "json", "parquet"] }
 axum = { version = "0.8", features = ["multipart"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["cors", "decompression-full", "trace", "limit", "catch-panic"] }
 utoipa-scalar = { version = "0.4", features = ["axum"] }
 object_store = { version = "0.14", features = ["aws", "azure"] }

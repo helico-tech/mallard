@@ -108,11 +108,12 @@ pub async fn send(dsn_str: &str, message: &str) -> Result<(Dsn, String)> {
             .ok()
             .and_then(|v| v.get("detail").or_else(|| v.get("error")).and_then(Value::as_str).map(str::to_string))
             .unwrap_or(text);
-        bail!("server rejected the event ({}): {detail}", status.as_u16());
+        bail!("server rejected the event ({}): {}", status.as_u16(), crate::fmt::clean(&detail));
     }
     let id = serde_json::from_str::<Value>(&text)
         .ok()
         .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+        .map(|id| crate::fmt::clean(&id))
         .unwrap_or(event_id);
     Ok((dsn, id))
 }

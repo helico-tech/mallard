@@ -67,8 +67,8 @@ impl Envelope {
             let item_headers = parse_obj(line).map_err(EnvelopeError::InvalidItemHeader)?;
             let payload = match item_headers.get("length").and_then(Value::as_u64) {
                 Some(len) => {
-                    let len = len as usize;
-                    if pos + len > data.len() {
+                    let len = usize::try_from(len).unwrap_or(usize::MAX);
+                    if len > data.len() - pos {
                         return Err(EnvelopeError::Truncated);
                     }
                     let p = data.slice(pos..pos + len);
@@ -145,6 +145,12 @@ mod tests {
         let env = Envelope::parse(Bytes::from_static(b"{}\n{\"type\":\"attachment\",\"length\":0}\n\n")).unwrap();
         assert_eq!(env.items.len(), 1);
         assert!(env.items[0].payload.is_empty());
+    }
+
+    #[test]
+    fn huge_length_does_not_overflow() {
+        let raw = b"{}\n{\"type\":\"event\",\"length\":18446744073709551615}\n{}";
+        assert_eq!(Envelope::parse(Bytes::from_static(raw)).unwrap_err(), EnvelopeError::Truncated);
     }
 
     #[test]

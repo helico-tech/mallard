@@ -25,10 +25,11 @@ pub struct SourceMapRef {
     pub debug_id: Option<Uuid>,
 }
 
+#[derive(Clone)]
 pub struct ResolvedSourceMap {
-    pub map: SourceMap,
+    pub map: Arc<SourceMap>,
     /// The minified file, used to recover original function names.
-    pub minified: Option<SourceView>,
+    pub minified: Option<Arc<SourceView>>,
     /// URL (or bundle path) of the map; relative sources resolve against it.
     pub map_url: String,
     /// "debug-id" or "release", reported in `frame.data.resolved_with`.
@@ -282,8 +283,8 @@ mod tests {
         b.add_raw(0, 21, 2, 9, Some(src), Some(user), false); // "e.name" -> user.name
         let sm = b.into_sourcemap();
         ResolvedSourceMap {
-            map: sm,
-            minified: Some(SourceView::new(Arc::from(minified))),
+            map: Arc::new(sm),
+            minified: Some(Arc::new(SourceView::new(Arc::from(minified)))),
             map_url: "https://cdn.test/assets/main.js.map".into(),
             resolved_with: "debug-id",
         }

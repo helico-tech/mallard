@@ -30,6 +30,12 @@ pub const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 pub const CHUNKS_PER_REQUEST: usize = 64;
 pub const MAX_REQUEST_SIZE: usize = 32 * 1024 * 1024;
 pub const MAX_BUNDLE_SIZE: usize = 512 * 1024 * 1024;
+/// Max size of one file read from a bundle (maps, minified sources).
+pub const MAX_ENTRY_SIZE: u64 = 64 * 1024 * 1024;
+/// Max size of manifest.json.
+pub const MAX_MANIFEST_SIZE: u64 = 16 * 1024 * 1024;
+/// Max distinct minified files looked up per event.
+pub const MAX_REFS_PER_EVENT: usize = 50;
 
 #[derive(Debug, Deserialize)]
 pub struct AssembleRequest {
@@ -91,7 +97,13 @@ struct Manifest {
 pub fn index_bundle(zip_bytes: &[u8]) -> Result<(Vec<NewBundleFile>, Option<String>, Option<String>)> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).context("bundle is not a zip file")?;
     let mut manifest = String::new();
-    zip.by_name("manifest.json").context("bundle has no manifest.json")?.read_to_string(&mut manifest)?;
+    zip.by_name("manifest.json")
+        .context("bundle has no manifest.json")?
+        .take(MAX_MANIFEST_SIZE + 1)
+        .read_to_string(&mut manifest)?;
+    if manifest.len() as u64 > MAX_MANIFEST_SIZE {
+        bail!("manifest.json is too large");
+    }
     let m: Manifest = serde_json::from_str(&manifest).context("invalid manifest.json")?;
     let mut files = Vec::new();
     for (path, f) in m.files {
@@ -131,12 +143,12 @@ pub struct SourceMaps {
     storage: Option<Storage>,
     /// Bundle zips by object key.
     bundles: Cache<String, Bytes>,
-    /// Parsed maps by (bundle, zip path).
-    maps: Cache<(String, String), Option<ParsedMap>>,
+    /// Parsed maps by (bundle, zip path). Failures are not cached.
+    maps: Cache<(String, String), ParsedMap>,
     /// Lookup results by (project, debug id or release/url key).
     lookups: Cache<(u32, String), Option<ArtifactLocation>>,
     /// Checksums currently being assembled.
-    assembling: tokio::sync::Mutex<std::collections::HashSet<String>>,
+    assembling: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl SourceMaps {
@@ -153,9 +165,8 @@ impl SourceMaps {
                 .max_capacity(budget / 2)
                 // A parsed map costs roughly 4x its token count in bytes; we
                 // only know the source size cheaply, so weigh by tokens.
-                .weigher(|_k: &(String, String), v: &Option<ParsedMap>| {
-                    v.as_ref()
-                        .map_or(64, |m| (m.map.get_token_count() as usize * 24 + 1024).try_into().unwrap_or(u32::MAX))
+                .weigher(|_k: &(String, String), m: &ParsedMap| {
+                    (m.map.get_token_count() as usize * 24 + 1024).try_into().unwrap_or(u32::MAX)
                 })
                 .time_to_idle(Duration::from_secs(3600))
                 .build(),
@@ -226,18 +237,16 @@ impl SourceMaps {
         if req.chunks.is_empty() {
             return Ok(AssembleResponse { state: "not_found", missing_chunks: vec![], detail: None });
         }
-        {
-            let mut busy = self.assembling.lock().await;
-            if !busy.insert(req.checksum.clone()) {
-                return Ok(AssembleResponse::state("assembling"));
-            }
+        if !self.assembling.lock().expect("lock").insert(req.checksum.clone()) {
+            return Ok(AssembleResponse::state("assembling"));
         }
+        // Removed on drop, also when the client disconnects mid-assembly.
+        let _guard = AssemblingGuard { set: self.assembling.clone(), checksum: req.checksum.clone() };
         let result = self.do_assemble(db, storage, &req, project_ids, &object_key).await;
-        self.assembling.lock().await.remove(&req.checksum);
         match result {
             Ok(()) => Ok(AssembleResponse::state("ok")),
             Err(e) => {
-                tracing::warn!(checksum = %req.checksum, error = %e, "assembling bundle failed");
+                tracing::warn!(checksum = %req.checksum, error = format!("{e:#}"), "assembling bundle failed");
                 Ok(AssembleResponse::error(e.to_string()))
             }
         }
@@ -313,7 +322,7 @@ impl SourceMaps {
                 .lookups
                 .get_with(key, async {
                     db.read(move |c, ns| read::find_by_debug_id(c, ns, project_id, id)).await.unwrap_or_else(|e| {
-                        tracing::warn!(error = %e, "debug id lookup failed");
+                        tracing::warn!(error = format!("{e:#}"), "debug id lookup failed");
                         None
                     })
                 })
@@ -323,6 +332,9 @@ impl SourceMaps {
             }
         }
         let release = release?.to_string();
+        if !db.caches.project_has_release(project_id, &release) {
+            return None;
+        }
         let dist = dist.map(str::to_string);
         let candidates = symbolicate::url_candidates(&r.abs_path);
         let key = (project_id, format!("url:{release}\0{}\0{}", dist.as_deref().unwrap_or(""), r.abs_path));
@@ -332,7 +344,7 @@ impl SourceMaps {
                 db.read(move |c, ns| read::find_by_url(c, ns, project_id, &release, dist.as_deref(), &candidates))
                     .await
                     .unwrap_or_else(|e| {
-                        tracing::warn!(error = %e, "release artifact lookup failed");
+                        tracing::warn!(error = format!("{e:#}"), "release artifact lookup failed");
                         None
                     })
             })
@@ -340,38 +352,34 @@ impl SourceMaps {
         loc.map(|l| (l, "release"))
     }
 
-    async fn load_map(&self, loc: &ArtifactLocation, resolved_with: &'static str, abs_path: &str) -> Option<ParsedMap> {
+    async fn load_map(&self, loc: &ArtifactLocation, resolved_with: &'static str) -> Option<ParsedMap> {
         let storage = self.storage.as_ref()?;
         let key = (loc.bundle_id.clone(), loc.map_path.clone());
         let loc = loc.clone();
-        let abs_path = abs_path.to_string();
-        self.maps
-            .get_with(key, async move {
-                let zip = match self
+        let result = self
+            .maps
+            .try_get_with(key, async move {
+                let zip = self
                     .bundles
                     .try_get_with(loc.object_key.clone(), async {
                         storage.get(&loc.object_key).await?.ok_or_else(|| anyhow!("bundle object missing"))
                     })
                     .await
-                {
-                    Ok(z) => z,
-                    Err(e) => {
-                        tracing::warn!(bundle = %loc.bundle_id, error = %e, "loading bundle failed");
-                        return None;
-                    }
-                };
+                    .map_err(|e| anyhow!("loading bundle {}: {e:#}", loc.bundle_id))?;
                 let parsed =
-                    tokio::task::spawn_blocking(move || parse_from_bundle(&zip, &loc, resolved_with, &abs_path)).await;
-                match parsed {
-                    Ok(Ok(m)) => Some(Arc::new(m)),
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, "parsing sourcemap failed");
-                        None
-                    }
-                    Err(_) => None,
-                }
+                    tokio::task::spawn_blocking(move || parse_from_bundle(&zip, &loc, resolved_with)).await??;
+                anyhow::Ok(Arc::new(parsed))
             })
-            .await
+            .await;
+        match result {
+            Ok(m) => Some(m),
+            Err(e) => {
+                // Not cached: a transient storage error must not disable
+                // symbolication for this map.
+                tracing::warn!(error = format!("{e:#}"), "loading sourcemap failed");
+                None
+            }
+        }
     }
 
     /// Resolve every minified file referenced by the event's frames.
@@ -382,50 +390,68 @@ impl SourceMaps {
         }
         let release = event.get("release").and_then(Value::as_str);
         let dist = event.get("dist").and_then(Value::as_str);
-        for r in symbolicate::collect_refs(event) {
+        for r in symbolicate::collect_refs(event).into_iter().take(MAX_REFS_PER_EVENT) {
             if let Some((loc, how)) = self.locate(db, project_id, &r, release, dist).await
-                && let Some(m) = self.load_map(&loc, how, &r.abs_path).await
+                && let Some(m) = self.load_map(&loc, how).await
             {
-                out.insert(r.abs_path.clone(), m);
+                // The map url depends on the frame's origin (`~/x.map`), so
+                // it is set per event on a cheap clone of the cached map.
+                let mut per_event = (*m).clone();
+                per_event.map_url = map_url_for(loc.map_url.as_deref(), &r.abs_path);
+                out.insert(r.abs_path.clone(), Arc::new(per_event));
             }
         }
         out
     }
 }
 
+struct AssemblingGuard {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    checksum: String,
+}
+
+impl Drop for AssemblingGuard {
+    fn drop(&mut self) {
+        self.set.lock().expect("lock").remove(&self.checksum);
+    }
+}
+
+/// Read one bundle entry, ignoring the size the zip header claims.
 fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, path: &str) -> Result<Vec<u8>> {
-    let mut f = zip.by_name(path).with_context(|| format!("bundle entry {path} missing"))?;
-    let mut buf = Vec::with_capacity(f.size() as usize);
-    f.read_to_end(&mut buf)?;
+    let f = zip.by_name(path).with_context(|| format!("bundle entry {path} missing"))?;
+    let mut buf = Vec::new();
+    f.take(MAX_ENTRY_SIZE + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_ENTRY_SIZE {
+        bail!("bundle entry {path} is larger than {MAX_ENTRY_SIZE} bytes");
+    }
     Ok(buf)
 }
 
-fn parse_from_bundle(
-    zip_bytes: &Bytes,
-    loc: &ArtifactLocation,
-    how: &'static str,
-    abs_path: &str,
-) -> Result<ResolvedSourceMap> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..]))?;
-    let map_bytes = read_entry(&mut zip, &loc.map_path)?;
-    let map = symbolicate::parse_sourcemap(&map_bytes)?;
-    let minified = match &loc.minified_path {
-        Some(p) => {
-            read_entry(&mut zip, p).ok().and_then(|b| String::from_utf8(b).ok()).map(|s| SourceView::new(Arc::from(s)))
-        }
-        None => None,
-    };
-    // Relative `sources` resolve against the map's location. With `~/x.map`
-    // urls we use the frame's own origin.
-    let map_url = match loc.map_url.as_deref() {
+/// Relative `sources` resolve against the map's location. `~/x.map` urls
+/// resolve against the frame's own origin.
+fn map_url_for(map_url: Option<&str>, abs_path: &str) -> String {
+    match map_url {
         Some(u) if u.starts_with("~/") => match url::Url::parse(abs_path) {
             Ok(base) => base.join(&u[1..]).map(|u| u.to_string()).unwrap_or_else(|_| u.to_string()),
             Err(_) => u[1..].to_string(),
         },
         Some(u) => u.to_string(),
         None => format!("{abs_path}.map"),
+    }
+}
+
+fn parse_from_bundle(zip_bytes: &Bytes, loc: &ArtifactLocation, how: &'static str) -> Result<ResolvedSourceMap> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..]))?;
+    let map_bytes = read_entry(&mut zip, &loc.map_path)?;
+    let map = Arc::new(symbolicate::parse_sourcemap(&map_bytes)?);
+    let minified = match &loc.minified_path {
+        Some(p) => read_entry(&mut zip, p)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| Arc::new(SourceView::new(Arc::from(s)))),
+        None => None,
     };
-    Ok(ResolvedSourceMap { map, minified, map_url, resolved_with: how })
+    Ok(ResolvedSourceMap { map, minified, map_url: String::new(), resolved_with: how })
 }
 
 #[cfg(test)]

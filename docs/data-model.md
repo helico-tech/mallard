@@ -111,10 +111,11 @@ writer thread: take everything queued (group commit)
    3. answer every request of the batch (200 only after commit)
 ```
 
-- **Group commit.** The writer commits as soon as the previous commit is done,
-  taking everything that queued up meanwhile; `SDL_BATCH_WINDOW` (100 ms) is
-  only the minimum gap between commits. Under load batches grow and latency
-  stays at the commit time; at low load it caps snapshots at 10/s.
+- **Group commit.** After the first event the writer collects for up to
+  `SDL_BATCH_WINDOW` (500 ms), so a quiet server makes at most two commits
+  (snapshots) per second. When 200+ events are queued it commits at once, so
+  under load latency is the commit time and throughput is not capped by the
+  window.
 - **Data inlining.** Batches of up to 1000 rows are stored inside the catalog
   (no Parquet file). A flush (every `SDL_FLUSH_INTERVAL`, or after
   `SDL_FLUSH_ROWS` inlined rows) writes them out as one sorted file per day.
@@ -127,8 +128,11 @@ writer thread: take everything queued (group commit)
 
 Every `SDL_COMPACT_INTERVAL` (1 h) the writer runs, scoped to its schema:
 
-1. retention: `DELETE FROM events WHERE received_at < now - SDL_RETENTION_DAYS`
+1. retention: `DELETE FROM events WHERE received_at < midnight - SDL_RETENTION_DAYS`
+   (day-aligned, so whole daily files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
+   (target file size 64 MB for `events`; DuckDB threads lowered to
+   `SDL_MAINTENANCE_THREADS` because sorted merges need memory per thread)
 3. if `SDL_CATALOG_WIDE_MAINTENANCE`: `ducklake_expire_snapshots` and
    `ducklake_cleanup_old_files` older than `SDL_SNAPSHOT_RETENTION` (1 h)
 
@@ -141,7 +145,7 @@ Every `SDL_COMPACT_INTERVAL` (1 h) the writer runs, scoped to its schema:
 | issue list | `events` (project, window): group_hash, user_key, received_at, title, culprit, level; `issues`; `issue_activity` | days in window |
 | issue detail | same for one group + tag facets | days + row groups by group_hash |
 | events of issue | narrow columns, `ORDER BY received_at DESC LIMIT` | row groups by group_hash |
-| event detail | one row incl. `payload` | group_hash when `?issue=` is given |
+| event detail | one row incl. `payload` | group_hash when `?issue=` is given; else growing windows (1 d, 7 d, 31 d, all) |
 | stats | received_at, level, group_hash, user_key | days in window |
 | by trace | trace_id (UUID equality) | days in window |
 

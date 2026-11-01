@@ -12,13 +12,18 @@ mod theme;
 mod ui;
 
 use crate::cli::describe;
-use app::{App, Req, Resp};
+use app::{App, FetchError, Req, Resp};
 use crossterm::event::{Event, KeyEventKind};
+use futures::FutureExt;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use sdl_client::Client;
 use sdl_client::types::{EventQuery, WindowQuery};
+use std::future::Future;
+use std::io::IsTerminal;
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 /// What the host should do after [`Embedded::handle_event`].
@@ -34,20 +39,26 @@ pub enum Outcome {
     OpenTrace(String),
 }
 
-/// The TUI as an embeddable component. Needs a tokio runtime: data loads run
-/// on `tokio::spawn` and their results are picked up in [`Embedded::tick`].
+/// The TUI as an embeddable component. Data loads run as tasks on the tokio
+/// runtime that was current when [`Embedded::new`] was called; their results
+/// are picked up in [`Embedded::tick`].
 pub struct Embedded {
     app: App,
     client: Client,
+    handle: Handle,
     tx: mpsc::UnboundedSender<Resp>,
     rx: mpsc::UnboundedReceiver<Resp>,
     started: bool,
 }
 
 impl Embedded {
+    /// Must be called inside a tokio runtime context (e.g. from async code
+    /// or under `Runtime::enter`); panics otherwise. The other methods can
+    /// then be called from any thread.
     pub fn new(client: Client, project: Option<String>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        Embedded { app: App::new(client.base_url(), project), client, tx, rx, started: false }
+        let handle = Handle::current();
+        Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false }
     }
 
     /// Draw inside `area` only.
@@ -104,15 +115,39 @@ impl Embedded {
 
     fn dispatch(&self, reqs: Vec<Req>) {
         for r in reqs {
-            tokio::spawn(fetch(self.client.clone(), r, self.tx.clone()));
+            self.handle.spawn(guarded(fetch(self.client.clone(), r), self.tx.clone()));
         }
     }
 }
 
-async fn fetch(c: Client, req: Req, tx: mpsc::UnboundedSender<Resp>) {
+/// Run a load and send its response; a panic inside becomes `Resp::Panicked`
+/// instead of a silently lost task.
+async fn guarded(fut: impl Future<Output = Resp>, tx: mpsc::UnboundedSender<Resp>) {
+    let resp = match AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "background task panicked".into());
+            Resp::Panicked(msg)
+        }
+    };
+    let _ = tx.send(resp);
+}
+
+fn fetch_error(err: sdl_client::Error, url: &str) -> FetchError {
+    // Network-level failures mean "offline"; a body we can't decode is a
+    // version mismatch, not an outage.
+    let offline = matches!(&err, sdl_client::Error::Http(h) if !h.is_decode());
+    FetchError { message: describe(&err, url), offline }
+}
+
+async fn fetch(c: Client, req: Req) -> Resp {
     let url = c.base_url().to_string();
-    let e = |err: sdl_client::Error| describe(&err, &url);
-    let resp = match req {
+    let e = |err: sdl_client::Error| fetch_error(err, &url);
+    match req {
         Req::Info => Resp::Info(c.info().await.map_err(e)),
         Req::Projects => Resp::Projects(c.projects().await.map_err(e)),
         Req::Issues(key) => {
@@ -148,19 +183,27 @@ async fn fetch(c: Client, req: Req, tx: mpsc::UnboundedSender<Resp>) {
             let result = c.events_by_trace(&trace_id).await.map_err(e);
             Resp::Trace { trace_id, result }
         }
-    };
-    let _ = tx.send(resp);
+    }
 }
 
 /// Standalone `sdl tui`.
 pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
     use futures::StreamExt;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!("sdl tui needs an interactive terminal (stdin and stdout must be a TTY)");
+    }
     // Fail fast with a friendly message instead of an empty dashboard.
     ctx.client.info().await.map_err(|e| ctx.err(e))?;
     let mut ui = Embedded::new(ctx.client.clone(), ctx.project.clone());
-    // `ratatui::init` enters raw mode + alternate screen and installs a
-    // panic hook that restores the terminal before printing the panic.
-    let mut terminal = ratatui::init();
+    // `try_init` enters raw mode + alternate screen and installs a panic
+    // hook that restores the terminal before printing the panic.
+    let mut terminal = match ratatui::try_init() {
+        Ok(t) => t,
+        Err(e) => {
+            ratatui::restore();
+            anyhow::bail!("cannot set up the terminal: {e}");
+        }
+    };
     let mut events = crossterm::event::EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let result: anyhow::Result<()> = async {
@@ -177,6 +220,11 @@ pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
                     None => break,
                 },
                 _ = ticker.tick() => ui.tick(),
+            }
+            if let Some(msg) = ui.app.fatal.take() {
+                // The panic hook has already restored the terminal; stop
+                // drawing on the normal screen and exit with the message.
+                anyhow::bail!("internal error in a background load: {msg}");
             }
         }
         Ok(())
@@ -227,7 +275,7 @@ mod tests {
         // Failed loads arrive via tick and show up as an error.
         for _ in 0..50 {
             ui.tick();
-            if ui.app.error.is_some() {
+            if ui.app.offline.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -241,5 +289,38 @@ mod tests {
         assert!(screen(&term).contains("Trace"));
         assert_eq!(ui.handle_event(&key(KeyCode::Esc)), Outcome::Consumed);
         assert_eq!(ui.handle_event(&key(KeyCode::Char('q'))), Outcome::Quit);
+    }
+
+    /// `new` captures the runtime handle, so the host may call the other
+    /// methods from a thread that is not inside the runtime context.
+    #[test]
+    fn embedded_works_outside_the_runtime_context() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let mut ui = {
+            let _guard = rt.enter();
+            Embedded::new(Client::new("http://127.0.0.1:9", "t").unwrap(), None)
+        };
+        // Not in a runtime context here: these spawn loads and must not panic.
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('R'))), Outcome::Consumed);
+        ui.tick();
+        ui.show_trace_errors("b7644661850f40e69380d8c9ea253e84");
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| ui.draw(f, f.area())).unwrap();
+    }
+
+    #[tokio::test]
+    async fn panicking_load_is_reported_not_lost() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        async fn boom() -> Resp {
+            panic!("boom in fetch")
+        }
+        guarded(boom(), tx).await;
+        match rx.recv().await {
+            Some(Resp::Panicked(m)) => assert!(m.contains("boom in fetch")),
+            other => panic!("unexpected {other:?}"),
+        }
+        let mut app = App::new("http://x", None);
+        app.on_response(Resp::Panicked("boom".into()));
+        assert_eq!(app.fatal.as_deref(), Some("boom"));
     }
 }

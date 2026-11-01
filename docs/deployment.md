@@ -141,13 +141,15 @@ Every flag has an environment variable. The most used:
 | `SDL_DUCKDB_MEMORY_LIMIT` | 80% of RAM | e.g. `1GB`. |
 | `SDL_DUCKDB_THREADS` | CPUs | DuckDB threads. |
 | `SDL_READERS` | `4` | Read connections for the query API. |
-| `SDL_BATCH_MAX` / `SDL_BATCH_WINDOW` | `2000` / `100ms` | Max events per commit / minimum gap between commits (group commit). |
+| `SDL_BATCH_MAX` / `SDL_BATCH_WINDOW` | `2000` / `500ms` | Max events per commit / how long a quiet server collects before committing (200+ queued events commit at once). |
+| `SDL_INGEST_CONCURRENCY` | `256` | Ingest requests processed at once (bounds request memory). |
+| `SDL_MAINTENANCE_THREADS` | `1` | DuckDB threads during compaction (sorted merges need memory per thread); 0 = unchanged. |
 | `SDL_FLUSH_ROWS` | `50000` | Also flush inlined rows to Parquet after this many (bounds catalog size). |
 | `SDL_SNAPSHOT_RETENTION` | `1h` | Keep snapshots and replaced files this long; set above your catalog backup age. |
 | `SDL_DUCKDB_TEMP_DIR` | `./.tmp` | DuckDB spill directory. |
 | `SDL_METRICS_LISTEN` | (main port) | Serve `/metrics` on a separate address, e.g. `0.0.0.0:9090`. |
 | `SDL_QUEUE_CAPACITY` | `20000` | Queued events before ingest answers 429. |
-| `SDL_MAX_EVENT_BYTES` / `SDL_MAX_BODY_BYTES` | 1 MiB / 50 MiB | Size limits. |
+| `SDL_MAX_EVENT_BYTES` / `SDL_MAX_BODY_BYTES` | 1 MiB / 20 MiB | Size limits (after decompression). Requests with the key only inside the envelope are limited to 2 MiB. |
 | `SDL_SOURCEMAP_CACHE_MB` | `256` | Sourcemap cache. |
 | `SDL_TRUST_FORWARDED_FOR` | `false` | Use `X-Forwarded-For` as client IP. |
 | `SDL_LISTEN` | `0.0.0.0:8000` | Listen address. |
@@ -300,25 +302,19 @@ What to back up: the **catalog** and the **bucket**, together.
 
 ## Sizing
 
-Start with these and watch `/metrics` (`sdl_write_batch_seconds`,
-`sdl_ingest_rejected_total`, `sdl_write_errors_total`) and `/v1/info` (queue depth):
+Measured numbers are in [capacity.md](capacity.md). In short: one process
+handles thousands of events per second; set `SDL_DUCKDB_MEMORY_LIMIT` to
+about half the container memory (DuckDB uses some memory outside its limit).
 
-| Load (events/s, sustained) | CPU request | Memory limit | `SDL_DUCKDB_MEMORY_LIMIT` |
-|---|---|---|---|
-| < 50 (small company) | 250m | 1-2 GiB | 512MB-1GB |
-| 50-500 (mid size) | 1 | 4 GiB | 2GB |
-| > 500 | 2+ | 8 GiB | 4-5GB |
+| Traffic | Events/day | CPU | Memory | `SDL_DUCKDB_MEMORY_LIMIT` |
+|---|---|---|---|---|
+| ~10k visitors/day | 1k-20k | 0.5 | 1-2 GiB | 512MB-1GB |
+| ~100k visitors/day | 10k-200k | 1 | 4 GiB | 2GB |
+| bigger / error storms | 1M+ | 2 | 4-8 GiB | 2-4GB |
 
-- Memory: DuckDB (writes, compaction, queries) plus the sourcemap cache
-  (`SDL_SOURCEMAP_CACHE_MB`, 256 by default) plus request buffers. Keep
-  `SDL_DUCKDB_MEMORY_LIMIT` at about half the container memory limit.
-- CPU: ingest is cheap; compaction (hourly) and wide API queries use the
-  most CPU. Do not set a CPU limit lower than 1 core, or compaction throttles.
-- Storage: events are stored as compressed Parquet. Measure with your own
-  traffic (bucket size divided by `sdl_events_stored_total`) and multiply by
-  `SDL_RETENTION_DAYS`.
-- These numbers are starting points, not measurements. Measured load numbers
-  will come from the load test (`crates/sdl-loadgen`).
+Watch `/metrics` (`sdl_write_batch_seconds`, `sdl_ingest_rejected_total`,
+`sdl_write_errors_total`, `sdl_maintenance_errors_total`) and `/v1/info`
+(queue depth). Do not set a CPU limit below 1 core or compaction throttles.
 
 ## Health and monitoring
 

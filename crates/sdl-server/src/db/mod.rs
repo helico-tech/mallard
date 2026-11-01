@@ -40,6 +40,8 @@ pub struct Caches {
     pub issues: RwLock<HashMap<(u32, u64), IssueStatus>>,
     /// (bundle checksum, project) pairs that are stored and indexed.
     pub bundles: RwLock<HashSet<(String, u32)>>,
+    /// (project, release) pairs that have at least one bundle.
+    pub bundle_releases: RwLock<HashSet<(u32, String)>>,
 }
 
 impl Caches {
@@ -53,6 +55,9 @@ impl Caches {
     pub fn bundle_known(&self, checksum: &str, projects: &[u32]) -> bool {
         let b = self.bundles.read().expect("lock");
         projects.iter().all(|p| b.contains(&(checksum.to_string(), *p)))
+    }
+    pub fn project_has_release(&self, project: u32, release: &str) -> bool {
+        self.bundle_releases.read().expect("lock").contains(&(project, release.to_string()))
     }
     pub fn project_has_bundles(&self, project: u32) -> bool {
         self.bundles.read().expect("lock").iter().any(|(_, p)| *p == project)
@@ -86,6 +91,9 @@ pub enum EnqueueError {
 
 /// Prepare a fresh connection: settings and extensions.
 fn configure(conn: &Connection, cfg: &Config) -> Result<()> {
+    // We never rely on insertion order (sorted tables sort explicitly); this
+    // lets flushes and compaction stream within a memory limit.
+    conn.execute_batch("SET preserve_insertion_order = false")?;
     if let Some(dir) = &cfg.extension_dir {
         conn.execute_batch(&format!("SET extension_directory = {}", sql_str(&dir.display().to_string())))?;
     }
@@ -242,6 +250,11 @@ impl Db {
         let _ = tokio::task::spawn_blocking(move || handle.join()).await;
     }
 
+    /// False once the writer thread has stopped (crash or shutdown).
+    pub fn writer_alive(&self) -> bool {
+        self.writer_thread.lock().expect("lock").as_ref().is_some_and(|h| !h.is_finished())
+    }
+
     pub fn queue_depth(&self) -> usize {
         self.tx.len()
     }
@@ -276,7 +289,14 @@ impl Db {
         let ns = self.ns.clone();
         tokio::task::spawn_blocking(move || {
             let conn = readers.lock().expect("lock").pop().expect("permit guarantees a connection");
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&conn, &ns)));
+            // One transaction per API call: all its queries see one snapshot
+            // (and the catalog is read once, not per statement).
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                conn.execute_batch("BEGIN TRANSACTION")?;
+                let r = f(&conn, &ns);
+                let _ = conn.execute_batch("ROLLBACK");
+                r
+            }));
             readers.lock().expect("lock").push(conn);
             match result {
                 Ok(r) => r,

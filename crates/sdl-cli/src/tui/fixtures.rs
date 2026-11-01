@@ -127,6 +127,17 @@ pub fn event_detail() -> EventDetail {
     }
 }
 
+pub fn info() -> ServerInfo {
+    ServerInfo {
+        version: "0.1.0".into(),
+        duckdb_version: "v2.0.0".into(),
+        catalog: "c".into(),
+        storage: "s".into(),
+        queue_depth: 12,
+        queue_capacity: 20000,
+    }
+}
+
 /// App with projects, issues and stats loaded, as after startup.
 pub fn loaded_app() -> App {
     let mut app = App::new("http://127.0.0.1:8000", None);

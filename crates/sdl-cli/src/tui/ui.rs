@@ -63,6 +63,19 @@ fn title_span(s: &str) -> Span<'static> {
     Span::styled(format!(" {s} "), th::bold())
 }
 
+/// A load's state in place of its content: the error (red) when it failed,
+/// else the loading text.
+fn load_state(error: Option<&str>, loading: &str) -> Paragraph<'static> {
+    let line = match error {
+        Some(e) => Line::from(vec![
+            Span::styled(format!("✗ {e}"), Style::new().fg(th::RED)),
+            Span::styled("  · R retry", th::dim()),
+        ]),
+        None => Line::from(Span::styled(loading.to_string(), th::dim())),
+    };
+    Paragraph::new(line).alignment(Alignment::Center).wrap(Wrap { trim: true })
+}
+
 pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
@@ -118,7 +131,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             th::text(),
         ));
     }
-    if app.error.is_some() {
+    if app.offline.is_some() {
         right.push(Span::styled("● offline  ", Style::new().fg(th::RED)));
     } else if app.info.is_some() {
         right.push(Span::styled("● live  ", Style::new().fg(th::GREEN)));
@@ -155,7 +168,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else if let Some(t) = &app.toast {
         let c = if t.error { th::RED } else { th::GREEN };
         Line::from(Span::styled(format!(" {}", t.text), Style::new().fg(c).add_modifier(Modifier::BOLD)))
-    } else if let Some(e) = &app.error {
+    } else if let Some(e) = app.offline.as_ref().or(app.global_error.as_ref()) {
         Line::from(vec![
             Span::styled(format!(" ✗ {e}"), Style::new().fg(th::RED)),
             Span::styled("   R retry", th::dim()),
@@ -261,7 +274,8 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
     }
     let [plot, axis] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     if s.is_none() {
-        f.render_widget(Paragraph::new(Span::styled(format!("{} loading…", spinner(app)), th::dim())), plot);
+        let loading = format!("{} loading…", spinner(app));
+        f.render_widget(load_state(app.stats_error.as_deref(), &loading).alignment(Alignment::Left), plot);
         return;
     }
     let data = fmt::resample(&events, plot.width as usize);
@@ -308,14 +322,23 @@ fn status_span(s: IssueStatus) -> Span<'static> {
 }
 
 fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
-    let title = vec![title_span("Issues"), Span::styled(format!("{} ", STATUSES[app.status]), th::dim())];
+    let mut title = vec![title_span("Issues"), Span::styled(format!("{} ", STATUSES[app.status]), th::dim())];
+    if let Some(e) = app.issues_error.as_ref().filter(|_| !app.issues.is_empty()) {
+        // The list is still shown; the failed refresh is noted in the title.
+        title.push(Span::styled(format!("✗ refresh failed: {} ", fmt::truncate(e, 60)), Style::new().fg(th::RED)));
+    }
     let block = rounded(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let window = WINDOWS[app.window].0;
     if app.issues.is_empty() {
-        let lines = if app.projects_loaded && app.projects.is_empty() {
+        let lines = if let Some(e) = &app.issues_error {
+            vec![
+                Line::from(Span::styled(format!("✗ {e}"), Style::new().fg(th::RED).bold())),
+                Line::from(Span::styled("R retries", th::dim())),
+            ]
+        } else if app.projects_loaded && app.projects.is_empty() {
             vec![
                 Line::from(Span::styled("No projects yet", th::bold())),
                 Line::from(Span::styled("create one with: sdl projects create <name>", th::dim())),
@@ -438,7 +461,9 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
         Span::raw(" "),
         Span::styled(title_text, th::bold()),
     ];
-    if s.is_none() {
+    if let Some(e) = &d.error {
+        l1.push(Span::styled(format!("  ✗ {e}"), Style::new().fg(th::RED)));
+    } else if s.is_none() {
         l1.push(Span::styled(format!("  {}", spinner_static(now)), th::dim()));
     }
     let mut l2 = vec![Span::raw(" ")];
@@ -609,7 +634,10 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
 
     let mut right: Vec<Line> = vec![section_line("Tags")];
     match &d.detail {
-        None => right.push(Line::from(Span::styled("  loading…", th::dim()))),
+        None => match &d.error {
+            Some(e) => right.push(Line::from(Span::styled(format!("  ✗ {e}"), Style::new().fg(th::RED)))),
+            None => right.push(Line::from(Span::styled("  loading…", th::dim()))),
+        },
         Some(dd) if dd.tags.is_empty() => right.push(Line::from(Span::styled("  no tags", th::faint()))),
         Some(dd) => {
             let bar_w = (col_w as usize).saturating_sub(2 + 22 + 1 + 7 + 2).clamp(6, 40);
@@ -663,9 +691,8 @@ fn render_stack(f: &mut Frame, area: Rect, d: &mut Detail) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let message = |text: &str| Paragraph::new(Span::styled(text.to_string(), th::dim())).alignment(Alignment::Center);
     if d.event.is_none() {
-        f.render_widget(message("loading event…"), inner);
+        f.render_widget(load_state(d.event_error.as_deref(), "loading event…"), inner);
         return;
     }
     if d.exceptions.is_empty() {
@@ -787,8 +814,12 @@ fn render_breadcrumbs(f: &mut Frame, area: Rect, d: &mut Detail) {
     let block = rounded(vec![title_span("Breadcrumbs"), Span::styled("newest first ", th::faint())]);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if d.event.is_none() || d.crumbs.is_empty() {
-        let t = if d.event.is_none() { "loading event…" } else { "This event has no breadcrumbs." };
+    if d.event.is_none() {
+        f.render_widget(load_state(d.event_error.as_deref(), "loading event…"), inner);
+        return;
+    }
+    if d.crumbs.is_empty() {
+        let t = "This event has no breadcrumbs.";
         f.render_widget(Paragraph::new(Span::styled(t, th::dim())).alignment(Alignment::Center), inner);
         return;
     }
@@ -824,8 +855,12 @@ fn render_events(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateTim
     let block = rounded(vec![title_span("Events"), Span::styled(format!("newest first · ⏎ show {more}"), th::faint())]);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if !d.events_loaded || d.events.is_empty() {
-        let t = if d.events_loaded { "No events in this issue." } else { "loading events…" };
+    if !d.events_loaded {
+        f.render_widget(load_state(d.events_error.as_deref(), "loading events…"), inner);
+        return;
+    }
+    if d.events.is_empty() {
+        let t = "No events in this issue.";
         f.render_widget(Paragraph::new(Span::styled(t, th::dim())).alignment(Alignment::Center), inner);
         return;
     }
@@ -903,7 +938,7 @@ fn render_json(f: &mut Frame, area: Rect, d: &mut Detail) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     if d.event.is_none() {
-        f.render_widget(Paragraph::new(Span::styled("loading event…", th::dim())).alignment(Alignment::Center), inner);
+        f.render_widget(load_state(d.event_error.as_deref(), "loading event…"), inner);
         return;
     }
     let h = inner.height as usize;
@@ -939,9 +974,12 @@ fn render_trace(f: &mut Frame, area: Rect, app: &mut App) {
     ]);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if !t.loaded || t.events.is_empty() {
-        let text =
-            if t.loaded { "No error events for this trace.".to_string() } else { format!("{spin} loading trace…") };
+    if !t.loaded {
+        f.render_widget(load_state(t.error.as_deref(), &format!("{spin} loading trace…")), inner);
+        return;
+    }
+    if t.events.is_empty() {
+        let text = "No error events for this trace.";
         f.render_widget(Paragraph::new(Span::styled(text, th::dim())).alignment(Alignment::Center), inner);
         return;
     }
@@ -1086,6 +1124,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use sdl_client::types::IssueList;
 
     pub fn draw(app: &mut App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1130,6 +1169,50 @@ mod tests {
         }
         // A sparkline character is drawn in the trend column.
         assert!(s.contains('█'));
+    }
+
+    #[test]
+    fn escape_sequences_from_events_never_reach_the_buffer() {
+        let mut app = App::new("http://x", None);
+        app.start();
+        app.on_response(Resp::Projects(Ok(projects())));
+        let mut list = issues();
+        list[0].title = "evil\x1b]52;c;cHduZWQ=\x07 \x1b[2Jtitle\u{9b}31m".into();
+        list[0].culprit = Some("cul\rprit\tx".into());
+        let key = app.issues_key().unwrap();
+        app.on_response(Resp::Issues(key, Ok(IssueList { issues: list, window_start: now(), window_end: now() })));
+        app.now = now();
+        let s = draw(&mut app, 140, 40);
+        assert!(!s.chars().any(|c| c.is_control() && c != '\n'), "control character in buffer:\n{s}");
+        assert!(s.contains("evil\u{FFFD}]52;c;cHduZWQ=\u{FFFD} \u{FFFD}[2Jtitle"), "{s}");
+        assert!(s.contains("cul prit    x"), "{s}");
+    }
+
+    #[test]
+    fn errors_render_in_place_and_offline_only_for_network_errors() {
+        let mut app = App::new("http://x", Some("web".into()));
+        app.start();
+        app.on_response(Resp::Projects(Ok(projects())));
+        let key = app.issues_key().unwrap();
+        app.on_response(Resp::Issues(key, Err(FetchError::api("not found: project not found"))));
+        app.on_response(Resp::Info(Ok(info())));
+        let s = draw(&mut app, 120, 30);
+        assert!(s.contains("✗ not found: project not found"), "{s}");
+        assert!(s.contains("● live") && !s.contains("offline"), "{s}");
+
+        app.on_response(Resp::Stats {
+            project: "web".into(),
+            window: app.window,
+            result: Err(FetchError::offline("cannot reach server")),
+        });
+        let s = draw(&mut app, 120, 30);
+        assert!(s.contains("● offline") && s.contains("cannot reach server"), "{s}");
+        // Info succeeding clears "offline" but not the issue list error.
+        app.on_response(Resp::Info(Ok(info())));
+        assert!(app.offline.is_none());
+        assert!(app.issues_error.is_some() && app.stats_error.is_some());
+        let s = draw(&mut app, 120, 30);
+        assert!(s.contains("project not found") && !s.contains("offline"), "{s}");
     }
 
     #[test]

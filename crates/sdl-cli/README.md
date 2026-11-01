@@ -19,6 +19,11 @@ export SDL_URL=http://localhost:8000 SDL_TOKEN=<SDL_API_TOKEN of the server>
 | `--json` | | off | raw JSON output (for scripts) |
 
 When the server has exactly one project, `-p` is optional.
+Text that comes from events (titles, messages, frames, tags, ...) or from
+the server is stripped of terminal control characters before it is printed,
+so an event can't send escape sequences to your terminal. `--json` output
+keeps the data, with control and bidi characters escaped as `\uXXXX`.
+Output to a closed pipe (`sdl issues list | head`) ends quietly with exit 0.
 Errors are one line on stderr with exit code 1, e.g.
 `error: invalid token (set SDL_TOKEN or --token)` or
 `error: cannot reach server at http://localhost:8000 (is it running? set SDL_URL)`.
@@ -81,7 +86,11 @@ line highlighted), Breadcrumbs, Events and JSON.
 
 Data loads run in the background (tokio tasks), so input never waits on the
 network. Everything refreshes every 5 s, the queue depth every 2 s.
-The terminal is restored on exit and on panic. Below 50×12 it shows a
+The terminal is restored on exit and on panic; a panic in a background load
+ends `sdl tui` with an error message. A failed load is shown where its data
+would be (issue list, stats, issue, event, trace); the header says
+"offline" only when the server can't be reached. `sdl tui` needs a terminal
+(stdin and stdout must be a TTY). Below 50×12 it shows a
 "terminal too small" note; columns and the stats panel drop out on narrow or
 short terminals.
 
@@ -90,6 +99,7 @@ short terminals.
 | Where | Key | Action |
 |---|---|---|
 | everywhere | `↑ ↓` `j k`, `g G`, `PgUp PgDn` | move |
+| | ctrl/alt + key | ignored (only plain keys run actions), except `ctrl-c` / `ctrl-q` quit and `ctrl-u` clears the search |
 | | `R` | refresh now |
 | | `?` | help |
 | | `ctrl-c` | quit |
@@ -121,8 +131,13 @@ The crate is also a library (`sdl_cli`) so other programs can mount it:
   `handle_event(&Event) -> Outcome` (`Consumed`, `Ignored`, `Quit`,
   `OpenTrace(trace_id)`), `tick()` (call a few times per second; applies
   finished loads, never blocks) and `show_trace_errors(trace_id)`.
-  F1 and F2 are always `Ignored` (reserved for the host). Needs a tokio
-  runtime.
+  F1 and F2 and ctrl/alt keys (other than `ctrl-c`/`ctrl-q`, which return
+  `Quit`) are `Ignored`.
+  **Runtime requirement:** call `Embedded::new` inside a tokio runtime
+  context (from async code, or under `Runtime::enter`); it panics otherwise.
+  It keeps that runtime's handle and spawns loads on it, so `draw`,
+  `handle_event`, `tick` and `show_trace_errors` may then be called from any
+  thread. A panicking load is caught and reported, not lost.
 
 ## Tests
 

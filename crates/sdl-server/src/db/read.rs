@@ -29,8 +29,11 @@ impl Window {
     pub fn parse(since: Option<&str>, default: &str, now: DateTime<Utc>) -> Result<Window, String> {
         let s = since.unwrap_or(default);
         let d = humantime::parse_duration(s).map_err(|e| format!("invalid duration {s:?}: {e}"))?;
-        let d = chrono::Duration::from_std(d).map_err(|e| e.to_string())?;
-        Ok(Window { start: now - d, end: now })
+        let start = chrono::Duration::from_std(d)
+            .ok()
+            .and_then(|d| now.checked_sub_signed(d))
+            .ok_or_else(|| format!("duration {s:?} is too large"))?;
+        Ok(Window { start, end: now })
     }
     fn start_us(&self) -> i64 {
         self.start.timestamp_micros()
@@ -80,34 +83,38 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
 
     let mut filters = String::new();
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
+    let mut filter_params: Vec<Box<dyn ToSql>> = Vec::new();
     if let Some(env) = &q.environment {
         filters.push_str(" AND environment = ?");
-        p.push(Box::new(env.clone()));
+        filter_params.push(Box::new(env.clone()));
     }
     if let Some(rel) = &q.release {
         filters.push_str(" AND release = ?");
-        p.push(Box::new(rel.clone()));
+        filter_params.push(Box::new(rel.clone()));
     }
+
+    // Phase 1: rank issues with cheap aggregates only (count, max). Distinct
+    // users are only computed for all groups when sorting by them, and then
+    // approximately.
+    let users_expr = if sort == "users" { "approx_count_distinct(user_key)" } else { "0" };
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
+    p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
     p.push(Box::new(project_id as i32)); // st
     p.push(Box::new(project_id as i32)); // issues join
     p.push(Box::new(status.clone()));
     p.push(Box::new(status.clone()));
     let mut search = String::new();
     if let Some(text) = q.query.as_ref().filter(|t| !t.trim().is_empty()) {
-        search.push_str(" AND (agg.title ILIKE ? OR agg.culprit ILIKE ?)");
-        let like = format!("%{}%", text.trim().replace('%', "\\%").replace('_', "\\_"));
+        // Matches the issue's first title and culprit.
+        search.push_str(r" AND (i.title ILIKE ? ESCAPE '\' OR i.culprit ILIKE ? ESCAPE '\')");
+        let like = format!("%{}%", text.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         p.push(Box::new(like.clone()));
         p.push(Box::new(like));
     }
     p.push(Box::new(limit));
-
     let sql = ns.sql(&format!(
         "WITH agg AS (
-            SELECT group_hash, count(*) AS cnt, count(DISTINCT user_key) AS users,
-                   epoch_us(max(received_at)) AS last_us,
-                   arg_max(title, received_at) AS title, arg_max(culprit, received_at) AS culprit,
-                   arg_max(level, received_at) AS level
+            SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, {users_expr} AS users
             FROM $S.events
             WHERE project_id = ? AND received_at >= make_timestamp(?){filters}
             GROUP BY group_hash
@@ -115,14 +122,14 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
             SELECT group_hash, arg_max(status, changed_at) AS status
             FROM $S.issue_activity WHERE project_id = ? GROUP BY group_hash
          )
-         SELECT agg.group_hash, agg.title, agg.culprit, agg.level, i.platform, i.exception_type,
+         SELECT agg.group_hash, i.title, i.culprit, i.level, i.platform, i.exception_type,
                 coalesce(st.status, 'unresolved') AS status, epoch_us(i.first_seen) AS first_us,
-                agg.cnt, agg.users, agg.last_us
+                agg.cnt, agg.last_us
          FROM agg
          JOIN $S.issues i ON i.project_id = ? AND i.group_hash = agg.group_hash
          LEFT JOIN st ON st.group_hash = agg.group_hash
          WHERE (? = 'all' OR coalesce(st.status, 'unresolved') = ?){search}
-         ORDER BY {sort} DESC
+         ORDER BY {sort} DESC, agg.group_hash
          LIMIT ?"
     ));
     let mut stmt = conn.prepare(&sql)?;
@@ -138,20 +145,62 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
             status: IssueStatus::parse(&r.get::<_, String>(6)?).unwrap_or_default(),
             first_seen: us_to_dt(r.get(7)?),
             count: r.get::<_, i64>(8)? as u64,
-            user_count: r.get::<_, i64>(9)? as u64,
-            last_seen: us_to_dt(r.get(10)?),
+            last_seen: us_to_dt(r.get(9)?),
+            user_count: 0,
             trend: vec![],
         })
     })?;
     let mut issues: Vec<IssueSummary> = rows.collect::<Result<_, _>>()?;
     let groups: Vec<u64> = issues.iter().filter_map(|i| parse_group_id(&i.id)).collect();
+    if groups.is_empty() {
+        return Ok(IssueList { issues, window_start: w.start, window_end: w.end });
+    }
+
+    // Phase 2: exact users and the latest title/culprit/level, only for the
+    // issues on this page.
+    let list = groups.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
+    p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
+    let sql = ns.sql(&format!(
+        "SELECT group_hash, count(DISTINCT user_key), arg_max(title, received_at), arg_max(culprit, received_at),
+                arg_max(level, received_at)
+         FROM $S.events
+         WHERE project_id = ? AND received_at >= make_timestamp(?){filters} AND group_hash IN ({list})
+         GROUP BY group_hash"
+    ));
+    let mut stmt = conn.prepare(&sql)?;
+    let mut latest: HashMap<u64, (u64, String, Option<String>, String)> = HashMap::new();
+    for row in stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+        Ok((r.get::<_, u64>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?, r.get(4)?))
+    })? {
+        let (g, users, title, culprit, level) = row?;
+        latest.insert(g, (users, title, culprit, level));
+    }
     let mut t = trends(conn, ns, project_id, w, &groups)?;
     for i in &mut issues {
-        if let Some(v) = parse_group_id(&i.id).and_then(|g| t.remove(&g)) {
+        let Some(g) = parse_group_id(&i.id) else { continue };
+        if let Some((users, title, culprit, level)) = latest.remove(&g) {
+            i.user_count = users;
+            i.title = title;
+            i.culprit = culprit.or(i.culprit.take());
+            i.level = level;
+        }
+        if let Some(v) = t.remove(&g) {
             i.trend = v;
         }
     }
     Ok(IssueList { issues, window_start: w.start, window_end: w.end })
+}
+
+/// Filter params are strings; rebuild them for a second statement.
+fn clone_param(p: &dyn ToSql) -> Box<dyn ToSql> {
+    match p.to_sql() {
+        Ok(duckdb::types::ToSqlOutput::Owned(duckdb::types::Value::Text(s))) => Box::new(s),
+        Ok(duckdb::types::ToSqlOutput::Borrowed(duckdb::types::ValueRef::Text(b))) => {
+            Box::new(String::from_utf8_lossy(b).into_owned())
+        }
+        _ => Box::new(Option::<String>::None),
+    }
 }
 
 pub fn issue_detail(
@@ -263,25 +312,29 @@ pub fn issue_detail(
 }
 
 fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Window) -> Result<Vec<TagFacet>> {
+    // Top 10 values per key and the distinct count are computed in SQL, so
+    // high-cardinality tags (urls, ids) don't stream every value to us.
     let mut stmt = conn.prepare(&ns.sql(
-        "SELECT k, v, count(*) AS c FROM (
-            SELECT unnest(map_keys(tags)) AS k, unnest(map_values(tags)) AS v
-            FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?)
-         ) GROUP BY k, v ORDER BY k, c DESC",
+        "WITH kv AS (
+            SELECT k, v, count(*) AS c FROM (
+                SELECT unnest(map_keys(tags)) AS k, unnest(map_values(tags)) AS v
+                FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?)
+            ) GROUP BY k, v
+         )
+         SELECT k, v, c, count(*) OVER (PARTITION BY k) AS uniq
+         FROM kv
+         QUALIFY row_number() OVER (PARTITION BY k ORDER BY c DESC, v) <= 10
+         ORDER BY k, c DESC, v",
     ))?;
     let mut facets: Vec<TagFacet> = Vec::new();
     for row in stmt.query_map(params![project_id as i32, group, w.start_us()], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
     })? {
-        let (k, v, c) = row?;
+        let (k, v, c, uniq) = row?;
+        let value = TagValueCount { value: v, count: c as u64 };
         match facets.last_mut() {
-            Some(f) if f.key == k => {
-                f.unique += 1;
-                if f.top.len() < 10 {
-                    f.top.push(TagValueCount { value: v, count: c as u64 });
-                }
-            }
-            _ => facets.push(TagFacet { key: k, unique: 1, top: vec![TagValueCount { value: v, count: c as u64 }] }),
+            Some(f) if f.key == k => f.top.push(value),
+            _ => facets.push(TagFacet { key: k, unique: uniq as u64, top: vec![value] }),
         }
     }
     Ok(facets)
@@ -326,20 +379,34 @@ pub fn list_events(
     if let Some(t) = q.trace_id.as_deref() {
         let t = sdl_protocol::event::parse_trace_id(t)
             .ok_or_else(|| anyhow::anyhow!("trace_id must be 32 hex characters"))?;
-        sql.push_str(" AND trace_id = ?::UUID");
+        // Trace ids are random: bound the scan to recent days.
+        let since = (chrono::Utc::now() - chrono::Duration::days(TRACE_WINDOW_DAYS)).timestamp_micros();
+        sql.push_str(" AND trace_id = ?::UUID AND received_at >= make_timestamp(?)");
         p.push(Box::new(t.to_string()));
+        p.push(Box::new(since));
     }
-    if let Some(before) = q.before.as_deref().and_then(|c| c.parse::<i64>().ok()) {
-        sql.push_str(" AND received_at < make_timestamp(?)");
-        p.push(Box::new(before));
+    // Cursor: "<received_at micros>:<event_id>" (ties broken by event id).
+    if let Some((us, id)) = q.before.as_deref().and_then(parse_cursor) {
+        match id {
+            Some(id) => {
+                sql.push_str(" AND (received_at < make_timestamp(?) OR (received_at = make_timestamp(?) AND event_id < ?::UUID))");
+                p.push(Box::new(us));
+                p.push(Box::new(us));
+                p.push(Box::new(id.to_string()));
+            }
+            None => {
+                sql.push_str(" AND received_at < make_timestamp(?)");
+                p.push(Box::new(us));
+            }
+        }
     }
-    sql.push_str(" ORDER BY received_at DESC LIMIT ?");
+    sql.push_str(" ORDER BY received_at DESC, event_id DESC LIMIT ?");
     p.push(Box::new(limit));
     let mut stmt = conn.prepare(&ns.sql(&sql))?;
     let events: Vec<EventSummary> =
         stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), event_summary)?.collect::<Result<_, _>>()?;
     let next_cursor = (events.len() as i64 == limit)
-        .then(|| events.last().map(|e| e.received_at.timestamp_micros().to_string()))
+        .then(|| events.last().map(|e| format!("{}:{}", e.received_at.timestamp_micros(), e.event_id)))
         .flatten();
     Ok(EventList { events, next_cursor })
 }
@@ -369,12 +436,50 @@ pub fn events_by_trace(
     Ok(EventList { events, next_cursor: None })
 }
 
+/// Days searched by trace id lookups.
+pub const TRACE_WINDOW_DAYS: i64 = 30;
+
+fn parse_cursor(c: &str) -> Option<(i64, Option<uuid::Uuid>)> {
+    match c.split_once(':') {
+        Some((us, id)) => Some((us.parse().ok()?, Some(uuid::Uuid::try_parse(id).ok()?))),
+        None => Some((c.parse().ok()?, None)),
+    }
+}
+
+/// Look up one event. Event ids are random, so without the issue (which
+/// prunes by sort order) we search growing windows: most lookups are for
+/// recent events and only read the last day's partitions.
 pub fn event_detail(
     conn: &Connection,
     ns: &Ns,
     project_id: u32,
     event_id: uuid::Uuid,
     group: Option<u64>,
+) -> Result<Option<EventDetail>> {
+    if group.is_some() {
+        return event_detail_in(conn, ns, project_id, event_id, group, None);
+    }
+    let now = chrono::Utc::now();
+    let mut lower: Option<i64> = None;
+    for days in [1, 7, 31] {
+        let from = (now - chrono::Duration::days(days)).timestamp_micros();
+        if let Some(e) = event_detail_in(conn, ns, project_id, event_id, None, Some((from, lower)))? {
+            return Ok(Some(e));
+        }
+        lower = Some(from);
+    }
+    // Everything older than the last window.
+    event_detail_in(conn, ns, project_id, event_id, None, Some((i64::MIN, lower)))
+}
+
+/// `range`: (from, to) in micros; `to = None` means up to now.
+fn event_detail_in(
+    conn: &Connection,
+    ns: &Ns,
+    project_id: u32,
+    event_id: uuid::Uuid,
+    group: Option<u64>,
+    range: Option<(i64, Option<i64>)>,
 ) -> Result<Option<EventDetail>> {
     let mut sql = format!(
         "SELECT {EVENT_COLUMNS}, culprit, CAST(tags AS JSON)::VARCHAR, payload FROM $S.events
@@ -384,6 +489,16 @@ pub fn event_detail(
     if let Some(g) = group {
         sql.push_str(" AND group_hash = ?");
         p.push(Box::new(g));
+    }
+    if let Some((from, to)) = range {
+        if from > i64::MIN {
+            sql.push_str(" AND received_at >= make_timestamp(?)");
+            p.push(Box::new(from));
+        }
+        if let Some(to) = to {
+            sql.push_str(" AND received_at < make_timestamp(?)");
+            p.push(Box::new(to));
+        }
     }
     sql.push_str(" LIMIT 1");
     let row = conn

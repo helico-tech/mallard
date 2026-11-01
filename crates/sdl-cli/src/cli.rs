@@ -11,8 +11,22 @@ use sdl_client::Client;
 use sdl_client::types::*;
 use serde::Serialize;
 
-/// One-line, actionable message for a client error.
+/// `println!` to a locked stdout that returns the error instead of
+/// panicking; `run` treats a closed pipe (`sdl issues list | head`) as success.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        writeln!(std::io::stdout().lock(), $($arg)*)?
+    }};
+}
+
+/// One-line, actionable message for a client error. Safe to print: server
+/// text in it is stripped of control characters.
 pub fn describe(e: &sdl_client::Error, url: &str) -> String {
+    fmt::clean(&describe_raw(e, url))
+}
+
+fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
     match e {
         sdl_client::Error::Api { status: 401, .. } => "invalid token (set SDL_TOKEN or --token)".into(),
         sdl_client::Error::Api { status: 403, .. } => "token not allowed to do this (check SDL_TOKEN)".into(),
@@ -28,6 +42,9 @@ pub fn describe(e: &sdl_client::Error, url: &str) -> String {
         }
         sdl_client::Error::Api { status, message } => {
             format!("request rejected ({status}): {message}")
+        }
+        sdl_client::Error::Url(m) if m.starts_with("invalid path segment") => {
+            format!("{m}: ids and slugs can't be empty, '.' or '..'")
         }
         sdl_client::Error::Url(m) => {
             format!("invalid server url {url:?}: {m} (set SDL_URL or --url)")
@@ -72,21 +89,52 @@ impl Ctx {
             [one] => Ok(one.slug.clone()),
             [] => bail!("no projects yet (create one: sdl projects create <name>)"),
             many => {
-                let slugs: Vec<&str> = many.iter().map(|p| p.slug.as_str()).collect();
+                let slugs: Vec<String> = many.iter().map(|p| fmt::clean(&p.slug)).collect();
                 bail!("several projects; pick one with -p or SDL_PROJECT ({})", slugs.join(", "))
             }
         }
     }
 
     fn print_json<T: Serialize>(&self, v: &T) -> Result<()> {
-        println!("{}", serde_json::to_string_pretty(v)?);
+        out!("{}", json_safe(&serde_json::to_string_pretty(v)?));
         Ok(())
     }
 }
 
 /// Run one command. Prints to stdout; errors are one-line, friendly messages.
+/// All text that comes from events or the server is stripped of terminal
+/// control characters before it is printed (except in `--json` output).
 pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
     p::init();
+    match run_inner(cmd, ctx).await {
+        Err(e) if is_broken_pipe(&e) => Ok(()),
+        r => r,
+    }
+}
+
+/// serde escapes C0 control characters in JSON strings but writes DEL, C1
+/// (e.g. U+009B, an 8-bit CSI) and bidi overrides as they are. Escape those
+/// too; `\uXXXX` is the same JSON value, so the output stays lossless.
+fn json_safe(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        // Raw newlines are the pretty-printer's own; inside strings serde escapes them.
+        if (c.is_control() && c != '\n')
+            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        {
+            out.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
+}
+
+async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
     match cmd {
         Command::SendTest { dsn, message } => send_test(&dsn, &message, ctx.json).await,
         Command::Info => info(ctx).await,
@@ -98,9 +146,9 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
         Command::Maintenance => {
             ctx.client.maintenance().await.map_err(|e| ctx.err(e))?;
             if ctx.json {
-                println!("{{\"ok\":true}}");
+                out!("{{\"ok\":true}}");
             } else {
-                println!("{} maintenance done (flushed, compacted, expired)", p::green("✓"));
+                out!("{} maintenance done (flushed, compacted, expired)", p::green("✓"));
             }
             Ok(())
         }
@@ -148,8 +196,9 @@ fn right(s: impl ToString) -> Cell {
     Cell::new(s).set_alignment(CellAlignment::Right)
 }
 
-fn kv(key: &str, value: &str) {
-    println!("  {:<14} {value}", p::dim(key));
+fn kv(key: &str, value: &str) -> Result<()> {
+    out!("  {:<14} {value}", p::dim(key));
+    Ok(())
 }
 
 async fn info(ctx: &Ctx) -> Result<()> {
@@ -157,12 +206,13 @@ async fn info(ctx: &Ctx) -> Result<()> {
     if ctx.json {
         return ctx.print_json(&i);
     }
-    println!("{} {}", p::bold("sentry-ducklake"), i.version);
-    kv("server", ctx.url());
-    kv("duckdb", &i.duckdb_version);
-    kv("catalog", &i.catalog);
-    kv("storage", &i.storage);
-    kv("queue", &format!("{} / {}", i.queue_depth, i.queue_capacity));
+    let i = fmt::sanitize(i, true);
+    out!("{} {}", p::bold("sentry-ducklake"), i.version);
+    kv("server", ctx.url())?;
+    kv("duckdb", &i.duckdb_version)?;
+    kv("catalog", &i.catalog)?;
+    kv("storage", &i.storage)?;
+    kv("queue", &format!("{} / {}", i.queue_depth, i.queue_capacity))?;
     Ok(())
 }
 
@@ -173,8 +223,9 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&ps);
             }
+            let ps = fmt::sanitize(ps, true);
             if ps.is_empty() {
-                println!("no projects yet; create one with: sdl projects create <name>");
+                out!("no projects yet; create one with: sdl projects create <name>");
                 return Ok(());
             }
             let mut t = table(&["ID", "SLUG", "NAME", "PLATFORM", "DSN"]);
@@ -187,7 +238,7 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
                     Cell::new(&p.dsn).fg(Color::Cyan),
                 ]);
             }
-            println!("{t}");
+            out!("{t}");
             Ok(())
         }
         ProjectsCmd::Create { name, slug, platform } => {
@@ -196,8 +247,9 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&pr);
             }
-            println!("{} created project {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
-            print_project(&pr);
+            let pr = fmt::sanitize(pr, true);
+            out!("{} created project {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
+            print_project(&pr)?;
             Ok(())
         }
         ProjectsCmd::Show { project } => {
@@ -205,25 +257,27 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&pr);
             }
-            print_project(&pr);
+            let pr = fmt::sanitize(pr, true);
+            print_project(&pr)?;
             Ok(())
         }
     }
 }
 
-fn print_project(pr: &Project) {
-    println!();
-    println!("  {}", p::dim("DSN"));
-    println!("  {}", p::bold(&p::cyan(&pr.dsn)));
-    println!();
-    kv("id", &pr.id.to_string());
-    kv("slug", &pr.slug);
-    kv("name", &pr.name);
-    kv("platform", pr.platform.as_deref().unwrap_or("-"));
-    kv("public key", &pr.public_key);
-    kv("created", &fmt::timestamp(pr.created_at));
-    println!();
-    println!("  {}", p::dim(&format!("test it: sdl send-test --dsn {}", pr.dsn)));
+fn print_project(pr: &Project) -> Result<()> {
+    out!();
+    out!("  {}", p::dim("DSN"));
+    out!("  {}", p::bold(&p::cyan(&pr.dsn)));
+    out!();
+    kv("id", &pr.id.to_string())?;
+    kv("slug", &pr.slug)?;
+    kv("name", &pr.name)?;
+    kv("platform", pr.platform.as_deref().unwrap_or("-"))?;
+    kv("public key", &pr.public_key)?;
+    kv("created", &fmt::timestamp(pr.created_at))?;
+    out!();
+    out!("  {}", p::dim(&format!("test it: sdl send-test --dsn {}", pr.dsn)));
+    Ok(())
 }
 
 fn issue_query(a: &IssueListArgs) -> IssueQuery {
@@ -262,8 +316,9 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&list);
             }
+            let list = fmt::sanitize(list, true);
             if list.issues.is_empty() {
-                println!("no issues match (window {} .. now)", fmt::timestamp(list.window_start));
+                out!("no issues match (window {} .. now)", fmt::timestamp(list.window_start));
                 return Ok(());
             }
             let now = Utc::now();
@@ -285,8 +340,8 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
                     status_cell(i.status),
                 ]);
             }
-            println!("{t}");
-            println!(
+            out!("{t}");
+            out!(
                 "{}",
                 p::dim(&format!("{} issues · window {} .. now", list.issues.len(), fmt::timestamp(list.window_start)))
             );
@@ -301,7 +356,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&d);
             }
-            print_issue(&d);
+            print_issue(&fmt::sanitize(d, true), &fmt::clean(&project))?;
             Ok(())
         }
         IssuesCmd::Resolve { ids } => set_status(ctx, &project, &ids, IssueStatus::Resolved).await,
@@ -310,34 +365,34 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
     }
 }
 
-fn print_issue(d: &IssueDetail) {
+fn print_issue(d: &IssueDetail, project: &str) -> Result<()> {
     let s = &d.summary;
     let now = Utc::now();
-    println!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
+    out!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
     if let Some(c) = &s.culprit {
-        println!("  {}", p::dim(c));
+        out!("  {}", p::dim(c));
     }
-    println!();
-    kv("id", &s.id);
-    kv("status", &p::status(s.status.as_str()));
-    kv("platform", &s.platform);
-    kv("events", &s.count.to_string());
-    kv("users", &s.user_count.to_string());
-    kv("first seen", &format!("{} ({})", fmt::timestamp(s.first_seen), fmt::relative_time(s.first_seen, now)));
-    kv("last seen", &format!("{} ({})", fmt::timestamp(s.last_seen), fmt::relative_time(s.last_seen, now)));
-    kv("first release", d.first_release.as_deref().unwrap_or("-"));
-    kv("last release", d.last_release.as_deref().unwrap_or("-"));
-    kv("latest event", d.latest_event_id.as_deref().unwrap_or("-"));
-    kv("trend", &p::magenta(&fmt::sparkline(&s.trend)));
+    out!();
+    kv("id", &s.id)?;
+    kv("status", &p::status(s.status.as_str()))?;
+    kv("platform", &s.platform)?;
+    kv("events", &s.count.to_string())?;
+    kv("users", &s.user_count.to_string())?;
+    kv("first seen", &format!("{} ({})", fmt::timestamp(s.first_seen), fmt::relative_time(s.first_seen, now)))?;
+    kv("last seen", &format!("{} ({})", fmt::timestamp(s.last_seen), fmt::relative_time(s.last_seen, now)))?;
+    kv("first release", d.first_release.as_deref().unwrap_or("-"))?;
+    kv("last release", d.last_release.as_deref().unwrap_or("-"))?;
+    kv("latest event", d.latest_event_id.as_deref().unwrap_or("-"))?;
+    kv("trend", &p::magenta(&fmt::sparkline(&s.trend)))?;
     if !d.tags.is_empty() {
-        println!();
-        println!("{}", p::bold("Tags"));
+        out!();
+        out!("{}", p::bold("Tags"));
         for f in &d.tags {
-            println!("  {} {}", p::bold(&f.key), p::dim(&format!("({} unique)", f.unique)));
+            out!("  {} {}", p::bold(&f.key), p::dim(&format!("({} unique)", f.unique)));
             let total: u64 = f.top.iter().map(|v| v.count).sum::<u64>().max(1);
             for v in &f.top {
                 let pct = v.count as f64 * 100.0 / total as f64;
-                println!(
+                out!(
                     "    {:<28} {:<20} {:>5.1}%  {}",
                     fmt::truncate(&v.value, 28),
                     p::cyan(&format!("{:<20}", fmt::hbar(v.count, total, 20))),
@@ -348,16 +403,17 @@ fn print_issue(d: &IssueDetail) {
         }
     }
     if !d.activity.is_empty() {
-        println!();
-        println!("{}", p::bold("Activity"));
+        out!();
+        out!("{}", p::bold("Activity"));
         for a in &d.activity {
-            println!("  {}  {:<10} {}", p::dim(&fmt::timestamp(a.at)), p::status(a.status.as_str()), p::dim(&a.reason));
+            out!("  {}  {:<10} {}", p::dim(&fmt::timestamp(a.at)), p::status(a.status.as_str()), p::dim(&a.reason));
         }
     }
     if let Some(e) = &d.latest_event_id {
-        println!();
-        println!("{}", p::dim(&format!("latest event: sdl events show {e} --issue {}", s.id)));
+        out!();
+        out!("{}", p::dim(&format!("latest event: sdl events show {e} --issue {} -p {project}", s.id)));
     }
+    Ok(())
 }
 
 async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatus) -> Result<()> {
@@ -367,19 +423,19 @@ async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatu
         match ctx.client.set_issue_status(project, id, status).await {
             Ok(d) => {
                 if !ctx.json {
-                    println!(
+                    out!(
                         "{} {} {}  {}",
                         p::green("✓"),
                         status.as_str(),
                         p::bold(id),
-                        p::dim(&fmt::truncate(&d.summary.title, 70))
+                        p::dim(&fmt::truncate(&fmt::clean(&d.summary.title), 70))
                     );
                 }
                 done.push(d);
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("{} {id}: {}", p::red("✗"), describe(&e, ctx.url()));
+                eprintln!("{} {}: {}", p::red("✗"), fmt::clean(id), describe(&e, ctx.url()));
             }
         }
     }
@@ -407,8 +463,9 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&list);
             }
+            let list = fmt::sanitize(list, true);
             if list.events.is_empty() {
-                println!("no events");
+                out!("no events");
                 return Ok(());
             }
             let now = Utc::now();
@@ -434,9 +491,9 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 ]);
                 t.add_row(row);
             }
-            println!("{t}");
+            out!("{t}");
             if list.next_cursor.is_some() {
-                println!("{}", p::dim("more events available (use --limit)"));
+                out!("{}", p::dim("more events available (use --limit)"));
             }
             Ok(())
         }
@@ -446,48 +503,49 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&e);
             }
-            print_event(&e);
+            print_event(&fmt::sanitize(e, true))?;
             Ok(())
         }
     }
 }
 
-fn section(title: &str) {
-    println!();
-    println!("{}", p::bold(&p::cyan(&format!("── {title} "))));
+fn section(title: &str) -> Result<()> {
+    out!();
+    out!("{}", p::bold(&p::cyan(&format!("── {title} "))));
+    Ok(())
 }
 
-pub fn print_event(e: &EventDetail) {
+pub fn print_event(e: &EventDetail) -> Result<()> {
     let s = &e.summary;
-    println!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
+    out!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
     if let Some(c) = &e.culprit {
-        println!("  {}", p::dim(c));
+        out!("  {}", p::dim(c));
     }
-    println!();
-    kv("event", &s.event_id);
-    kv("issue", &s.issue_id);
-    kv("time", &format!("{} ({})", fmt::timestamp(s.timestamp), fmt::relative_time(s.timestamp, Utc::now())));
-    kv("platform", &s.platform);
+    out!();
+    kv("event", &s.event_id)?;
+    kv("issue", &s.issue_id)?;
+    kv("time", &format!("{} ({})", fmt::timestamp(s.timestamp), fmt::relative_time(s.timestamp, Utc::now())))?;
+    kv("platform", &s.platform)?;
     if let Some(v) = &s.environment {
-        kv("environment", v);
+        kv("environment", v)?;
     }
     if let Some(v) = &s.release {
-        kv("release", v);
+        kv("release", v)?;
     }
     if let Some(v) = &s.trace_id {
-        kv("trace", &format!("{v}{}", s.span_id.as_ref().map(|sp| format!("  span {sp}")).unwrap_or_default()));
+        kv("trace", &format!("{v}{}", s.span_id.as_ref().map(|sp| format!("  span {sp}")).unwrap_or_default()))?;
     }
     for (k, v) in ev::contexts(&e.payload) {
-        kv(&k, &v);
+        kv(&k, &v)?;
     }
     if let Some(m) = ev::message(&e.payload) {
-        section("Message");
-        println!("  {m}");
+        section("Message")?;
+        out!("  {m}");
     }
 
     let exceptions = ev::exceptions(&e.payload);
     for (i, x) in exceptions.iter().enumerate() {
-        section(if i == 0 { "Exception" } else { "Caused by" });
+        section(if i == 0 { "Exception" } else { "Caused by" })?;
         let mut head = p::bold(&p::red(&x.headline()));
         if let Some(m) = &x.mechanism {
             let handled = match x.handled {
@@ -497,26 +555,26 @@ pub fn print_event(e: &EventDetail) {
             };
             head.push_str(&p::dim(&format!("  ({m}{handled})")));
         }
-        println!("  {head}");
+        out!("  {head}");
         let frames = x.frames_newest_first(false);
         if frames.is_empty() {
-            println!("  {}", p::dim("(no stack trace)"));
+            out!("  {}", p::dim("(no stack trace)"));
         }
         for f in frames {
             if f.in_app {
-                println!("    {} {}  {}", p::yellow("▸"), p::bold(f.function_name()), p::cyan(&f.location()));
+                out!("    {} {}  {}", p::yellow("▸"), p::bold(f.function_name()), p::cyan(&f.location()));
                 for (n, line, is_err) in f.context() {
                     let num = n.map(|n| format!("{n:>5}")).unwrap_or_else(|| "     ".into());
                     if is_err {
-                        println!("      {} {} {}", p::highlight(&num), p::yellow("→"), p::highlight(&line));
+                        out!("      {} {} {}", p::highlight(&num), p::yellow("→"), p::highlight(&line));
                     } else {
-                        println!("      {}   {}", p::dim(&num), p::dim(&line));
+                        out!("      {}   {}", p::dim(&num), p::dim(&line));
                     }
                 }
             } else {
-                println!("    {}", p::dim(&format!("  at {}  {}", f.function_name(), f.location())));
+                out!("    {}", p::dim(&format!("  at {}  {}", f.function_name(), f.location())));
                 if let Some(c) = &f.context_line {
-                    println!("      {}", p::dim(&format!("      {}", c.trim())));
+                    out!("      {}", p::dim(&format!("      {}", c.trim())));
                 }
             }
         }
@@ -524,12 +582,12 @@ pub fn print_event(e: &EventDetail) {
 
     let crumbs = ev::breadcrumbs(&e.payload);
     if !crumbs.is_empty() {
-        section("Breadcrumbs (newest first)");
+        section("Breadcrumbs (newest first)")?;
         for b in &crumbs {
             let time =
                 b.timestamp.map(|t| t.format("%H:%M:%S%.3f").to_string()).unwrap_or_else(|| "            ".into());
             let cat = b.category.clone().or_else(|| b.ty.clone()).unwrap_or_default();
-            println!(
+            out!(
                 "  {}  {:<8} {:<16} {}",
                 p::dim(&time),
                 p::level(&b.level),
@@ -540,31 +598,32 @@ pub fn print_event(e: &EventDetail) {
     }
 
     if !e.tags.is_empty() {
-        section("Tags");
+        section("Tags")?;
         let w = e.tags.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0).min(24);
         for (k, v) in &e.tags {
-            println!("  {}  {v}", p::dim(&format!("{k:<w$}")));
+            out!("  {}  {v}", p::dim(&format!("{k:<w$}")));
         }
     }
 
     let user = ev::user(&e.payload);
     if !user.is_empty() {
-        section("User");
+        section("User")?;
         for (k, v) in &user {
-            kv(k, v);
+            kv(k, v)?;
         }
     }
 
     if let Some(r) = ev::request(&e.payload) {
-        section("Request");
-        println!("  {} {}", p::bold(r.method.as_deref().unwrap_or("")), r.url.as_deref().unwrap_or(""));
+        section("Request")?;
+        out!("  {} {}", p::bold(r.method.as_deref().unwrap_or("")), r.url.as_deref().unwrap_or(""));
         if let Some(q) = &r.query {
-            kv("query", q);
+            kv("query", q)?;
         }
         for (k, v) in &r.headers {
-            kv(k, v);
+            kv(k, v)?;
         }
     }
+    Ok(())
 }
 
 async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()> {
@@ -577,13 +636,14 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
     if ctx.json {
         return ctx.print_json(&s);
     }
-    println!(
+    let s = fmt::sanitize(s, true);
+    out!(
         "{} {}",
         p::bold("Project stats"),
         p::dim(&format!("last {since} · buckets of {}", fmt::duration(s.interval_seconds)))
     );
-    println!();
-    println!(
+    out!();
+    out!(
         "  {}  {}    {}  {}    {}  {}    {}  {}",
         p::dim("events"),
         p::bold(&s.total_events.to_string()),
@@ -595,12 +655,12 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
         p::bold(&s.affected_users.to_string())
     );
     let events: Vec<u64> = s.buckets.iter().map(|b| b.events).collect();
-    println!();
-    println!("  {}", p::magenta(&fmt::sparkline(&events)));
-    println!();
+    out!();
+    out!("  {}", p::magenta(&fmt::sparkline(&events)));
+    out!();
     let max = events.iter().copied().max().unwrap_or(0);
     for b in &s.buckets {
-        println!(
+        out!(
             "  {}  {:>7}  {}{}",
             p::dim(&b.start.format("%m-%d %H:%M").to_string()),
             b.events,
@@ -608,8 +668,8 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
             p::yellow(&fmt::hbar(b.warnings + b.other, max, 40))
         );
     }
-    println!();
-    println!("  {} errors  {} warnings/other", p::red("█"), p::yellow("█"));
+    out!();
+    out!("  {} errors  {} warnings/other", p::red("█"), p::yellow("█"));
     Ok(())
 }
 
@@ -619,8 +679,9 @@ async fn sourcemaps(ctx: &Ctx) -> Result<()> {
     if ctx.json {
         return ctx.print_json(&list);
     }
+    let list = fmt::sanitize(list, true);
     if list.is_empty() {
-        println!("no sourcemaps uploaded (upload with sentry-cli sourcemaps upload)");
+        out!("no sourcemaps uploaded (upload with sentry-cli sourcemaps upload)");
         return Ok(());
     }
     let mut t = table(&["BUNDLE", "RELEASE", "DIST", "FILES", "SIZE", "DEBUG IDS", "UPLOADED"]);
@@ -635,18 +696,32 @@ async fn sourcemaps(ctx: &Ctx) -> Result<()> {
             Cell::new(fmt::timestamp(b.created_at)),
         ]);
     }
-    println!("{t}");
+    out!("{t}");
     Ok(())
 }
 
 async fn send_test(dsn: &str, message: &str, json: bool) -> Result<()> {
     let (d, id) = crate::send_test::send(dsn, message).await?;
     if json {
-        println!("{}", serde_json::json!({"id": id, "project_id": d.project_id, "url": d.envelope_url}));
+        out!("{}", serde_json::json!({"id": id, "project_id": d.project_id, "url": d.envelope_url}));
     } else {
-        println!("{} sent test event {} to project {}", p::green("✓"), p::bold(&id), d.project_id);
-        println!("  {}", p::dim(&format!("POST {}", d.envelope_url)));
-        println!("  {}", p::dim(&format!("check it: sdl events show {id} -p {}", d.project_id)));
+        out!("{} sent test event {} to project {}", p::green("✓"), p::bold(&id), d.project_id);
+        out!("  {}", p::dim(&format!("POST {}", d.envelope_url)));
+        out!("  {}", p::dim(&format!("check it: sdl events show {id} -p {}", d.project_id)));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_output_escapes_c1_and_bidi_but_stays_equal() {
+        let v = serde_json::json!({"t": "a\u{9b}31m\u{202e}b\u{1b}c\nd"});
+        let out = json_safe(&serde_json::to_string_pretty(&v).unwrap());
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        assert!(out.contains("\\u009b") && out.contains("\\u202e"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), v);
+    }
 }

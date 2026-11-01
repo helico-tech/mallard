@@ -107,7 +107,7 @@ async fn rust_sdk_events_are_grouped_and_queryable() {
     for i in 0..3 {
         hub.capture_error(&DbError(format!("connection {i} refused")));
     }
-    hub.capture_message("cache miss storm", sentry::Level::Warning);
+    hub.capture_message("cache_miss storm", sentry::Level::Warning);
     assert!(client.flush(Some(Duration::from_secs(10))));
 
     let issues = t.get("/v1/projects/rust-api/issues").await;
@@ -117,7 +117,7 @@ async fn rust_sdk_events_are_grouped_and_queryable() {
         list.iter().find(|i| i["exception_type"].as_str().unwrap_or("").contains("DbError")).expect("DbError issue");
     assert_eq!(db["count"], 3, "the same error three times is one issue");
     assert_eq!(db["user_count"], 1);
-    let warn = list.iter().find(|i| i["title"] == "cache miss storm").unwrap();
+    let warn = list.iter().find(|i| i["title"] == "cache_miss storm").unwrap();
     assert_eq!(warn["level"], "warning");
 
     let id = db["id"].as_str().unwrap();
@@ -135,6 +135,31 @@ async fn rust_sdk_events_are_grouped_and_queryable() {
 
     let events = t.get(&format!("/v1/projects/rust-api/events?issue={id}")).await;
     assert_eq!(events["events"].as_array().unwrap().len(), 3);
+
+    // Search treats `_` and `%` literally.
+    let found = t.get("/v1/projects/rust-api/issues?query=cache_miss").await;
+    assert_eq!(found["issues"].as_array().unwrap().len(), 1, "{found}");
+    let none = t.get("/v1/projects/rust-api/issues?query=cache%25miss").await;
+    assert!(none["issues"].as_array().unwrap().is_empty(), "{none}");
+
+    // Cursor paging returns every event exactly once.
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let url = match &cursor {
+            Some(c) => format!("/v1/projects/rust-api/events?limit=1&before={c}"),
+            None => "/v1/projects/rust-api/events?limit=1".to_string(),
+        };
+        let page = t.get(&url).await;
+        for e in page["events"].as_array().unwrap() {
+            assert!(seen.insert(e["event_id"].as_str().unwrap().to_string()), "duplicate event in paging");
+        }
+        match page["next_cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 4);
 
     let stats = t.get("/v1/projects/rust-api/stats?since=1h").await;
     assert_eq!(stats["total_events"], 4);
@@ -378,6 +403,25 @@ async fn sourcemap_upload_protocol_and_symbolication() {
     let bundles = t.get("/v1/projects/web/sourcemaps").await;
     assert_eq!(bundles[0]["id"], checksum);
     assert_eq!(bundles[0]["debug_ids"][0], debug_id);
+
+    // The same bundle uploaded for a second project is indexed there too.
+    t.create_project("api").await;
+    let assemble_api = json!({"checksum": checksum, "chunks": checksums, "projects": ["api"]});
+    let (_, v) =
+        t.api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble_api)).await;
+    // Chunks were deleted after the first assembly, so the CLI is asked for them again.
+    assert_eq!(v["state"], "not_found", "{v}");
+    let form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(chunks[0].to_vec()).file_name(checksums[0].clone()))
+        .part("file", reqwest::multipart::Part::bytes(chunks[1].to_vec()).file_name(checksums[1].clone()));
+    let r = t.http.post(opts["url"].as_str().unwrap()).bearer_auth(TOKEN).multipart(form).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let assemble_api = json!({"checksum": checksum, "chunks": checksums, "projects": ["api"]});
+    let (_, v) =
+        t.api(reqwest::Method::POST, "/api/0/organizations/default/artifactbundle/assemble/", Some(assemble_api)).await;
+    assert_eq!(v["state"], "ok", "{v}");
+    assert_eq!(t.get("/v1/projects/api/sourcemaps").await[0]["id"], checksum);
+    assert_eq!(t.get("/v1/projects/web/sourcemaps").await.as_array().unwrap().len(), 1);
 
     // A browser error pointing at the minified file gets symbolicated.
     let event = json!({

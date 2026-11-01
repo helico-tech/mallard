@@ -35,8 +35,8 @@ impl IntoResponse for ApiErr {
 
 impl From<anyhow::Error> for ApiErr {
     fn from(e: anyhow::Error) -> Self {
-        tracing::error!(error = %e, "api error");
-        ApiErr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        tracing::error!(error = format!("{e:#}"), "api error");
+        ApiErr(StatusCode::INTERNAL_SERVER_ERROR, "internal error (see server log)".into())
     }
 }
 
@@ -131,9 +131,16 @@ async fn require_token(State(state): S, req: Request, next: Next) -> Response {
 }
 
 async fn readyz(State(state): S) -> Response {
+    if !state.db.writer_alive() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "writer stopped").into_response();
+    }
     match state.db.read(|c, _| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i32>(0))?)).await {
         Ok(_) => (StatusCode::OK, "ready").into_response(),
-        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        Err(e) => {
+            // Details go to the log, not to unauthenticated callers.
+            tracing::warn!(error = format!("{e:#}"), "readiness check failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "database not ready").into_response()
+        }
     }
 }
 

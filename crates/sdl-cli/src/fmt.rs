@@ -1,6 +1,9 @@
 //! Small formatting helpers shared by the CLI and the TUI.
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -163,6 +166,56 @@ pub fn hbar(value: u64, max: u64, width: usize) -> String {
     s
 }
 
+/// Make untrusted text (event data, server messages) safe to print to a
+/// terminal: tabs become spaces, other control characters (C0, DEL, C1, so
+/// ESC, OSC, CSI, BEL, CR, ...) become U+FFFD, and bidi overrides are
+/// dropped. Newlines are kept when `keep_newlines`, else they become spaces.
+pub fn clean_text(s: &str, keep_newlines: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' if keep_newlines => out.push('\n'),
+            '\n' => out.push(' '),
+            '\r' if keep_newlines => {}
+            '\r' => out.push(' '),
+            '\t' => out.push_str("    "),
+            '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => {}
+            c if c.is_control() => out.push('\u{FFFD}'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// One-line [`clean_text`].
+pub fn clean(s: &str) -> String {
+    clean_text(s, false)
+}
+
+fn clean_value(v: &mut Value, keep_newlines: bool) {
+    match v {
+        Value::String(s) => *s = clean_text(s, keep_newlines),
+        Value::Array(a) => a.iter_mut().for_each(|x| clean_value(x, keep_newlines)),
+        Value::Object(o) => {
+            let old = std::mem::take(o);
+            for (k, mut x) in old {
+                clean_value(&mut x, keep_newlines);
+                o.insert(clean_text(&k, keep_newlines), x);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`clean_text`] every string (and object key) inside an API response, so
+/// no field of it can carry terminal escape sequences. Used for all
+/// non-JSON output; `--json` output is escaped by serde instead.
+pub fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> T {
+    let Ok(mut value) = serde_json::to_value(&v) else { return v };
+    clean_value(&mut value, keep_newlines);
+    serde_json::from_value(value).unwrap_or(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +261,24 @@ mod tests {
         assert_eq!(compact(999_999), "1M");
         assert_eq!(compact(3_400_000), "3.4M");
         assert_eq!(compact(2_000_000_000), "2B");
+    }
+
+    #[test]
+    fn clean_strips_terminal_escapes() {
+        let evil = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\u{9b}31md\re\tf\u{202e}g";
+        let out = clean(evil);
+        assert!(!out.chars().any(|c| c.is_control()), "{out:?}");
+        assert_eq!(out, "a\u{FFFD}]52;c;ZXZpbA==\u{FFFD}b\u{FFFD}[2Jc\u{FFFD}31md e    fg");
+        assert_eq!(clean_text("l1\r\nl2", true), "l1\nl2");
+        assert_eq!(clean("l1\nl2"), "l1 l2");
+    }
+
+    #[test]
+    fn sanitize_cleans_nested_strings_and_keys() {
+        let v = serde_json::json!({"t\x1b[2J": ["x\x1b]0;pwn\x07", {"k": "\u{9b}"}], "n": 1});
+        let s = sanitize(v, false).to_string();
+        assert!(!s.contains('\u{1b}') && !s.contains('\u{9b}') && !s.contains('\u{7}'), "{s}");
+        assert!(s.contains("\"n\":1"));
     }
 
     #[test]

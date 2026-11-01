@@ -56,6 +56,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/{project_id}/store/", post(store))
         .route("/api/{project_id}/store", post(store))
         .layer(RequestDecompressionLayer::new())
+        .layer(tower::limit::GlobalConcurrencyLimitLayer::new(state.cfg.ingest_concurrency.max(1)))
         .layer(cors)
         .with_state(state)
 }
@@ -71,13 +72,16 @@ fn sentry_error(status: StatusCode, detail: &str) -> Response {
         r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         r.headers_mut().insert("x-sentry-rate-limits", HeaderValue::from_static("5::organization"));
     }
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("10"));
+    }
     r
 }
 
 struct Incoming {
     project_id: u32,
-    headers: HeaderMap,
-    query: Option<String>,
+    /// Key from a header or the query string (already checked).
+    header_key: Option<String>,
     client_ip: Option<String>,
     body: Bytes,
 }
@@ -94,7 +98,20 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
         .flatten()
         .and_then(|v| v.split(',').next())
         .map(|s| s.trim().to_string());
-    let body = axum::body::to_bytes(body, state.cfg.max_body_bytes).await.map_err(|e| {
+    // Authenticate before reading (and decompressing) the body whenever the
+    // key is in a header or the query string, so unauthenticated clients
+    // cannot make us inflate large bodies. Requests that carry the key only
+    // in the envelope (tunnels) get a small body limit.
+    let query = parts.uri.query().map(str::to_string);
+    let header_key = key_from_headers(&parts.headers, query.as_deref());
+    let limit = match &header_key {
+        Some(key) => {
+            check_key(state, project_id, key)?;
+            state.cfg.max_body_bytes
+        }
+        None => state.cfg.max_body_bytes.min(UNAUTHENTICATED_BODY_LIMIT),
+    };
+    let body = axum::body::to_bytes(body, limit).await.map_err(|e| {
         let msg = e.to_string();
         if msg.contains("length limit") {
             sentry_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
@@ -102,39 +119,45 @@ async fn read_request(state: &AppState, project_id: &str, req: Request) -> Resul
             sentry_error(StatusCode::BAD_REQUEST, "could not read request body (bad compression?)")
         }
     })?;
-    Ok(Incoming {
-        project_id,
-        query: parts.uri.query().map(str::to_string),
-        headers: parts.headers,
-        client_ip: forwarded.or(peer),
-        body,
-    })
+    Ok(Incoming { project_id, header_key, client_ip: forwarded.or(peer), body })
 }
 
-/// Find the public key in headers, query or envelope DSN and check it.
-fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) -> Result<(), Response> {
-    let key = inc
-        .headers
+/// Body limit for requests whose key is only inside the envelope.
+const UNAUTHENTICATED_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+fn key_from_headers(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+    headers
         .get("x-sentry-auth")
         .and_then(|v| v.to_str().ok())
         .and_then(auth::parse_auth_header)
         .or_else(|| {
-            inc.headers
+            headers
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .filter(|v| v.trim_start().to_ascii_lowercase().starts_with("sentry "))
                 .and_then(auth::parse_auth_header)
         })
-        .or_else(|| inc.query.as_deref().and_then(auth::parse_query))
-        .or_else(|| envelope_dsn.and_then(|d| sdl_protocol::dsn::Dsn::parse(d).ok()).map(|d| d.public_key));
-    let Some(key) = key else {
-        return Err(sentry_error(StatusCode::UNAUTHORIZED, "missing authorization information"));
-    };
-    let project = state.db.caches.project(inc.project_id);
-    match project {
+        .or_else(|| query.and_then(auth::parse_query))
+}
+
+fn check_key(state: &AppState, project_id: u32, key: &str) -> Result<(), Response> {
+    match state.db.caches.project(project_id) {
         Some(p) if constant_time_eq(p.public_key.as_bytes(), key.as_bytes()) => Ok(()),
         Some(_) => Err(sentry_error(StatusCode::UNAUTHORIZED, "invalid api key")),
         None => Err(sentry_error(StatusCode::NOT_FOUND, "project not found")),
+    }
+}
+
+/// Check the key from the envelope's `dsn` header when there was none in
+/// the headers or query (those were checked before reading the body).
+fn authenticate(state: &AppState, inc: &Incoming, envelope_dsn: Option<&str>) -> Result<(), Response> {
+    if inc.header_key.is_some() {
+        return Ok(());
+    }
+    let key = envelope_dsn.and_then(|d| sdl_protocol::dsn::Dsn::parse(d).ok()).map(|d| d.public_key);
+    match key {
+        Some(key) => check_key(state, inc.project_id, &key),
+        None => Err(sentry_error(StatusCode::UNAUTHORIZED, "missing authorization information")),
     }
 }
 
@@ -197,8 +220,8 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
     if let Err(r) = authenticate(&state, &inc, None) {
         return r;
     }
-    let Some(json_bytes) = sdl_protocol::store::decode_store_body(&inc.body) else {
-        return sentry_error(StatusCode::BAD_REQUEST, "invalid event body");
+    let Some(json_bytes) = sdl_protocol::store::decode_store_body(&inc.body, state.cfg.max_event_bytes) else {
+        return sentry_error(StatusCode::BAD_REQUEST, "invalid or too large event body");
     };
     if json_bytes.len() > state.cfg.max_event_bytes {
         return sentry_error(StatusCode::PAYLOAD_TOO_LARGE, "event too large");
@@ -232,22 +255,29 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     let mut ctx = NormalizeContext::new(received_at);
     ctx.client_ip = inc.client_ip.clone();
     ctx.event_id_hint = hint.map(str::to_string);
-    let mut ev = normalize_event(raw, &ctx);
-
+    // Normalizing, symbolicating and grouping are CPU work: keep them off
+    // the async worker threads.
+    let blocking_err = |_| sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed");
+    let ev = tokio::task::spawn_blocking(move || normalize_event(raw, &ctx)).await.map_err(blocking_err)?;
     let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev).await;
-    if !maps.is_empty() {
-        let n = symbolicate::apply(&mut ev, &maps);
-        metrics::counter!("sdl_frames_symbolicated_total").increment(n as u64);
-    }
-
-    let processed = ProcessedEvent::from_normalized(ev, received_at);
+    let (processed, payload_json) = tokio::task::spawn_blocking(move || {
+        let mut ev = ev;
+        if !maps.is_empty() {
+            let n = symbolicate::apply(&mut ev, &maps);
+            metrics::counter!("sdl_frames_symbolicated_total").increment(n as u64);
+        }
+        let processed = ProcessedEvent::from_normalized(ev, received_at);
+        let payload_json = processed.payload.to_string();
+        (processed, payload_json)
+    })
+    .await
+    .map_err(blocking_err)?;
     let id = processed.event_id.simple().to_string();
     let dedupe_key = (inc.project_id, processed.event_id);
     if state.recent_events.contains_key(&dedupe_key) {
         metrics::counter!("sdl_ingest_duplicates_total").increment(1);
         return Ok(id);
     }
-    let payload_json = processed.payload.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let cmd =
         WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event: processed, payload_json, reply: tx }));
@@ -267,7 +297,7 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
             Ok(id)
         }
         Ok(Err(e)) => {
-            tracing::error!(error = %e, "storing event failed");
+            tracing::error!(error = format!("{e:#}"), "storing event failed");
             Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "storing the event failed"))
         }
         Err(_) => Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")),

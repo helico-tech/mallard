@@ -77,9 +77,10 @@ pub struct Config {
     #[arg(long, env = "SDL_BATCH_MAX", default_value_t = 2000)]
     pub batch_max: usize,
 
-    /// Minimum time between two commits (group commit). Bounds the number of
-    /// DuckLake snapshots at low load; under load commits run back to back.
-    #[arg(long, env = "SDL_BATCH_WINDOW", value_parser = humantime::parse_duration, default_value = "100ms")]
+    /// How long the writer collects events after the first one before
+    /// committing (bounds DuckLake snapshots at low load to one per window).
+    /// Under load, batches of 200+ commit immediately.
+    #[arg(long, env = "SDL_BATCH_WINDOW", value_parser = humantime::parse_duration, default_value = "500ms")]
     #[serde(with = "humantime_serde")]
     pub batch_window: Duration,
 
@@ -101,6 +102,13 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub compact_interval: Duration,
 
+    /// DuckDB threads used while compacting (sorted merges need memory per
+    /// thread; 1 keeps compaction within small memory limits). 0 = leave the
+    /// thread count alone. DuckDB's thread count is global for the database,
+    /// so queries running at the same time also use this many threads.
+    #[arg(long, env = "SDL_MAINTENANCE_THREADS", default_value_t = 1)]
+    pub maintenance_threads: usize,
+
     /// Keep DuckLake snapshots (and the files they reference) this long.
     /// Must exceed the age of your oldest catalog backup you may restore.
     #[arg(long, env = "SDL_SNAPSHOT_RETENTION", value_parser = humantime::parse_duration, default_value = "1h")]
@@ -112,8 +120,13 @@ pub struct Config {
     pub max_event_bytes: usize,
 
     /// Max size of a request body after decompression.
-    #[arg(long, env = "SDL_MAX_BODY_BYTES", default_value_t = 50 * 1024 * 1024)]
+    #[arg(long, env = "SDL_MAX_BODY_BYTES", default_value_t = 20 * 1024 * 1024)]
     pub max_body_bytes: usize,
+
+    /// Ingest requests processed at once (bounds memory for request bodies);
+    /// more wait for a slot.
+    #[arg(long, env = "SDL_INGEST_CONCURRENCY", default_value_t = 256)]
+    pub ingest_concurrency: usize,
 
     /// Read connections for the query API.
     #[arg(long, env = "SDL_READERS", default_value_t = 4)]
@@ -161,14 +174,16 @@ impl Default for Config {
             retention_days: 90,
             catalog_wide_maintenance: true,
             batch_max: 2000,
-            batch_window: Duration::from_millis(100),
+            batch_window: Duration::from_millis(500),
             queue_capacity: 20000,
             flush_interval: Duration::from_secs(300),
             flush_rows: 50_000,
             compact_interval: Duration::from_secs(3600),
             snapshot_retention: Duration::from_secs(3600),
+            maintenance_threads: 1,
             max_event_bytes: 1024 * 1024,
-            max_body_bytes: 50 * 1024 * 1024,
+            max_body_bytes: 20 * 1024 * 1024,
+            ingest_concurrency: 256,
             readers: 4,
             duckdb_threads: None,
             duckdb_memory_limit: None,

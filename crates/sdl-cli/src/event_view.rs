@@ -73,11 +73,11 @@ impl Frame {
         let pre = self.pre_context.len() as u64;
         let mut out = Vec::new();
         for (i, l) in self.pre_context.iter().enumerate() {
-            out.push((n.map(|n| (n + i as u64).saturating_sub(pre)), l.clone(), false));
+            out.push((n.map(|n| n.saturating_sub(pre - i as u64)), l.clone(), false));
         }
         out.push((n, line.clone(), true));
         for (i, l) in self.post_context.iter().enumerate() {
-            out.push((n.map(|n| n + 1 + i as u64), l.clone(), false));
+            out.push((n.map(|n| n.saturating_add(1 + i as u64)), l.clone(), false));
         }
         out
     }
@@ -386,6 +386,19 @@ pub(crate) mod tests {
         assert_eq!(ctx[0].0, Some(9));
         assert_eq!(ctx[2], (Some(11), "throw new Error(\"inside span\")".to_string(), true));
         assert_eq!(ctx[3].0, Some(12));
+    }
+
+    #[test]
+    fn huge_line_numbers_do_not_overflow() {
+        let f = Frame::from_value(&json!({
+            "lineno": u64::MAX, "pre_context": ["a", "b"], "context_line": "c", "post_context": ["d", "e"]
+        }));
+        let ctx = f.context();
+        assert_eq!(ctx.len(), 5);
+        assert_eq!(ctx[0].0, Some(u64::MAX - 2));
+        assert_eq!(ctx[1].0, Some(u64::MAX - 1));
+        assert_eq!(ctx[2].0, Some(u64::MAX));
+        assert_eq!(ctx[4].0, Some(u64::MAX));
     }
 
     #[test]

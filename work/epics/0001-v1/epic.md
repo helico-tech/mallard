@@ -28,9 +28,20 @@ alerts/notifications, multi-org, user accounts.
 - Reviewed by independent agents; findings fixed or filed.
 
 ## Stories
-- 01 server core - done (commit 98284b9)
-- 02 client + CLI + TUI
-- 03 JS end-to-end tests
-- 04 deploy: Docker, compose, Helm, CI
-- 05 load test + capacity doc
-- 06 docs + review
+- 01 server core - done (98284b9)
+- 02 client + CLI + TUI (also embeddable as a library) - done (b261f40)
+- 03 JS end-to-end tests (26 tests, real SDKs, Chromium, sentry-cli, vite plugin) - done (b261f40)
+- 04 deploy: Docker, compose (RustFS + Postgres), Helm (verified on k8s), CI - done (b261f40)
+- 05 load test + capacity doc - done ([capacity.md](../../../docs/capacity.md))
+- 06 docs + three independent reviews (server security, data model, CLI/TUI);
+  all findings fixed or filed as issues 0001-0003 - done
+
+## Progress log
+- 2026-11-01: reviews found 12 server, 12 storage and 11 CLI issues; fixed:
+  zlib bomb, envelope length overflow, tag/frame/exception caps, CPU work off
+  async workers, auth before body read, symbolication lookup caps, failed-map
+  caching, bundle indexing per project, ILIKE escaping, two-phase issue list,
+  SQL top-N tag facets, cursor tiebreak, snapshot-consistent reads, day-aligned
+  retention, staging cleanup, readiness checks the writer, compaction OOM under
+  2 GB (single-threaded sorted merges, 64 MB files), CLI escape-code injection,
+  broken pipe, ctrl/alt keys in the embedded TUI. Filed: 0001, 0002, 0003.
