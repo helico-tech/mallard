@@ -304,7 +304,14 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
         put!(out, "no data");
         return out;
     }
-    let mut t = table(&["series", "last", "min", "avg", "max", "trend"]);
+    // Piped: no sparkline column.
+    let fancy = mallard_term::table::fancy();
+    let headers: &[&str] = if fancy {
+        &["series", "last", "min", "avg", "max", "trend"]
+    } else {
+        &["series", "last", "min", "avg", "max"]
+    };
+    let mut t = table(headers);
     for s in &r.series {
         let vals: Vec<f64> = s.points.iter().map(|p| p.value).collect();
         let Some(&last) = vals.last() else {
@@ -313,14 +320,11 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
         let label = if s.labels.is_empty() { "(all)".to_string() } else { fmt_attrs(&s.labels) };
         let (min, max) = min_max(&vals);
         let avg = vals.iter().sum::<f64>() / vals.len() as f64;
-        t.add_row(vec![
-            Cell::new(label),
-            num(last),
-            num(min),
-            num(avg),
-            num(max),
-            Cell::new(sparkline(&vals[vals.len().saturating_sub(60)..])).fg(Color::Cyan),
-        ]);
+        let mut row = vec![Cell::new(label), num(last), num(min), num(avg), num(max)];
+        if fancy {
+            row.push(Cell::new(sparkline(&vals[vals.len().saturating_sub(60)..])).fg(Color::Cyan));
+        }
+        t.add_row(row);
     }
     put!(out, "{t}");
     out

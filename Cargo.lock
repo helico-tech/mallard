@@ -2250,6 +2250,7 @@ dependencies = [
 name = "mallard-client"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "odl-client",
  "sdl-client",
  "serde",
@@ -2328,7 +2329,10 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
+ "mallard-common",
  "ratatui",
+ "serde",
+ "serde_json",
  "unicode-width",
 ]
 

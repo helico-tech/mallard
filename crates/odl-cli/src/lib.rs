@@ -18,78 +18,156 @@ pub use tui::{Embedded, Outcome};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use mallard_term::color::{ColorChoice, Out, alert};
-use mallard_term::error::{Described, Failure};
+use mallard_term::error::{Described, Failure, Kind, usage};
+use mallard_term::output::{Format, List, Output};
+use mallard_term::window::{Window, WindowArgs};
 use odl_client::{Client, LogTail, api::*};
 
-use crate::fmt::{json_safe, log_line, *};
+use crate::fmt::{log_line, *};
 
 /// Hints for the standalone `odl` binary.
 pub const HINTS: Hints = Hints { command: "odl", url_env: "ODL_URL", token_env: "ODL_TOKEN", project_env: "" };
 
+/// Default window of the telemetry commands.
+pub const DEFAULT_WINDOW: Duration = Duration::from_secs(3600);
+
+/// `services` (default window 1h).
 #[derive(clap::Args, Debug, Clone)]
-pub struct Win {
-    /// Relative window ending now, e.g. 15m, 6h, 2d, 1h30m.
-    #[arg(short, long, default_value = "1h", value_parser = check_window)]
-    pub since: String,
-    /// Absolute start (RFC 3339). Overrides --since.
+pub struct ServiceArgs {
+    #[command(flatten)]
+    pub w: WindowArgs,
+    /// Count all spans, not only entry spans.
     #[arg(long)]
-    pub from: Option<chrono::DateTime<chrono::Utc>>,
-    /// Absolute end (RFC 3339). Default: now.
-    #[arg(long)]
-    pub to: Option<chrono::DateTime<chrono::Utc>>,
+    pub all_spans: bool,
 }
 
-/// All `odl` commands. Embedders can mount this as a subcommand.
+/// `ops` (default window 1h).
+#[derive(clap::Args, Debug, Clone)]
+pub struct OpsArgs {
+    #[command(flatten)]
+    pub w: WindowArgs,
+    #[arg(short = 'S', long)]
+    pub service: Option<String>,
+    #[arg(long)]
+    pub all_spans: bool,
+}
+
+/// `traces` (default window 1h).
+#[derive(clap::Args, Debug, Clone)]
+pub struct TraceListArgs {
+    #[command(flatten)]
+    pub w: WindowArgs,
+    #[arg(short = 'S', long)]
+    pub service: Option<String>,
+    /// Span name.
+    #[arg(short = 'O', long)]
+    pub operation: Option<String>,
+    /// Only traces with an error span.
+    #[arg(short, long)]
+    pub errors: bool,
+    /// Minimum span duration in ms.
+    #[arg(long)]
+    pub min_ms: Option<f64>,
+    #[arg(long)]
+    pub max_ms: Option<f64>,
+    /// Attribute filter key=value (repeatable).
+    #[arg(short, long)]
+    pub attr: Vec<String>,
+    /// Max traces (`-l` still works).
+    #[arg(short = 'n', short_alias = 'l', long, default_value_t = 30)]
+    pub limit: u32,
+}
+
+/// `logs` (default window 1h).
+#[derive(clap::Args, Debug, Clone)]
+pub struct LogArgs {
+    #[command(flatten)]
+    pub w: WindowArgs,
+    #[arg(short = 'S', long)]
+    pub service: Option<String>,
+    /// Minimum severity: trace, debug, info, warn, error, fatal or 1-24.
+    #[arg(short = 'l', long)]
+    pub level: Option<String>,
+    /// Substring to find in the body (case-insensitive).
+    #[arg(short, long)]
+    pub query: Option<String>,
+    #[arg(short, long)]
+    pub trace: Option<String>,
+    #[arg(short, long)]
+    pub attr: Vec<String>,
+    #[arg(short = 'n', long, default_value_t = 100)]
+    pub limit: u32,
+    /// Keep printing new records (from --from/--since on, until Ctrl-C).
+    #[arg(short, long, conflicts_with_all = ["to", "around"])]
+    pub follow: bool,
+    /// Logs around this time (RFC 3339 or a duration ago), oldest first:
+    /// from --around minus --window to --around plus --window.
+    #[arg(long, value_parser = mallard_term::window::parse_time, conflicts_with_all = ["since", "from", "to"])]
+    pub around: Option<chrono::DateTime<chrono::Utc>>,
+    /// How far before and after --around, e.g. 30s, 2m.
+    #[arg(long, default_value = "1m", value_parser = mallard_term::window::parse_since, requires = "around")]
+    pub window: String,
+}
+
+/// `metrics` (default window 1h).
+#[derive(clap::Args, Debug, Clone)]
+pub struct MetricListArgs {
+    #[command(flatten)]
+    pub w: WindowArgs,
+    #[arg(short = 'S', long)]
+    pub service: Option<String>,
+    /// Name substring.
+    #[arg(short, long)]
+    pub query: Option<String>,
+}
+
+/// `metric <name>` (default window 1h).
+#[derive(clap::Args, Debug, Clone)]
+pub struct MetricArgs {
+    pub name: String,
+    #[command(flatten)]
+    pub w: WindowArgs,
+    #[arg(short = 'S', long)]
+    pub service: Option<String>,
+    /// avg, min, max, sum, count, rate, increase, p50, p95, p99 ...
+    #[arg(short = 'g', long)]
+    pub agg: Option<String>,
+    /// Group by attribute keys (comma separated).
+    #[arg(short, long)]
+    pub by: Option<String>,
+    #[arg(short, long)]
+    pub attr: Vec<String>,
+    /// Bucket width, e.g. 1m.
+    #[arg(long)]
+    pub step: Option<String>,
+}
+
+/// `sql`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct SqlArgs {
+    pub query: String,
+    #[arg(short = 'n', long, default_value_t = 100)]
+    pub limit: u32,
+}
+
+/// All `odl` commands. Embedders can mount this as a subcommand, or single
+/// commands through their `*Args`.
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum Command {
-    /// Check that the server is up (no token needed); exit code 1 if not.
+    /// Check that the server is up (no token needed); exit code 6 if not.
     Health,
     /// Server health, ingest counters and storage size.
     Status,
     /// Services with request rate, error rate and latency.
-    Services {
-        #[command(flatten)]
-        w: Win,
-        /// Count all spans, not only entry spans.
-        #[arg(long)]
-        all_spans: bool,
-    },
+    Services(ServiceArgs),
     /// Operations (span names) with RED metrics.
-    Ops {
-        #[command(flatten)]
-        w: Win,
-        #[arg(short = 'S', long)]
-        service: Option<String>,
-        #[arg(long)]
-        all_spans: bool,
-    },
+    Ops(OpsArgs),
     /// Search traces.
-    Traces {
-        #[command(flatten)]
-        w: Win,
-        #[arg(short = 'S', long)]
-        service: Option<String>,
-        /// Span name.
-        #[arg(short = 'O', long)]
-        operation: Option<String>,
-        /// Only traces with an error span.
-        #[arg(short, long)]
-        errors: bool,
-        /// Minimum span duration in ms.
-        #[arg(long)]
-        min_ms: Option<f64>,
-        #[arg(long)]
-        max_ms: Option<f64>,
-        /// Attribute filter key=value (repeatable).
-        #[arg(short, long)]
-        attr: Vec<String>,
-        /// Max traces (`-l` still works).
-        #[arg(short = 'n', short_alias = 'l', long, default_value_t = 30)]
-        limit: u32,
-    },
+    Traces(TraceListArgs),
     /// Show one trace as a waterfall.
     Trace {
         trace_id: String,
@@ -101,62 +179,13 @@ pub enum Command {
         attributes: bool,
     },
     /// Search or follow logs.
-    Logs {
-        #[command(flatten)]
-        w: Win,
-        #[arg(short = 'S', long)]
-        service: Option<String>,
-        /// Minimum severity: trace, debug, info, warn, error, fatal or 1-24.
-        #[arg(short = 'l', long)]
-        level: Option<String>,
-        /// Substring to find in the body (case-insensitive).
-        #[arg(short, long)]
-        query: Option<String>,
-        #[arg(short, long)]
-        trace: Option<String>,
-        #[arg(short, long)]
-        attr: Vec<String>,
-        #[arg(short = 'n', long, default_value_t = 100)]
-        limit: u32,
-        /// Keep printing new records (from --from/--since on, until Ctrl-C).
-        #[arg(short, long, conflicts_with = "to")]
-        follow: bool,
-    },
+    Logs(LogArgs),
     /// List metrics.
-    Metrics {
-        #[command(flatten)]
-        w: Win,
-        #[arg(short = 'S', long)]
-        service: Option<String>,
-        /// Name substring.
-        #[arg(short, long)]
-        query: Option<String>,
-    },
+    Metrics(MetricListArgs),
     /// Query a metric over time.
-    Metric {
-        name: String,
-        #[command(flatten)]
-        w: Win,
-        #[arg(short = 'S', long)]
-        service: Option<String>,
-        /// avg, min, max, sum, count, rate, increase, p50, p95, p99 ...
-        #[arg(short = 'g', long)]
-        agg: Option<String>,
-        /// Group by attribute keys (comma separated).
-        #[arg(short, long)]
-        by: Option<String>,
-        #[arg(short, long)]
-        attr: Vec<String>,
-        /// Bucket width, e.g. 1m.
-        #[arg(long)]
-        step: Option<String>,
-    },
+    Metric(MetricArgs),
     /// Run a read-only SQL query (server must enable it).
-    Sql {
-        query: String,
-        #[arg(short = 'n', long, default_value_t = 100)]
-        limit: u32,
-    },
+    Sql(SqlArgs),
     /// Interactive terminal UI.
     Tui {
         /// Initial time window.
@@ -179,10 +208,13 @@ fn check_window(s: &str) -> Result<String> {
     parse_window(s).map(|_| s.trim().to_string())
 }
 
-impl Win {
-    fn parts(&self) -> (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
-        (self.from, self.to, if self.from.is_some() { None } else { Some(self.since.clone()) })
-    }
+/// The window as the API takes it (`from`, `to`, `since`): always
+/// absolute, so the JSON output can say which window it covered.
+type ApiWindow = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>);
+
+fn window(w: &WindowArgs) -> Result<(Window, ApiWindow)> {
+    let r = w.resolve(DEFAULT_WINDOW)?;
+    Ok((r, (Some(r.from), Some(r.to), None)))
 }
 
 /// Attribute filters `k=v` as the API takes them: comma separated.
@@ -190,41 +222,63 @@ pub(crate) fn attrs(a: &[String]) -> Option<String> {
     (!a.is_empty()).then(|| a.join(","))
 }
 
-/// Print `v` as pretty JSON or as the text `text` makes of it.
+/// Print `v` as the output format says, or as the text `text` makes of it.
 fn print<T: serde::Serialize + ?Sized>(ctx: &Ctx, v: &T, text: impl FnOnce(&T) -> String) -> Result<()> {
-    if ctx.json {
-        ctx.out.line(&json_safe(&serde_json::to_string_pretty(v)?))?;
-    } else {
+    if ctx.output.text() {
         ctx.out.line(&text(v))?;
+        Ok(())
+    } else {
+        ctx.output.object(v)
     }
-    Ok(())
+}
+
+/// Print a list in the envelope, or as the text `text` makes of the items.
+fn print_list<T: serde::Serialize>(ctx: &Ctx, l: List<T>, text: impl FnOnce(&[T]) -> String) -> Result<()> {
+    if ctx.output.text() {
+        ctx.out.line(&text(&l.items))?;
+        ctx.output.truncation_note(&l);
+        Ok(())
+    } else {
+        ctx.output.list(&l)
+    }
 }
 
 /// What the commands need besides their own arguments:
-/// `Ctx::new(client).with_json(true)`. The same builder as `sdl_cli::Ctx`.
+/// `Ctx::new(client).with_output(o)`. The same builder as `sdl_cli::Ctx`.
 #[derive(Debug)]
 pub struct Ctx {
     client: Client,
-    json: bool,
+    output: Output,
     out: Out,
     hints: Hints,
 }
 
 impl Ctx {
-    /// Table output, colour as `--color=auto` says, [`HINTS`].
+    /// Text output, colour as `--color=auto` says, [`HINTS`].
     pub fn new(client: Client) -> Self {
-        Ctx { client, json: false, out: Out::stdout(ColorChoice::Auto), hints: HINTS }
+        let output = Output::default();
+        Ctx { client, out: output.out, output, hints: HINTS }
     }
 
-    /// Print JSON instead of tables.
+    /// Print JSON instead of tables (`--json`).
     pub fn with_json(mut self, json: bool) -> Self {
-        self.json = json;
+        if json {
+            self.output.format = Format::Json;
+        }
+        self
+    }
+
+    /// Format, colour, `--fields` and `--raw` at once.
+    pub fn with_output(mut self, output: Output) -> Self {
+        self.out = output.out;
+        self.output = output;
         self
     }
 
     /// The `--color` flag (for stdout).
     pub fn with_color(mut self, color: ColorChoice) -> Self {
         self.out = Out::stdout(color);
+        self.output.out = self.out;
         self
     }
 
@@ -235,24 +289,30 @@ impl Ctx {
 
     /// The friendly message, with the client error kept as its source.
     fn err(&self, e: odl_client::Error) -> anyhow::Error {
-        let msg = describe(&e, self.client.base_url(), &self.hints);
-        anyhow::Error::new(e).context(Described(msg))
+        let msg = classify(&e, self.client.base_url(), &self.hints);
+        anyhow::Error::new(e).context(msg)
     }
 }
 
 /// One-line, actionable message for a client error. Safe to print.
 pub fn describe(e: &odl_client::Error, url: &str, hints: &Hints) -> String {
+    classify(e, url, hints).to_string()
+}
+
+/// [`describe`] with the [`Kind`] (exit code) and the hint apart.
+pub fn classify(e: &odl_client::Error, url: &str, hints: &Hints) -> Described {
     use odl_client::Error as E;
     let f = match e {
-        E::Api { status, message, .. } => Failure::Status { status: *status, message },
+        E::Api { status, code, message } => Failure::Status { status: *status, code, message },
         E::InvalidUrl(m) => Failure::InvalidUrl(m),
+        E::InvalidTraceId(_) => return Described::new(Kind::Usage, e.to_string()),
         E::Http(h) if h.is_connect() => Failure::Connect,
         E::Http(h) if h.is_timeout() => Failure::Timeout,
         E::Http(h) if h.is_decode() => Failure::Decode(h.to_string()),
         E::Http(h) => Failure::Other(h.to_string()),
-        e => return clean(&e.to_string()).into_owned(),
+        e => Failure::Other(e.to_string()),
     };
-    mallard_term::error::describe(f, url, hints)
+    mallard_term::error::classify(f, url, hints)
 }
 
 /// Run one command. Client errors become one friendly line ([`describe`]).
@@ -278,33 +338,33 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             let s = c.stats().await?;
             print(ctx, &s, |s| stats_text(s, c.base_url()))
         }
-        Command::Services { w, all_spans } => {
-            let (from, to, since) = w.parts();
+        Command::Services(ServiceArgs { w, all_spans }) => {
+            let (win, (from, to, since)) = window(&w)?;
             let v = c.services(&ServiceQuery { from, to, since, entry_only: Some(!all_spans) }).await?;
-            print(ctx, &v, |v| services_text(v))
+            print_list(ctx, List::new(v).window(win), services_text)
         }
-        Command::Ops { w, service, all_spans } => {
-            let (from, to, since) = w.parts();
+        Command::Ops(OpsArgs { w, service, all_spans }) => {
+            let (win, (from, to, since)) = window(&w)?;
             let v = c.operations(&OperationQuery { from, to, since, service, entry_only: Some(!all_spans) }).await?;
-            print(ctx, &v, |v| operations_text(v))
+            print_list(ctx, List::new(v).window(win), operations_text)
         }
-        Command::Traces { w, service, operation, errors, min_ms, max_ms, attr, limit } => {
-            let (from, to, since) = w.parts();
+        Command::Traces(a) => {
+            let (win, (from, to, since)) = window(&a.w)?;
             let v = c
                 .traces(&TraceQuery {
                     from,
                     to,
                     since,
-                    service,
-                    operation,
-                    errors_only: Some(errors),
-                    min_duration_ms: min_ms,
-                    max_duration_ms: max_ms,
-                    attributes: attrs(&attr),
-                    limit: Some(limit),
+                    service: a.service,
+                    operation: a.operation,
+                    errors_only: Some(a.errors),
+                    min_duration_ms: a.min_ms,
+                    max_duration_ms: a.max_ms,
+                    attributes: attrs(&a.attr),
+                    limit: Some(a.limit),
                 })
                 .await?;
-            print(ctx, &v, |v| traces_text(v))
+            print_list(ctx, List::new(v).limit(Some(a.limit)).window(win), traces_text)
         }
         Command::Trace { trace_id, since, attributes } => {
             let id = &trace_id;
@@ -322,69 +382,14 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             };
             print(ctx, &t, |t| trace_lines(t, attributes).join("\n"))
         }
-        Command::Logs { w, service, level, query, trace, attr, limit, follow } => {
-            let min_severity = level
-                .as_deref()
-                .map(|l| severity::parse(l).ok_or_else(|| anyhow::anyhow!("unknown level {l:?}")))
-                .transpose()?;
-            let (from, to, since) = w.parts();
-            let q = LogQuery {
-                from,
-                to,
-                since,
-                service,
-                min_severity,
-                q: query,
-                trace_id: trace,
-                attributes: attrs(&attr),
-                limit: Some(limit),
-                order: Some(LogOrder::Desc),
-            };
-            if !follow {
-                let mut v = c.logs(&q).await?;
-                v.reverse(); // print oldest first, like a log file
-                return print(ctx, &v, |v| v.iter().map(log_line).collect::<Vec<_>>().join("\n"));
-            }
-            // Start where --from/--since say; the first poll shows the newest
-            // `--limit` records of that window, like `tail -n N -f`.
-            let start = match from {
-                Some(f) => f,
-                None => chrono::Utc::now() - chrono::TimeDelta::from_std(parse_window(&w.since)?)?,
-            };
-            let mut tail = LogTail::new(c.clone(), q, start);
-            // One Ctrl-C future for the whole loop, so a signal that arrives
-            // while a request is in flight is not lost.
-            let ctrl_c = tokio::signal::ctrl_c();
-            tokio::pin!(ctrl_c);
-            loop {
-                tokio::select! {
-                    res = tail.poll() => match res {
-                        Ok(v) => {
-                            for r in &v {
-                                if ctx.json {
-                                    ctx.out.line(&json_safe(&serde_json::to_string(r)?))?;
-                                } else {
-                                    ctx.out.line(&log_line(r))?;
-                                }
-                            }
-                        }
-                        Err(e) => eprintln!("{} {}", alert("poll failed:"), describe(&e, c.base_url(), &ctx.hints)),
-                    },
-                    _ = &mut ctrl_c => return Ok(()),
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                    _ = &mut ctrl_c => return Ok(()),
-                }
-            }
-        }
-        Command::Metrics { w, service, query } => {
-            let (from, to, since) = w.parts();
+        Command::Logs(a) => logs(ctx, a).await,
+        Command::Metrics(MetricListArgs { w, service, query }) => {
+            let (win, (from, to, since)) = window(&w)?;
             let v = c.metrics(&MetricListQuery { from, to, since, service, q: query }).await?;
-            print(ctx, &v, |v| metrics_text(v))
+            print_list(ctx, List::new(v).window(win), metrics_text)
         }
-        Command::Metric { name, w, service, agg, by, attr, step } => {
-            let (from, to, since) = w.parts();
+        Command::Metric(MetricArgs { name, w, service, agg, by, attr, step }) => {
+            let (_, (from, to, since)) = window(&w)?;
             let r = c
                 .metric_query(&MetricQuery {
                     name,
@@ -400,11 +405,105 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                 .await?;
             print(ctx, &r, metric_text)
         }
-        Command::Sql { query, limit } => {
+        Command::Sql(SqlArgs { query, limit }) => {
             let r = c.sql(&query, Some(limit)).await?;
             print(ctx, &r, sql_text)
         }
         Command::Tui { since } => tui::run_standalone(c.clone(), &since).await,
+    }
+}
+
+/// A log record as JSON: `resource_attributes` only with `--raw` (they
+/// repeat on every record; the service name is already a field).
+fn log_json(r: &LogRecord, raw: bool) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(r)?;
+    if !raw && let Some(m) = v.as_object_mut() {
+        m.remove("resource_attributes");
+    }
+    Ok(v)
+}
+
+async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
+    let c = &ctx.client;
+    let min_severity = a
+        .level
+        .as_deref()
+        .map(|l| {
+            severity::parse(l)
+                .ok_or_else(|| usage(format!("unknown level {l:?} (trace, debug, info, warn, error, fatal or 1-24)")))
+        })
+        .transpose()?;
+    let (win, order) = match a.around {
+        Some(t) => {
+            let d = chrono::TimeDelta::from_std(mallard_term::window::parse_duration(&a.window).map_err(usage)?)?;
+            (Window { from: t - d, to: t + d }, LogOrder::Asc)
+        }
+        None => (a.w.resolve(DEFAULT_WINDOW)?, LogOrder::Desc),
+    };
+    let q = LogQuery {
+        from: Some(win.from),
+        to: if a.follow { None } else { Some(win.to) },
+        since: None,
+        service: a.service,
+        min_severity,
+        q: a.query,
+        trace_id: a.trace,
+        attributes: attrs(&a.attr),
+        limit: Some(a.limit),
+        order: Some(order),
+    };
+    if !a.follow {
+        let mut v = c.logs(&q).await?;
+        if order == LogOrder::Desc {
+            v.reverse(); // print oldest first, like a log file
+        }
+        let list = List::new(v).limit(Some(a.limit)).window(win);
+        if ctx.output.text() {
+            if !list.items.is_empty() {
+                ctx.out.line(&list.items.iter().map(log_line).collect::<Vec<_>>().join("\n"))?;
+            }
+            ctx.output.truncation_note(&list);
+            return Ok(());
+        }
+        let items = list.items.iter().map(|r| log_json(r, ctx.output.raw)).collect::<Result<Vec<_>>>()?;
+        let l = List {
+            items,
+            count: list.count,
+            limit: list.limit,
+            truncated: list.truncated,
+            next_cursor: None,
+            window: list.window,
+        };
+        return ctx.output.list(&l);
+    }
+    // Start where --from/--since say; the first poll shows the newest
+    // `--limit` records of that window, like `tail -n N -f`.
+    let mut tail = LogTail::new(c.clone(), q, win.from);
+    // One Ctrl-C future for the whole loop, so a signal that arrives
+    // while a request is in flight is not lost.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        tokio::select! {
+            res = tail.poll() => match res {
+                Ok(v) => {
+                    for r in &v {
+                        if ctx.output.text() {
+                            ctx.out.line(&log_line(r))?;
+                        } else {
+                            // A stream is NDJSON in json mode too.
+                            ctx.output.record(&log_json(r, ctx.output.raw)?)?;
+                        }
+                    }
+                }
+                Err(e) => eprintln!("{} {}", alert("poll failed:"), describe(&e, c.base_url(), &ctx.hints)),
+            },
+            _ = &mut ctrl_c => return Ok(()),
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            _ = &mut ctrl_c => return Ok(()),
+        }
     }
 }
 
@@ -436,11 +535,40 @@ mod tests {
     fn windows_are_validated() {
         assert!(parse(&["services", "--since", "bogus"]).is_err());
         assert!(parse(&["tui", "--since", "0s"]).is_err());
-        let Command::Services { w, .. } = parse(&["services", "--since", "1h30m"]).unwrap() else { panic!() };
-        assert_eq!(parse_window(&w.since).unwrap(), Duration::from_secs(5400));
-        assert_eq!(w.parts().2.as_deref(), Some("1h30m"));
-        let from = "2026-01-01T00:00:00Z".parse().unwrap();
-        let w = Win { since: "1h".into(), from: Some(from), to: None };
-        assert_eq!(w.parts(), (Some(from), None, None), "--from overrides --since");
+        let Command::Services(a) = parse(&["services", "--since", "1h30m"]).unwrap() else { panic!() };
+        let (w, (from, to, since)) = window(&a.w).unwrap();
+        assert_eq!((w.to - w.from).num_seconds(), 5400);
+        assert_eq!((from, to, since), (Some(w.from), Some(w.to), None), "always absolute");
+        let Command::Services(a) = parse(&["services"]).unwrap() else { panic!() };
+        let w = window(&a.w).unwrap().0;
+        assert_eq!((w.to - w.from).to_std().unwrap(), DEFAULT_WINDOW);
+    }
+
+    #[test]
+    fn logs_around_a_time() {
+        assert!(parse(&["logs", "--around", "2026-01-01T00:00:00Z", "--window", "30s"]).is_ok());
+        assert!(parse(&["logs", "--around", "10m", "--since", "1h"]).is_err(), "around or a window");
+        assert!(parse(&["logs", "--around", "10m", "-f"]).is_err(), "around or follow");
+        assert!(parse(&["logs", "--window", "30s"]).is_err(), "--window needs --around");
+    }
+
+    #[test]
+    fn log_json_drops_resource_attributes_unless_raw() {
+        let r = LogRecord {
+            time: Utc::now(),
+            observed_time: Utc::now(),
+            service_name: "checkout".into(),
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: "hi".into(),
+            trace_id: None,
+            span_id: None,
+            event_name: String::new(),
+            scope_name: String::new(),
+            attributes: Default::default(),
+            resource_attributes: Default::default(),
+        };
+        assert!(log_json(&r, false).unwrap().get("resource_attributes").is_none());
+        assert!(log_json(&r, true).unwrap().get("resource_attributes").is_some());
     }
 }

@@ -1,23 +1,35 @@
 //! `mallard`: the CLI and TUI. Talks to a `mallard-server` over HTTP.
+//!
+//! One flat command tree (ADR 0008): `issues`, `events`, `traces`, `logs`,
+//! … The commands come from the two libraries (`sdl-cli`, `odl-cli`);
+//! `status`, `setup`, `find`, `trace` and `help agents` span both sides and
+//! live here. The old `errors …` / `telemetry …` paths stay as hidden
+//! aliases of the same commands.
 
+mod find;
+mod help;
+mod setup;
+mod status;
 mod trace;
 mod tui;
 
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{FromArgMatches, Parser, Subcommand};
 use mallard_client::Client;
-use mallard_term::color::{ColorChoice, Out};
-use mallard_term::error::{Described, Hints};
-use mallard_term::text::clean;
+use mallard_term::color::ColorChoice;
+use mallard_term::error::{Described, Hints, Kind};
+use mallard_term::output::{Format, Output};
+use mallard_term::window::WindowArgs;
 
 #[derive(Parser)]
 #[command(
     name = "mallard",
     version,
     about = "Errors, traces, logs and metrics on one DuckLake",
-    propagate_version = true
+    propagate_version = true,
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Server base URL (its http_addr).
@@ -26,9 +38,21 @@ struct Cli {
     /// API token (one of the server's server.api_tokens).
     #[arg(long, env = "MALLARD_TOKEN", hide_env_values = true, global = true)]
     token: Option<String>,
-    /// Print JSON instead of text.
+    /// Sentry project id or slug (issues, events, …); optional with one project.
+    #[arg(short, long, env = "MALLARD_PROJECT", global = true)]
+    project: Option<String>,
+    /// Output format: text, json (compact when piped) or ndjson (one item per line).
+    #[arg(long, env = "MALLARD_FORMAT", value_enum, global = true)]
+    format: Option<Format>,
+    /// Same as --format json.
     #[arg(long, global = true)]
     json: bool,
+    /// Keep only these top-level fields, comma separated (e.g. id,title,count).
+    #[arg(long, global = true, value_name = "A,B")]
+    fields: Option<String>,
+    /// Include raw payloads: the Sentry event payload, log resource attributes.
+    #[arg(long, global = true)]
+    raw: bool,
     /// Colour: auto (a terminal without NO_COLOR), always or never.
     #[arg(long, global = true, value_enum, default_value_t)]
     color: ColorChoice,
@@ -38,201 +62,337 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Health, ingest and storage of the server.
+    /// Health of both sides and what the server allows; exit code 6 when a side is down.
     Status,
-    /// Everything about one trace: spans, Sentry errors and logs.
-    Trace {
-        /// Trace id (32 hex characters).
-        trace_id: String,
-        /// Search window, e.g. 24h, 7d.
-        #[arg(short, long)]
-        since: Option<String>,
+    /// Create a project if it does not exist; print its DSN and the OTLP env vars.
+    Setup(setup::SetupArgs),
+    /// What is this id (trace, event or issue)? Prints matches and the command to see more.
+    Find {
+        /// A trace or event id (32 hex) or an issue id (16 hex).
+        id: String,
+        /// Where to look for traces and events (default 7d).
+        #[command(flatten)]
+        window: WindowArgs,
+    },
+    /// Error issues: list, show, resolve, ignore, unresolve.
+    #[command(subcommand)]
+    Issues(sdl_cli::IssuesCmd),
+    /// Error events: list, show.
+    #[command(subcommand)]
+    Events(sdl_cli::EventsCmd),
+    /// Sentry projects: list, show, create.
+    #[command(subcommand)]
+    Projects(sdl_cli::ProjectsCmd),
+    /// Traces: list (search), show (spans, errors and logs of one trace).
+    #[command(subcommand)]
+    Traces(TracesCmd),
+    /// Everything about one trace: spans, errors and logs (= traces show).
+    Trace(TraceShowArgs),
+    /// Search, follow or show logs around a time (default window 1h).
+    Logs(odl_cli::LogArgs),
+    /// Services with request rate, error rate and latency (default window 1h).
+    Services(odl_cli::ServiceArgs),
+    /// Operations (span names) with request rate, error rate and latency.
+    Ops(odl_cli::OpsArgs),
+    /// Metrics: list, show (values over time).
+    #[command(subcommand)]
+    Metrics(MetricsCmd),
+    /// Read-only SQL over the telemetry tables (the server must enable it).
+    Sql(odl_cli::SqlArgs),
+    /// Uploaded sourcemap bundles.
+    #[command(subcommand)]
+    Sourcemaps(sdl_cli::SourcemapsCmd),
+    /// Send a test error to a DSN (checks the Sentry SDK setup end to end).
+    SendTest {
+        /// DSN to send to (from `mallard setup`).
+        #[arg(long, env = "SENTRY_DSN")]
+        dsn: String,
+        /// Error message of the test event.
+        #[arg(long, default_value = "send-test: hello from the mallard CLI")]
+        message: String,
     },
     /// Terminal UI: F1 errors, F2 telemetry.
-    Tui {
-        /// Sentry project id or slug; optional when there is only one project.
-        #[arg(short, long, env = "MALLARD_PROJECT")]
-        project: Option<String>,
+    Tui,
+    /// Help for a command, or `mallard help agents`: the guide for AI agents.
+    Help {
+        /// A command (e.g. `issues list`) or `agents`.
+        topic: Vec<String>,
     },
-    /// Errors from Sentry SDKs: projects, issues, events, sourcemaps.
-    #[command(alias = "sentry")]
+    /// The Sentry-side commands under their old name (also `sentry`).
+    #[command(hide = true, alias = "sentry")]
     Errors {
-        /// Project id or slug; optional when there is only one project.
-        #[arg(short, long, env = "MALLARD_PROJECT", global = true)]
-        project: Option<String>,
         #[command(subcommand)]
         cmd: sdl_cli::Command,
     },
-    /// OpenTelemetry data: services, traces, logs, metrics.
-    #[command(alias = "otel")]
+    /// The OpenTelemetry-side commands under their old name (also `otel`).
+    #[command(hide = true, alias = "otel")]
     Telemetry {
         #[command(subcommand)]
         cmd: odl_cli::Command,
     },
 }
 
-/// Hints in `mallard errors …` messages name mallard's command and env vars.
-const ERRORS_HINTS: Hints = Hints {
-    command: "mallard errors",
-    url_env: "MALLARD_URL",
-    token_env: "MALLARD_TOKEN",
-    project_env: "MALLARD_PROJECT",
-};
+#[derive(Subcommand)]
+enum TracesCmd {
+    /// Search traces (default window 1h).
+    List(odl_cli::TraceListArgs),
+    /// Spans, Sentry errors and logs of one trace.
+    Show(TraceShowArgs),
+}
 
-/// The same for `mallard telemetry …`.
-const TELEMETRY_HINTS: Hints = Hints { command: "mallard telemetry", ..ERRORS_HINTS };
+#[derive(clap::Args)]
+struct TraceShowArgs {
+    /// Trace id (32 hex characters).
+    trace_id: String,
+    /// Where to look (default 7d).
+    #[command(flatten)]
+    window: WindowArgs,
+}
+
+#[derive(Subcommand)]
+enum MetricsCmd {
+    /// Metric names, types and series counts (default window 1h).
+    List(odl_cli::MetricListArgs),
+    /// One metric over time: aggregate, group by attributes.
+    Show(odl_cli::MetricArgs),
+}
+
+/// Hints in messages name mallard's commands and env vars.
+const ERRORS_HINTS: Hints =
+    Hints { command: "mallard", url_env: "MALLARD_URL", token_env: "MALLARD_TOKEN", project_env: "MALLARD_PROJECT" };
+
+/// The same for the telemetry side.
+const TELEMETRY_HINTS: Hints = ERRORS_HINTS;
+
+/// What every command gets: the client and how to print.
+struct Run {
+    client: Client,
+    project: Option<String>,
+    output: Output,
+}
+
+impl Run {
+    fn sentry(&self) -> sdl_cli::Ctx {
+        sdl_cli::Ctx::new(self.client.sentry.clone())
+            .with_project(self.project.clone())
+            .with_output(self.output.clone())
+            .with_hints(ERRORS_HINTS)
+    }
+
+    fn otel(&self) -> odl_cli::Ctx {
+        odl_cli::Ctx::new(self.client.otel.clone()).with_output(self.output.clone()).with_hints(TELEMETRY_HINTS)
+    }
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let color = cli.color;
-    mallard_term::error::report(run(cli).await, color)
+    let cli = match parse(std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(code) => return code,
+    };
+    let (color, json) = (cli.color, Format::pick(cli.format, cli.json).is_json());
+    mallard_term::error::report_as(run(cli).await, color, json)
+}
+
+/// Parse the arguments. Usage errors exit 2; with JSON output asked for
+/// (`--json`, `--format json|ndjson`, `MALLARD_FORMAT`) they are one JSON
+/// line on stderr, like every other error.
+fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Cli, ExitCode> {
+    let args: Vec<std::ffi::OsString> = args.into_iter().collect();
+    let res = help::command().try_get_matches_from(&args).and_then(|m| Cli::from_arg_matches(&m));
+    match res {
+        Ok(cli) => Ok(cli),
+        // --help and --version.
+        Err(e) if !e.use_stderr() => {
+            let _ = e.print();
+            Err(ExitCode::SUCCESS)
+        }
+        Err(e) if wants_json(&args) => {
+            let text = e.to_string();
+            let first = text.lines().next().unwrap_or("").trim_start_matches("error: ");
+            let d = Described::new(Kind::Usage, first).hint("see mallard --help");
+            eprintln!("{}", mallard_term::error::error_line(&d, ColorChoice::Never, true));
+            Err(ExitCode::from(Kind::Usage.exit_code()))
+        }
+        Err(e) => {
+            let _ = e.print();
+            Err(ExitCode::from(Kind::Usage.exit_code()))
+        }
+    }
+}
+
+/// Whether the raw arguments (or `MALLARD_FORMAT`) ask for JSON output.
+fn wants_json(args: &[std::ffi::OsString]) -> bool {
+    let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let is_json = |v: &str| v == "json" || v == "ndjson";
+    args.iter().any(|a| a == "--json" || a.strip_prefix("--format=").is_some_and(is_json))
+        || args.windows(2).any(|w| w[0] == "--format" && is_json(&w[1]))
+        || std::env::var("MALLARD_FORMAT").is_ok_and(|v| is_json(&v))
 }
 
 async fn run(cli: Cli) -> Result<()> {
     let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
-    let out = Out::stdout(cli.color);
+    let output =
+        Output::new(Format::pick(cli.format, cli.json), cli.color).with_fields(cli.fields.as_deref()).with_raw(cli.raw);
+    let r = Run { client, project: cli.project, output };
     match cli.cmd {
-        Cmd::Status => status(&client, cli.json, out).await,
-        Cmd::Tui { project } => tui::run(&client, project).await,
-        Cmd::Errors { project, cmd } => {
-            let ctx = sdl_cli::Ctx::new(client.sentry.clone())
-                .with_project(project)
-                .with_json(cli.json)
-                .with_color(cli.color)
-                .with_hints(ERRORS_HINTS);
-            sdl_cli::run(cmd, &ctx).await
-        }
-        Cmd::Telemetry { cmd } => {
-            let ctx = odl_cli::Ctx::new(client.otel.clone())
-                .with_json(cli.json)
-                .with_color(cli.color)
-                .with_hints(TELEMETRY_HINTS);
-            odl_cli::run(cmd, &ctx).await
-        }
-        Cmd::Trace { trace_id, since } => {
-            let t = client.trace_overview(&trace_id, since.as_deref()).await.map_err(|e| described(e, &cli.url))?;
-            if cli.json {
-                out.line(&mallard_term::text::json_safe(&serde_json::to_string_pretty(&t)?))?;
-            } else {
-                out.line(&trace::render(&t))?;
-            }
-            Ok(())
-        }
+        Cmd::Status => status::run(&r).await,
+        Cmd::Setup(a) => setup::run(&r, a).await,
+        Cmd::Find { id, window } => find::run(&r, &id, &window).await,
+        Cmd::Issues(c) => sdl_cli::run(sdl_cli::Command::Issues(c), &r.sentry()).await,
+        Cmd::Events(c) => sdl_cli::run(sdl_cli::Command::Events(c), &r.sentry()).await,
+        Cmd::Projects(c) => sdl_cli::run(sdl_cli::Command::Projects(c), &r.sentry()).await,
+        Cmd::Sourcemaps(c) => sdl_cli::run(sdl_cli::Command::Sourcemaps(c), &r.sentry()).await,
+        Cmd::SendTest { dsn, message } => sdl_cli::run(sdl_cli::Command::SendTest { dsn, message }, &r.sentry()).await,
+        Cmd::Traces(TracesCmd::List(a)) => odl_cli::run(odl_cli::Command::Traces(a), &r.otel()).await,
+        Cmd::Traces(TracesCmd::Show(a)) | Cmd::Trace(a) => trace::run(&r, &a.trace_id, &a.window).await,
+        Cmd::Logs(a) => odl_cli::run(odl_cli::Command::Logs(a), &r.otel()).await,
+        Cmd::Services(a) => odl_cli::run(odl_cli::Command::Services(a), &r.otel()).await,
+        Cmd::Ops(a) => odl_cli::run(odl_cli::Command::Ops(a), &r.otel()).await,
+        Cmd::Metrics(MetricsCmd::List(a)) => odl_cli::run(odl_cli::Command::Metrics(a), &r.otel()).await,
+        Cmd::Metrics(MetricsCmd::Show(a)) => odl_cli::run(odl_cli::Command::Metric(a), &r.otel()).await,
+        Cmd::Sql(a) => odl_cli::run(odl_cli::Command::Sql(a), &r.otel()).await,
+        Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
+        Cmd::Help { topic } => help::run(&topic, &r.output),
+        Cmd::Errors { cmd } => sdl_cli::run(cmd, &r.sentry()).await,
+        Cmd::Telemetry { cmd } => odl_cli::run(cmd, &r.otel()).await,
     }
 }
 
-/// One friendly line for a client error, worded and hinted like the
-/// `errors` and `telemetry` commands do it.
-fn describe(e: &mallard_client::Error, base_url: &str) -> String {
+/// What went wrong with a mallard-client call, worded like the side's own
+/// commands do it.
+fn classify(e: &mallard_client::Error, base_url: &str) -> Described {
     let base_url = base_url.trim_end_matches('/');
     match e {
-        mallard_client::Error::Sentry(e) => {
-            format!("errors: {}", sdl_cli::describe(e, &format!("{base_url}/sentry"), &ERRORS_HINTS))
-        }
-        mallard_client::Error::Otel(e) => {
-            format!("telemetry: {}", odl_cli::describe(e, &format!("{base_url}/otel"), &TELEMETRY_HINTS))
-        }
-        e => clean(&e.to_string()).into_owned(),
+        mallard_client::Error::Sentry(e) => sdl_cli::classify(e, &format!("{base_url}/sentry"), &ERRORS_HINTS),
+        mallard_client::Error::Otel(e) => odl_cli::classify(e, &format!("{base_url}/otel"), &TELEMETRY_HINTS),
+        mallard_client::Error::InvalidTraceId(_) => Described::new(Kind::Usage, e.to_string()),
+        e => Described::new(Kind::Internal, e.to_string()),
     }
 }
 
+/// A mallard-client error with its message and kind attached.
 fn described(e: mallard_client::Error, base_url: &str) -> anyhow::Error {
-    let msg = describe(&e, base_url);
-    anyhow::Error::new(e).context(Described(msg))
-}
-
-async fn status(c: &Client, json: bool, out: Out) -> Result<()> {
-    let (s, o) = tokio::join!(c.sentry.info(), c.otel.stats());
-    let s = s.map_err(|e| sdl_cli::describe(&e, c.sentry.base_url(), &ERRORS_HINTS));
-    let o = o.map_err(|e| odl_cli::describe(&e, c.otel.base_url(), &TELEMETRY_HINTS));
-    if json {
-        fn side<T: serde::Serialize>(r: &Result<T, String>) -> serde_json::Value {
-            match r {
-                Ok(v) => serde_json::json!({ "ok": true, "info": v }),
-                Err(e) => serde_json::json!({ "ok": false, "error": e }),
-            }
-        }
-        let v = serde_json::json!({ "sentry": side(&s), "otel": side(&o) });
-        out.line(&mallard_term::text::json_safe(&serde_json::to_string_pretty(&v)?))?;
-        return Ok(());
-    }
-    out.line(&status_text(c.base_url(), s, o))?;
-    Ok(())
-}
-
-/// The text of `mallard status`: one line per side, server text cleaned.
-fn status_text(
-    base_url: &str,
-    s: Result<mallard_client::sdl_client::types::ServerInfo, String>,
-    o: Result<mallard_client::odl_client::api::Stats, String>,
-) -> String {
-    use mallard_term::fmt::{bytes, compact};
-    let mut text = format!("server    {}\n", clean(base_url));
-    let error = |e: &str| format!("{} {}", mallard_term::color::red("ERROR"), clean(e));
-    match s {
-        Ok(i) => text.push_str(&format!(
-            "errors    ok  v{}  duckdb {}  queue {}/{}\n",
-            clean(&i.version),
-            clean(&i.duckdb_version),
-            i.queue_depth,
-            i.queue_capacity
-        )),
-        Err(e) => text.push_str(&format!("errors    {}\n", error(&e))),
-    }
-    match o {
-        Ok(st) => {
-            let rows: i64 = st.storage.tables.iter().map(|t| t.rows + t.inlined_rows).sum();
-            let size: i64 = st.storage.tables.iter().map(|t| t.bytes).sum();
-            text.push_str(&format!(
-                "telemetry ok  v{}  up {}s  buffered {} rows  stored {} rows / {}  flush errors {}",
-                clean(&st.version),
-                st.uptime_secs,
-                compact(st.ingest.buffered_rows as f64),
-                compact(rows as f64),
-                bytes(size.max(0) as u64),
-                st.ingest.flush_errors
-            ));
-        }
-        Err(e) => text.push_str(&format!("telemetry {}", error(&e))),
-    }
-    text
+    let d = classify(&e, base_url);
+    anyhow::Error::new(e).context(d)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+
+    fn parse_ok(args: &[&str]) -> Cli {
+        try_parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let args: Vec<&str> = std::iter::once("mallard").chain(args.iter().copied()).collect();
+        help::command().try_get_matches_from(args).and_then(|m| Cli::from_arg_matches(&m))
+    }
 
     #[test]
     fn cli_definition_is_valid() {
-        Cli::command().debug_assert();
+        help::command().debug_assert();
     }
 
     #[test]
-    fn errors_project_works_before_and_after_the_subcommand() {
+    fn the_flat_tree() {
         for args in [
-            &["mallard", "errors", "-p", "web", "issues", "list"][..],
-            &["mallard", "errors", "issues", "list", "-p", "web"][..],
-            &["mallard", "errors", "issues", "list", "--project", "web"][..],
+            &["status"][..],
+            &["setup", "checkout", "--platform", "node"],
+            &["find", "0af7651916cd43dd8448eb211c80319c"],
+            &["issues", "list", "--new", "--first-release", "web@1", "--since", "1h"],
+            &["issues", "list", "--from", "2h", "--to", "1h", "--sort", "count", "-n", "10"],
+            &["issues", "show", "85fede14250ec6be", "--since", "1h"],
+            &["issues", "resolve", "85fede14250ec6be", "--reason", "fixed in #123"],
+            &["issues", "ignore", "a", "b"],
+            &["events", "list", "--issue", "85fede14250ec6be", "--since", "1d"],
+            &["events", "show", "0af7651916cd43dd8448eb211c80319c", "--raw"],
+            &["projects", "create", "web", "--if-not-exists"],
+            &["traces", "list", "-S", "checkout", "--errors", "--since", "15m"],
+            &["traces", "show", "0af7651916cd43dd8448eb211c80319c", "--from", "1d"],
+            &["trace", "0af7651916cd43dd8448eb211c80319c"],
+            &["logs", "-S", "checkout", "-l", "warn", "--since", "10m"],
+            &["logs", "--around", "2026-11-01T10:15:03Z", "--window", "2m"],
+            &["logs", "-f"],
+            &["services", "--since", "1h"],
+            &["ops", "-S", "checkout"],
+            &["metrics", "list", "-q", "http"],
+            &["metrics", "show", "http.server.duration", "-g", "p95", "-b", "http.route"],
+            &["sql", "SELECT 1"],
+            &["sourcemaps", "list"],
+            &["send-test", "--dsn", "http://k@h/1"],
+            &["tui"],
+            &["help", "agents"],
+            &["help", "issues", "list"],
         ] {
-            let cli = Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
-            assert!(matches!(cli.cmd, Cmd::Errors { project: Some(p), .. } if p == "web"), "{args:?}");
+            if let Err(e) = try_parse(args) {
+                panic!("{args:?}: {e}");
+            }
         }
     }
 
+    #[test]
+    fn old_paths_are_hidden_aliases_of_the_same_commands() {
+        for args in [
+            &["errors", "issues", "list", "-s", "1h"][..],
+            &["sentry", "events", "list", "-t", "abc", "-n", "3"],
+            &["errors", "stats", "--since", "1h"],
+            &["errors", "maintenance"],
+            &["errors", "projects", "create", "web"],
+            &["telemetry", "traces", "-n", "5"],
+            &["otel", "logs", "-f"],
+            &["telemetry", "trace", "0af7651916cd43dd8448eb211c80319c"],
+            &["telemetry", "metric", "x", "-g", "p95"],
+            &["telemetry", "health"],
+        ] {
+            if let Err(e) = try_parse(args) {
+                panic!("{args:?}: {e}");
+            }
+        }
+        let help = help::command().render_help().to_string();
+        assert!(!help.contains("  errors") && !help.contains("  telemetry"), "hidden: {help}");
+        assert!(help.contains("issues") && help.contains("logs"), "{help}");
+    }
+
+    #[test]
+    fn project_and_output_flags_are_global() {
+        for args in [
+            &["-p", "web", "issues", "list"][..],
+            &["issues", "list", "-p", "web"],
+            &["errors", "issues", "list", "--project", "web"],
+        ] {
+            assert_eq!(parse_ok(args).project.as_deref(), Some("web"), "{args:?}");
+        }
+        let cli = parse_ok(&["traces", "list", "-n", "5", "--json", "--color", "never", "--fields", "trace_id"]);
+        assert!(cli.json && cli.color == ColorChoice::Never && cli.fields.as_deref() == Some("trace_id"));
+        let cli = parse_ok(&["logs", "--format", "ndjson", "--raw"]);
+        assert_eq!((cli.format, cli.raw), (Some(Format::Ndjson), true));
+        assert!(try_parse(&["logs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn json_is_asked_for() {
+        let a = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(wants_json(&a(&["mallard", "x", "--json"])));
+        assert!(wants_json(&a(&["mallard", "--format", "ndjson", "x"])));
+        assert!(wants_json(&a(&["mallard", "--format=json"])));
+    }
+
     /// Both sides fail with one line in the same style, naming mallard's
-    /// env vars (review 2.M).
+    /// env vars (review 2.M), and the "unavailable" exit code.
     #[tokio::test]
     async fn both_sides_report_errors_alike() {
         let mut lines = vec![];
         for args in [
-            &["mallard", "--url", "http://127.0.0.1:9", "errors", "-p", "web", "issues", "list"][..],
-            &["mallard", "--url", "http://127.0.0.1:9", "telemetry", "services"][..],
-            &["mallard", "--url", "http://127.0.0.1:9", "trace", "0af7651916cd43dd8448eb211c80319c"][..],
+            &["--url", "http://127.0.0.1:9", "issues", "list", "-p", "web"][..],
+            &["--url", "http://127.0.0.1:9", "services"],
+            &["--url", "http://127.0.0.1:9", "trace", "0af7651916cd43dd8448eb211c80319c"],
+            &["--url", "http://127.0.0.1:9", "errors", "-p", "web", "issues", "list"],
         ] {
-            let e = run(Cli::try_parse_from(args).unwrap()).await.unwrap_err();
-            let msg = mallard_term::error::message(&e);
+            let res = run(parse_ok(args)).await;
+            assert_eq!(mallard_term::error::exit_code(&res), 6, "{args:?}");
+            let msg = mallard_term::error::message(&res.unwrap_err());
             assert!(msg.contains("cannot reach server at http://127.0.0.1:9/"), "{args:?}: {msg}");
             assert!(msg.contains("set MALLARD_URL"), "{args:?}: {msg}");
             assert!(!msg.contains('\n'), "{msg}");
@@ -242,26 +402,11 @@ mod tests {
         assert!(lines[1].starts_with("cannot reach server at http://127.0.0.1:9/otel"), "{}", lines[1]);
     }
 
-    #[test]
-    fn shared_global_flags() {
-        let cli =
-            Cli::try_parse_from(["mallard", "telemetry", "traces", "-n", "5", "--json", "--color", "never"]).unwrap();
-        assert!(cli.json && cli.color == ColorChoice::Never);
-        assert!(Cli::try_parse_from(["mallard", "errors", "events", "list", "-t", "abc", "-n", "3"]).is_ok());
-        assert!(Cli::try_parse_from(["mallard", "errors", "issues", "list", "-s", "1h"]).is_ok());
-    }
-
-    #[test]
-    fn status_names_each_side_once_and_cleans_server_text() {
-        let text = status_text(
-            "http://h",
-            Err("cannot reach server at http://h/sentry (is it running? set MALLARD_URL)".into()),
-            Err("down\x1b[2J".into()),
-        );
-        let plain = mallard_term::color::strip_ansi(&text);
-        assert_eq!(
-            plain,
-            "server    http://h\nerrors    ERROR cannot reach server at http://h/sentry (is it running? set MALLARD_URL)\ntelemetry ERROR down\\u{1b}[2J"
-        );
+    #[tokio::test]
+    async fn bad_ids_are_usage_errors() {
+        let res = run(parse_ok(&["--url", "http://127.0.0.1:9", "trace", "nope"])).await;
+        assert_eq!(mallard_term::error::exit_code(&res), 2);
+        let res = run(parse_ok(&["--url", "http://127.0.0.1:9", "find", "not-an-id"])).await;
+        assert_eq!(mallard_term::error::exit_code(&res), 2);
     }
 }

@@ -282,7 +282,7 @@ impl Embedded {
         }
         if due(self.stats_at, Duration::from_secs(5)) && !self.loader.is_pending(Kind::Stats) {
             let c = self.client.clone();
-            if self.loader.spawn(Kind::Stats, async move { c.stats().await }, Data::Stats) {
+            if self.loader.spawn(Kind::Stats, async move { c.stats().await }, |s| Data::Stats(Box::new(s))) {
                 self.stats_at = Some(Instant::now());
             }
         }
@@ -310,7 +310,7 @@ impl Embedded {
                     }
                 }
                 self.prev_accepted = Some((Instant::now(), accepted));
-                self.stats = Some(s);
+                self.stats = Some(*s);
                 self.stats_error = None;
             }
             Data::Services(v) => self.overview.set_services(v),
