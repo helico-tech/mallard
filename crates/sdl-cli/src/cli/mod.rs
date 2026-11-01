@@ -215,7 +215,7 @@ mod tests {
         let d = |e: sdl_client::Error| describe(&e, "http://x", &HINTS);
         assert_eq!(d(api(403, "")), "token not allowed to do this (check SDL_TOKEN)");
         assert_eq!(d(api(404, "")), "not found");
-        assert_eq!(d(api(404, "no issue")), "not found: no issue");
+        assert_eq!(d(api(404, "issue not found")), "issue not found");
         assert_eq!(d(api(400, "bad since")), "request rejected (400): bad since");
         assert_eq!(d(api(500, "down\x1b[2J")), "server error (500): down\\u{1b}[2J");
         assert_eq!(d(api(503, "busy")), "server busy (503): busy (try again)");
@@ -228,7 +228,7 @@ mod tests {
         let ctx = Ctx::new(sdl_client::Client::new("http://x", None).unwrap()).with_hints(MALLARD);
         let e =
             ctx.err(sdl_client::Error::Api { status: 404, code: String::new(), message: "gone\x1b]0;x\x07".into() });
-        assert_eq!(e.to_string(), "not found: gone\\u{1b}]0;x\\u{7}");
+        assert_eq!(e.to_string(), "gone\\u{1b}]0;x\\u{7}");
         let src = e.downcast_ref::<sdl_client::Error>().expect("typed source");
         assert!(src.is_not_found());
         assert!(!format!("{e:#}").chars().any(char::is_control), "{e:#}");

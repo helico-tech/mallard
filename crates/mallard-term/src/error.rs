@@ -210,8 +210,10 @@ pub fn classify(f: Failure<'_>, url: &str, h: &Hints) -> Described {
                 (_, Kind::Disabled) if message.is_empty() => d(kind, "turned off on the server".into()),
                 (_, Kind::Disabled) => d(kind, format!("turned off on the server: {message}")),
                 (403, _) => d(kind, "token not allowed to do this".into()).hint(format!("check {}", h.token_env)),
+                // Both servers already say what was not found ("issue not
+                // found", "trace … not found in the time window").
                 (404, _) if message.is_empty() => d(kind, "not found".into()),
-                (404, _) => d(kind, format!("not found: {message}")),
+                (404, _) => d(kind, message.to_string()),
                 (_, Kind::Unavailable) => d(kind, format!("server busy ({status}): {message}")).hint("try again"),
                 (500.., _) => d(kind, format!("server error ({status}): {message}")),
                 _ => d(kind, format!("request rejected ({status}): {message}")),
@@ -310,7 +312,7 @@ mod tests {
         assert_eq!(d(st(401, "")), "invalid token (set T or --token)");
         assert_eq!(d(st(403, "")), "token not allowed to do this (check T)");
         assert_eq!(d(st(404, "")), "not found");
-        assert_eq!(d(st(404, "no issue")), "not found: no issue");
+        assert_eq!(d(st(404, "issue not found")), "issue not found", "said once");
         assert_eq!(d(st(400, "bad since")), "request rejected (400): bad since");
         assert_eq!(d(st(500, "down\x1b[2J")), "server error (500): down\\u{1b}[2J");
         assert_eq!(d(st(503, "busy")), "server busy (503): busy (try again)");
