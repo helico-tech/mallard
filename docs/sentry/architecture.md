@@ -77,8 +77,12 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
 ## Concurrency model
 
 - **One writer thread** (`ducklake-writer`, a plain OS thread) owns the write
-  connection. Writes from anywhere else are bugs. This rules out DuckLake
+  connection. Row writes from anywhere else are bugs. This rules out DuckLake
   write conflicts inside the process and makes batching natural.
+- **One maintenance thread** (`ducklake-maintenance`, own connection) flushes
+  inlined data, compacts and expires snapshots, next to the writer. Retention
+  runs on the writer thread: its `DELETE` conflicts with concurrent inserts
+  ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)).
 - **Reader pool**: `SDL_READERS` connections cloned from the same DuckDB
   instance, used via `spawn_blocking`. Each query sees the latest committed
   snapshot.

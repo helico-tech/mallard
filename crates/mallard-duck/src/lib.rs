@@ -228,6 +228,14 @@ fn create_secrets(conn: &Connection, st: &StorageConfig) -> Result<()> {
     Ok(())
 }
 
+/// Whether a failed commit lost against a concurrent one and is worth trying
+/// again: a DuckLake transaction conflict, or too many retries on the next
+/// snapshot id (the catalog's primary key) under load.
+pub fn is_conflict(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}").to_ascii_lowercase();
+    text.contains("conflict") || text.contains("maximum retry count")
+}
+
 /// Create the parent directory of a local file path.
 fn ensure_parent_dir(file: &str) -> Result<()> {
     match Path::new(file).parent() {

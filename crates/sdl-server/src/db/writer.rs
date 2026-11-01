@@ -8,18 +8,23 @@
 //! Rows go first into an in-memory staging table with the fast DuckDB
 //! appender, then `INSERT INTO <lake>.<schema>.events SELECT ... FROM staging` moves
 //! them into the lake. (DuckDB does not allow one transaction to write to
-//! two databases, so the staging append runs before the lake transaction.)
+//! two databases, so the staging append runs before the lake transaction.
+//!
+//! Flush and compaction run next to this thread ([`super::maintenance`]).
+//! A commit that conflicts with another process is tried again.
 
+use super::maintenance::{MaintCmd, flush_inlined};
 use super::{Caches, Ns, ProjectRow, us_to_dt};
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use crossbeam_channel::{Receiver, RecvTimeoutError};
+use crossbeam_channel::{Receiver, Sender};
 use mallard_duck::duckdb::{Connection, params};
 use sdl_protocol::ProcessedEvent;
 use sdl_types::IssueStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
@@ -80,7 +85,13 @@ pub enum WriteCmd {
         reply: oneshot::Sender<Result<()>>,
     },
     /// Run flush + compaction + retention now (used by tests and the CLI).
+    /// Handed to the maintenance thread after what is queued before it.
     Maintenance {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Delete events past retention. On this thread: a `DELETE` that removes
+    /// rows conflicts with every concurrent insert into the table (ADR 0014).
+    Retention {
         reply: oneshot::Sender<Result<()>>,
     },
     /// Write everything still queued, flush inlined data and stop.
@@ -96,26 +107,21 @@ pub struct Writer {
     caches: Arc<Caches>,
     batch_max: usize,
     batch_window: Duration,
-    flush_interval: Duration,
-    compact_interval: Duration,
     retention: Duration,
-    maintenance: Maintenance,
-    last_flush: Instant,
-    inlined_since_flush: usize,
-    flush_rows: usize,
-    last_compact: Instant,
+    /// The maintenance thread, for [`WriteCmd::Maintenance`].
+    maintainer: Sender<MaintCmd>,
+    /// Rows inlined since the last flush; the maintenance thread reads it.
+    inlined: Arc<AtomicUsize>,
 }
 
 /// A drained queue with at least this many events commits without waiting
 /// for the batch window.
 const EARLY_COMMIT_EVENTS: usize = 200;
 
-/// Files merged per table and maintenance run (bounds how long one run blocks
-/// the writer; the rest is merged in later runs).
-const MAX_COMPACTED_FILES: usize = 1000;
-
-/// Tables compacted by periodic maintenance.
-const COMPACTED_TABLES: &[&str] = &["events", "issues", "issue_activity", "artifact_files"];
+/// Commits tried again after a conflict with another process. Doubling from
+/// 20 ms, this waits at most about 2.5 s; then the batch fails and the SDK
+/// retries it.
+const MAX_COMMIT_RETRIES: u32 = 7;
 
 const STAGING: &str = "CREATE TABLE IF NOT EXISTS $T.staging_events (
     project_id INTEGER, received_us BIGINT, ts_us BIGINT, event_id VARCHAR, group_hash UBIGINT,
@@ -213,16 +219,6 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     Ok(())
 }
 
-/// Settings for maintenance that is not scoped to this schema.
-#[derive(Debug, Clone, Copy)]
-pub struct Maintenance {
-    /// Expire snapshots and delete old files catalog-wide, keeping
-    /// snapshots this long (`None`: another component does it).
-    pub catalog_wide: Option<Duration>,
-    /// `SET threads` while compacting (0 = leave alone).
-    pub threads: usize,
-}
-
 impl Writer {
     pub fn new(
         conn: Connection,
@@ -230,7 +226,8 @@ impl Writer {
         rx: Receiver<WriteCmd>,
         caches: Arc<Caches>,
         cfg: &Config,
-        maintenance: Maintenance,
+        maintainer: Sender<MaintCmd>,
+        inlined: Arc<AtomicUsize>,
     ) -> Result<Self> {
         conn.execute_batch(&ns.sql("ATTACH IF NOT EXISTS ':memory:' AS $T"))?;
         conn.execute_batch(&ns.sql(STAGING))?;
@@ -241,14 +238,9 @@ impl Writer {
             caches,
             batch_max: cfg.ingest.batch_max.max(1),
             batch_window: cfg.ingest.batch_window,
-            flush_interval: cfg.maintenance.flush_interval,
-            compact_interval: cfg.maintenance.compact_interval,
             retention: cfg.retention.events,
-            maintenance,
-            last_flush: Instant::now(),
-            last_compact: Instant::now(),
-            inlined_since_flush: 0,
-            flush_rows: cfg.maintenance.flush_rows.max(1),
+            maintainer,
+            inlined,
         })
     }
 
@@ -256,14 +248,9 @@ impl Writer {
         tracing::info!(schema = %self.ns.schema, "writer started");
         let mut shutdown_reply = None;
         while shutdown_reply.is_none() {
-            let next_maint = self.next_maintenance_in();
-            let cmd = match self.rx.recv_timeout(next_maint) {
+            let cmd = match self.rx.recv() {
                 Ok(c) => c,
-                Err(RecvTimeoutError::Timeout) => {
-                    self.periodic_maintenance();
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(_) => break,
             };
             match cmd {
                 WriteCmd::Event(e) => {
@@ -302,9 +289,6 @@ impl Writer {
                 WriteCmd::Shutdown { reply } => shutdown_reply = Some(reply),
                 other => self.handle(other),
             }
-            if shutdown_reply.is_none() {
-                self.periodic_maintenance();
-            }
         }
         // Drain what is still queued (late requests get answered, not dropped).
         let mut batch = Vec::new();
@@ -321,33 +305,13 @@ impl Writer {
             self.write_events(batch);
         }
         // Flush inlined data so a clean shutdown leaves everything in Parquet.
-        if let Err(e) = self.flush_inlined() {
+        // The maintenance thread has stopped by now (`Db::shutdown`).
+        if let Err(e) = flush_inlined(&self.conn, &self.ns) {
             tracing::warn!(error = format!("{e:#}"), "final flush failed");
         }
         tracing::info!("writer stopped");
         if let Some(reply) = shutdown_reply {
             let _ = reply.send(());
-        }
-    }
-
-    fn next_maintenance_in(&self) -> Duration {
-        let f = self.flush_interval.saturating_sub(self.last_flush.elapsed());
-        let c = self.compact_interval.saturating_sub(self.last_compact.elapsed());
-        f.min(c).max(Duration::from_millis(10))
-    }
-
-    fn periodic_maintenance(&mut self) {
-        if self.last_flush.elapsed() >= self.flush_interval || self.inlined_since_flush >= self.flush_rows {
-            if let Err(e) = self.flush_inlined() {
-                tracing::error!(error = format!("{e:#}"), "flushing inlined data failed");
-            }
-            self.last_flush = Instant::now();
-        }
-        if self.last_compact.elapsed() >= self.compact_interval {
-            if let Err(e) = self.compact_and_expire() {
-                tracing::error!(error = format!("{e:#}"), "compaction failed");
-            }
-            self.last_compact = Instant::now();
         }
     }
 
@@ -368,15 +332,37 @@ impl Writer {
                 let _ = reply.send(());
             }
             WriteCmd::Maintenance { reply } => {
-                let r = self.flush_inlined().and_then(|_| self.compact_and_expire());
-                self.last_flush = Instant::now();
-                self.last_compact = Instant::now();
-                let _ = reply.send(r);
+                // Never wait here: that would pause ingest.
+                if let Err(e) = self.maintainer.try_send(MaintCmd::RunNow { reply })
+                    && let MaintCmd::RunNow { reply } = e.into_inner()
+                {
+                    let _ = reply.send(Err(anyhow!("maintenance is busy or stopped")));
+                }
+            }
+            WriteCmd::Retention { reply } => {
+                let _ = reply.send(self.retention());
             }
         }
     }
 
-    fn in_tx<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    /// Run `f` in one transaction. Again when the commit conflicts with
+    /// another process (or its retention): nothing was written then.
+    fn in_tx<T>(&self, f: impl Fn(&Connection) -> Result<T>) -> Result<T> {
+        let mut attempt = 0;
+        loop {
+            match self.try_tx(&f) {
+                Err(e) if attempt < MAX_COMMIT_RETRIES && mallard_duck::is_conflict(&e) => {
+                    metrics::counter!("sdl_write_conflicts_total").increment(1);
+                    tracing::debug!(attempt, error = format!("{e:#}"), "commit conflict, trying again");
+                    std::thread::sleep(Duration::from_millis(20 << attempt));
+                    attempt += 1;
+                }
+                r => return r,
+            }
+        }
+    }
+
+    fn try_tx<T>(&self, f: &impl Fn(&Connection) -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN TRANSACTION")?;
         match f(&self.conn) {
             Ok(v) => {
@@ -403,7 +389,7 @@ impl Writer {
         match &result {
             Ok(()) => {
                 if n <= super::schema::EVENTS_INLINE_ROWS {
-                    self.inlined_since_flush += n;
+                    self.inlined.fetch_add(n, Ordering::Relaxed);
                 }
                 metrics::counter!("sdl_events_stored_total").increment(n as u64);
                 tracing::debug!(events = n, ms = elapsed.as_millis() as u64, "batch committed");
@@ -649,81 +635,20 @@ impl Writer {
         Ok(())
     }
 
-    fn flush_inlined(&mut self) -> Result<()> {
-        let started = Instant::now();
-        let sql = self.ns.sql("CALL ducklake_flush_inlined_data($C, schema_name => $N)");
-        self.conn.execute_batch(&sql).context("ducklake_flush_inlined_data")?;
-        metrics::histogram!("sdl_flush_seconds").record(started.elapsed().as_secs_f64());
-        tracing::debug!(ms = started.elapsed().as_millis() as u64, "flushed inlined data");
+    fn retention(&self) -> Result<()> {
+        if self.retention.is_zero() {
+            return Ok(());
+        }
+        // Day-aligned cutoff: whole daily partitions are dropped without
+        // writing delete files. Partial days round up (keep more).
+        let days = self.retention.as_secs().div_ceil(86_400);
+        let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
+        let cutoff = (today - chrono::Duration::days(days as i64)).timestamp_micros();
+        let sql = self.ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)");
+        let deleted = self.in_tx(|c| Ok(c.execute(&sql, params![cutoff])?))?;
+        if deleted > 0 {
+            tracing::info!(deleted, "retention removed old events");
+        }
         Ok(())
-    }
-
-    fn compact_and_expire(&self) -> Result<()> {
-        let ns = &self.ns;
-        let started = Instant::now();
-        let mut errors = Vec::new();
-        if !self.retention.is_zero() {
-            // Day-aligned cutoff: whole daily partitions are dropped without
-            // writing delete files. Partial days round up (keep more).
-            let days = self.retention.as_secs().div_ceil(86_400);
-            let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).expect("midnight").and_utc();
-            let cutoff = (today - chrono::Duration::days(days as i64)).timestamp_micros();
-            match self
-                .conn
-                .execute(&ns.sql("DELETE FROM $S.events WHERE received_at < make_timestamp(?)"), params![cutoff])
-            {
-                Ok(0) => {}
-                Ok(deleted) => tracing::info!(deleted, "retention removed old events"),
-                Err(e) => errors.push(format!("retention: {e}")),
-            }
-        }
-        // Sorted merges need memory per thread: compact with fewer threads,
-        // then restore the previous setting.
-        let restore_threads: Option<i64> = match self.maintenance.threads {
-            0 => None,
-            n => {
-                let current: Option<i64> =
-                    self.conn.query_row("SELECT current_setting('threads')::BIGINT", [], |r| r.get(0)).ok();
-                if current.is_some_and(|c| c > n as i64) {
-                    let _ = self.conn.execute_batch(&format!("SET threads = {n}"));
-                    current
-                } else {
-                    None
-                }
-            }
-        };
-        // Each step runs even if an earlier one failed, so snapshots keep
-        // expiring when e.g. one table cannot be compacted.
-        for table in COMPACTED_TABLES {
-            let sql = ns.sql(&format!(
-                "CALL ducklake_merge_adjacent_files($C, '{table}', schema => $N, max_compacted_files => {MAX_COMPACTED_FILES});
-                 CALL ducklake_rewrite_data_files($C, '{table}', schema => $N, max_compacted_files => {MAX_COMPACTED_FILES});"
-            ));
-            if let Err(e) = self.conn.execute_batch(&sql) {
-                errors.push(format!("compacting {table}: {e}"));
-            }
-        }
-        if let Some(t) = restore_threads {
-            let _ = self.conn.execute_batch(&format!("SET threads = {t}"));
-        }
-        if let Some(keep) = self.maintenance.catalog_wide {
-            let cutoff = (Utc::now() - chrono::Duration::from_std(keep).unwrap_or_default()).timestamp_micros();
-            for (what, sql) in [
-                ("expiring snapshots", "CALL ducklake_expire_snapshots($C, older_than => make_timestamp(?))"),
-                ("cleaning up old files", "CALL ducklake_cleanup_old_files($C, older_than => make_timestamp(?))"),
-            ] {
-                if let Err(e) = self.conn.execute(&ns.sql(sql), params![cutoff]) {
-                    errors.push(format!("{what}: {e}"));
-                }
-            }
-        }
-        metrics::histogram!("sdl_compact_seconds").record(started.elapsed().as_secs_f64());
-        if errors.is_empty() {
-            tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");
-            Ok(())
-        } else {
-            metrics::counter!("sdl_maintenance_errors_total").increment(errors.len() as u64);
-            Err(anyhow!(errors.join("; ")))
-        }
     }
 }

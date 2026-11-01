@@ -3,10 +3,13 @@
 //! - One **writer thread** owns the primary connection. All writes go
 //!   through it as commands on a bounded channel, so there are never write
 //!   conflicts inside the process, and events are committed in batches.
+//! - A **maintenance thread** flushes and compacts on its own connection,
+//!   so that does not pause ingest (ADR 0014).
 //! - A small **reader pool** of cloned connections serves the query API.
 //!   DuckLake snapshots give readers a consistent view while the writer
 //!   commits.
 
+pub mod maintenance;
 pub mod read;
 pub mod schema;
 pub mod writer;
@@ -14,10 +17,13 @@ pub mod writer;
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use maintenance::MaintCmd;
 use mallard_duck::duckdb::{Connection, InterruptHandle};
 use sdl_types::IssueStatus;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, oneshot};
 pub use writer::{EventWrite, NewBundle, NewBundleFile, WriteCmd, WriteError};
 
@@ -116,6 +122,54 @@ pub struct Db {
     pub catalog: String,
     pub queue_capacity: usize,
     writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    maintainer: Maintainer,
+}
+
+/// The maintenance thread as [`Db`] sees it.
+#[derive(Clone)]
+struct Maintainer {
+    tx: crossbeam_channel::Sender<MaintCmd>,
+    stopping: Arc<AtomicBool>,
+    interrupt: Arc<InterruptHandle>,
+    thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
+
+impl Maintainer {
+    /// Stop after the current step, interrupting a long merge. A merge rolls
+    /// back when interrupted; nothing is lost. Waits for the thread.
+    fn stop_and_join(&self) {
+        self.stop();
+        if let Some(h) = self.thread.lock().expect("lock").take() {
+            let _ = h.join();
+        }
+    }
+
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Relaxed);
+        self.interrupt.interrupt();
+        let _ = self.tx.try_send(MaintCmd::Stop);
+    }
+}
+
+/// A job that is due once per interval.
+struct Tick {
+    interval: Duration,
+    last: Instant,
+}
+
+impl Tick {
+    fn new(interval: Duration) -> Self {
+        Tick { interval, last: Instant::now() }
+    }
+    fn due_in(&self) -> Duration {
+        self.interval.saturating_sub(self.last.elapsed()).max(Duration::from_millis(10))
+    }
+    fn is_due(&self) -> bool {
+        self.last.elapsed() >= self.interval
+    }
+    fn done(&mut self) {
+        self.last = Instant::now();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -153,7 +207,7 @@ impl Db {
     pub fn with_connection(
         conn: Connection,
         cfg: &Config,
-        maintenance: writer::Maintenance,
+        settings: maintenance::Maintenance,
         catalog_desc: String,
     ) -> Result<Db> {
         let ns = Ns::new(mallard_duck::CATALOG, crate::SCHEMA);
@@ -179,11 +233,28 @@ impl Db {
             readers.push(r);
         }
         let writer_conn = conn.try_clone()?;
+        let maintenance_conn = conn.try_clone()?;
         drop(conn);
 
         let (tx, rx) = crossbeam_channel::bounded(cfg.ingest.queue_capacity.max(1));
-        let w = writer::Writer::new(writer_conn, ns.clone(), rx, caches.clone(), cfg, maintenance)?;
+        let (maint_tx, maint_rx) = crossbeam_channel::bounded(16);
+        let inlined = Arc::new(AtomicUsize::new(0));
+        let w =
+            writer::Writer::new(writer_conn, ns.clone(), rx, caches.clone(), cfg, maint_tx.clone(), inlined.clone())?;
         let handle = std::thread::Builder::new().name("ducklake-writer".into()).spawn(move || w.run())?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let interrupt = maintenance_conn.interrupt_handle();
+        let m = maintenance::Maintainer::new(
+            maintenance_conn,
+            ns.clone(),
+            maint_rx,
+            tx.clone(),
+            inlined,
+            stopping.clone(),
+            cfg,
+            settings,
+        );
+        let maint_handle = std::thread::Builder::new().name("ducklake-maintenance".into()).spawn(move || m.run())?;
 
         Ok(Db {
             tx,
@@ -195,13 +266,21 @@ impl Db {
             catalog: catalog_desc,
             queue_capacity: cfg.ingest.queue_capacity,
             writer_thread: Mutex::new(Some(handle)),
+            maintainer: Maintainer {
+                tx: maint_tx,
+                stopping,
+                interrupt,
+                thread: Arc::new(Mutex::new(Some(maint_handle))),
+            },
         })
     }
 
-    /// Write what is queued, flush inlined data and stop the writer thread.
-    /// Idempotent. Later writes fail with "writer stopped".
+    /// Stop maintenance, write what is queued, flush inlined data and stop
+    /// the writer thread. Idempotent. Later writes fail with "writer stopped".
     pub async fn shutdown(&self) {
         let Some(handle) = self.writer_thread.lock().expect("lock").take() else { return };
+        let m = self.maintainer.clone();
+        let _ = tokio::task::spawn_blocking(move || m.stop_and_join()).await;
         let (tx, rx) = oneshot::channel();
         let sender = self.tx.clone();
         let sent = tokio::task::spawn_blocking(move || sender.send(WriteCmd::Shutdown { reply: tx }).is_ok())
@@ -359,15 +438,16 @@ impl Db {
 }
 
 impl Drop for Db {
-    /// Call `shutdown().await` before dropping. Without it, dropping `tx`
-    /// disconnects the queue: the writer writes what is queued, flushes and
-    /// stops on its own thread (it owns its connection, so DuckDB stays up
-    /// until then). Drop does not wait for that: it may run on an async
-    /// worker thread.
+    /// Call `shutdown().await` before dropping. Without it, maintenance is
+    /// told to stop; once it has, and `tx` is gone, the queue disconnects:
+    /// the writer writes what is queued, flushes and stops on its own thread
+    /// (it owns its connection, so DuckDB stays up until then). Drop does not
+    /// wait for that: it may run on an async worker thread.
     fn drop(&mut self) {
         let running = self.writer_thread.get_mut().map(|h| h.is_some()).unwrap_or(false);
         if running {
             tracing::warn!("Db dropped without shutdown(); the writer finishes in the background");
+            self.maintainer.stop();
         }
     }
 }
@@ -382,7 +462,6 @@ pub fn us_to_dt(us: i64) -> DateTime<Utc> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn bundle_caches_per_project() {
@@ -409,8 +488,8 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
-        let maintenance = writer::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
-        Db::with_connection(conn, &cfg, maintenance, "test".into()).unwrap()
+        let settings = maintenance::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
+        Db::with_connection(conn, &cfg, settings, "test".into()).unwrap()
     }
 
     async fn select_one(db: &Db) -> Result<i32> {
@@ -546,6 +625,94 @@ pub(crate) mod tests {
         assert_eq!(in_bucket(past + chrono::Duration::minutes(10)), 1);
         assert_eq!(in_bucket(now), 1);
         assert_eq!(stats.buckets.iter().map(|b| b.events).sum::<u64>(), 3);
+        db.shutdown().await;
+    }
+
+    /// Queue one event with its own message (= its own issue) at `received_at`.
+    fn queue_event(
+        db: &Db,
+        message: &str,
+        received_at: DateTime<Utc>,
+    ) -> oneshot::Receiver<Result<(), Arc<anyhow::Error>>> {
+        use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let ctx = NormalizeContext::new(received_at);
+        let ev = normalize_event(serde_json::json!({"message": message}), &ctx);
+        let (tx, rx) = oneshot::channel();
+        let event = ProcessedEvent::from_normalized(&ev, received_at);
+        let w = EventWrite { project_id: 1, event, payload_json: ev.to_string(), reply: tx };
+        db.try_send(WriteCmd::Event(Box::new(w))).unwrap();
+        rx
+    }
+
+    async fn count_events(db: &Db) -> i64 {
+        db.read(|c, ns| Ok(c.query_row(&ns.sql("SELECT count(*) FROM $S.events"), [], |r| r.get(0))?)).await.unwrap()
+    }
+
+    /// Issue 0003: compaction and flushes run next to the writer. Events
+    /// are committed while they run, none get lost, and retention (on the
+    /// writer thread) removes old days without failing a batch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ingest_continues_during_maintenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(open_db(dir.path(), 1));
+        // Data to work on: batches above the inline limit become Parquet
+        // files, one of them older than the retention of 90 days.
+        for i in 0..8 {
+            let at = if i == 0 { Utc::now() - chrono::Duration::days(200) } else { Utc::now() };
+            let replies: Vec<_> = (0..schema::EVENTS_INLINE_ROWS + 100).map(|_| queue_event(&db, "old", at)).collect();
+            for rx in replies {
+                rx.await.unwrap().unwrap();
+            }
+        }
+        let preloaded = count_events(&db).await;
+
+        let done = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicUsize::new(0));
+        let ingest = {
+            let (db, done, committed) = (db.clone(), done.clone(), committed.clone());
+            tokio::spawn(async move {
+                let mut slowest = Duration::ZERO;
+                while !done.load(Ordering::Relaxed) {
+                    let started = Instant::now();
+                    queue_event(&db, "new", Utc::now()).await.unwrap().unwrap();
+                    slowest = slowest.max(started.elapsed());
+                    committed.fetch_add(1, Ordering::Relaxed);
+                }
+                slowest
+            })
+        };
+        let mut during_maintenance = 0;
+        for _ in 0..3 {
+            // Inlined rows for the flush to pick up.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let before = committed.load(Ordering::Relaxed);
+            let r: Result<()> = db.call(|reply| WriteCmd::Maintenance { reply }).await;
+            r.unwrap();
+            during_maintenance += committed.load(Ordering::Relaxed) - before;
+        }
+        done.store(true, Ordering::Relaxed);
+        let slowest = ingest.await.unwrap();
+
+        assert!(during_maintenance > 0, "no event was committed while maintenance ran");
+        assert!(slowest < Duration::from_secs(5), "ingest paused for {slowest:?}");
+        // Everything acknowledged is stored; the old batch is gone.
+        let old_batch = (schema::EVENTS_INLINE_ROWS + 100) as i64;
+        assert_eq!(count_events(&db).await, preloaded - old_batch + committed.load(Ordering::Relaxed) as i64);
+        db.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_stops_a_running_maintenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        queue_event(&db, "x", Utc::now()).await.unwrap().unwrap();
+        // Still answered: maintenance stopped between steps or never started.
+        let (reply, rx) = oneshot::channel();
+        db.try_send(WriteCmd::Maintenance { reply }).unwrap();
+        db.shutdown().await;
+        let _ = rx.await;
+        assert!(!db.writer_alive());
+        // Idempotent, also for the maintenance thread.
         db.shutdown().await;
     }
 

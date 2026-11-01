@@ -10,8 +10,9 @@ Design rules:
 1. **Append-only.** Rows are never updated. Mutable state (issue status) is an
    append-only log where the newest row wins. In a lakehouse an `UPDATE`
    rewrites data or writes delete files; an `INSERT` is cheap.
-2. **One writer.** All writes go through one thread, in batches. One batch is
-   one DuckLake transaction and one snapshot.
+2. **One writer.** All row writes go through one thread, in batches. One batch
+   is one DuckLake transaction and one snapshot. Maintenance runs next to it
+   and only rewrites files (ADR 0014).
 3. **Prune by time, then by issue.** Almost every query filters on
    `project_id`, a time window and often `group_hash`. The physical
    layout is built for exactly that.
@@ -136,9 +137,12 @@ writer thread: take everything queued (group commit)
 
 ## Maintenance
 
-Every `SDL_COMPACT_INTERVAL` (1 h) the writer runs, scoped to its schema:
+The maintenance thread flushes inlined data (see above) and, every
+`SDL_COMPACT_INTERVAL` (1 h), runs, scoped to its schema:
 
-1. retention: `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
+1. retention, on the writer thread because a `DELETE` conflicts with concurrent
+   inserts ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)):
+   `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
    (day-aligned, so whole daily files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
    (target file size 64 MB for `events`; DuckDB threads lowered to

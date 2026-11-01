@@ -42,5 +42,5 @@ GCS / Azure / local disk). Rust workspace; HTTP API with OpenAPI; CLI + TUI.
 - duckdb crate is pinned `=1.20000.1` (DuckDB 2.0.0); a sibling project
   (obs-ducklake) embeds this crate and must use the identical version.
 - All timestamps are UTC `TIMESTAMP` (bundled DuckDB has no ICU).
-- Never write to DuckLake outside the writer thread (`db/writer.rs`).
+- Never write rows to DuckLake outside the writer thread (`db/writer.rs`); flush and compaction run on the maintenance thread (`db/maintenance.rs`).
 - Tables are append-only; mutable state is an append-only log (latest wins).
