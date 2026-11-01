@@ -619,6 +619,9 @@ pub struct MetricQuery {
     pub attributes: Option<String>,
     /// Bucket width, e.g. `1m`. Default picks ~60 buckets.
     pub step: Option<String>,
+    /// Also return exemplars: per series and bucket the one with the
+    /// highest value that links to a trace.
+    pub exemplars: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -629,6 +632,26 @@ pub struct MetricQueryResult {
     pub agg: String,
     pub step_secs: u64,
     pub series: Vec<MetricSeries>,
+    /// Only with `exemplars=true` (at most 1000, oldest first). Missing
+    /// from older servers.
+    #[serde(default)]
+    pub exemplars: Vec<MetricExemplar>,
+}
+
+/// A sample measurement recorded with a metric point, linking it to the
+/// trace (span) that was active at the time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct MetricExemplar {
+    /// Labels of the series it belongs to (the `group_by` keys).
+    pub labels: Attributes,
+    pub time: DateTime<Utc>,
+    pub value: f64,
+    /// 32 hex characters.
+    pub trace_id: String,
+    /// 16 hex characters.
+    pub span_id: Option<String>,
+    /// The exemplar's filtered attributes (those the aggregation dropped).
+    pub attributes: Attributes,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

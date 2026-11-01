@@ -168,6 +168,9 @@ pub struct MetricArgs {
     /// Bucket width, e.g. 1m.
     #[arg(long)]
     pub step: Option<String>,
+    /// Also list exemplars: per series and bucket the highest value with a trace id.
+    #[arg(long)]
+    pub exemplars: bool,
 }
 
 /// `attrs` (default window 1h).
@@ -487,7 +490,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             let v = c.metrics(&MetricListQuery { from, to, since, service, q: query }).await?;
             print_list(ctx, List::new(v).window(win), metrics_text)
         }
-        Command::Metric(MetricArgs { name, w, service, agg, by, attr, step }) => {
+        Command::Metric(MetricArgs { name, w, service, agg, by, attr, step, exemplars }) => {
             let (_, (from, to, since)) = window(&w)?;
             let r = c
                 .metric_query(&MetricQuery {
@@ -500,6 +503,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     group_by: by,
                     attributes: attrs(&attr),
                     step,
+                    exemplars: exemplars.then_some(true),
                 })
                 .await?;
             print(ctx, &r, metric_text)

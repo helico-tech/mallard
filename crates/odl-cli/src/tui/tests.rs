@@ -431,6 +431,7 @@ fn metrics_render_and_chart() {
                 .map(|i| MetricPoint { time: now - TimeDelta::minutes(30 - i), value: 0.1 + i as f64 / 100.0 })
                 .collect(),
         }],
+        exemplars: vec![],
     });
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);

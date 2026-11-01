@@ -156,6 +156,7 @@ mallard logs -S checkout -f --until-match "listening on" --for 1m   # exit 0 at 
 ```sh
 mallard metrics list -q http
 mallard metrics show http.server.request.duration -g p95 -b http.route --since 6h --step 5m
+mallard metrics show http.server.request.duration -g p99 --exemplars --json   # .exemplars[].trace_id → mallard trace <id>
 ```
 
 **Health and limits:** `mallard status --json` has `capabilities`: `sql` and

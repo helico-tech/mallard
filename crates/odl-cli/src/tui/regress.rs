@@ -363,6 +363,7 @@ fn metric_result_json(agg: &str) -> String {
         agg: agg.into(),
         step_secs: 60,
         series: vec![],
+        exemplars: vec![],
     })
     .unwrap()
 }

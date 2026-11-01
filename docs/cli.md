@@ -22,7 +22,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`; `--cursor` for the next page), follow (`-f`, stops by itself with `--for 2m` or `--until-match <text>`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation; `ops --compare 1d` adds p95 and error rate of the same window a day earlier, and the change |
 | `mallard series spans\|logs\|errors` | counts per time bucket (`--step 5m`): spans with errors and p50/p95/p99, logs per severity band, Sentry events (errors, warnings, other) |
-| `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`) |
+| `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`; `--exemplars` adds trace ids of the highest samples) |
 | `mallard sql "<select>" [--errors]` | read-only SQL over the telemetry tables, or with `--errors` over `events`, `issues`, `issue_activity` (exit 7 when off; ADR 0011; `-n` rows and 32 MiB per answer, ADR 0015) |
 | `mallard schema [tables]`, `mallard schema attrs` | the tables and columns `sql` can query, per `side` (`errors` tables need `sql --errors`); attribute keys with counts, or the top values of `--key` (`--signal spans\|logs\|metrics`, `-S`, `--metric`; sampled) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |

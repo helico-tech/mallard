@@ -3,6 +3,7 @@
 //! fixed identifiers are formatted into SQL text.
 
 pub mod attributes;
+pub mod exemplars;
 pub mod logs;
 pub mod metrics;
 pub mod sql;

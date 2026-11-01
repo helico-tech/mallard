@@ -550,6 +550,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "exemplars",
+            "in": "query",
+            "description": "Also return exemplars: per series and bucket the one with the\nhighest value that links to a trace.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -1668,6 +1677,46 @@
           }
         }
       },
+      "MetricExemplar": {
+        "type": "object",
+        "description": "A sample measurement recorded with a metric point, linking it to the\ntrace (span) that was active at the time.",
+        "required": [
+          "labels",
+          "time",
+          "value",
+          "trace_id",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/BTreeMap",
+            "description": "The exemplar's filtered attributes (those the aggregation dropped)."
+          },
+          "labels": {
+            "$ref": "#/components/schemas/BTreeMap",
+            "description": "Labels of the series it belongs to (the `group_by` keys)."
+          },
+          "span_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "16 hex characters."
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "32 hex characters."
+          },
+          "value": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "MetricInfo": {
         "type": "object",
         "required": [
@@ -1749,6 +1798,13 @@
         "properties": {
           "agg": {
             "type": "string"
+          },
+          "exemplars": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricExemplar"
+            },
+            "description": "Only with `exemplars=true` (at most 1000, oldest first). Missing\nfrom older servers."
           },
           "metric_type": {
             "$ref": "#/components/schemas/MetricType"

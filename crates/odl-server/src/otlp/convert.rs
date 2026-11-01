@@ -10,6 +10,8 @@
 //! - Attribute values are stringified: strings verbatim, numbers/bools via
 //!   Display, bytes as base64, arrays and maps as JSON. Duplicate keys keep the
 //!   last value.
+//! - Metric exemplars are kept per data point as a nested list; a zero
+//!   exemplar time falls back to the point's time.
 
 use std::{collections::BTreeMap, collections::HashMap, sync::Arc};
 
@@ -27,7 +29,7 @@ use opentelemetry_proto::tonic::{
         trace::v1::ExportTraceServiceRequest,
     },
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
-    metrics::v1::{metric::Data, number_data_point},
+    metrics::v1::{Exemplar, exemplar, metric::Data, number_data_point},
     resource::v1::Resource,
 };
 use xxhash_rust::xxh3::Xxh3;
@@ -207,6 +209,55 @@ impl ListOffsets {
         let st = StructArray::new(struct_fields.clone(), children, None);
         let item = Arc::new(Field::new("item", DataType::Struct(struct_fields), true));
         Arc::new(ListArray::new(item, OffsetBuffer::new(offsets.into()), Arc::new(st), None))
+    }
+}
+
+/// `exemplars` column of the metric tables:
+/// `STRUCT(time, value, trace_id, span_id, attributes)[]`.
+#[derive(Default)]
+struct ExemplarCol {
+    offsets: ListOffsets,
+    time: TimestampMicrosecondBuilder,
+    value: Float64Builder,
+    trace_id: Vec<Option<[u8; 16]>>,
+    span_id: UInt64Builder,
+    attrs: AttrCol,
+}
+
+impl ExemplarCol {
+    /// The exemplars of one data point whose time is `point_time` (µs).
+    fn append(&mut self, exemplars: &[Exemplar], point_time: i64) {
+        for e in exemplars {
+            self.time.append_value(if e.time_unix_nano == 0 { point_time } else { nanos_to_micros(e.time_unix_nano) });
+            self.value.append_option(e.value.map(|v| match v {
+                exemplar::Value::AsDouble(d) => d,
+                exemplar::Value::AsInt(i) => i as f64,
+            }));
+            self.trace_id.push(trace_id(&e.trace_id));
+            self.span_id.append_option(span_id(&e.span_id));
+            self.attrs.append(&attrs(&e.filtered_attributes));
+        }
+        self.offsets.close_row(exemplars.len());
+    }
+
+    fn finish(&mut self) -> (Field, ArrayRef) {
+        let a = self.attrs.finish();
+        let fields = Fields::from(vec![
+            f("time", ts_type()),
+            f("value", DataType::Float64),
+            uuid_field("trace_id"),
+            f("span_id", DataType::UInt64),
+            map_field("attributes", &a),
+        ]);
+        let children = vec![
+            Arc::new(self.time.finish()) as ArrayRef,
+            Arc::new(self.value.finish()),
+            fsb_opt(&std::mem::take(&mut self.trace_id)),
+            Arc::new(self.span_id.finish()),
+            a,
+        ];
+        let col = self.offsets.finish(fields, children);
+        (f("exemplars", col.data_type().clone()), col)
     }
 }
 
@@ -529,9 +580,11 @@ impl MetricBase {
         }
     }
 
-    fn append(&mut self, m: &MetricCtx, time_ns: u64, start_ns: u64, flags: u32, kvs: &[KeyValue], recv: i64) {
+    /// Append the shared columns of one point; returns its time (µs).
+    fn append(&mut self, m: &MetricCtx, time_ns: u64, start_ns: u64, flags: u32, kvs: &[KeyValue], recv: i64) -> i64 {
         let a = attrs(kvs);
-        self.time.append_value(if time_ns == 0 { recv } else { nanos_to_micros(time_ns) });
+        let time = if time_ns == 0 { recv } else { nanos_to_micros(time_ns) };
+        self.time.append_value(time);
         self.start.append_option((start_ns != 0).then(|| nanos_to_micros(start_ns)));
         self.service.append_value(&m.res.service);
         self.name.append_value(m.name);
@@ -545,6 +598,7 @@ impl MetricBase {
         self.res_attrs.append(&m.res.attrs);
         self.attrs.append(&a);
         self.rows += 1;
+        time
     }
 
     fn finish(&mut self) -> Vec<(Field, ArrayRef)> {
@@ -615,12 +669,14 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
     let mut np_type = StringBuilder::new();
     let mut np_mono = BooleanBuilder::new();
     let mut np_value = Float64Builder::new();
+    let mut np_ex = ExemplarCol::default();
     // histograms
     let mut h = MetricBase::new();
     let (mut h_count, mut h_sum, mut h_min, mut h_max) =
         (UInt64Builder::new(), Float64Builder::new(), Float64Builder::new(), Float64Builder::new());
     let (mut h_buckets, mut h_bounds) =
         (ListBuilder::new(UInt64Builder::new()), ListBuilder::new(Float64Builder::new()));
+    let mut h_ex = ExemplarCol::default();
     // exponential histograms
     let mut e = MetricBase::new();
     let (mut e_count, mut e_sum, mut e_min, mut e_max) =
@@ -628,6 +684,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
     let (mut e_scale, mut e_zero, mut e_zt) = (Int32Builder::new(), UInt64Builder::new(), Float64Builder::new());
     let (mut e_poff, mut e_noff) = (Int32Builder::new(), Int32Builder::new());
     let (mut e_pos, mut e_neg) = (ListBuilder::new(UInt64Builder::new()), ListBuilder::new(UInt64Builder::new()));
+    let mut e_ex = ExemplarCol::default();
     // summaries
     let mut s = MetricBase::new();
     let (mut s_count, mut s_sum) = (UInt64Builder::new(), Float64Builder::new());
@@ -656,7 +713,9 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     Some(Data::Gauge(g)) => {
                         ctx.kind = "gauge";
                         for p in &g.data_points {
-                            np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            let t =
+                                np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            np_ex.append(&p.exemplars, t);
                             np_type.append_value(MetricType::Gauge.as_str());
                             np_mono.append_value(false);
                             np_value.append_option(number_value(p.value.as_ref()));
@@ -666,7 +725,9 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         ctx.kind = "sum";
                         ctx.temporality = temporality(sum.aggregation_temporality);
                         for p in &sum.data_points {
-                            np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            let t =
+                                np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            np_ex.append(&p.exemplars, t);
                             np_type.append_value(MetricType::Sum.as_str());
                             np_mono.append_value(sum.is_monotonic);
                             np_value.append_option(number_value(p.value.as_ref()));
@@ -676,7 +737,9 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         ctx.kind = "histogram";
                         ctx.temporality = temporality(hist.aggregation_temporality);
                         for p in &hist.data_points {
-                            h.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            let t =
+                                h.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            h_ex.append(&p.exemplars, t);
                             h_count.append_value(p.count);
                             h_sum.append_option(p.sum);
                             h_min.append_option(p.min);
@@ -691,7 +754,9 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         ctx.kind = "exp_histogram";
                         ctx.temporality = temporality(hist.aggregation_temporality);
                         for p in &hist.data_points {
-                            e.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            let t =
+                                e.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
+                            e_ex.append(&p.exemplars, t);
                             e_count.append_value(p.count);
                             e_sum.append_option(p.sum);
                             e_min.append_option(p.min);
@@ -738,6 +803,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         cols.push((f("metric_type", DataType::Utf8), Arc::new(np_type.finish())));
         cols.push((f("is_monotonic", DataType::Boolean), Arc::new(np_mono.finish())));
         cols.push((f("value", DataType::Float64), Arc::new(np_value.finish())));
+        cols.push(np_ex.finish());
         out.batches.push((TableId::MetricPoints, batch(cols)));
     }
     if h.rows > 0 {
@@ -751,6 +817,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         cols.push((f("bucket_counts", b.data_type().clone()), b));
         let b: ArrayRef = Arc::new(h_bounds.finish());
         cols.push((f("explicit_bounds", b.data_type().clone()), b));
+        cols.push(h_ex.finish());
         out.batches.push((TableId::MetricHistograms, batch(cols)));
     }
     if e.rows > 0 {
@@ -769,6 +836,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
         cols.push((f("negative_offset", DataType::Int32), Arc::new(e_noff.finish())));
         let b: ArrayRef = Arc::new(e_neg.finish());
         cols.push((f("negative_bucket_counts", b.data_type().clone()), b));
+        cols.push(e_ex.finish());
         out.batches.push((TableId::MetricExpHistograms, batch(cols)));
     }
     if s.rows > 0 {
@@ -959,6 +1027,67 @@ mod tests {
             }
         }
         assert_eq!(seen, TableId::ALL.to_vec(), "one batch per table");
+    }
+
+    #[test]
+    fn converts_exemplars() {
+        use opentelemetry_proto::tonic::metrics::v1::{
+            Gauge, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+        };
+        let t = 1_700_000_000_000_000_000u64;
+        let ex = |time: u64, value: exemplar::Value, trace: Vec<u8>| Exemplar {
+            time_unix_nano: time,
+            value: Some(value),
+            trace_id: trace,
+            span_id: vec![0, 0, 0, 0, 0, 0, 0, 7],
+            filtered_attributes: vec![kv("user", any_value::Value::StringValue("u1".into()))],
+        };
+        let gauge = NumberDataPoint {
+            time_unix_nano: t,
+            exemplars: vec![
+                ex(t - 1_000, exemplar::Value::AsDouble(1.5), vec![1; 16]),
+                // zero time -> point time; int value; invalid trace id -> NULL
+                ex(0, exemplar::Value::AsInt(3), vec![0; 16]),
+            ],
+            ..Default::default()
+        };
+        let hist = HistogramDataPoint { time_unix_nano: t, ..Default::default() };
+        let m = |data: Data| Metric { name: "m".into(), data: Some(data), ..Default::default() };
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![
+                        m(Data::Gauge(Gauge { data_points: vec![gauge] })),
+                        m(Data::Histogram(opentelemetry_proto::tonic::metrics::v1::Histogram {
+                            data_points: vec![hist],
+                            ..Default::default()
+                        })),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let c = convert_metrics(&req);
+        let col = |id: TableId| {
+            let b = &c.batches.iter().find(|(t, _)| *t == id).unwrap().1;
+            b.column_by_name("exemplars").unwrap().as_list::<i32>().clone()
+        };
+        let points = col(TableId::MetricPoints);
+        let ex = points.value(0);
+        let ex = ex.as_struct();
+        assert_eq!(ex.len(), 2);
+        let time = ex.column_by_name("time").unwrap().as_primitive::<arrow::datatypes::TimestampMicrosecondType>();
+        assert_eq!((time.value(0), time.value(1)), ((t - 1_000) as i64 / 1000, t as i64 / 1000));
+        let value = ex.column_by_name("value").unwrap().as_primitive::<arrow::datatypes::Float64Type>();
+        assert_eq!((value.value(0), value.value(1)), (1.5, 3.0));
+        let trace = ex.column_by_name("trace_id").unwrap();
+        assert!(trace.is_valid(0) && trace.is_null(1));
+        let span = ex.column_by_name("span_id").unwrap().as_primitive::<arrow::datatypes::UInt64Type>();
+        assert_eq!(span.value(0), 7);
+        // A point without exemplars has an empty list, not NULL.
+        let hist = col(TableId::MetricHistograms);
+        assert!(hist.is_valid(0) && hist.value(0).is_empty());
     }
 
     #[test]

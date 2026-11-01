@@ -133,10 +133,11 @@ docs/ work/          documentation and work tracking
 
 Version 0.1: feature-complete for its scope, tested end to end (unit,
 integration with a real DuckLake, compose and Kubernetes runs), and reviewed.
-Known limitations: exemplars are not stored; attribute values are stored as
-strings; in-memory buffering may lose up to `flush_interval` (5 s) of data on
-a hard crash. Put an OpenTelemetry Collector with a persistent queue in front
-if you need zero loss ([ADR 0003](docs/adr/0003-ingest-durability.md)).
+Known limitations: attribute values are stored as strings; in-memory buffering
+may lose up to `flush_interval` (5 s) of data on a hard crash. Put an
+OpenTelemetry Collector with a persistent queue in front if you need zero loss
+([recipe](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss),
+[ADR 0003](adr/0003-ingest-durability.md)).
 
 ## License
 
