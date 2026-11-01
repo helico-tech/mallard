@@ -74,8 +74,8 @@ pub struct RetentionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Run maintenance tasks in this process. Disable on extra replicas if you
-    /// prefer a single maintainer (concurrent runs are safe but wasteful).
+    /// Run maintenance tasks in this process. Replicas sharing a catalog need no
+    /// change: only the holder of a lease in the catalog runs them.
     pub enabled: bool,
     /// Flush inlined rows and merge small files this often.
     #[serde(with = "duration")]

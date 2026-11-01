@@ -99,7 +99,7 @@ without rewriting files.
 
 | key | default | meaning |
 |---|---|---|
-| `enabled` | `true` | Run maintenance in this process. |
+| `enabled` | `true` | Run maintenance in this process. Replicas sharing a catalog elect one by a lease ([operations](operations.md#several-replicas)). |
 | `compact_interval` | `10m` | Flush inlined rows and merge files smaller than `small_file_size`. |
 | `small_file_size` | `16MB` | |
 | `full_compact_interval` | `6h` | Merge files up to `storage.target_file_size`. |

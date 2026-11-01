@@ -175,7 +175,7 @@ const PROJECT_SEQ: &str = "project_seq";
 /// Rows of `meta` that get replaced, not added: a `DELETE` of no rows conflicts
 /// with nothing, so each must exist before its first use.
 pub fn ensure_meta_rows(conn: &Connection, ns: &Ns) -> Result<()> {
-    for key in [PROJECT_SEQ, super::maintenance::LEASE] {
+    for key in [PROJECT_SEQ, mallard_duck::LEASE] {
         let n: i64 = conn.query_row(&ns.sql("SELECT count(*) FROM $S.meta WHERE key = ?"), [key], |r| r.get(0))?;
         if n == 0 {
             conn.execute(

@@ -31,6 +31,21 @@ pub(crate) fn is_conflict(e: &anyhow::Error) -> bool {
     mallard_duck::is_conflict(e)
 }
 
+/// The table of the maintenance lease, and its row: outside `TABLES`, because it
+/// holds no telemetry (no retention, no compaction, not in the query API).
+fn create_meta(conn: &Connection, schema: &str) -> Result<()> {
+    let meta = format!("{CATALOG}.{schema}.meta");
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta} (key VARCHAR NOT NULL, value VARCHAR NOT NULL, updated_at TIMESTAMP NOT NULL)"
+    ))?;
+    let rows: i64 =
+        conn.query_row(&format!("SELECT count(*) FROM {meta} WHERE key = ?"), [mallard_duck::LEASE], |r| r.get(0))?;
+    if rows == 0 {
+        conn.execute(&format!("INSERT INTO {meta} VALUES (?, '', now()::TIMESTAMP)"), [mallard_duck::LEASE])?;
+    }
+    Ok(())
+}
+
 impl Lake {
     pub fn open(cfg: &Config) -> Result<Self> {
         Self::with_connection(mallard_duck::open_connection(&cfg.storage, &cfg.duckdb)?, cfg)
@@ -86,6 +101,7 @@ impl Lake {
     fn migrate_once(&self) -> Result<()> {
         let conn = self.root.lock().unwrap();
         conn.execute_batch(&format!("CREATE SCHEMA IF NOT EXISTS {CATALOG}.{}", self.schema))?;
+        create_meta(&conn, &self.schema)?;
         for t in TABLES {
             conn.execute_batch(&t.create_sql(CATALOG, &self.schema))
                 .with_context(|| format!("creating table {}", t.name))?;

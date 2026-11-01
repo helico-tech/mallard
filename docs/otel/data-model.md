@@ -39,6 +39,10 @@ SORTED BY (<see below>)
 
 and written as Parquet with zstd compression and 122,880-row row groups.
 
+One small extra table, `meta`, holds the maintenance lease
+([operations](operations.md#several-replicas)). It has no telemetry, is not
+partitioned and is not part of the query API.
+
 ## Design decisions
 
 ### 1. Wide, denormalized tables

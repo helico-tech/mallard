@@ -42,6 +42,27 @@ expiry and file cleanup. Stop the server first with a DuckDB-file or SQLite
 catalog (a running server holds the file; the command then fails). Handy to
 compact a backfilled lake before timing queries.
 
+It ignores the lease below, so it also works while a pod holds it. Next to
+running pods on Postgres it can lose a conflict against their maintenance; it
+then exits with an error and is safe to run again.
+
+## Several replicas
+
+Replicas on one Postgres catalog elect one maintainer, as the Sentry side does
+([ADR 0021](../adr/0021-sentry-several-processes.md)): before each task a replica
+tries the `maintenance_lease` row in `otel.meta`. Only the holder runs compaction,
+retention, snapshot expiry and file cleanup; for the others the task is skipped
+until its next interval.
+
+- The lease is valid for 3 of the shortest maintenance interval (30 minutes by
+  default). After a holder stops, or restarts under a new identity, maintenance
+  pauses until the lease runs out and the next task of another replica (or of the
+  restarted process) takes it.
+- `last_maintenance` in `/api/v1/stats` is per process: it stays empty on a replica
+  that never held the lease. Check all replicas before you conclude nothing runs.
+- A task that outlives the lease can overlap with the next holder. That is safe:
+  the loser logs a failed task and the next run tries again.
+
 ## Sizing
 
 See [capacity.md](capacity.md). Short version: 1-2 vCPU and 2 GiB RAM

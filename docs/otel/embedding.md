@@ -38,7 +38,8 @@ let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // sch
   its own schema and tables, uses `try_clone()` of the connection, and never
   changes global DuckDB settings.
 - Merges and retention are scoped to this schema. Snapshot expiry and file
-  cleanup are catalog-wide and always run with `maintenance.enabled`: the
+  cleanup are catalog-wide and always run with `maintenance.enabled` (on the
+  replica holding the maintenance lease, a row in `otel.meta`): the
   otel side owns them on a shared catalog; the other components must not
   run them (sentry: `Host::catalog_maintenance = None`).
 - Use DuckDB only through `mallard_duck::duckdb` (one version for the whole

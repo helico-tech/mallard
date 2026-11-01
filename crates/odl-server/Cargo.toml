@@ -32,6 +32,7 @@ tracing.workspace = true
 humantime.workspace = true
 metrics.workspace = true
 xxhash-rust.workspace = true
+uuid.workspace = true
 flate2.workspace = true
 base64.workspace = true
 zstd = "0.13"

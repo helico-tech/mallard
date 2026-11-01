@@ -110,7 +110,8 @@ that talks HTTP only.
 
 ### Maintenance (`store/maintenance.rs`)
 
-One thread runs these tasks:
+One thread runs these tasks, on the replica that holds the lease in `otel.meta`
+([operations](operations.md#several-replicas)):
 
 | task | default interval | what |
 |---|---|---|

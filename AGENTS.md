@@ -31,7 +31,7 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `crates/mallard` | the `mallard` CLI/TUI: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases |
 | `crates/mallard-server` | embeds both sides on one DuckLake connection; config, routes, readiness, shutdown; `src/bridge/`: Sentry transactions and streamed spans → OTel spans, OTel exceptions → issues (ADR 0009, 0013, 0021) |
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
-| `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction |
+| `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction, maintenance lease |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
 | `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error kinds and exit codes, `--format`/`--fields`/list envelope (`output`), `--since/--from/--to` (`window`), `--wait` (`wait`), TUI theme/keys/`Outcome` (ADR 0006, 0008) |
 | `crates/sdl-*` | Sentry side: `sdl-protocol` (pure protocol), `sdl-server` (ingest, writer, `/v1` API), `sdl-types`, `sdl-client`, `sdl-cli` (commands + TUI component), `sdl-loadgen` |

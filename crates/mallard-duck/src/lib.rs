@@ -9,9 +9,11 @@
 //! side does that on a `try_clone()` of the connection (ADR 0001).
 //!
 //! [`sql`] checks and runs read-only ad-hoc SQL for both sides' SQL
-//! endpoints (ADR 0011).
+//! endpoints (ADR 0011). [`try_lease`] elects the process that runs maintenance
+//! (ADR 0021).
 
 mod config;
+mod lease;
 pub mod sql;
 
 use std::path::Path;
@@ -20,6 +22,7 @@ use anyhow::{Context, Result, bail};
 pub use config::{CatalogKind, DuckDbConfig, SecretConfig, StorageConfig};
 pub use duckdb;
 use duckdb::Connection;
+pub use lease::{LEASE, try_lease};
 use tracing::{info, warn};
 
 /// Name under which the lake is attached.

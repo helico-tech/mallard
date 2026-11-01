@@ -602,9 +602,12 @@ async fn compaction_and_retention() {
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
+    // Of `spans`: with inlining off, the lease row in `meta` has a file too.
     let files = |c: &mallard_duck::duckdb::Connection| -> i64 {
         c.query_row(
-            "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file WHERE end_snapshot IS NULL",
+            "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file f \
+             JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) \
+             WHERE f.end_snapshot IS NULL AND t.end_snapshot IS NULL AND t.table_name = 'spans'",
             [],
             |r| r.get(0),
         )

@@ -289,8 +289,8 @@ What to expect:
 
 Storage must be object storage, not a local path. Tested with two processes on
 one Postgres catalog and on one SQLite file (`db::tests::two_processes_*`).
-OTel maintenance still runs on every pod, with jitter
-([issue 0051](../../work/issues/0051-otel-maintenance-on-every-replica.md)).
+OTel maintenance uses the same kind of lease, with its own row in `otel.meta`
+([operations](../otel/operations.md#several-replicas)).
 
 ## Upgrades
 
