@@ -55,21 +55,21 @@ fn describe_raw(e: &sdl_client::Error, url: &str, hints: &Hints) -> String {
         sdl_client::Error::Api { status: 403, .. } => {
             format!("token not allowed to do this (check {})", hints.token_env)
         }
-        sdl_client::Error::Api { status: 404, message } => {
+        sdl_client::Error::Api { status: 404, message, .. } => {
             if message.is_empty() {
                 "not found".into()
             } else {
                 format!("not found: {message}")
             }
         }
-        sdl_client::Error::Api { status, message } if *status >= 500 => {
+        sdl_client::Error::Api { status, message, .. } if *status >= 500 => {
             format!("server error ({status}): {message}")
         }
-        sdl_client::Error::Api { status, message } => {
+        sdl_client::Error::Api { status, message, .. } => {
             format!("request rejected ({status}): {message}")
         }
         sdl_client::Error::InvalidSegment(_) => format!("{e}: ids and slugs can't be empty, '.' or '..'"),
-        sdl_client::Error::Url(m) => {
+        sdl_client::Error::InvalidUrl(m) => {
             format!("invalid server url {url:?}: {m} (set {} or --url)", hints.url_env)
         }
         sdl_client::Error::Http(h) if h.is_connect() => {
@@ -125,8 +125,8 @@ impl Ctx {
     pub(crate) fn err(&self, e: sdl_client::Error) -> anyhow::Error {
         let msg = describe(&e, self.url(), &self.hints);
         let e = match e {
-            sdl_client::Error::Api { status, message } => {
-                sdl_client::Error::Api { status, message: fmt::clean(&message) }
+            sdl_client::Error::Api { status, code, message } => {
+                sdl_client::Error::Api { status, code, message: fmt::clean(&message) }
             }
             e => e,
         };
@@ -227,30 +227,31 @@ mod tests {
 
     #[test]
     fn hints_name_the_host() {
-        let e = sdl_client::Error::Api { status: 401, message: String::new() };
+        let e = sdl_client::Error::Api { status: 401, code: String::new(), message: String::new() };
         assert_eq!(describe(&e, "http://x", &Hints::SDL), "invalid token (set SDL_TOKEN or --token)");
         assert_eq!(describe(&e, "http://x", &MALLARD), "invalid token (set MALLARD_TOKEN or --token)");
-        let e = sdl_client::Client::new("nope", "").unwrap_err();
+        let e = sdl_client::Client::new("nope", None).unwrap_err();
         assert!(describe(&e, "nope", &MALLARD).contains("set MALLARD_URL or --url"));
     }
 
     #[test]
     fn describe_maps_every_kind_of_error() {
-        let api = |status: u16, m: &str| sdl_client::Error::Api { status, message: m.into() };
+        let api = |status: u16, m: &str| sdl_client::Error::Api { status, code: String::new(), message: m.into() };
         let d = |e: sdl_client::Error| describe(&e, "http://x", &Hints::SDL);
         assert_eq!(d(api(403, "")), "token not allowed to do this (check SDL_TOKEN)");
         assert_eq!(d(api(404, "")), "not found");
         assert_eq!(d(api(404, "no issue")), "not found: no issue");
         assert_eq!(d(api(400, "bad since")), "request rejected (400): bad since");
         assert_eq!(d(api(503, "down\x1b[2J")), "server error (503): down\u{FFFD}[2J");
-        let e = block_on(sdl_client::Client::new("http://x", "").unwrap().project("..")).unwrap_err();
+        let e = block_on(sdl_client::Client::new("http://x", None).unwrap().project("..")).unwrap_err();
         assert_eq!(d(e), "invalid path segment \"..\": ids and slugs can't be empty, '.' or '..'");
     }
 
     #[test]
     fn err_keeps_the_typed_source_and_cleans_it() {
-        let ctx = Ctx::new(sdl_client::Client::new("http://x", "").unwrap()).with_hints(MALLARD);
-        let e = ctx.err(sdl_client::Error::Api { status: 404, message: "gone\x1b]0;x\x07".into() });
+        let ctx = Ctx::new(sdl_client::Client::new("http://x", None).unwrap()).with_hints(MALLARD);
+        let e =
+            ctx.err(sdl_client::Error::Api { status: 404, code: String::new(), message: "gone\x1b]0;x\x07".into() });
         assert_eq!(e.to_string(), "not found: gone\u{FFFD}]0;x\u{FFFD}");
         let src = e.downcast_ref::<sdl_client::Error>().expect("typed source");
         assert!(src.is_not_found());

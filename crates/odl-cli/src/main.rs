@@ -24,7 +24,7 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
     let result = async {
-        let ctx = Ctx { client: Client::new(&cli.url, cli.token)?, output: cli.output };
+        let ctx = Ctx { client: Client::new(&cli.url, cli.token.as_deref())?, output: cli.output };
         run(cli.cmd, &ctx).await
     }
     .await;

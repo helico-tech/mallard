@@ -2,7 +2,7 @@
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), sdl_client::Error> {
-//! let c = sdl_client::Client::new("http://localhost:8000", "token")?;
+//! let c = sdl_client::Client::new("http://localhost:8000", Some("token"))?;
 //! let issues = c.issues("web", &Default::default()).await?;
 //! for i in issues.issues { println!("{} {}", i.id, i.title); }
 //! # Ok(()) }
@@ -16,23 +16,38 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 
+/// The same variants and helpers as `odl_client::Error` (plus
+/// [`Error::InvalidSegment`]).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     #[error("invalid base url: {0}")]
-    Url(String),
+    InvalidUrl(String),
     /// An id or slug that can't be a path segment (empty, `.` or `..`).
     #[error("invalid path segment {0:?}")]
     InvalidSegment(String),
-    #[error("request failed: {0}")]
+    /// Connection, timeout or decoding error; the cause is in `source()`.
+    #[error("request failed")]
     Http(#[from] reqwest::Error),
+    /// The server answered with an error status. `code` is the machine
+    /// readable code when the body has one (`{"error": code, "message": …}`),
+    /// else empty.
     #[error("{status}: {message}")]
-    Api { status: u16, message: String },
+    Api { status: u16, code: String, message: String },
 }
 
 impl Error {
+    /// HTTP status for API errors.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Error::Api { status, .. } => Some(*status),
+            Error::Http(e) => e.status().map(|s| s.as_u16()),
+            _ => None,
+        }
+    }
+
     pub fn is_not_found(&self) -> bool {
-        matches!(self, Error::Api { status: 404, .. })
+        self.status() == Some(404)
     }
 }
 
@@ -40,8 +55,9 @@ impl Error {
 /// segment (so `/`, `?`, `#`, `%` and spaces can't change the path).
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
-/// Requests time out after this, except [`Client::maintenance`].
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// Requests time out after this, except [`Client::maintenance`] (the same
+/// in `odl-client`).
+const TIMEOUT: Duration = Duration::from_secs(60);
 /// Flush + compact + expire can take long on a large lake.
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Longest error body (in chars) kept as the message of [`Error::Api`].
@@ -76,14 +92,17 @@ impl std::fmt::Debug for Client {
 
 impl Client {
     /// `base_url` may include a path prefix (e.g. `https://host/sentry`).
-    /// An empty `token` means no token: no `Authorization` header is sent.
-    pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
-        url::Url::parse(base_url).map_err(|e| Error::Url(e.to_string()))?;
+    /// No or an empty `token`: no `Authorization` header is sent.
+    pub fn new(base_url: &str, token: Option<&str>) -> Result<Self, Error> {
+        let parsed = url::Url::parse(base_url).map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Error::InvalidUrl(format!("scheme must be http or https, not {:?}", parsed.scheme())));
+        }
         let http = reqwest::Client::builder()
             .user_agent(concat!("sdl-client/", env!("CARGO_PKG_VERSION")))
             .timeout(TIMEOUT)
             .build()?;
-        let token = (!token.is_empty()).then(|| token.to_string());
+        let token = token.filter(|t| !t.is_empty()).map(str::to_string);
         Ok(Client { http, base: base_url.trim_end_matches('/').to_string(), token })
     }
 
@@ -112,10 +131,11 @@ impl Client {
         Ok(self.checked(req).await?.json().await?)
     }
 
-    /// `Error::Api` from a non-success response. The message is the
-    /// `ApiError.error` field when the body is one, else the start of a
-    /// plain-text body, else the status reason (so a proxy's HTML error
-    /// page becomes "Bad Gateway").
+    /// `Error::Api` from a non-success response. Reads both error bodies:
+    /// `{"error": message}` (this API) and `{"error": code, "message": …}`
+    /// (the otel API's shape). Else the message is the start of a
+    /// plain-text body, else the status reason (so a proxy's HTML error page
+    /// becomes "Bad Gateway").
     async fn api_error(resp: reqwest::Response) -> Error {
         let status = resp.status();
         let plain = resp
@@ -124,12 +144,18 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.starts_with("text/plain"));
         let text = resp.text().await.unwrap_or_default();
-        let message = match serde_json::from_str::<ApiError>(&text) {
-            Ok(e) => e.error,
-            Err(_) if plain => shorten(text.trim(), MAX_ERROR_BODY),
-            Err(_) => status.canonical_reason().unwrap_or_default().to_string(),
+        #[derive(serde::Deserialize)]
+        struct Body {
+            error: String,
+            message: Option<String>,
+        }
+        let (code, message) = match serde_json::from_str::<Body>(&text) {
+            Ok(Body { error, message: Some(m) }) => (error, m),
+            Ok(Body { error, message: None }) => (String::new(), error),
+            Err(_) if plain => (String::new(), shorten(text.trim(), MAX_ERROR_BODY)),
+            Err(_) => (String::new(), status.canonical_reason().unwrap_or_default().to_string()),
         };
-        Error::Api { status: status.as_u16(), message }
+        Error::Api { status: status.as_u16(), code, message }
     }
 
     async fn get<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T, Error> {
@@ -223,7 +249,7 @@ mod tests {
 
     #[test]
     fn debug_never_shows_the_token() {
-        let c = Client::new("http://127.0.0.1:9", "s3cret-token").unwrap();
+        let c = Client::new("http://127.0.0.1:9", Some("s3cret-token")).unwrap();
         let s = format!("{c:?}");
         assert!(!s.contains("s3cret") && s.contains("<redacted>"), "{s}");
     }
@@ -261,8 +287,8 @@ mod tests {
 
     async fn api_message(status: u16, content_type: &'static str, body: &str) -> (u16, String) {
         let (url, _) = serve_once(status, content_type, body.to_string());
-        match Client::new(&url, "t").unwrap().info().await {
-            Err(Error::Api { status, message }) => (status, message),
+        match Client::new(&url, Some("t")).unwrap().info().await {
+            Err(Error::Api { status, message, .. }) => (status, message),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -275,6 +301,13 @@ mod tests {
         );
         let (_, m) = api_message(400, "text/plain; charset=utf-8", &"bad query ".repeat(100)).await;
         assert!(m.starts_with("bad query") && m.ends_with('…') && m.chars().count() == MAX_ERROR_BODY + 1, "{m}");
+        let (url, _) = serve_once(400, "application/json", r#"{"error":"bad_request","message":"bad since"}"#.into());
+        match Client::new(&url, None).unwrap().info().await {
+            Err(Error::Api { status: 400, code, message }) => {
+                assert_eq!((code.as_str(), message.as_str()), ("bad_request", "bad since"))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         let html = format!("<html><body>{}</body></html>", "x".repeat(10_000));
         assert_eq!(api_message(502, "text/html", &html).await, (502, "Bad Gateway".into()));
     }
@@ -282,11 +315,11 @@ mod tests {
     #[tokio::test]
     async fn maintenance_reads_errors_from_any_body() {
         let (url, _) = serve_once(500, "application/json", r#"{"error":"disk full"}"#.into());
-        let r = Client::new(&url, "t").unwrap().maintenance().await;
-        assert!(matches!(r, Err(Error::Api { status: 500, message }) if message == "disk full"));
+        let r = Client::new(&url, Some("t")).unwrap().maintenance().await;
+        assert!(matches!(r, Err(Error::Api { status: 500, message, .. }) if message == "disk full"));
         let (url, _) = serve_once(503, "text/html", "<h1>down</h1>".into());
-        let r = Client::new(&url, "t").unwrap().maintenance().await;
-        assert!(matches!(r, Err(Error::Api { status: 503, message }) if message == "Service Unavailable"));
+        let r = Client::new(&url, Some("t")).unwrap().maintenance().await;
+        assert!(matches!(r, Err(Error::Api { status: 503, message, .. }) if message == "Service Unavailable"));
     }
 
     #[test]
@@ -300,12 +333,12 @@ mod tests {
         let info =
             r#"{"version":"1","duckdb_version":"v","catalog":"c","storage":"s","queue_depth":0,"queue_capacity":1}"#;
         let (url, head) = serve_once(200, "application/json", info.into());
-        Client::new(&url, "").unwrap().info().await.unwrap();
+        Client::new(&url, None).unwrap().info().await.unwrap();
         let head = head.recv().unwrap().to_ascii_lowercase();
         assert!(!head.contains("authorization"), "{head}");
 
         let (url, head) = serve_once(200, "application/json", info.into());
-        Client::new(&url, "tok").unwrap().info().await.unwrap();
+        Client::new(&url, Some("tok")).unwrap().info().await.unwrap();
         assert!(head.recv().unwrap().to_ascii_lowercase().contains("authorization: bearer tok"));
     }
 
@@ -324,11 +357,12 @@ mod tests {
 
     #[test]
     fn dot_segments_never_reach_the_server() {
-        let c = Client::new("http://127.0.0.1:9", "t").unwrap();
+        let c = Client::new("http://127.0.0.1:9", Some("t")).unwrap();
         // The error is returned before any network I/O, so this resolves on the first poll.
         assert!(matches!(block_on(c.project("..")), Err(Error::InvalidSegment(_))));
         assert!(matches!(block_on(c.issue("web", ".", &Default::default())), Err(Error::InvalidSegment(_))));
-        assert!(matches!(Client::new("not a url", "t"), Err(Error::Url(_))));
+        assert!(matches!(Client::new("not a url", Some("t")), Err(Error::InvalidUrl(_))));
+        assert!(matches!(Client::new("localhost:8000", None), Err(Error::InvalidUrl(_))), "no http scheme");
     }
 
     /// Minimal executor for futures that resolve without I/O.

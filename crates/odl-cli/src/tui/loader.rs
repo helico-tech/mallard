@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_all_except_keeps_one_kind() {
         let mut l = Loader::default();
-        l.spawn(Kind::Stats, async { Err(odl_client::Error::BadUrl(String::new())) }, Data::Stats);
+        l.spawn(Kind::Stats, async { Err(odl_client::Error::InvalidUrl(String::new())) }, Data::Stats);
         l.spawn(Kind::MetricList, ok(1), Data::MetricList);
         l.cancel_all_except(Kind::Stats);
         let got = drain_all(&mut l).await;

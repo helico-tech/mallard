@@ -280,7 +280,7 @@ mod tests {
     /// error instead of hanging.
     #[tokio::test]
     async fn embedded_draw_handle_tick() {
-        let client = Client::new("http://127.0.0.1:9", "t").unwrap();
+        let client = Client::new("http://127.0.0.1:9", Some("t")).unwrap();
         let mut ui = Embedded::new(client, Some("web".into()));
         let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();
         term.draw(|f| ui.draw(f, Rect { x: 0, y: 1, width: 120, height: 34 })).unwrap();
@@ -320,7 +320,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let mut ui = {
             let _guard = rt.enter();
-            Embedded::new(Client::new("http://127.0.0.1:9", "t").unwrap(), None)
+            Embedded::new(Client::new("http://127.0.0.1:9", Some("t")).unwrap(), None)
         };
         // Not in a runtime context here: these spawn loads and must not panic.
         assert_eq!(ui.handle_event(&key(KeyCode::Char('R'))), Outcome::Consumed);
@@ -333,7 +333,7 @@ mod tests {
     /// The host learns about a panicked load through `take_fatal`.
     #[tokio::test]
     async fn a_panicked_load_reaches_the_host() {
-        let mut ui = Embedded::new(Client::new("http://127.0.0.1:9", "t").unwrap(), Some("web".into()));
+        let mut ui = Embedded::new(Client::new("http://127.0.0.1:9", Some("t")).unwrap(), Some("web".into()));
         assert_eq!(ui.take_fatal(), None);
         ui.tx.send(Resp::Panicked { kind: Kind::Info, msg: "boom".into() }).unwrap();
         ui.tick();
@@ -347,7 +347,7 @@ mod tests {
         // Accepts connections but never answers, so the loads hang.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let mut ui = Embedded::new(Client::new(&url, "t").unwrap(), Some("web".into()));
+        let mut ui = Embedded::new(Client::new(&url, Some("t")).unwrap(), Some("web".into()));
         ui.tick();
         let tasks = ui.tasks.clone();
         assert!(!tasks.is_empty() && tasks.iter().all(|t| !t.is_finished()));

@@ -14,18 +14,23 @@ pub use odl_api as api;
 use odl_api::*;
 use serde::{Serialize, de::DeserializeOwned};
 
+/// The same variants and helpers as `sdl_client::Error` (plus
+/// [`Error::InvalidTraceId`]).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("invalid base URL {0:?}: must start with http:// or https://")]
-    BadUrl(String),
+    #[error("invalid base url: {0}")]
+    InvalidUrl(String),
     #[error("invalid trace id {0:?}: must be 32 hex characters")]
-    BadTraceId(String),
+    InvalidTraceId(String),
     /// Connection, timeout or decoding error; the cause is in `source()`.
     #[error("request failed")]
     Http(#[from] reqwest::Error),
+    /// The server answered with an error status. `code` is the machine
+    /// readable code (e.g. `bad_request`), or `http` when the body was not
+    /// an API error.
     #[error("{status}: {message}")]
-    Api { status: u16, error: String, message: String },
+    Api { status: u16, code: String, message: String },
 }
 
 impl Error {
@@ -36,6 +41,10 @@ impl Error {
             Error::Http(e) => e.status().map(|s| s.as_u16()),
             _ => None,
         }
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        self.status() == Some(404)
     }
 
     /// The server refused the time window because it is larger than its
@@ -49,6 +58,9 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Requests time out after this (the same in `sdl-client`).
+const TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct Client {
@@ -68,17 +80,18 @@ impl std::fmt::Debug for Client {
 
 impl Client {
     /// `base_url` is where the API router is mounted, e.g. `http://localhost:8080`
-    /// or `https://obs.example.com/otel`.
-    pub fn new(base_url: &str, token: Option<String>) -> Result<Self> {
-        let base = base_url.trim_end_matches('/').to_string();
-        if !(base.starts_with("http://") || base.starts_with("https://")) {
-            return Err(Error::BadUrl(base_url.to_string()));
+    /// or `https://obs.example.com/otel`. An empty `token` means no token.
+    pub fn new(base_url: &str, token: Option<&str>) -> Result<Self> {
+        let parsed = url::Url::parse(base_url).map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Error::InvalidUrl(format!("scheme must be http or https, not {:?}", parsed.scheme())));
         }
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(TIMEOUT)
             .user_agent(concat!("odl-client/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { http, base, token: token.filter(|t| !t.is_empty()) })
+        let token = token.filter(|t| !t.is_empty()).map(str::to_string);
+        Ok(Self { http, base: base_url.trim_end_matches('/').to_string(), token })
     }
 
     pub fn base_url(&self) -> &str {
@@ -100,11 +113,11 @@ impl Client {
             return Ok(resp.json().await?);
         }
         let text = resp.text().await.unwrap_or_default();
-        let (error, message) = match serde_json::from_str::<ApiError>(&text) {
+        let (code, message) = match serde_json::from_str::<ApiError>(&text) {
             Ok(e) => (e.error, e.message),
             Err(_) => ("http".to_string(), fallback_message(&text, status)),
         };
-        Err(Error::Api { status: status.as_u16(), error, message })
+        Err(Error::Api { status: status.as_u16(), code, message })
     }
 
     async fn get<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T> {
@@ -133,7 +146,7 @@ impl Client {
     pub async fn trace(&self, trace_id: &str, q: &TraceGetQuery) -> Result<Trace> {
         let id = trace_id.replace('-', "");
         if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::BadTraceId(trace_id.to_string()));
+            return Err(Error::InvalidTraceId(trace_id.to_string()));
         }
         self.get(&format!("/api/v1/traces/{id}"), q).await
     }
@@ -362,15 +375,16 @@ mod tests {
 
     #[test]
     fn base_url_validation() {
-        assert!(Client::new("localhost:8080", None).is_err());
-        let c = Client::new("http://x:8080/otel/", Some(String::new())).unwrap();
+        assert!(matches!(Client::new("localhost:8080", None), Err(Error::InvalidUrl(_))));
+        assert!(matches!(Client::new("not a url", None), Err(Error::InvalidUrl(_))));
+        let c = Client::new("http://x:8080/otel/", Some("")).unwrap();
         assert_eq!(c.base_url(), "http://x:8080/otel");
         assert!(c.token.is_none());
     }
 
     #[test]
     fn debug_hides_token() {
-        let c = Client::new("http://x", Some("secret".into())).unwrap();
+        let c = Client::new("http://x", Some("secret")).unwrap();
         let d = format!("{c:?}");
         assert!(!d.contains("secret") && d.contains("***"), "{d}");
     }
@@ -379,8 +393,8 @@ mod tests {
     async fn trace_id_is_validated() {
         let c = Client::new("http://127.0.0.1:9", None).unwrap();
         let q = TraceGetQuery::default();
-        assert!(matches!(c.trace("xyz", &q).await, Err(Error::BadTraceId(_))));
-        assert!(matches!(c.trace("0af7651916cd43dd8448eb211c80319c/x", &q).await, Err(Error::BadTraceId(_))));
+        assert!(matches!(c.trace("xyz", &q).await, Err(Error::InvalidTraceId(_))));
+        assert!(matches!(c.trace("0af7651916cd43dd8448eb211c80319c/x", &q).await, Err(Error::InvalidTraceId(_))));
         // Dashes are fine; this one fails only because nothing listens.
         assert!(matches!(c.trace("0af76519-16cd-43dd-8448-eb211c80319c", &q).await, Err(Error::Http(_))));
     }
@@ -394,12 +408,15 @@ mod tests {
         assert_eq!(fallback_message("", reqwest::StatusCode::BAD_GATEWAY), "502 Bad Gateway");
         let e = Error::Api {
             status: 400,
-            error: "bad_request".into(),
+            code: "bad_request".into(),
             message: "time window larger than query.max_window (1day)".into(),
         };
         assert!(e.is_window_too_large());
-        let e = Error::Api { status: 400, error: "bad_request".into(), message: "invalid since".into() };
+        let e = Error::Api { status: 400, code: "bad_request".into(), message: "invalid since".into() };
         assert!(!e.is_window_too_large());
+        assert!(!e.is_not_found());
+        let e = Error::Api { status: 404, code: "not_found".into(), message: "no trace".into() };
+        assert!(e.is_not_found() && e.status() == Some(404));
     }
 
     fn rec(micros: i64, body: &str) -> LogRecord {

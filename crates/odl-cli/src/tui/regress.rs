@@ -450,7 +450,7 @@ async fn drill_down_supersedes_pending_traces() {
 #[test]
 fn errors_flash_once_and_clear() {
     let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
-    let err = odl_client::Error::Api { status: 503, error: "busy".into(), message: "busy".into() };
+    let err = odl_client::Error::Api { status: 503, code: "busy".into(), message: "busy".into() };
     e.apply_error(Kind::LogTail, &err);
     assert!(e.flash.take().is_some());
     e.apply_error(Kind::LogTail, &err);
@@ -466,7 +466,7 @@ fn errors_flash_once_and_clear() {
 #[test]
 fn trace_lookup_backs_off() {
     let mut d = crate::tui::views::traces::Detail::new(TID.into(), None);
-    let err = odl_client::Error::Api { status: 404, error: "not_found".into(), message: "trace not found".into() };
+    let err = odl_client::Error::Api { status: 404, code: "not_found".into(), message: "trace not found".into() };
     let mut last = Duration::ZERO;
     for _ in 0..6 {
         d.on_error(&err);
@@ -479,7 +479,7 @@ fn trace_lookup_backs_off() {
     let mut d = crate::tui::views::traces::Detail::new(TID.into(), None);
     let too_large = odl_client::Error::Api {
         status: 400,
-        error: "bad_request".into(),
+        code: "bad_request".into(),
         message: "larger than query.max_window".into(),
     };
     d.on_error(&too_large);

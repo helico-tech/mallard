@@ -24,7 +24,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    let result = match sdl_client::Client::new(&cli.url, &cli.token) {
+    let result = match sdl_client::Client::new(&cli.url, Some(&cli.token)) {
         Ok(client) => {
             let ctx = sdl_cli::Ctx::new(client).with_project(cli.project).with_json(cli.json);
             sdl_cli::run(cli.command, &ctx).await
