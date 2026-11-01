@@ -41,6 +41,7 @@ zstd = "0.13"
 tokio-util.workspace = true
 
 [dev-dependencies]
+metrics-exporter-prometheus.workspace = true
 odl-client.workspace = true
 futures.workspace = true
 tonic = { workspace = true, features = ["channel"] }
