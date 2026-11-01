@@ -384,13 +384,13 @@ mod tests {
         waits_for_the_lease_of_another_process(&catalog, dir.path());
     }
 
-    /// Needs an empty Postgres database, e.g.
-    /// `ODL_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
+    /// Needs an empty Postgres database of its own, e.g.
+    /// `MALLARD_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
     #[test]
     #[ignore]
     fn waits_for_the_lease_on_postgres() {
         let dir = tempfile::tempdir().unwrap();
-        let libpq = std::env::var("ODL_TEST_POSTGRES").expect("ODL_TEST_POSTGRES");
+        let libpq = std::env::var("MALLARD_TEST_POSTGRES").expect("MALLARD_TEST_POSTGRES");
         waits_for_the_lease_of_another_process(&format!("postgres:{libpq}"), dir.path());
     }
 

@@ -74,7 +74,7 @@ struct Args {
     #[arg(long)]
     gzip: bool,
     /// Bearer token for the receiver.
-    #[arg(long, env = "ODL_INGEST_TOKEN")]
+    #[arg(long, env = "MALLARD_INGEST_TOKEN")]
     token: Option<String>,
     /// Random seed for reproducible data (default: random).
     #[arg(long)]

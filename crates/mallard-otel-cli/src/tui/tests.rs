@@ -561,11 +561,11 @@ async fn settle(e: &mut Embedded) {
 }
 
 /// Render every view against a live server and print the screens.
-/// Run with: ODL_TEST_URL=http://localhost:8080 cargo test -p mallard-otel-cli live_snapshot -- --ignored --nocapture
+/// Run with: MALLARD_TEST_URL=http://localhost:8080 cargo test -p mallard-otel-cli live_snapshot -- --ignored --nocapture
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn live_snapshot() {
-    let url = std::env::var("ODL_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let url = std::env::var("MALLARD_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m").unwrap();
     for (k, name) in [('1', "overview"), ('2', "traces"), ('3', "logs"), ('4', "metrics"), ('5', "status")] {
         let _ = e.handle_event(&ch(k));

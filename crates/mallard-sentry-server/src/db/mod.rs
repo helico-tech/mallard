@@ -1185,13 +1185,13 @@ pub(crate) mod tests {
         two_processes(&format!("sqlite:{}", dir.path().join("catalog.sqlite").display()), dir.path()).await;
     }
 
-    /// Needs an empty Postgres database, e.g.
-    /// `SDL_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
+    /// Needs an empty Postgres database of its own, e.g.
+    /// `MALLARD_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
     async fn two_processes_on_postgres() {
         let dir = tempfile::tempdir().unwrap();
-        let libpq = std::env::var("SDL_TEST_POSTGRES").expect("SDL_TEST_POSTGRES");
+        let libpq = std::env::var("MALLARD_TEST_POSTGRES").expect("MALLARD_TEST_POSTGRES");
         two_processes(&format!("postgres:{libpq}"), dir.path()).await;
     }
 

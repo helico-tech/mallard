@@ -28,9 +28,9 @@ mod commands;
 
 pub use commands::create_or_get;
 
-/// Hints for the standalone `sdl` binary.
+/// Default hints: the `mallard` command and its env vars.
 pub const HINTS: Hints =
-    Hints { command: "sdl", url_env: "SDL_URL", token_env: "SDL_TOKEN", project_env: "SDL_PROJECT" };
+    Hints { command: "mallard", url_env: "MALLARD_URL", token_env: "MALLARD_TOKEN", project_env: "MALLARD_PROJECT" };
 
 /// One-line, actionable message for a client error. Safe to print: server
 /// text in it is cleaned.
@@ -195,20 +195,16 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
 mod tests {
     use super::*;
 
-    const MALLARD: Hints = Hints {
-        command: "mallard errors",
-        url_env: "MALLARD_URL",
-        token_env: "MALLARD_TOKEN",
-        project_env: "MALLARD_PROJECT",
-    };
+    const HOST: Hints =
+        Hints { command: "host", url_env: "HOST_URL", token_env: "HOST_TOKEN", project_env: "HOST_PROJECT" };
 
     #[test]
     fn hints_name_the_host() {
         let e = mallard_sentry_client::Error::Api { status: 401, code: String::new(), message: String::new() };
-        assert_eq!(describe(&e, "http://x", &HINTS), "invalid token (set SDL_TOKEN or --token)");
-        assert_eq!(describe(&e, "http://x", &MALLARD), "invalid token (set MALLARD_TOKEN or --token)");
+        assert_eq!(describe(&e, "http://x", &HINTS), "invalid token (set MALLARD_TOKEN or --token)");
+        assert_eq!(describe(&e, "http://x", &HOST), "invalid token (set HOST_TOKEN or --token)");
         let e = mallard_sentry_client::Client::new("nope", None).unwrap_err();
-        assert!(describe(&e, "nope", &MALLARD).contains("set MALLARD_URL or --url"));
+        assert!(describe(&e, "nope", &HOST).contains("set HOST_URL or --url"));
     }
 
     #[test]
@@ -216,7 +212,7 @@ mod tests {
         let api =
             |status: u16, m: &str| mallard_sentry_client::Error::Api { status, code: String::new(), message: m.into() };
         let d = |e: mallard_sentry_client::Error| describe(&e, "http://x", &HINTS);
-        assert_eq!(d(api(403, "")), "token not allowed to do this (check SDL_TOKEN)");
+        assert_eq!(d(api(403, "")), "token not allowed to do this (check MALLARD_TOKEN)");
         assert_eq!(d(api(404, "")), "not found");
         assert_eq!(d(api(404, "issue not found")), "issue not found");
         assert_eq!(d(api(400, "bad since")), "request rejected (400): bad since");
@@ -228,7 +224,7 @@ mod tests {
 
     #[test]
     fn err_keeps_the_typed_source_and_cleans_it() {
-        let ctx = Ctx::new(mallard_sentry_client::Client::new("http://x", None).unwrap()).with_hints(MALLARD);
+        let ctx = Ctx::new(mallard_sentry_client::Client::new("http://x", None).unwrap()).with_hints(HOST);
         let e = ctx.err(mallard_sentry_client::Error::Api {
             status: 404,
             code: String::new(),

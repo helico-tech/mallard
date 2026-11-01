@@ -233,7 +233,7 @@ mod tests {
     use super::*;
 
     fn load(text: &str) -> anyhow::Result<Config> {
-        mallard_common::config::load_from(Some(text), "SDL_", std::iter::empty())
+        mallard_common::config::load_from(Some(text), "TEST_", std::iter::empty())
     }
 
     #[test]

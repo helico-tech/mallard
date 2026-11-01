@@ -33,8 +33,9 @@ use mallard_term::window::{Window, WindowArgs};
 
 use crate::fmt::{log_line, *};
 
-/// Hints for the standalone `odl` binary.
-pub const HINTS: Hints = Hints { command: "odl", url_env: "ODL_URL", token_env: "ODL_TOKEN", project_env: "" };
+/// Default hints: the `mallard` command and its env vars.
+pub const HINTS: Hints =
+    Hints { command: "mallard", url_env: "MALLARD_URL", token_env: "MALLARD_TOKEN", project_env: "" };
 
 /// Default window of the telemetry commands.
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(3600);

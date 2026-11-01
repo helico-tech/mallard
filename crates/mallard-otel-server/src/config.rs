@@ -1,15 +1,10 @@
-//! Server configuration.
+//! Server configuration: plain serde structs. The library loads nothing itself.
 //!
-//! Loaded from a TOML file (optional) and then overridden by environment
-//! variables with the `ODL_` prefix, using `__` as section separator, e.g.
-//! `ODL_STORAGE__DATA_PATH=s3://bucket/otel/`.
-//! Values of the form `${NAME}` are replaced by the environment variable NAME,
-//! so secrets can stay out of the file.
-//!
-//! An embedding application (mallard) uses only the sections it does not
-//! own itself: `ingest`, `retention`, `maintenance` and `query`.
+//! mallard fills `ingest`, `retention`, `maintenance` and `query` from its
+//! `[otel.*]` sections (`MALLARD_OTEL__<SECTION>__<KEY>`), and the other
+//! sections from its own settings.
 
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use mallard_common::{ByteSize, LogFormat, duration};
@@ -186,14 +181,6 @@ impl Default for QueryConfig {
 }
 
 impl Config {
-    /// Load config: defaults <- TOML file <- `ODL_*` environment variables
-    /// (see [`mallard_common::config`]), then validate it.
-    pub fn load(path: Option<&Path>) -> Result<Self> {
-        let cfg: Config = mallard_common::config::load(path, "ODL_")?;
-        cfg.validate()?;
-        Ok(cfg)
-    }
-
     /// Check ranges and combinations. Units are checked while parsing.
     pub fn validate(&self) -> Result<()> {
         let (i, m, q, r) = (&self.ingest, &self.maintenance, &self.query, &self.retention);
@@ -260,7 +247,7 @@ mod tests {
 
     fn load(text: &str, vars: &[(&str, &str)]) -> Result<Config> {
         let vars = vars.iter().map(|(k, v)| (k.to_string(), v.to_string()));
-        mallard_common::config::load_from(Some(text), "ODL_", vars)
+        mallard_common::config::load_from(Some(text), "TEST_", vars)
     }
 
     #[test]
@@ -302,11 +289,11 @@ mod tests {
         let cfg = load(
             "",
             &[
-                ("ODL_STORAGE__DATA_PATH", "s3://b/p/"),
-                ("ODL_QUERY__MAX_CONCURRENT", "8"),
-                ("ODL_AUTH__API_TOKENS", "[\"${TOK}\"]"),
-                ("ODL_AUTH__INGEST_TOKENS", "a, b"),
-                ("ODL_RETENTION__TRACES", "0"),
+                ("TEST_STORAGE__DATA_PATH", "s3://b/p/"),
+                ("TEST_QUERY__MAX_CONCURRENT", "8"),
+                ("TEST_AUTH__API_TOKENS", "[\"${TOK}\"]"),
+                ("TEST_AUTH__INGEST_TOKENS", "a, b"),
+                ("TEST_RETENTION__TRACES", "0"),
                 ("TOK", "secret"),
                 ("UNRELATED", "x"),
             ],
