@@ -20,20 +20,18 @@ What to watch:
 | `inlined_rows` keeps growing | compaction not running | `maintenance.enabled` |
 | queries return 503 | all `query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |
 
-You can also send otel-ducklake's own data to itself: it is just another
-OTLP endpoint for your SDKs.
-
 ## Sizing
 
-See [capacity.md](capacity.md). Short version: 1 vCPU and 1-2 GiB RAM
-handles typical small/mid traffic with large headroom. Give DuckDB about 70%
-of the container memory (`duckdb.memory_limit`).
+See [capacity.md](capacity.md). Short version: 1-2 vCPU and 2 GiB RAM
+handle small/mid traffic with large headroom. Keep container memory ≥
+`duckdb.memory_limit` + `ingest.max_buffer_bytes` + 0.5 GB.
 
 ## Retention and disk usage
 
-Disk ≈ spans/day × bytes/span × retention days. Measured 27-60 bytes per
-span (synthetic to realistic attribute variety) and 15-40 bytes per log
-record, plus the body. Example: 10 M spans/day × 50 B × 7 days ≈ 3.5 GB.
+Disk ≈ rows/day × bytes/row × retention days. Measured about 30 bytes per
+span and per log record with varied synthetic attributes
+([capacity.md](capacity.md)); plan for 2-3× with real data. Example:
+10 M spans/day × 60 B × 7 days ≈ 4 GB.
 
 Changing `[retention]` takes effect on the next retention run (hourly).
 

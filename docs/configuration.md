@@ -129,7 +129,7 @@ itself speaks plain HTTP/gRPC.
 
 | key | default | meaning |
 |---|---|---|
-| `memory_limit` | DuckDB default (80% of RAM) | Set to ~70% of the container memory limit, e.g. `1400MB` for 2 GiB. |
+| `memory_limit` | DuckDB default (80% of RAM) | Always set it in containers. Process memory peaks at about `memory_limit` + `ingest.max_buffer_bytes` + 0.5 GB, e.g. `1GB` with a 256 MB buffer in 2 GiB. |
 | `threads` | all cores | DuckDB worker threads. |
 | `temp_directory` | DuckDB default | Spill location for large queries. |
 | `extension_directory` | `~/.duckdb/extensions` | Where extensions are installed. Images use `/opt/duckdb/extensions`. |
