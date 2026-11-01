@@ -1,7 +1,7 @@
 // Test harness: start one sentry-ducklake server per test file on a free
 // port with its own temp dir, and talk to its /v1 API.
 //
-// Binary: $SDL_BIN, else ../target/debug/sentry-ducklake (built with
+// Binary: $SDL_BIN, else ../../target/debug/sentry-ducklake (built with
 // `cargo build -p sdl-server` if missing).
 
 import { spawn, execFileSync } from "node:child_process";
@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const E2E_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const REPO_DIR = path.resolve(E2E_DIR, "..");
+export const REPO_DIR = path.resolve(E2E_DIR, "../..");
 const TOKEN = "e2e-token";
 
 export function serverBinary() {

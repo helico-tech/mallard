@@ -75,18 +75,11 @@ impl Detail {
 
 impl State {
     pub fn set_list(&mut self, v: Vec<TraceSummary>) {
-        let keep = self
-            .sel
-            .selected()
-            .and_then(|i| self.list.get(i))
-            .map(|t| t.trace_id.clone());
+        let keep = self.sel.selected().and_then(|i| self.list.get(i)).map(|t| t.trace_id.clone());
         self.list = v;
         self.error = None;
-        let i = keep
-            .and_then(|id| self.list.iter().position(|t| t.trace_id == id))
-            .unwrap_or(0);
-        self.sel
-            .select((!self.list.is_empty()).then_some(i.min(self.list.len().saturating_sub(1))));
+        let i = keep.and_then(|id| self.list.iter().position(|t| t.trace_id == id)).unwrap_or(0);
+        self.sel.select((!self.list.is_empty()).then_some(i.min(self.list.len().saturating_sub(1))));
     }
 
     pub fn set_trace(&mut self, t: Trace) {
@@ -105,10 +98,7 @@ impl State {
 
     pub fn set_trace_logs(&mut self, v: Vec<LogRecord>) {
         if let Some(d) = &mut self.detail {
-            d.logs = v
-                .into_iter()
-                .filter(|l| l.trace_id.as_deref() == Some(d.trace_id.as_str()))
-                .collect();
+            d.logs = v.into_iter().filter(|l| l.trace_id.as_deref() == Some(d.trace_id.as_str())).collect();
         }
     }
 }
@@ -120,26 +110,14 @@ impl Embedded {
                 return;
             }
             let (from, to, since) = match d.hint {
-                Some(h) => (
-                    Some(h - TimeDelta::hours(1)),
-                    Some(h + TimeDelta::hours(1)),
-                    None,
-                ),
+                Some(h) => (Some(h - TimeDelta::hours(1)), Some(h + TimeDelta::hours(1)), None),
                 None => (None, None, Some("7d".to_string())),
             };
             let id = d.trace_id.clone();
             let c = self.client.clone();
-            let q = TraceGetQuery {
-                from,
-                to,
-                since: since.clone(),
-            };
+            let q = TraceGetQuery { from, to, since: since.clone() };
             let idc = id.clone();
-            if !self.loader.spawn(
-                Kind::Trace,
-                async move { c.trace(&idc, &q).await.map(Box::new) },
-                Data::Trace,
-            ) {
+            if !self.loader.spawn(Kind::Trace, async move { c.trace(&idc, &q).await.map(Box::new) }, Data::Trace) {
                 return;
             }
             d.requested = true;
@@ -153,8 +131,7 @@ impl Embedded {
                 order: Some("asc".into()),
                 ..Default::default()
             };
-            self.loader
-                .spawn(Kind::TraceLogs, async move { c.logs(&q).await }, Data::Logs);
+            self.loader.spawn(Kind::TraceLogs, async move { c.logs(&q).await }, Data::Logs);
             return;
         }
         if !force && !due(self.traces.refreshed, Duration::from_secs(5)) {
@@ -173,22 +150,13 @@ impl Embedded {
             ..Default::default()
         };
         let c = self.client.clone();
-        if self.loader.spawn(
-            Kind::Traces,
-            async move { c.traces(&q).await },
-            Data::Traces,
-        ) {
+        if self.loader.spawn(Kind::Traces, async move { c.traces(&q).await }, Data::Traces) {
             self.traces.refreshed = Some(Instant::now());
         }
     }
 
     pub(crate) fn open_trace_detail(&mut self, id: String) {
-        let hint = self
-            .traces
-            .list
-            .iter()
-            .find(|t| t.trace_id == id)
-            .map(|t| t.start_time);
+        let hint = self.traces.list.iter().find(|t| t.trace_id == id).map(|t| t.start_time);
         self.loader.cancel(Kind::Trace);
         self.loader.cancel(Kind::TraceLogs);
         self.traces.detail = Some(Detail::new(id, hint));
@@ -253,11 +221,7 @@ impl Embedded {
             t.sel.select(Some(i));
             return Some(Outcome::Consumed);
         }
-        let selected = t
-            .sel
-            .selected()
-            .and_then(|i| t.list.get(i))
-            .map(|x| x.trace_id.clone());
+        let selected = t.sel.selected().and_then(|i| t.list.get(i)).map(|x| x.trace_id.clone());
         match k.code {
             KeyCode::Char('/' | 'f') => {
                 let v = t.filter.to_query();
@@ -273,11 +237,7 @@ impl Embedded {
                 t.filter.errors_only = !t.filter.errors_only;
                 t.refreshed = None;
                 self.loader.cancel(Kind::Traces);
-                let msg = if self.traces.filter.errors_only {
-                    "only traces with errors"
-                } else {
-                    "all traces"
-                };
+                let msg = if self.traces.filter.errors_only { "only traces with errors" } else { "all traces" };
                 self.flash(msg);
                 Some(Outcome::Consumed)
             }
@@ -320,50 +280,27 @@ impl Embedded {
                 TSpan::styled(q, theme::bold())
             },
         ]);
-        let block = widgets::panel_with(
-            "Traces",
-            Line::from(format!(" {} newest ", t.list.len())).style(theme::muted()),
-            true,
-        );
+        let block =
+            widgets::panel_with("Traces", Line::from(format!(" {} newest ", t.list.len())).style(theme::muted()), true);
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let [fl, table_area] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+        let [fl, table_area] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
         f.render_widget(filter_line, fl);
-        let max_dur = t
-            .list
-            .iter()
-            .map(|x| x.duration_ms)
-            .fold(0.0, f64::max)
-            .max(1e-9);
+        let max_dur = t.list.iter().map(|x| x.duration_ms).fold(0.0, f64::max).max(1e-9);
         let rows: Vec<TRow> = t
             .list
             .iter()
             .map(|tr| {
                 let (svc, name) = match (&tr.root_service, &tr.root_name) {
                     (Some(s), Some(n)) => (s.clone(), n.clone()),
-                    _ => (
-                        tr.services.first().cloned().unwrap_or_default(),
-                        "(root not received)".into(),
-                    ),
+                    _ => (tr.services.first().cloned().unwrap_or_default(), "(root not received)".into()),
                 };
                 let frac = tr.duration_ms / max_dur;
                 let filled = ((frac * 10.0).round() as usize).clamp(1, 10);
-                let bar_color = if tr.error_count > 0 {
-                    theme::ERR
-                } else {
-                    theme::ACCENT
-                };
+                let bar_color = if tr.error_count > 0 { theme::ERR } else { theme::ACCENT };
                 TRow::new(vec![
-                    Cell::from(widgets::local(
-                        tr.start_time,
-                        if long {
-                            "%m-%d %H:%M:%S"
-                        } else {
-                            "%H:%M:%S%.3f"
-                        },
-                    ))
-                    .style(theme::dim()),
+                    Cell::from(widgets::local(tr.start_time, if long { "%m-%d %H:%M:%S" } else { "%H:%M:%S%.3f" }))
+                        .style(theme::dim()),
                     Cell::from(Line::from(vec![
                         TSpan::styled("● ", Style::new().fg(theme::service_color(&svc))),
                         TSpan::styled(format!("{svc} "), theme::dim()),
@@ -374,11 +311,9 @@ impl Embedded {
                         TSpan::styled("▬".repeat(filled), Style::new().fg(bar_color)),
                         TSpan::styled("─".repeat(10 - filled), theme::muted()),
                     ])),
-                    Cell::from(Line::from(compact(tr.span_count as f64)).right_aligned())
-                        .style(theme::dim()),
+                    Cell::from(Line::from(compact(tr.span_count as f64)).right_aligned()).style(theme::dim()),
                     if tr.error_count > 0 {
-                        Cell::from(Line::from(format!("✗ {}", tr.error_count)).right_aligned())
-                            .style(theme::error())
+                        Cell::from(Line::from(format!("✗ {}", tr.error_count)).right_aligned()).style(theme::error())
                     } else {
                         Cell::from(Line::from("·").right_aligned()).style(theme::muted())
                     },
@@ -407,26 +342,16 @@ impl Embedded {
             Constraint::Fill(2),
         ];
         let sel = t.sel.selected();
-        widgets::fit_offset(
-            t.sel.offset_mut(),
-            sel,
-            t.list.len(),
-            table_area.height.saturating_sub(1),
-        );
+        widgets::fit_offset(t.sel.offset_mut(), sel, t.list.len(), table_area.height.saturating_sub(1));
         f.render_stateful_widget(
-            Table::new(rows, widths)
-                .header(header)
-                .row_highlight_style(theme::selected())
-                .highlight_symbol("▌"),
+            Table::new(rows, widths).header(header).row_highlight_style(theme::selected()).highlight_symbol("▌"),
             table_area,
             &mut t.sel,
         );
         if empty {
             let (msg, style) = match &t.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None if t.refreshed.is_some() => {
-                    ("no matching traces in this window".into(), theme::muted())
-                }
+                None if t.refreshed.is_some() => ("no matching traces in this window".into(), theme::muted()),
                 None => ("loading…".into(), theme::muted()),
             };
             widgets::placeholder(f, table_area, &msg, style);
@@ -454,35 +379,17 @@ impl Embedded {
             widgets::placeholder(f, inner, &msg, style);
             return;
         };
-        let errors = trace
-            .spans
-            .iter()
-            .filter(|s| s.status_code == "ERROR")
-            .count();
-        let services: std::collections::BTreeSet<&str> = trace
-            .spans
-            .iter()
-            .map(|s| s.service_name.as_str())
-            .collect();
+        let errors = trace.spans.iter().filter(|s| s.status_code == "ERROR").count();
+        let services: std::collections::BTreeSet<&str> = trace.spans.iter().map(|s| s.service_name.as_str()).collect();
         let mut right = vec![
             TSpan::styled(format!(" {} ", ms(d.total_ns as f64 / 1e6)), theme::bold()),
-            TSpan::styled(
-                format!(
-                    "· {} spans · {} services ",
-                    trace.spans.len(),
-                    services.len()
-                ),
-                theme::dim(),
-            ),
+            TSpan::styled(format!("· {} spans · {} services ", trace.spans.len(), services.len()), theme::dim()),
         ];
         if errors > 0 {
             right.push(TSpan::styled(format!("· ✗ {errors} "), theme::error()));
         }
         if !d.logs.is_empty() {
-            right.push(TSpan::styled(
-                format!("· {} logs ", d.logs.len()),
-                theme::dim(),
-            ));
+            right.push(TSpan::styled(format!("· {} logs ", d.logs.len()), theme::dim()));
         }
         let block = widgets::panel_with(&format!("Trace {}", d.trace_id), Line::from(right), true);
         let inner = block.inner(wf_area);
@@ -490,8 +397,7 @@ impl Embedded {
         if inner.height < 2 || inner.width < 20 {
             return;
         }
-        let [ruler, list_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+        let [ruler, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
         let w = list_area.width.saturating_sub(1) as usize; // highlight symbol
         let dur_w = 9usize;
         let label_w = (w * 45 / 100).clamp(18.min(w), 70);
@@ -527,10 +433,7 @@ impl Embedded {
                 let svc_color = theme::service_color(&s.service_name);
                 let mut label: Vec<TSpan> = vec![TSpan::styled(row.prefix.clone(), theme::muted())];
                 let used = row.prefix.chars().count();
-                let svc = widgets::trunc(
-                    &s.service_name,
-                    14.min(label_w.saturating_sub(used + 2)).max(1),
-                );
+                let svc = widgets::trunc(&s.service_name, 14.min(label_w.saturating_sub(used + 2)).max(1));
                 let rest = label_w.saturating_sub(used + svc.chars().count() + 1);
                 label.push(TSpan::styled(svc.clone(), Style::new().fg(svc_color)));
                 label.push(TSpan::raw(" "));
@@ -538,57 +441,30 @@ impl Embedded {
                 let pad = rest.saturating_sub(name.chars().count());
                 label.push(TSpan::styled(
                     name,
-                    if is_err {
-                        theme::error().add_modifier(Modifier::BOLD)
-                    } else {
-                        theme::text()
-                    },
+                    if is_err { theme::error().add_modifier(Modifier::BOLD) } else { theme::text() },
                 ));
                 label.push(TSpan::raw(" ".repeat(pad + 1)));
-                let (start, len) =
-                    waterfall::bar(row.offset_ns, row.duration_ns, d.total_ns, bar_w as u16);
+                let (start, len) = waterfall::bar(row.offset_ns, row.duration_ns, d.total_ns, bar_w as u16);
                 let bar_color = if is_err { theme::ERR } else { svc_color };
                 label.push(TSpan::raw(" ".repeat(start as usize)));
-                label.push(TSpan::styled(
-                    "█".repeat(len as usize),
-                    Style::new().fg(bar_color),
-                ));
-                label.push(TSpan::raw(
-                    " ".repeat(bar_w.saturating_sub((start + len) as usize)),
-                ));
-                label.push(TSpan::styled(
-                    format!("{:>dur_w$}", ms(row.duration_ns as f64 / 1e6)),
-                    theme::dim(),
-                ));
+                label.push(TSpan::styled("█".repeat(len as usize), Style::new().fg(bar_color)));
+                label.push(TSpan::raw(" ".repeat(bar_w.saturating_sub((start + len) as usize))));
+                label.push(TSpan::styled(format!("{:>dur_w$}", ms(row.duration_ns as f64 / 1e6)), theme::dim()));
                 ListItem::new(Line::from(label))
             })
             .collect();
         let sel = d.sel.selected();
         widgets::fit_offset(d.sel.offset_mut(), sel, d.rows.len(), list_area.height);
         f.render_stateful_widget(
-            List::new(items)
-                .highlight_style(theme::selected())
-                .highlight_symbol("▌"),
+            List::new(items).highlight_style(theme::selected()).highlight_symbol("▌"),
             list_area,
             &mut d.sel,
         );
         // Span details
         let lines = span_details(d);
-        let title = d
-            .selected_span()
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| "Span".into());
-        let block = widgets::panel(
-            &widgets::trunc(&title, info_area.width.saturating_sub(6) as usize),
-            false,
-        );
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((d.scroll, 0))
-                .block(block),
-            info_area,
-        );
+        let title = d.selected_span().map(|s| s.name.clone()).unwrap_or_else(|| "Span".into());
+        let block = widgets::panel(&widgets::trunc(&title, info_area.width.saturating_sub(6) as usize), false);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((d.scroll, 0)).block(block), info_area);
     }
 }
 
@@ -601,21 +477,14 @@ fn section(title: &str) -> Line<'static> {
 }
 
 fn kv_line(k: &str, v: &str) -> Line<'static> {
-    Line::from(vec![
-        TSpan::styled(format!("  {k} "), theme::dim()),
-        TSpan::styled(v.to_string(), theme::text()),
-    ])
+    Line::from(vec![TSpan::styled(format!("  {k} "), theme::dim()), TSpan::styled(v.to_string(), theme::text())])
 }
 
 fn span_details(d: &Detail) -> Vec<Line<'static>> {
     let Some(s) = d.selected_span() else {
         return vec![Line::from("no span selected")];
     };
-    let trace_start = d
-        .trace
-        .as_ref()
-        .and_then(|t| t.spans.iter().map(|s| s.start_time).min())
-        .unwrap_or(s.start_time);
+    let trace_start = d.trace.as_ref().and_then(|t| t.spans.iter().map(|s| s.start_time).min()).unwrap_or(s.start_time);
     let offset = (s.start_time - trace_start).num_nanoseconds().unwrap_or(0) as f64 / 1e6;
     let (status, sc) = match s.status_code.as_str() {
         "ERROR" => ("ERROR", theme::ERR),
@@ -626,10 +495,7 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
         Line::from(vec![
             TSpan::styled(format!(" {status} "), theme::badge(sc)),
             TSpan::raw(" "),
-            TSpan::styled(
-                format!("● {}", s.service_name),
-                Style::new().fg(theme::service_color(&s.service_name)),
-            ),
+            TSpan::styled(format!("● {}", s.service_name), Style::new().fg(theme::service_color(&s.service_name))),
             TSpan::styled(format!("  {}", s.kind.to_lowercase()), theme::muted()),
         ]),
         Line::from(vec![
@@ -639,24 +505,15 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
         ]),
     ];
     if !s.status_message.is_empty() {
-        out.push(Line::from(TSpan::styled(
-            format!("  {}", s.status_message),
-            theme::error(),
-        )));
+        out.push(Line::from(TSpan::styled(format!("  {}", s.status_message), theme::error())));
     }
     out.push(kv_line("span  ", &s.span_id));
     if let Some(p) = &s.parent_span_id {
         out.push(kv_line("parent", p));
     }
-    out.push(kv_line(
-        "start ",
-        &widgets::local(s.start_time, "%Y-%m-%d %H:%M:%S%.6f"),
-    ));
+    out.push(kv_line("start ", &widgets::local(s.start_time, "%Y-%m-%d %H:%M:%S%.6f")));
     if !s.scope_name.is_empty() {
-        out.push(kv_line(
-            "scope ",
-            &format!("{} {}", s.scope_name, s.scope_version),
-        ));
+        out.push(kv_line("scope ", &format!("{} {}", s.scope_name, s.scope_version)));
     }
     if !s.attributes.is_empty() {
         out.push(Line::raw(""));
@@ -670,11 +527,8 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
         out.push(section(&format!("Events ({})", s.events.len())));
         for e in &s.events {
             let at = (e.time - trace_start).num_nanoseconds().unwrap_or(0) as f64 / 1e6;
-            let style = if e.name == "exception" {
-                theme::error().add_modifier(Modifier::BOLD)
-            } else {
-                theme::accent()
-            };
+            let style =
+                if e.name == "exception" { theme::error().add_modifier(Modifier::BOLD) } else { theme::accent() };
             out.push(Line::from(vec![
                 TSpan::styled(format!("  +{} ", ms(at)), theme::dim()),
                 TSpan::styled(e.name.clone(), style),
@@ -683,10 +537,7 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
                 if k == "exception.stacktrace" {
                     out.push(Line::from(TSpan::styled(format!("    {k}"), theme::dim())));
                     for l in v.lines() {
-                        out.push(Line::from(TSpan::styled(
-                            format!("      {l}"),
-                            theme::error(),
-                        )));
+                        out.push(Line::from(TSpan::styled(format!("      {l}"), theme::error())));
                     }
                 } else {
                     out.push(Line::from(vec![
@@ -704,21 +555,15 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
             out.push(kv_line("→", &format!("{} / {}", l.trace_id, l.span_id)));
         }
     }
-    let span_logs: Vec<&LogRecord> = d
-        .logs
-        .iter()
-        .filter(|l| l.span_id.as_deref() == Some(s.span_id.as_str()))
-        .collect();
+    let span_logs: Vec<&LogRecord> =
+        d.logs.iter().filter(|l| l.span_id.as_deref() == Some(s.span_id.as_str())).collect();
     if !span_logs.is_empty() {
         out.push(Line::raw(""));
         out.push(section(&format!("Logs ({})", span_logs.len())));
         for l in span_logs {
             let (lbl, c) = theme::severity(l.severity_number, &l.severity_text);
             out.push(Line::from(vec![
-                TSpan::styled(
-                    format!("  {} ", widgets::local(l.time, "%H:%M:%S%.3f")),
-                    theme::dim(),
-                ),
+                TSpan::styled(format!("  {} ", widgets::local(l.time, "%H:%M:%S%.3f")), theme::dim()),
                 TSpan::styled(format!("{lbl:<5} "), Style::new().fg(c)),
                 TSpan::styled(l.body.clone(), theme::text()),
             ]));
@@ -726,10 +571,7 @@ fn span_details(d: &Detail) -> Vec<Line<'static>> {
     }
     if !s.resource_attributes.is_empty() {
         out.push(Line::raw(""));
-        out.push(section(&format!(
-            "Resource ({})",
-            s.resource_attributes.len()
-        )));
+        out.push(section(&format!("Resource ({})", s.resource_attributes.len())));
         for (k, v) in &s.resource_attributes {
             out.push(kv_line(k, v));
         }

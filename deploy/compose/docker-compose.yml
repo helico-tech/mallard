@@ -1,37 +1,37 @@
-# Full local stack: obs-ducklake + S3-compatible object store (RustFS) +
+# Full local stack: mallard + S3-compatible object store (RustFS) +
 # PostgreSQL as the DuckLake catalog. Same stack as sentry-ducklake's compose.
 #
 #   docker compose -f deploy/compose/docker-compose.yml up -d --build
 #
-#   export OBS_URL=http://localhost:8080 OBS_TOKEN=dev-token
-#   obs status
-#   curl -XPOST -H "Authorization: Bearer $OBS_TOKEN" -H 'content-type: application/json' \
-#        $OBS_URL/sentry/v1/projects -d '{"name":"web"}'          # returns a Sentry DSN
+#   export MALLARD_URL=http://localhost:8080 MALLARD_TOKEN=dev-token
+#   mallard status
+#   curl -XPOST -H "Authorization: Bearer $MALLARD_TOKEN" -H 'content-type: application/json' \
+#        $MALLARD_URL/sentry/v1/projects -d '{"name":"web"}'          # returns a Sentry DSN
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318             # for OTel SDKs
 #
-# Simpler mode (DuckDB-file catalog on the obs-data volume, data still on S3;
+# Simpler mode (DuckDB-file catalog on the mallard-data volume, data still on S3;
 # one server process only):
 #
-#   OBS_CATALOG=/data/catalog.ducklake docker compose -f deploy/compose/docker-compose.yml up -d
+#   MALLARD_CATALOG=/data/catalog.ducklake docker compose -f deploy/compose/docker-compose.yml up -d
 #
 # Settings you may want to override (shell env or a .env file next to this file):
-#   OBS_PORT (8080), OBS_API_TOKEN (dev-token), OBS_CATALOG, S3_ACCESS_KEY,
-#   S3_SECRET_KEY, POSTGRES_PASSWORD, OBS_IMAGE.
+#   MALLARD_PORT (8080), MALLARD_API_TOKEN (dev-token), MALLARD_CATALOG, S3_ACCESS_KEY,
+#   S3_SECRET_KEY, POSTGRES_PASSWORD, MALLARD_IMAGE.
 # The defaults are for local use only. Change every secret before exposing it.
 
-name: obs-ducklake
+name: mallard
 
 x-s3-credentials: &s3-credentials
-  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-obs-access-key}
-  S3_SECRET_KEY: ${S3_SECRET_KEY:-obs-secret-key-change-me}
-  S3_BUCKET: obs
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-mallard-access-key}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-mallard-secret-key-change-me}
+  S3_BUCKET: mallard
 
 services:
   rustfs:
     image: rustfs/rustfs:1.0.4
     environment:
-      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-obs-access-key}
-      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-obs-secret-key-change-me}
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-mallard-access-key}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-mallard-secret-key-change-me}
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: ":9000"
     volumes:
@@ -66,47 +66,43 @@ services:
     image: postgres:18.6-alpine
     environment:
       POSTGRES_DB: ducklake
-      POSTGRES_USER: obs
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-obs-change-me}
+      POSTGRES_USER: mallard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mallard-change-me}
     volumes:
       - postgres-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U obs -d ducklake"]
+      test: ["CMD-SHELL", "pg_isready -U mallard -d ducklake"]
       interval: 5s
       timeout: 3s
       retries: 20
     restart: unless-stopped
 
-  obs-ducklake:
-    image: ${OBS_IMAGE:-obs-ducklake:dev}
+  mallard:
+    image: ${MALLARD_IMAGE:-mallard:dev}
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
-      additional_contexts:
-        # The pinned library checkouts (scripts/pin-libs.sh).
-        sentry-ducklake: ../../../sentry-ducklake/.claude/worktrees/obs-pin
-        otel-ducklake: ../../../otel-ducklake/.claude/worktrees/obs-pin
     depends_on:
       create-bucket:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
     ports:
-      - "${OBS_PORT:-8080}:8080"   # Sentry ingest + APIs + OTLP/HTTP
-      - "${OBS_OTLP_HTTP_PORT:-4318}:4318"
-      - "${OBS_OTLP_GRPC_PORT:-4317}:4317"
+      - "${MALLARD_PORT:-8080}:8080"   # Sentry ingest + APIs + OTLP/HTTP
+      - "${MALLARD_OTLP_HTTP_PORT:-4318}:4318"
+      - "${MALLARD_OTLP_GRPC_PORT:-4317}:4317"
     environment:
-      OBS_CONFIG: /etc/obs-ducklake/obs-ducklake.toml
-      OBS_PUBLIC_URL: http://localhost:${OBS_PORT:-8080}
-      OBS_API_TOKEN: ${OBS_API_TOKEN:-dev-token}
-      OBS_CATALOG: ${OBS_CATALOG:-postgres:host=postgres port=5432 dbname=ducklake user=obs password=${POSTGRES_PASSWORD:-obs-change-me}}
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-obs-access-key}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-obs-secret-key-change-me}
+      MALLARD_CONFIG: /etc/mallard/mallard.toml
+      MALLARD_PUBLIC_URL: http://localhost:${MALLARD_PORT:-8080}
+      MALLARD_API_TOKEN: ${MALLARD_API_TOKEN:-dev-token}
+      MALLARD_CATALOG: ${MALLARD_CATALOG:-postgres:host=postgres port=5432 dbname=ducklake user=mallard password=${POSTGRES_PASSWORD:-mallard-change-me}}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-mallard-access-key}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-mallard-secret-key-change-me}
       RUST_LOG: info
     volumes:
-      - ./obs-ducklake.toml:/etc/obs-ducklake/obs-ducklake.toml:ro
+      - ./mallard.toml:/etc/mallard/mallard.toml:ro
       # DuckDB-file catalog in simple mode, and DuckDB's spill files.
-      - obs-data:/data
+      - mallard-data:/data
     # Long enough for both libraries to flush on stop.
     stop_grace_period: 60s
     restart: unless-stopped
@@ -114,4 +110,4 @@ services:
 volumes:
   rustfs-data:
   postgres-data:
-  obs-data:
+  mallard-data:

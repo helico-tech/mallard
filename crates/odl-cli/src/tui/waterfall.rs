@@ -25,19 +25,11 @@ pub fn layout(spans: &[Span]) -> (Vec<Row>, i64) {
     }
     let start = spans.iter().map(|s| s.start_time).min().unwrap();
     let off = |s: &Span| (s.start_time - start).num_nanoseconds().unwrap_or(0);
-    let total = spans
-        .iter()
-        .map(|s| off(s) + s.duration_ns.max(0))
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    let total = spans.iter().map(|s| off(s) + s.duration_ns.max(0)).max().unwrap_or(1).max(1);
     let ids: HashSet<&str> = spans.iter().map(|s| s.span_id.as_str()).collect();
     let mut children: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
     for (i, s) in spans.iter().enumerate() {
-        let parent = s
-            .parent_span_id
-            .as_deref()
-            .filter(|p| ids.contains(p) && *p != s.span_id);
+        let parent = s.parent_span_id.as_deref().filter(|p| ids.contains(p) && *p != s.span_id);
         children.entry(parent).or_default().push(i);
     }
     for v in children.values_mut() {
@@ -64,13 +56,7 @@ pub fn layout(spans: &[Span]) -> (Vec<Row>, i64) {
             prefix.push_str(if last { "└─" } else { "├─" });
         }
         let s = &spans[i];
-        rows.push(Row {
-            span: i,
-            depth,
-            prefix,
-            offset_ns: off(s),
-            duration_ns: s.duration_ns.max(0),
-        });
+        rows.push(Row { span: i, depth, prefix, offset_ns: off(s), duration_ns: s.duration_ns.max(0) });
         if let Some(kids) = children.get(&Some(s.span_id.as_str())) {
             let mut g = guides.clone();
             g.push(!last);
@@ -121,9 +107,7 @@ pub mod tests {
             name: format!("op-{id}"),
             kind: "SERVER".into(),
             service_name: "svc".into(),
-            start_time: Utc
-                .timestamp_millis_opt(1_700_000_000_000 + start_ms)
-                .unwrap(),
+            start_time: Utc.timestamp_millis_opt(1_700_000_000_000 + start_ms).unwrap(),
             duration_ns: dur_ms * 1_000_000,
             status_code: "UNSET".into(),
             status_message: String::new(),
@@ -147,10 +131,7 @@ pub mod tests {
             span("orphan", Some("missing"), 60, 1),
         ];
         let (rows, total) = layout(&spans);
-        let order: Vec<&str> = rows
-            .iter()
-            .map(|r| spans[r.span].span_id.as_str())
-            .collect();
+        let order: Vec<&str> = rows.iter().map(|r| spans[r.span].span_id.as_str()).collect();
         assert_eq!(order, vec!["a", "c1", "g", "c2", "orphan"]);
         assert_eq!(total, 100_000_000);
         let prefixes: Vec<&str> = rows.iter().map(|r| r.prefix.as_str()).collect();

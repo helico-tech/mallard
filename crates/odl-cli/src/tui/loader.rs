@@ -58,12 +58,7 @@ pub struct Loader {
 impl Default for Loader {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Self {
-            tx,
-            rx,
-            gens: HashMap::new(),
-            pending: HashSet::new(),
-        }
+        Self { tx, rx, gens: HashMap::new(), pending: HashSet::new() }
     }
 }
 

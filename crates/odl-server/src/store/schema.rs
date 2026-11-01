@@ -61,14 +61,8 @@ pub const SPANS: TableDef = TableDef {
         ("scope_version", "VARCHAR"),
         ("resource_attributes", ATTRS),
         ("attributes", ATTRS),
-        (
-            "events",
-            "STRUCT(time TIMESTAMP, name VARCHAR, attributes MAP(VARCHAR, VARCHAR))[]",
-        ),
-        (
-            "links",
-            "STRUCT(trace_id UUID, span_id UBIGINT, trace_state VARCHAR, attributes MAP(VARCHAR, VARCHAR))[]",
-        ),
+        ("events", "STRUCT(time TIMESTAMP, name VARCHAR, attributes MAP(VARCHAR, VARCHAR))[]"),
+        ("links", "STRUCT(trace_id UUID, span_id UBIGINT, trace_state VARCHAR, attributes MAP(VARCHAR, VARCHAR))[]"),
     ],
 };
 
@@ -123,11 +117,7 @@ pub const METRIC_POINTS: TableDef = TableDef {
     time_column: "time",
     signal: Signal::Metrics,
     sort_by: "metric_name, series_id, time",
-    columns: metric_columns![
-        ("metric_type", "VARCHAR"),
-        ("is_monotonic", "BOOLEAN"),
-        ("value", "DOUBLE"),
-    ],
+    columns: metric_columns![("metric_type", "VARCHAR"), ("is_monotonic", "BOOLEAN"), ("value", "DOUBLE"),],
 };
 
 pub const METRIC_HISTOGRAMS: TableDef = TableDef {
@@ -177,14 +167,8 @@ pub const METRIC_SUMMARIES: TableDef = TableDef {
     ],
 };
 
-pub const TABLES: &[&TableDef] = &[
-    &SPANS,
-    &LOGS,
-    &METRIC_POINTS,
-    &METRIC_HISTOGRAMS,
-    &METRIC_EXP_HISTOGRAMS,
-    &METRIC_SUMMARIES,
-];
+pub const TABLES: &[&TableDef] =
+    &[&SPANS, &LOGS, &METRIC_POINTS, &METRIC_HISTOGRAMS, &METRIC_EXP_HISTOGRAMS, &METRIC_SUMMARIES];
 
 /// Index of a table in [`TABLES`]; used by the write buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,11 +198,7 @@ impl TableId {
 impl TableDef {
     /// `CREATE TABLE IF NOT EXISTS` statement for this table.
     pub fn create_sql(&self, catalog: &str, schema: &str) -> String {
-        let cols: Vec<String> = self
-            .columns
-            .iter()
-            .map(|(n, t)| format!("    {n} {t}"))
-            .collect();
+        let cols: Vec<String> = self.columns.iter().map(|(n, t)| format!("    {n} {t}")).collect();
         format!(
             "CREATE TABLE IF NOT EXISTS {catalog}.{schema}.{name} (\n{cols}\n)\nPARTITIONED BY (epoch_day({time}))\nSORTED BY ({sort})",
             name = self.name,
@@ -240,12 +220,7 @@ mod tests {
         assert!(sql.contains("PARTITIONED BY (epoch_day(start_time))"));
         for t in TABLES {
             let names: std::collections::HashSet<_> = t.columns.iter().map(|c| c.0).collect();
-            assert_eq!(
-                names.len(),
-                t.columns.len(),
-                "duplicate column in {}",
-                t.name
-            );
+            assert_eq!(names.len(), t.columns.len(), "duplicate column in {}", t.name);
             assert!(names.contains(t.time_column));
         }
         for (i, id) in TableId::ALL.iter().enumerate() {

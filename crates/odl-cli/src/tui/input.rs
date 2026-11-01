@@ -17,18 +17,11 @@ pub enum InputResult {
 
 impl Input {
     pub fn new(value: &str) -> Self {
-        Self {
-            value: value.to_string(),
-            cursor: value.chars().count(),
-        }
+        Self { value: value.to_string(), cursor: value.chars().count() }
     }
 
     fn byte_idx(&self, char_idx: usize) -> usize {
-        self.value
-            .char_indices()
-            .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(self.value.len())
+        self.value.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(self.value.len())
     }
 
     pub fn handle(&mut self, k: &KeyEvent) -> InputResult {
@@ -102,9 +95,6 @@ mod tests {
         i.handle(&key(KeyCode::Char('x')));
         i.handle(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
         assert_eq!(i.value, "ab ");
-        assert!(matches!(
-            i.handle(&key(KeyCode::Enter)),
-            InputResult::Submit
-        ));
+        assert!(matches!(i.handle(&key(KeyCode::Enter)), InputResult::Submit));
     }
 }

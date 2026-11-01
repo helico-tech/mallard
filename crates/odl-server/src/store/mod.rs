@@ -46,8 +46,7 @@ pub fn redact(text: &str) -> String {
             let q = rest.as_bytes()[0] as char;
             rest[1..].find(q).map(|e| e + 2).unwrap_or(rest.len())
         } else {
-            rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ';')
-                .unwrap_or(rest.len())
+            rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ';').unwrap_or(rest.len())
         };
         out.push_str("***");
         i = pos + klen + end;
@@ -70,15 +69,10 @@ impl Lake {
     /// Only the schema and tables are created; DuckDB settings, extensions,
     /// secrets and DuckLake options are left to the caller.
     pub fn with_connection(conn: Connection, cfg: &Config) -> Result<Self> {
-        let attached: i64 = conn.query_row(
-            "SELECT count(*) FROM duckdb_databases() WHERE database_name = ?",
-            [CATALOG],
-            |r| r.get(0),
-        )?;
+        let attached: i64 =
+            conn.query_row("SELECT count(*) FROM duckdb_databases() WHERE database_name = ?", [CATALOG], |r| r.get(0))?;
         if attached == 0 {
-            bail!(
-                "no database attached as {CATALOG:?}; ATTACH the DuckLake catalog AS {CATALOG} first"
-            );
+            bail!("no database attached as {CATALOG:?}; ATTACH the DuckLake catalog AS {CATALOG} first");
         }
         let lake = Self {
             root: Mutex::new(conn),
@@ -109,10 +103,7 @@ impl Lake {
         loop {
             match self.migrate_once() {
                 Ok(()) => return Ok(()),
-                Err(e)
-                    if attempt < 10
-                        && format!("{e:#}").to_ascii_lowercase().contains("conflict") =>
-                {
+                Err(e) if attempt < 10 && format!("{e:#}").to_ascii_lowercase().contains("conflict") => {
                     attempt += 1;
                     warn!(attempt, error = %format!("{e:#}"), "schema migration conflicted with another writer; retrying");
                     std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
@@ -126,10 +117,7 @@ impl Lake {
     /// definition since the table was created.
     fn migrate_once(&self) -> Result<()> {
         let conn = self.root.lock().unwrap();
-        conn.execute_batch(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {CATALOG}.{}",
-            self.schema
-        ))?;
+        conn.execute_batch(&format!("CREATE SCHEMA IF NOT EXISTS {CATALOG}.{}", self.schema))?;
         for t in TABLES {
             conn.execute_batch(&t.create_sql(CATALOG, &self.schema))
                 .with_context(|| format!("creating table {}", t.name))?;
@@ -137,9 +125,8 @@ impl Lake {
                 "SELECT column_name FROM duckdb_columns() \
                  WHERE database_name = ? AND schema_name = ? AND table_name = ? ORDER BY column_index",
             )?;
-            let existing: Vec<String> = stmt
-                .query_map([CATALOG, self.schema.as_str(), t.name], |r| r.get(0))?
-                .collect::<Result<_, _>>()?;
+            let existing: Vec<String> =
+                stmt.query_map([CATALOG, self.schema.as_str(), t.name], |r| r.get(0))?.collect::<Result<_, _>>()?;
             // Columns are matched by name: we only ever add missing ones.
             // Extra columns come from a newer version (rolling upgrade or
             // rollback); we leave them NULL.
@@ -152,10 +139,8 @@ impl Lake {
                     ))?;
                 }
             }
-            let extra: Vec<&String> = existing
-                .iter()
-                .filter(|e| !t.columns.iter().any(|c| c.0 == e.as_str()))
-                .collect();
+            let extra: Vec<&String> =
+                existing.iter().filter(|e| !t.columns.iter().any(|c| c.0 == e.as_str())).collect();
             if !extra.is_empty() {
                 warn!(table = t.name, columns = ?extra, "table has columns this version does not know; they stay NULL for rows written here");
             }
@@ -185,8 +170,7 @@ pub fn install_extensions(cfg: &Config, names: &[String]) -> Result<()> {
         if !is_identifier(n) {
             bail!("invalid extension name {n:?}");
         }
-        conn.execute_batch(&format!("INSTALL {n}"))
-            .with_context(|| format!("installing {n}"))?;
+        conn.execute_batch(&format!("INSTALL {n}")).with_context(|| format!("installing {n}"))?;
         info!(extension = %n, "installed");
     }
     Ok(())
@@ -199,19 +183,13 @@ fn configure_duckdb(conn: &Connection, cfg: &Config) -> Result<()> {
         sql += &format!("SET threads = {};", d.threads);
     }
     if !d.memory_limit.is_empty() {
-        sql += &format!(
-            "SET memory_limit = {};",
-            sql_str(&format!("{}B", parse_bytes(&d.memory_limit)?))
-        );
+        sql += &format!("SET memory_limit = {};", sql_str(&format!("{}B", parse_bytes(&d.memory_limit)?)));
     }
     if !d.temp_directory.is_empty() {
         sql += &format!("SET temp_directory = {};", sql_str(&d.temp_directory));
     }
     if !d.extension_directory.is_empty() {
-        sql += &format!(
-            "SET extension_directory = {};",
-            sql_str(&d.extension_directory)
-        );
+        sql += &format!("SET extension_directory = {};", sql_str(&d.extension_directory));
     }
     if !d.autoinstall_extensions {
         sql += "SET autoinstall_known_extensions = false;";
@@ -231,18 +209,13 @@ pub fn required_extensions(cfg: &Config) -> Vec<String> {
         CatalogKind::DuckDb => {}
     }
     let dp = cfg.storage.data_path.to_ascii_lowercase();
-    if [
-        "s3://", "s3a://", "s3n://", "gs://", "gcs://", "r2://", "http://", "https://", "hf://",
-    ]
-    .iter()
-    .any(|p| dp.starts_with(p))
-    {
-        exts.push("httpfs".into());
-    }
-    if ["az://", "azure://", "abfss://"]
+    if ["s3://", "s3a://", "s3n://", "gs://", "gcs://", "r2://", "http://", "https://", "hf://"]
         .iter()
         .any(|p| dp.starts_with(p))
     {
+        exts.push("httpfs".into());
+    }
+    if ["az://", "azure://", "abfss://"].iter().any(|p| dp.starts_with(p)) {
         exts.push("azure".into());
     }
     for s in &cfg.storage.secrets {
@@ -322,11 +295,8 @@ fn create_secrets(conn: &Connection, cfg: &Config) -> Result<()> {
             };
             opts.push(format!("{} {val}", k.to_ascii_uppercase()));
         }
-        conn.execute_batch(&format!(
-            "CREATE OR REPLACE SECRET {name} ({})",
-            opts.join(", ")
-        ))
-        .with_context(|| format!("creating secret {name}"))?;
+        conn.execute_batch(&format!("CREATE OR REPLACE SECRET {name} ({})", opts.join(", ")))
+            .with_context(|| format!("creating secret {name}"))?;
     }
     Ok(())
 }
@@ -367,28 +337,16 @@ fn attach(conn: &Connection, cfg: &Config) -> Result<()> {
             }
             _ => "",
         };
-        format!(
-            "attaching DuckLake catalog ({}) with data path {}{hint}",
-            st.catalog_kind().as_str(),
-            st.data_path
-        )
+        format!("attaching DuckLake catalog ({}) with data path {}{hint}", st.catalog_kind().as_str(), st.data_path)
     })?;
     let opts = [
         ("parquet_compression", sql_str("zstd")),
         ("parquet_row_group_size", st.row_group_size.to_string()),
-        (
-            "target_file_size",
-            sql_str(&format!("{}B", parse_bytes(&st.target_file_size)?)),
-        ),
-        (
-            "data_inlining_row_limit",
-            st.data_inlining_row_limit.to_string(),
-        ),
+        ("target_file_size", sql_str(&format!("{}B", parse_bytes(&st.target_file_size)?))),
+        ("data_inlining_row_limit", st.data_inlining_row_limit.to_string()),
     ];
     for (k, v) in opts {
-        if let Err(e) =
-            conn.execute_batch(&format!("CALL {CATALOG}.set_option({}, {v})", sql_str(k)))
-        {
+        if let Err(e) = conn.execute_batch(&format!("CALL {CATALOG}.set_option({}, {v})", sql_str(k))) {
             warn!(option = k, error = %e, "could not set DuckLake option");
         }
     }
@@ -410,10 +368,7 @@ mod tests {
         assert_eq!(required_extensions(&cfg), vec!["ducklake"]);
         cfg.storage.catalog = "postgres:host=x".into();
         cfg.storage.data_path = "s3://b/".into();
-        assert_eq!(
-            required_extensions(&cfg),
-            vec!["ducklake", "postgres", "httpfs"]
-        );
+        assert_eq!(required_extensions(&cfg), vec!["ducklake", "postgres", "httpfs"]);
         cfg.storage.data_path = "abfss://c@acct.dfs.core.windows.net/x/".into();
         assert!(required_extensions(&cfg).contains(&"azure".to_string()));
     }

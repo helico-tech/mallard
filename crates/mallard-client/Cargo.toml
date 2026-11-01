@@ -1,0 +1,13 @@
+[package]
+name = "mallard-client"
+description = "Async client for mallard: Sentry errors and OpenTelemetry data behind one URL"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sdl-client.workspace = true
+odl-client.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros"] }

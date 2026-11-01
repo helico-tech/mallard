@@ -18,9 +18,7 @@ fn logs(n: usize, t0: u64) -> Vec<u8> {
         .map(|i| OtlpLog {
             time_unix_nano: t0 + i as u64 * 1_000_000,
             severity_number: if i % 2 == 0 { 9 } else { 17 },
-            body: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(format!("line {i}"))),
-            }),
+            body: Some(AnyValue { value: Some(any_value::Value::StringValue(format!("line {i}"))) }),
             ..Default::default()
         })
         .collect();
@@ -29,17 +27,12 @@ fn logs(n: usize, t0: u64) -> Vec<u8> {
             resource: Some(Resource {
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
-                    value: Some(AnyValue {
-                        value: Some(any_value::Value::StringValue("web".into())),
-                    }),
+                    value: Some(AnyValue { value: Some(any_value::Value::StringValue("web".into())) }),
                     ..Default::default()
                 }],
                 ..Default::default()
             }),
-            scope_logs: vec![ScopeLogs {
-                log_records: recs,
-                ..Default::default()
-            }],
+            scope_logs: vec![ScopeLogs { log_records: recs, ..Default::default() }],
             ..Default::default()
         }],
     }
@@ -56,13 +49,7 @@ async fn client_against_server() {
     cfg.maintenance.enabled = false;
     cfg.auth.api_tokens = vec!["tok".into()];
     // Pick free ports.
-    let free = || {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .to_string()
-    };
+    let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
     cfg.server.api_addr = free();
     cfg.server.otlp_http_addr = free();
     cfg.server.otlp_grpc_addr = free();
@@ -81,21 +68,12 @@ async fn client_against_server() {
 
     let t0 = chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64 - 2_000_000_000;
     let http = reqwest::Client::new();
-    let r = http
-        .post(&otlp)
-        .header("content-type", "application/x-protobuf")
-        .body(logs(10, t0))
-        .send()
-        .await
-        .unwrap();
+    let r = http.post(&otlp).header("content-type", "application/x-protobuf").body(logs(10, t0)).send().await.unwrap();
     assert_eq!(r.status(), 200);
 
     let mut tail = LogTail::new(
         c.clone(),
-        LogQuery {
-            service: Some("web".into()),
-            ..Default::default()
-        },
+        LogQuery { service: Some("web".into()), ..Default::default() },
         chrono::Utc::now() - chrono::TimeDelta::minutes(5),
     );
     let mut got = Vec::new();
@@ -122,21 +100,11 @@ async fn client_against_server() {
         .unwrap();
     assert_eq!(errs.len(), 3);
     let series = c
-        .log_series(&LogSeriesQuery {
-            since: Some("10m".into()),
-            step: Some("1m".into()),
-            ..Default::default()
-        })
+        .log_series(&LogSeriesQuery { since: Some("10m".into()), step: Some("1m".into()), ..Default::default() })
         .await
         .unwrap();
     assert_eq!(series.points.iter().map(|p| p.error).sum::<u64>(), 5);
-    let err = c
-        .metric_query(&MetricQuery {
-            name: "nope".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap_err();
+    let err = c.metric_query(&MetricQuery { name: "nope".into(), ..Default::default() }).await.unwrap_err();
     assert_eq!(err.status(), Some(404));
     let stats = c.stats().await.unwrap();
     assert_eq!(stats.ingest.signals[1].accepted, 10);

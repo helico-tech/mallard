@@ -36,23 +36,14 @@ fn stats() -> Stats {
         ingest: IngestStats {
             signals: ["traces", "logs", "metrics"]
                 .iter()
-                .map(|s| SignalIngestStats {
-                    signal: s.to_string(),
-                    requests: 10,
-                    accepted: 1234,
-                    rejected: 0,
-                })
+                .map(|s| SignalIngestStats { signal: s.to_string(), requests: 10, accepted: 1234, rejected: 0 })
                 .collect(),
             buffered_rows: 120,
             buffered_bytes: 1_000_000,
             max_buffer_bytes: 512_000_000,
             flushes: 42,
             flush_errors: 0,
-            last_flush: Some(FlushInfo {
-                at: Utc::now(),
-                rows: 500,
-                duration_ms: 21.0,
-            }),
+            last_flush: Some(FlushInfo { at: Utc::now(), rows: 500, duration_ms: 21.0 }),
             last_flush_error: None,
         },
         storage: StorageStats {
@@ -103,18 +94,9 @@ fn fixture() -> Embedded {
     e.stats = Some(stats());
     e.ingest_rate = Some(250.0);
     e.overview.set_services(vec![
-        ServiceSummary {
-            name: "frontend".into(),
-            red: red(1000, 12),
-        },
-        ServiceSummary {
-            name: "checkout".into(),
-            red: red(200, 20),
-        },
-        ServiceSummary {
-            name: "payment".into(),
-            red: red(50, 0),
-        },
+        ServiceSummary { name: "frontend".into(), red: red(1000, 12) },
+        ServiceSummary { name: "checkout".into(), red: red(200, 20) },
+        ServiceSummary { name: "payment".into(), red: red(50, 0) },
     ]);
     let now = Utc::now();
     e.overview.span_series = Some(SpanSeries {
@@ -196,27 +178,16 @@ fn trace_fixture() -> Trace {
         time: t2,
         name: "exception".into(),
         attributes: [
-            (
-                "exception.type".to_string(),
-                "PaymentDeclinedError".to_string(),
-            ),
-            (
-                "exception.stacktrace".to_string(),
-                "at charge (pay.go:42)\nat serve (server.go:9)".to_string(),
-            ),
+            ("exception.type".to_string(), "PaymentDeclinedError".to_string()),
+            ("exception.stacktrace".to_string(), "at charge (pay.go:42)\nat serve (server.go:9)".to_string()),
         ]
         .into(),
     });
-    spans[0]
-        .attributes
-        .insert("http.route".into(), "/checkout".into());
+    spans[0].attributes.insert("http.route".into(), "/checkout".into());
     for s in &mut spans {
         s.trace_id = TID.into();
     }
-    Trace {
-        trace_id: TID.into(),
-        spans,
-    }
+    Trace { trace_id: TID.into(), spans }
 }
 
 fn render(e: &mut Embedded, w: u16, h: u16) -> String {
@@ -289,13 +260,7 @@ fn traces_render_and_waterfall() {
     assert_eq!(e.view, View::Traces);
     all_sizes(&mut e);
     let s = render(&mut e, 160, 40);
-    for needle in [
-        "Traces",
-        "POST /checkout",
-        "123.4ms",
-        "✗ 2",
-        "frontend payment",
-    ] {
+    for needle in ["Traces", "POST /checkout", "123.4ms", "✗ 2", "frontend payment"] {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
     // 'e' asks the host for errors of the selected trace
@@ -387,24 +352,12 @@ fn logs_render_and_keys() {
     e.handle_event(&ch('3'));
     all_sizes(&mut e);
     let s = render(&mut e, 160, 40);
-    for needle in [
-        "Volume",
-        "error",
-        "Logs",
-        "following",
-        "payment declined: card expired",
-        "WARN",
-        "ERROR",
-        "◆",
-    ] {
+    for needle in ["Volume", "error", "Logs", "following", "payment declined: card expired", "WARN", "ERROR", "◆"] {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
     // follow stays at the end when new records arrive
     assert_eq!(e.logs.sel.selected(), Some(2));
-    e.logs_tail_loaded(vec![
-        log(4, 9, "new one", None),
-        log(3, 17, "payment declined: card expired", Some(TID)),
-    ]);
+    e.logs_tail_loaded(vec![log(4, 9, "new one", None), log(3, 17, "payment declined: card expired", Some(TID))]);
     assert_eq!(e.logs.records.len(), 4, "duplicate dropped");
     assert_eq!(e.logs.sel.selected(), Some(3));
     // pause
@@ -422,10 +375,7 @@ fn logs_render_and_keys() {
     // o on a record with a trace opens the trace
     e.handle_event(&ch('o'));
     assert_eq!(e.view, View::Traces);
-    assert_eq!(
-        e.traces.detail.as_ref().map(|d| d.trace_id.as_str()),
-        Some(TID)
-    );
+    assert_eq!(e.traces.detail.as_ref().map(|d| d.trace_id.as_str()), Some(TID));
     // severity cycle rewrites the filter
     e.handle_event(&ch('3'));
     e.handle_event(&ch('s'));
@@ -455,22 +405,13 @@ fn metrics_render_and_chart() {
         series: vec![MetricSeries {
             labels: [("service.name".to_string(), "checkout".to_string())].into(),
             points: (0..30)
-                .map(|i| MetricPoint {
-                    time: now - TimeDelta::minutes(30 - i),
-                    value: 0.1 + i as f64 / 100.0,
-                })
+                .map(|i| MetricPoint { time: now - TimeDelta::minutes(30 - i), value: 0.1 + i as f64 / 100.0 })
                 .collect(),
         }],
     });
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);
-    for needle in [
-        "app.request.duration · histogram · s",
-        "p95",
-        "checkout",
-        "last",
-        "390.0ms",
-    ] {
+    for needle in ["app.request.duration · histogram · s", "p95", "checkout", "last", "390.0ms"] {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
     e.handle_event(&ch('a'));
@@ -501,18 +442,9 @@ fn status_renders() {
     e.handle_event(&ch('5'));
     all_sizes(&mut e);
     let s = render(&mut e, 140, 40);
-    for needle in [
-        "Ingest",
-        "Storage",
-        "traces",
-        "1234",
-        "buffer",
-        "duckdb",
-        "spans",
-        "100.0k",
-        "compaction",
-        "merged 12 files",
-    ] {
+    for needle in
+        ["Ingest", "Storage", "traces", "1234", "buffer", "duckdb", "spans", "100.0k", "compaction", "merged 12 files"]
+    {
         assert!(s.contains(needle), "missing {needle:?} in\n{s}");
     }
     e.stats = None;
@@ -528,10 +460,8 @@ fn global_keys() {
     assert_eq!(e.handle_event(&key(KeyCode::F(2))), Outcome::Ignored);
     assert_eq!(e.handle_event(&ch('z')), Outcome::Ignored);
     assert_eq!(e.handle_event(&Event::FocusGained), Outcome::Ignored);
-    let release = Event::Key(KeyEvent {
-        kind: KeyEventKind::Release,
-        ..KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
-    });
+    let release =
+        Event::Key(KeyEvent { kind: KeyEventKind::Release, ..KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE) });
     assert_eq!(e.handle_event(&release), Outcome::Ignored);
     assert_eq!(e.handle_event(&key(KeyCode::Tab)), Outcome::Consumed);
     assert_eq!(e.view, View::Traces);
@@ -549,10 +479,7 @@ fn global_keys() {
     e.handle_event(&ch('x'));
     assert!(!e.help);
     assert_eq!(e.handle_event(&ch('q')), Outcome::Quit);
-    assert_eq!(
-        e.handle_event(&key(KeyCode::Char('c')).with_ctrl()),
-        Outcome::Quit
-    );
+    assert_eq!(e.handle_event(&key(KeyCode::Char('c')).with_ctrl()), Outcome::Quit);
 }
 
 #[test]
@@ -598,13 +525,7 @@ async fn settle(e: &mut Embedded) {
 async fn live_snapshot() {
     let url = std::env::var("ODL_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m");
-    for (k, name) in [
-        ('1', "overview"),
-        ('2', "traces"),
-        ('3', "logs"),
-        ('4', "metrics"),
-        ('5', "status"),
-    ] {
+    for (k, name) in [('1', "overview"), ('2', "traces"), ('3', "logs"), ('4', "metrics"), ('5', "status")] {
         e.handle_event(&ch(k));
         settle(&mut e).await;
         println!("===== {name} =====\n{}", render(&mut e, 150, 42));
@@ -642,10 +563,7 @@ async fn live_snapshot() {
     }
     settle(&mut e).await;
     e.handle_event(&key(KeyCode::Enter));
-    println!(
-        "===== error logs + detail =====\n{}",
-        render(&mut e, 150, 42)
-    );
+    println!("===== error logs + detail =====\n{}", render(&mut e, 150, 42));
     e.handle_event(&key(KeyCode::Esc));
     e.handle_event(&ch('1'));
     println!("===== overview 80x24 =====\n{}", render(&mut e, 80, 24));

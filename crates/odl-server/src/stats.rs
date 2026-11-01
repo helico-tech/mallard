@@ -56,11 +56,7 @@ impl Stats {
         self.flushes.fetch_add(1, Relaxed);
         // A success clears the alarm; `flush_errors` keeps the count.
         *self.last_flush_error.lock().unwrap() = None;
-        *self.last_flush.lock().unwrap() = Some(FlushInfo {
-            at: Utc::now(),
-            rows,
-            duration_ms,
-        });
+        *self.last_flush.lock().unwrap() = Some(FlushInfo { at: Utc::now(), rows, duration_ms });
     }
 
     pub fn flush_err(&self, msg: String) {
@@ -84,11 +80,7 @@ impl Stats {
             rejected: c.rejected.load(Relaxed),
         };
         IngestStats {
-            signals: vec![
-                sig("traces", &self.traces),
-                sig("logs", &self.logs),
-                sig("metrics", &self.metrics),
-            ],
+            signals: vec![sig("traces", &self.traces), sig("logs", &self.logs), sig("metrics", &self.metrics)],
             buffered_rows: self.buffered_rows.load(Relaxed),
             buffered_bytes: self.buffered_bytes.load(Relaxed),
             max_buffer_bytes,

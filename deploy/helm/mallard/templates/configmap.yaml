@@ -1,0 +1,73 @@
+{{- $s3 := .Values.storage.s3 -}}
+{{- $creds := include "mallard.storageSecret" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mallard.fullname" . }}
+  labels:
+    {{- include "mallard.labels" . | nindent 4 }}
+data:
+  mallard.toml: |
+    # Rendered by the Helm chart. ${NAME} = environment variable NAME.
+    [server]
+    http_addr = "0.0.0.0:8080"
+    otlp_http_addr = "0.0.0.0:4318"
+    otlp_grpc_addr = "0.0.0.0:4317"
+    public_url = {{ .Values.publicUrl | quote }}
+    api_tokens = ["${MALLARD_API_TOKEN}"]
+    ingest_tokens = ["${MALLARD_INGEST_TOKEN}"]
+    log_format = {{ ternary "json" "text" .Values.logJson | quote }}
+
+    [storage]
+    # catalog comes from MALLARD_STORAGE__CATALOG
+    data_path = {{ .Values.storage.dataPath | quote }}
+    {{- if include "mallard.usesS3" . }}
+
+    [[storage.secrets]]
+    type = "s3"
+    {{- if $creds }}
+    key_id = "${AWS_ACCESS_KEY_ID}"
+    secret = "${AWS_SECRET_ACCESS_KEY}"
+    {{- else }}
+    provider = "credential_chain"
+    {{- end }}
+    region = {{ $s3.region | quote }}
+    {{- with $s3.endpoint }}
+    endpoint = {{ . | trimPrefix "https://" | trimPrefix "http://" | trimSuffix "/" | quote }}
+    use_ssl = {{ hasPrefix "https://" . }}
+    {{- end }}
+    {{- if $s3.pathStyle }}
+    url_style = "path"
+    {{- end }}
+    {{- end }}
+    {{- range .Values.storage.extraSecrets }}
+
+    [[storage.secrets]]
+    {{- range $k, $v := . }}
+    {{ $k }} = {{ $v | toJson }}
+    {{- end }}
+    {{- end }}
+
+    [duckdb]
+    memory_limit = {{ .Values.duckdb.memoryLimit | quote }}
+    threads = {{ .Values.duckdb.threads | int }}
+
+    [otel.retention]
+    traces = {{ .Values.retention.traces | quote }}
+    logs = {{ .Values.retention.logs | quote }}
+    metrics = {{ .Values.retention.metrics | quote }}
+
+    [sentry]
+    retention_days = {{ .Values.retention.errorsDays | int }}
+    {{- with .Values.storage.artifactsUrl }}
+    storage_url = {{ . | quote }}
+    {{- end }}
+    {{- with $s3.endpoint }}
+    s3_endpoint = {{ . | quote }}
+    {{- end }}
+    s3_region = {{ $s3.region | quote }}
+    s3_path_style = {{ $s3.pathStyle }}
+    {{- with .Values.extraConfig }}
+
+    {{- . | nindent 4 }}
+    {{- end }}

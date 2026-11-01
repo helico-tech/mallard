@@ -87,10 +87,7 @@ pub fn error() -> Style {
     Style::new().fg(ERR)
 }
 pub fn key() -> Style {
-    Style::new()
-        .fg(Color::Rgb(26, 27, 38))
-        .bg(ACCENT)
-        .add_modifier(Modifier::BOLD)
+    Style::new().fg(Color::Rgb(26, 27, 38)).bg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
 /// Color for an error rate (0..1).
@@ -127,10 +124,7 @@ pub fn severity(n: u8, text: &str) -> (&'static str, Color) {
 
 /// Badge style: dark text on a colored background.
 pub fn badge(c: Color) -> Style {
-    Style::new()
-        .fg(Color::Rgb(26, 27, 38))
-        .bg(c)
-        .add_modifier(Modifier::BOLD)
+    Style::new().fg(Color::Rgb(26, 27, 38)).bg(c).add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

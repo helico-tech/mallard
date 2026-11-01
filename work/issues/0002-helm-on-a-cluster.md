@@ -11,4 +11,4 @@ The chart passes `helm lint`/`helm template`, and its rendered config passes
 PVC permissions with readOnlyRootFilesystem, and the gRPC service are untested.
 
 ## Notes
-Use kind + the `ci/duckdb-values.yaml` and `ci/minio-values.yaml` value sets.
+Use kind + the `deploy/helm/mallard/ci/duckdb-values.yaml` and `ci/minio-values.yaml` value sets.

@@ -18,8 +18,8 @@ use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, KeyValue, any_value},
     logs::v1::{LogRecord as OtlpLog, ResourceLogs, ScopeLogs},
     metrics::v1::{
-        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
-        ResourceMetrics, ScopeMetrics, Sum, metric::Data, number_data_point,
+        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
+        ScopeMetrics, Sum, metric::Data, number_data_point,
     },
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span},
@@ -31,27 +31,21 @@ use tower::ServiceExt;
 fn kv(k: &str, v: &str) -> KeyValue {
     KeyValue {
         key: k.into(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(v.into())),
-        }),
+        value: Some(AnyValue { value: Some(any_value::Value::StringValue(v.into())) }),
         ..Default::default()
     }
 }
 
 fn resource(service: &str) -> Option<Resource> {
-    Some(Resource {
-        attributes: vec![kv("service.name", service), kv("host.name", "h1")],
-        ..Default::default()
-    })
+    Some(Resource { attributes: vec![kv("service.name", service), kv("host.name", "h1")], ..Default::default() })
 }
 
 fn now_ns() -> u64 {
     chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64
 }
 
-const TRACE: [u8; 16] = [
-    0x0a, 0xf7, 0x65, 0x19, 0x16, 0xcd, 0x43, 0xdd, 0x84, 0x48, 0xeb, 0x21, 0x1c, 0x80, 0x31, 0x9c,
-];
+const TRACE: [u8; 16] =
+    [0x0a, 0xf7, 0x65, 0x19, 0x16, 0xcd, 0x43, 0xdd, 0x84, 0x48, 0xeb, 0x21, 0x1c, 0x80, 0x31, 0x9c];
 const TRACE_HEX: &str = "0af7651916cd43dd8448eb211c80319c";
 
 fn traces_req(t0: u64) -> ExportTraceServiceRequest {
@@ -62,25 +56,15 @@ fn traces_req(t0: u64) -> ExportTraceServiceRequest {
         kind: 2,
         start_time_unix_nano: t0,
         end_time_unix_nano: t0 + 120_000_000,
-        attributes: vec![
-            kv("http.route", "/checkout"),
-            kv("http.response.status_code", "500"),
-        ],
-        status: Some(Status {
-            code: 2,
-            message: "boom".into(),
-        }),
+        attributes: vec![kv("http.route", "/checkout"), kv("http.response.status_code", "500")],
+        status: Some(Status { code: 2, message: "boom".into() }),
         events: vec![span::Event {
             time_unix_nano: t0 + 1000,
             name: "exception".into(),
             attributes: vec![kv("exception.type", "Boom")],
             ..Default::default()
         }],
-        links: vec![span::Link {
-            trace_id: vec![7; 16],
-            span_id: vec![0, 0, 0, 0, 0, 0, 0, 9],
-            ..Default::default()
-        }],
+        links: vec![span::Link { trace_id: vec![7; 16], span_id: vec![0, 0, 0, 0, 0, 0, 0, 9], ..Default::default() }],
         ..Default::default()
     };
     let child = Span {
@@ -107,18 +91,12 @@ fn traces_req(t0: u64) -> ExportTraceServiceRequest {
         resource_spans: vec![
             ResourceSpans {
                 resource: resource("checkout"),
-                scope_spans: vec![ScopeSpans {
-                    spans: vec![root, child],
-                    ..Default::default()
-                }],
+                scope_spans: vec![ScopeSpans { spans: vec![root, child], ..Default::default() }],
                 ..Default::default()
             },
             ResourceSpans {
                 resource: resource("db"),
-                scope_spans: vec![ScopeSpans {
-                    spans: vec![other_service],
-                    ..Default::default()
-                }],
+                scope_spans: vec![ScopeSpans { spans: vec![other_service], ..Default::default() }],
                 ..Default::default()
             },
         ],
@@ -135,9 +113,7 @@ fn logs_req(t0: u64) -> ExportLogsServiceRequest {
                         time_unix_nano: t0,
                         severity_number: 17,
                         severity_text: "ERROR".into(),
-                        body: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue("payment FAILED".into())),
-                        }),
+                        body: Some(AnyValue { value: Some(any_value::Value::StringValue("payment FAILED".into())) }),
                         trace_id: TRACE.to_vec(),
                         span_id: vec![0, 0, 0, 0, 0, 0, 0, 1],
                         attributes: vec![kv("order.id", "42")],
@@ -146,9 +122,7 @@ fn logs_req(t0: u64) -> ExportLogsServiceRequest {
                     OtlpLog {
                         time_unix_nano: t0 + 1_000_000,
                         severity_number: 9,
-                        body: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue("all good".into())),
-                        }),
+                        body: Some(AnyValue { value: Some(any_value::Value::StringValue("all good".into())) }),
                         ..Default::default()
                     },
                 ],
@@ -201,12 +175,7 @@ fn metrics_req(t0: u64, n: u64) -> ExportMetricsServiceRequest {
             resource: resource("checkout"),
             scope_metrics: vec![ScopeMetrics {
                 metrics: vec![
-                    metric(
-                        "queue.size",
-                        Data::Gauge(Gauge {
-                            data_points: gauge_pts,
-                        }),
-                    ),
+                    metric("queue.size", Data::Gauge(Gauge { data_points: gauge_pts })),
                     metric(
                         "http.requests",
                         Data::Sum(Sum {
@@ -254,35 +223,16 @@ async fn harness(token: Option<&str>) -> Harness {
     let shutdown = CancellationToken::new();
     let s2 = server.clone();
     let sd = shutdown.clone();
-    let bg = tokio::spawn(async move {
-        s2.run_background(async move { sd.cancelled().await })
-            .await
-            .unwrap()
-    });
-    Harness {
-        otlp: server.otlp_http_router(),
-        api: server.api_router(),
-        shutdown,
-        bg,
-        _dir: dir,
-    }
+    let bg = tokio::spawn(async move { s2.run_background(async move { sd.cancelled().await }).await.unwrap() });
+    Harness { otlp: server.otlp_http_router(), api: server.api_router(), shutdown, bg, _dir: dir }
 }
 
 impl Harness {
     async fn post(&self, path: &str, ct: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
-        let req = Request::post(path)
-            .header(header::CONTENT_TYPE, ct)
-            .body(Body::from(body))
-            .unwrap();
+        let req = Request::post(path).header(header::CONTENT_TYPE, ct).body(Body::from(body)).unwrap();
         let resp = self.otlp.clone().oneshot(req).await.unwrap();
         let status = resp.status();
-        (
-            status,
-            to_bytes(resp.into_body(), usize::MAX)
-                .await
-                .unwrap()
-                .to_vec(),
-        )
+        (status, to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec())
     }
 
     async fn get_raw(&self, path: &str, token: Option<&str>) -> (StatusCode, String) {
@@ -290,23 +240,9 @@ impl Harness {
         if let Some(t) = token {
             b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
         }
-        let resp = self
-            .api
-            .clone()
-            .oneshot(b.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = self.api.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
         let status = resp.status();
-        (
-            status,
-            String::from_utf8(
-                to_bytes(resp.into_body(), usize::MAX)
-                    .await
-                    .unwrap()
-                    .to_vec(),
-            )
-            .unwrap(),
-        )
+        (status, String::from_utf8(to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap())
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> T {
@@ -340,20 +276,12 @@ impl Harness {
 async fn traces_roundtrip() {
     let h = harness(None).await;
     let t0 = now_ns() - 5_000_000_000;
-    let (s, _) = h
-        .post(
-            "/v1/traces",
-            "application/x-protobuf",
-            traces_req(t0).encode_to_vec(),
-        )
-        .await;
+    let (s, _) = h.post("/v1/traces", "application/x-protobuf", traces_req(t0).encode_to_vec()).await;
     assert_eq!(s, StatusCode::OK);
 
     let trace: Trace = h
         .eventually(|| async {
-            let (s, body) = h
-                .get_raw(&format!("/api/v1/traces/{TRACE_HEX}?since=1h"), None)
-                .await;
+            let (s, body) = h.get_raw(&format!("/api/v1/traces/{TRACE_HEX}?since=1h"), None).await;
             if s != StatusCode::OK && s != StatusCode::NOT_FOUND {
                 panic!("{s}: {body}");
             }
@@ -375,15 +303,8 @@ async fn traces_roundtrip() {
     assert_eq!(root.events[0].attributes["exception.type"], "Boom");
     assert_eq!(root.links[0].trace_id, "07070707070707070707070707070707");
     assert_eq!(root.links[0].span_id, "0000000000000009");
-    let child = trace
-        .spans
-        .iter()
-        .find(|s| s.name == "SELECT orders")
-        .unwrap();
-    assert_eq!(
-        child.span_id, "ff00000000000002",
-        "high bit must survive UBIGINT"
-    );
+    let child = trace.spans.iter().find(|s| s.name == "SELECT orders").unwrap();
+    assert_eq!(child.span_id, "ff00000000000002", "high bit must survive UBIGINT");
     assert_eq!(child.parent_span_id.as_deref(), Some("0000000000000001"));
 
     let services: Vec<ServiceSummary> = h.get("/api/v1/services?since=1h").await;
@@ -392,9 +313,7 @@ async fn traces_roundtrip() {
     assert_eq!(checkout.red.error_count, 1);
     assert!(services.iter().any(|s| s.name == "db"));
 
-    let ops: Vec<OperationSummary> = h
-        .get("/api/v1/operations?since=1h&service=checkout&entry_only=false")
-        .await;
+    let ops: Vec<OperationSummary> = h.get("/api/v1/operations?since=1h&service=checkout&entry_only=false").await;
     assert_eq!(ops.len(), 2);
 
     let found: Vec<TraceSummary> = h.get("/api/v1/traces?since=1h&service=db").await;
@@ -402,36 +321,22 @@ async fn traces_roundtrip() {
     assert_eq!(found[0].trace_id, TRACE_HEX);
     assert_eq!(found[0].span_count, 3);
     assert_eq!(found[0].root_service.as_deref(), Some("checkout"));
-    assert_eq!(
-        found[0].services,
-        vec!["checkout".to_string(), "db".to_string()]
-    );
+    assert_eq!(found[0].services, vec!["checkout".to_string(), "db".to_string()]);
     assert!((found[0].duration_ms - 120.0).abs() < 0.01);
 
     let none: Vec<TraceSummary> = h.get("/api/v1/traces?since=1h&min_duration_ms=500").await;
     assert!(none.is_empty());
-    let by_attr: Vec<TraceSummary> = h
-        .get("/api/v1/traces?since=1h&attributes=http.route%3D/checkout")
-        .await;
+    let by_attr: Vec<TraceSummary> = h.get("/api/v1/traces?since=1h&attributes=http.route%3D/checkout").await;
     assert_eq!(by_attr.len(), 1);
-    let errs: Vec<TraceSummary> = h
-        .get("/api/v1/traces?since=1h&errors_only=true&limit=5")
-        .await;
+    let errs: Vec<TraceSummary> = h.get("/api/v1/traces?since=1h&errors_only=true&limit=5").await;
     assert_eq!(errs.len(), 1);
 
-    let series: SpanSeries = h
-        .get("/api/v1/spans/series?since=1h&service=checkout")
-        .await;
+    let series: SpanSeries = h.get("/api/v1/spans/series?since=1h&service=checkout").await;
     assert_eq!(series.points.iter().map(|p| p.count).sum::<u64>(), 1);
 
     let (s, _) = h.get_raw("/api/v1/traces/nothex?since=1h", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, _) = h
-        .get_raw(
-            "/api/v1/traces/00000000000000000000000000000001?since=1h",
-            None,
-        )
-        .await;
+    let (s, _) = h.get_raw("/api/v1/traces/00000000000000000000000000000001?since=1h", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = h.get_raw("/api/v1/traces?since=99999d", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -463,9 +368,7 @@ async fn json_logs_and_rejections() {
     assert_eq!(q.len(), 1, "case-insensitive substring");
     let pct: Vec<LogRecord> = h.get("/api/v1/logs?since=1h&q=%25").await;
     assert!(pct.is_empty(), "% is not a wildcard");
-    let by_trace: Vec<LogRecord> = h
-        .get(&format!("/api/v1/logs?since=1h&trace_id={TRACE_HEX}"))
-        .await;
+    let by_trace: Vec<LogRecord> = h.get(&format!("/api/v1/logs?since=1h&trace_id={TRACE_HEX}")).await;
     assert_eq!(by_trace.len(), 1);
     let series: LogSeries = h.get("/api/v1/logs/series?since=1h").await;
     let total: u64 = series.points.iter().map(|p| p.total).sum();
@@ -473,28 +376,17 @@ async fn json_logs_and_rejections() {
     assert_eq!((total, errors), (2, 1));
 
     // Invalid payloads and media types.
-    let (s, _) = h
-        .post("/v1/logs", "application/x-protobuf", vec![0xff, 0xff, 0xff])
-        .await;
+    let (s, _) = h.post("/v1/logs", "application/x-protobuf", vec![0xff, 0xff, 0xff]).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, _) = h.post("/v1/logs", "text/plain", vec![]).await;
     assert_eq!(s, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     // Spans with invalid ids are reported as partial success.
     let mut bad = traces_req(t0);
     bad.resource_spans[0].scope_spans[0].spans[0].trace_id = vec![1, 2, 3];
-    let (s, body) = h
-        .post(
-            "/v1/traces",
-            "application/json",
-            serde_json::to_vec(&bad).unwrap(),
-        )
-        .await;
+    let (s, body) = h.post("/v1/traces", "application/json", serde_json::to_vec(&bad).unwrap()).await;
     assert_eq!(s, StatusCode::OK);
     let body = String::from_utf8(body).unwrap();
-    assert!(
-        body.contains("rejectedSpans") || body.contains("rejected_spans"),
-        "{body}"
-    );
+    assert!(body.contains("rejectedSpans") || body.contains("rejected_spans"), "{body}");
     h.stop().await;
 }
 
@@ -502,13 +394,7 @@ async fn json_logs_and_rejections() {
 async fn metrics_queries() {
     let h = harness(None).await;
     let t0 = now_ns() - 1_000_000_000;
-    let (s, _) = h
-        .post(
-            "/v1/metrics",
-            "application/x-protobuf",
-            metrics_req(t0, 10).encode_to_vec(),
-        )
-        .await;
+    let (s, _) = h.post("/v1/metrics", "application/x-protobuf", metrics_req(t0, 10).encode_to_vec()).await;
     assert_eq!(s, StatusCode::OK);
 
     let list: Vec<MetricInfo> = h
@@ -524,9 +410,7 @@ async fn metrics_queries() {
     assert!(list.iter().any(|m| m.metric_type == "histogram"));
 
     // Counter rate per route: /a grows 100/min, /b 50/min.
-    let r: MetricQueryResult = h
-        .get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&group_by=route")
-        .await;
+    let r: MetricQueryResult = h.get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&group_by=route").await;
     assert_eq!(r.agg, "rate");
     assert_eq!(r.series.len(), 2);
     let a = r.series.iter().find(|s| s.labels["route"] == "/a").unwrap();
@@ -534,50 +418,26 @@ async fn metrics_queries() {
     for p in &a.points {
         assert!((p.value - 100.0 / 60.0).abs() < 1e-6, "rate {}", p.value);
     }
-    let total: MetricQueryResult = h
-        .get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&agg=increase")
-        .await;
+    let total: MetricQueryResult =
+        h.get("/api/v1/metrics/query?name=http.requests&since=15m&step=1m&agg=increase").await;
     assert_eq!(total.series.len(), 1);
-    assert!(
-        total.series[0]
-            .points
-            .iter()
-            .all(|p| (p.value - 150.0).abs() < 1e-6)
-    );
+    assert!(total.series[0].points.iter().all(|p| (p.value - 150.0).abs() < 1e-6));
 
-    let g: MetricQueryResult = h
-        .get("/api/v1/metrics/query?name=queue.size&since=15m&step=1m&agg=max")
-        .await;
+    let g: MetricQueryResult = h.get("/api/v1/metrics/query?name=queue.size&since=15m&step=1m&agg=max").await;
     assert_eq!(g.series[0].points.last().unwrap().value, 19.0);
 
     // Histogram: each minute 50 values in (0,10] and 50 in (10,20] -> p50=10, p75=15.
-    let p: MetricQueryResult = h
-        .get("/api/v1/metrics/query?name=http.duration&since=15m&step=1m&agg=p75")
-        .await;
+    let p: MetricQueryResult = h.get("/api/v1/metrics/query?name=http.duration&since=15m&step=1m&agg=p75").await;
     assert!(!p.series[0].points.is_empty());
     for pt in &p.series[0].points {
         assert!((pt.value - 15.0).abs() < 1e-6, "p75 {}", pt.value);
     }
-    let avg: MetricQueryResult = h
-        .get("/api/v1/metrics/query?name=http.duration&since=15m&step=1m&agg=avg")
-        .await;
-    assert!(
-        avg.series[0]
-            .points
-            .iter()
-            .all(|p| (p.value - 10.0).abs() < 1e-6)
-    );
+    let avg: MetricQueryResult = h.get("/api/v1/metrics/query?name=http.duration&since=15m&step=1m&agg=avg").await;
+    assert!(avg.series[0].points.iter().all(|p| (p.value - 10.0).abs() < 1e-6));
 
-    let (s, _) = h
-        .get_raw(
-            "/api/v1/metrics/query?name=queue.size&since=15m&agg=p95",
-            None,
-        )
-        .await;
+    let (s, _) = h.get_raw("/api/v1/metrics/query?name=queue.size&since=15m&agg=p95", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, _) = h
-        .get_raw("/api/v1/metrics/query?name=nope&since=15m", None)
-        .await;
+    let (s, _) = h.get_raw("/api/v1/metrics/query?name=nope&since=15m", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     h.stop().await;
 }
@@ -587,13 +447,7 @@ async fn auth_sql_stats_and_maintenance() {
     let h = harness(Some("s3cret")).await;
     let t0 = now_ns() - 1_000_000_000;
     for i in 0..5 {
-        let (s, _) = h
-            .post(
-                "/v1/traces",
-                "application/x-protobuf",
-                traces_req(t0 + i).encode_to_vec(),
-            )
-            .await;
+        let (s, _) = h.post("/v1/traces", "application/x-protobuf", traces_req(t0 + i).encode_to_vec()).await;
         assert_eq!(s, StatusCode::OK);
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
@@ -610,36 +464,17 @@ async fn auth_sql_stats_and_maintenance() {
         .eventually(|| async {
             let (_, body) = h.get_raw("/api/v1/stats", Some("s3cret")).await;
             let st: odl_api::Stats = serde_json::from_str(&body).unwrap();
-            let spans = st
-                .storage
-                .tables
-                .iter()
-                .find(|t| t.name == "spans")
-                .unwrap()
-                .rows;
+            let spans = st.storage.tables.iter().find(|t| t.name == "spans").unwrap().rows;
             (spans == 15).then_some(st)
         })
         .await;
-    let spans = stats
-        .storage
-        .tables
-        .iter()
-        .find(|t| t.name == "spans")
-        .unwrap();
-    assert!(
-        spans.files >= 2,
-        "expected several small files, got {}",
-        spans.files
-    );
+    let spans = stats.storage.tables.iter().find(|t| t.name == "spans").unwrap();
+    assert!(spans.files >= 2, "expected several small files, got {}", spans.files);
     assert_eq!(stats.ingest.signals[0].accepted, 15);
 
     // SQL endpoint
     let sql = |q: &str| {
-        let body = serde_json::to_vec(&SqlRequest {
-            query: q.into(),
-            limit: Some(2),
-        })
-        .unwrap();
+        let body = serde_json::to_vec(&SqlRequest { query: q.into(), limit: Some(2) }).unwrap();
         Request::post("/api/v1/sql")
             .header(header::AUTHORIZATION, "Bearer s3cret")
             .header(header::CONTENT_TYPE, "application/json")
@@ -649,69 +484,27 @@ async fn auth_sql_stats_and_maintenance() {
     let resp = h
         .api
         .clone()
-        .oneshot(sql(
-            "SELECT service_name, count(*) AS n FROM spans GROUP BY 1 ORDER BY 1",
-        ))
+        .oneshot(sql("SELECT service_name, count(*) AS n FROM spans GROUP BY 1 ORDER BY 1"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let r: SqlResponse =
-        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let r: SqlResponse = serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(r.columns[0].name, "service_name");
-    assert_eq!(
-        r.rows[0],
-        vec![serde_json::json!("checkout"), serde_json::json!(10)]
-    );
-    let resp = h
-        .api
-        .clone()
-        .oneshot(sql("SELECT * FROM read_text('/etc/passwd')"))
-        .await
-        .unwrap();
+    assert_eq!(r.rows[0], vec![serde_json::json!("checkout"), serde_json::json!(10)]);
+    let resp = h.api.clone().oneshot(sql("SELECT * FROM read_text('/etc/passwd')")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let resp = h
-        .api
-        .clone()
-        .oneshot(sql("SELECT 1 AS x -- trailing comment"))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "trailing comments must not break the wrapper"
-    );
-    let resp = h
-        .api
-        .clone()
-        .oneshot(sql("SELECT no_such_column FROM spans"))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "user SQL errors are 400"
-    );
-    let e: ApiError =
-        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert!(
-        !e.message.contains("DESCRIBE"),
-        "wrapper not leaked: {}",
-        e.message
-    );
-    let (s, body) = h
-        .get_raw("/api/v1/logs?min_severity=300", Some("s3cret"))
-        .await;
+    let resp = h.api.clone().oneshot(sql("SELECT 1 AS x -- trailing comment")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "trailing comments must not break the wrapper");
+    let resp = h.api.clone().oneshot(sql("SELECT no_such_column FROM spans")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "user SQL errors are 400");
+    let e: ApiError = serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(!e.message.contains("DESCRIBE"), "wrapper not leaked: {}", e.message);
+    let (s, body) = h.get_raw("/api/v1/logs?min_severity=300", Some("s3cret")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let e: ApiError = serde_json::from_str(&body).expect("JSON error body for bad query params");
     assert_eq!(e.error, "bad_request");
-    let resp = h
-        .api
-        .clone()
-        .oneshot(sql("SELECT * FROM range(10)"))
-        .await
-        .unwrap();
-    let r: SqlResponse =
-        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let resp = h.api.clone().oneshot(sql("SELECT * FROM range(10)")).await.unwrap();
+    let r: SqlResponse = serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(r.truncated);
 
     h.stop().await;
@@ -728,10 +521,7 @@ async fn compaction_and_retention() {
     let conn = lake.connect().unwrap();
     // Write 6 small batches directly: two days ago and now.
     let old = now_ns() - 10 * 86_400_000_000_000;
-    for (i, t) in [old, old + 1, now_ns(), now_ns(), now_ns(), now_ns()]
-        .iter()
-        .enumerate()
-    {
+    for (i, t) in [old, old + 1, now_ns(), now_ns(), now_ns(), now_ns()].iter().enumerate() {
         let mut req = traces_req(*t);
         for rs in &mut req.resource_spans {
             for ss in &mut rs.scope_spans {
@@ -742,9 +532,7 @@ async fn compaction_and_retention() {
         }
         let c = odl_server::otlp::convert::convert_traces(&req);
         let tx = conn.unchecked_transaction().unwrap();
-        let mut app = conn
-            .appender_to_catalog_and_db("spans", "lake", "otel")
-            .unwrap();
+        let mut app = conn.appender_to_catalog_and_db("spans", "lake", "otel").unwrap();
         for (_, b) in c.batches {
             app.append_record_batch(b).unwrap();
         }
@@ -767,17 +555,10 @@ async fn compaction_and_retention() {
     let settings = store::maintenance::Settings::from_config(&cfg).unwrap();
     let detail = store::maintenance::retention(&conn, "otel", &settings).unwrap();
     assert!(detail.contains("deleted 6 expired rows"), "{detail}");
-    let n: i64 = conn
-        .query_row("SELECT count(*) FROM spans", [], |r| r.get(0))
-        .unwrap();
+    let n: i64 = conn.query_row("SELECT count(*) FROM spans", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 12);
-    let deletes: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_delete_file",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let deletes: i64 =
+        conn.query_row("SELECT count(*) FROM __ducklake_metadata_lake.ducklake_delete_file", [], |r| r.get(0)).unwrap();
     assert_eq!(deletes, 0, "day-aligned retention drops whole files");
 }
 
@@ -793,44 +574,23 @@ async fn tolerates_columns_added_by_newer_version() {
     cfg.maintenance.enabled = false;
     {
         let lake = store::Lake::open(&cfg).unwrap();
-        lake.connect()
-            .unwrap()
-            .execute_batch("ALTER TABLE spans ADD COLUMN future_column VARCHAR")
-            .unwrap();
+        lake.connect().unwrap().execute_batch("ALTER TABLE spans ADD COLUMN future_column VARCHAR").unwrap();
     }
     let server = Arc::new(Server::new(cfg).await.unwrap());
     let shutdown = CancellationToken::new();
     let (s2, sd) = (server.clone(), shutdown.clone());
-    let bg = tokio::spawn(async move {
-        s2.run_background(async move { sd.cancelled().await })
-            .await
-            .unwrap()
-    });
+    let bg = tokio::spawn(async move { s2.run_background(async move { sd.cancelled().await }).await.unwrap() });
     let req = Request::post("/v1/traces")
         .header(header::CONTENT_TYPE, "application/x-protobuf")
-        .body(Body::from(
-            traces_req(now_ns() - 1_000_000_000).encode_to_vec(),
-        ))
+        .body(Body::from(traces_req(now_ns() - 1_000_000_000).encode_to_vec()))
         .unwrap();
-    assert_eq!(
-        server
-            .otlp_http_router()
-            .oneshot(req)
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+    assert_eq!(server.otlp_http_router().oneshot(req).await.unwrap().status(), StatusCode::OK);
     let api = server.api_router();
     let mut found = false;
     for _ in 0..50 {
         let resp = api
             .clone()
-            .oneshot(
-                Request::get(format!("/api/v1/traces/{TRACE_HEX}?since=1h"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get(format!("/api/v1/traces/{TRACE_HEX}?since=1h")).body(Body::empty()).unwrap())
             .await
             .unwrap();
         if resp.status() == StatusCode::OK {
@@ -851,12 +611,7 @@ async fn refuses_expansion_bombs() {
     let mut req = traces_req(now_ns());
     let big = "x".repeat(64 * 1024);
     let span = req.resource_spans[0].scope_spans[0].spans[0].clone();
-    req.resource_spans[0]
-        .resource
-        .as_mut()
-        .unwrap()
-        .attributes
-        .push(kv("big", &big));
+    req.resource_spans[0].resource.as_mut().unwrap().attributes.push(kv("big", &big));
     req.resource_spans[0].scope_spans[0].spans = (0..20_000)
         .map(|i| {
             let mut s = span.clone();

@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use comfy_table::{
-    Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED,
-};
+use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use odl_client::api::*;
 use owo_colors::OwoColorize;
 
@@ -57,11 +55,7 @@ pub fn bytes(b: f64) -> String {
         v /= 1000.0;
         i += 1;
     }
-    if i == 0 {
-        format!("{v:.0} {}", units[i])
-    } else {
-        format!("{v:.1} {}", units[i])
-    }
+    if i == 0 { format!("{v:.0} {}", units[i]) } else { format!("{v:.1} {}", units[i]) }
 }
 
 fn err_cell(rate: f64) -> Cell {
@@ -87,12 +81,7 @@ fn red_cells(r: &RedStats) -> Vec<Cell> {
 }
 
 pub fn print_stats(s: &Stats, url: &str) {
-    println!(
-        "{} {} {}",
-        "otel-ducklake".bold(),
-        s.version,
-        format!("({url})").dimmed()
-    );
+    println!("{} {} {}", "otel-ducklake".bold(), s.version, format!("({url})").dimmed());
     println!(
         "uptime {}   catalog {}   data {}   snapshot {}",
         humanize_secs(s.uptime_secs),
@@ -119,19 +108,10 @@ pub fn print_stats(s: &Stats, url: &str) {
         bytes(i.max_buffer_bytes as f64),
         fill * 100.0,
         i.flushes,
-        if i.flush_errors > 0 {
-            i.flush_errors.red().to_string()
-        } else {
-            "0".green().to_string()
-        }
+        if i.flush_errors > 0 { i.flush_errors.red().to_string() } else { "0".green().to_string() }
     );
     if let Some(f) = &i.last_flush {
-        println!(
-            "last flush {} rows in {} at {}",
-            f.rows,
-            ms(f.duration_ms),
-            f.at.format("%H:%M:%S")
-        );
+        println!("last flush {} rows in {} at {}", f.rows, ms(f.duration_ms), f.at.format("%H:%M:%S"));
     }
     if let Some(e) = &i.last_flush_error {
         println!("{} {e}", "last flush error:".red());
@@ -148,17 +128,8 @@ pub fn print_stats(s: &Stats, url: &str) {
     }
     println!("\n{}\n{t}", "Storage".bold());
     if let Some(m) = &s.storage.last_maintenance {
-        let status = if m.ok {
-            "ok".green().to_string()
-        } else {
-            "failed".red().to_string()
-        };
-        println!(
-            "last maintenance: {} {status} at {} — {}",
-            m.task,
-            m.at.format("%H:%M:%S"),
-            m.detail
-        );
+        let status = if m.ok { "ok".green().to_string() } else { "failed".red().to_string() };
+        println!("last maintenance: {} {status} at {} — {}", m.task, m.at.format("%H:%M:%S"), m.detail);
     }
 }
 
@@ -190,23 +161,10 @@ pub fn print_operations(v: &[OperationSummary]) {
         println!("no spans in this window");
         return;
     }
-    let mut t = table(&[
-        "service",
-        "operation",
-        "kind",
-        "spans",
-        "rate",
-        "errors",
-        "p50",
-        "p95",
-        "p99",
-    ]);
+    let mut t = table(&["service", "operation", "kind", "spans", "rate", "errors", "p50", "p95", "p99"]);
     for s in v {
-        let mut row = vec![
-            Cell::new(&s.service),
-            Cell::new(&s.name),
-            Cell::new(s.kind.to_lowercase()).fg(Color::DarkGrey),
-        ];
+        let mut row =
+            vec![Cell::new(&s.service), Cell::new(&s.name), Cell::new(s.kind.to_lowercase()).fg(Color::DarkGrey)];
         row.extend(red_cells(&s.red));
         t.add_row(row);
     }
@@ -218,9 +176,7 @@ pub fn print_traces(v: &[TraceSummary]) {
         println!("no matching traces");
         return;
     }
-    let mut t = table(&[
-        "start", "trace id", "root", "duration", "spans", "errors", "services",
-    ]);
+    let mut t = table(&["start", "trace id", "root", "duration", "spans", "errors", "services"]);
     for tr in v {
         let root = match (&tr.root_service, &tr.root_name) {
             (Some(s), Some(n)) => format!("{s}: {n}"),
@@ -281,35 +237,17 @@ pub fn print_trace(t: &Trace, show_attrs: bool) {
     ) {
         let off = (s.start_time - start).num_nanoseconds().unwrap_or(0);
         let a = (off as f64 / end_ns as f64 * width as f64) as usize;
-        let len = ((s.duration_ns as f64 / end_ns as f64 * width as f64).ceil() as usize)
-            .clamp(1, width - a.min(width - 1));
-        let bar = format!(
-            "{}{}{}",
-            " ".repeat(a.min(width - 1)),
-            "█".repeat(len),
-            " ".repeat(width.saturating_sub(a + len))
-        );
-        let bar = if s.status_code == "ERROR" {
-            bar.red().to_string()
-        } else {
-            bar.cyan().to_string()
-        };
+        let len =
+            ((s.duration_ns as f64 / end_ns as f64 * width as f64).ceil() as usize).clamp(1, width - a.min(width - 1));
+        let bar =
+            format!("{}{}{}", " ".repeat(a.min(width - 1)), "█".repeat(len), " ".repeat(width.saturating_sub(a + len)));
+        let bar = if s.status_code == "ERROR" { bar.red().to_string() } else { bar.cyan().to_string() };
         let label = format!("{}{} {}", "  ".repeat(depth), s.service_name.bold(), s.name);
-        let err = if s.status_code == "ERROR" {
-            format!(" {}", "✗".red())
-        } else {
-            String::new()
-        };
+        let err = if s.status_code == "ERROR" { format!(" {}", "✗".red()) } else { String::new() };
         println!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6));
         if show_attrs {
             for (k, v) in &s.attributes {
-                println!(
-                    "{}  {}{} = {}",
-                    " ".repeat(width + 10),
-                    "  ".repeat(depth + 1),
-                    k.dimmed(),
-                    v
-                );
+                println!("{}  {}{} = {}", " ".repeat(width + 10), "  ".repeat(depth + 1), k.dimmed(), v);
             }
             for e in &s.events {
                 println!(
@@ -333,10 +271,7 @@ pub fn print_trace(t: &Trace, show_attrs: bool) {
 }
 
 fn fmt_attrs(a: &Attributes) -> String {
-    a.iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+    a.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")
 }
 
 pub fn severity_label(n: u8, text: &str) -> String {
@@ -365,11 +300,7 @@ pub fn severity_label(n: u8, text: &str) -> String {
 }
 
 pub fn print_log(r: &LogRecord) {
-    let trace = r
-        .trace_id
-        .as_deref()
-        .map(|t| format!(" trace={}", &t[..8.min(t.len())]))
-        .unwrap_or_default();
+    let trace = r.trace_id.as_deref().map(|t| format!(" trace={}", &t[..8.min(t.len())])).unwrap_or_default();
     println!(
         "{} {} {} {}{}",
         r.time.format("%m-%d %H:%M:%S%.3f").dimmed(),
@@ -385,26 +316,14 @@ pub fn print_metrics(v: &[MetricInfo]) {
         println!("no metrics in this window");
         return;
     }
-    let mut t = table(&[
-        "metric",
-        "type",
-        "unit",
-        "series",
-        "points",
-        "services",
-        "last seen",
-    ]);
+    let mut t = table(&["metric", "type", "unit", "series", "points", "services", "last seen"]);
     for m in v {
         t.add_row(vec![
             Cell::new(&m.name).fg(Color::White),
             Cell::new(format!(
                 "{}{}",
                 m.metric_type,
-                if m.temporality.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", m.temporality)
-                }
+                if m.temporality.is_empty() { String::new() } else { format!(" ({})", m.temporality) }
             )),
             Cell::new(&m.unit),
             num(m.series_count as f64),
@@ -419,17 +338,9 @@ pub fn print_metrics(v: &[MetricInfo]) {
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn sparkline(vals: &[f64]) -> String {
-    let (lo, hi) = vals
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+    let (lo, hi) = vals.iter().fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
     vals.iter()
-        .map(|v| {
-            if hi > lo {
-                SPARK[(((v - lo) / (hi - lo)) * 7.0).round() as usize]
-            } else {
-                SPARK[3]
-            }
-        })
+        .map(|v| if hi > lo { SPARK[(((v - lo) / (hi - lo)) * 7.0).round() as usize] } else { SPARK[3] })
         .collect()
 }
 
@@ -452,14 +363,8 @@ pub fn print_metric(r: &MetricQueryResult) {
         if vals.is_empty() {
             continue;
         }
-        let label = if s.labels.is_empty() {
-            "(all)".to_string()
-        } else {
-            fmt_attrs(&s.labels)
-        };
-        let (min, max) = vals
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+        let label = if s.labels.is_empty() { "(all)".to_string() } else { fmt_attrs(&s.labels) };
+        let (min, max) = vals.iter().fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
         let avg = vals.iter().sum::<f64>() / vals.len() as f64;
         t.add_row(vec![
             Cell::new(label),
@@ -487,13 +392,8 @@ pub fn print_sql(r: &SqlResponse) {
     println!("{t}");
     println!(
         "{}",
-        format!(
-            "{} rows{} in {}",
-            r.rows.len(),
-            if r.truncated { " (truncated)" } else { "" },
-            ms(r.elapsed_ms)
-        )
-        .dimmed()
+        format!("{} rows{} in {}", r.rows.len(), if r.truncated { " (truncated)" } else { "" }, ms(r.elapsed_ms))
+            .dimmed()
     );
 }
 

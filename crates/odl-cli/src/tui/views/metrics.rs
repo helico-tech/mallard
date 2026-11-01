@@ -58,10 +58,7 @@ pub fn aggs_for(info: &MetricInfo) -> Vec<&'static str> {
 impl State {
     pub fn visible(&self) -> Vec<&MetricInfo> {
         let s = self.search.to_lowercase();
-        self.list
-            .iter()
-            .filter(|m| s.is_empty() || m.name.to_lowercase().contains(&s))
-            .collect()
+        self.list.iter().filter(|m| s.is_empty() || m.name.to_lowercase().contains(&s)).collect()
     }
 
     pub fn clamp_selection(&mut self) {
@@ -71,10 +68,7 @@ impl State {
     }
 
     pub fn set_list(&mut self, v: Vec<MetricInfo>) {
-        let keep = self
-            .sel
-            .selected()
-            .and_then(|i| self.visible().get(i).map(|m| m.name.clone()));
+        let keep = self.sel.selected().and_then(|i| self.visible().get(i).map(|m| m.name.clone()));
         self.list = v;
         self.error = None;
         let idx = keep.and_then(|n| self.visible().iter().position(|m| m.name == n));
@@ -98,11 +92,7 @@ fn unit_fmt(unit: &str) -> fn(f64) -> String {
         "ms" => ms,
         "By" => |v| crate::fmt::bytes(v),
         "1" => |v| {
-            if v.abs() <= 1.0 {
-                format!("{:.1}%", v * 100.0)
-            } else {
-                compact(v)
-            }
+            if v.abs() <= 1.0 { format!("{:.1}%", v * 100.0) } else { compact(v) }
         },
         _ => compact,
     }
@@ -122,11 +112,7 @@ impl Embedded {
                 ..Default::default()
             };
             let cl = self.client.clone();
-            if self.loader.spawn(
-                Kind::MetricQuery,
-                async move { cl.metric_query(&q).await },
-                Data::MetricQuery,
-            ) {
+            if self.loader.spawn(Kind::MetricQuery, async move { cl.metric_query(&q).await }, Data::MetricQuery) {
                 c.refreshed = Some(Instant::now());
             }
             return;
@@ -134,16 +120,9 @@ impl Embedded {
         if !force && !due(self.metrics.refreshed, Duration::from_secs(30)) {
             return;
         }
-        let q = MetricListQuery {
-            since: Some(self.since()),
-            ..Default::default()
-        };
+        let q = MetricListQuery { since: Some(self.since()), ..Default::default() };
         let c = self.client.clone();
-        if self.loader.spawn(
-            Kind::MetricList,
-            async move { c.metrics(&q).await },
-            Data::MetricList,
-        ) {
+        if self.loader.spawn(Kind::MetricList, async move { c.metrics(&q).await }, Data::MetricList) {
             self.metrics.refreshed = Some(Instant::now());
         }
     }
@@ -193,12 +172,7 @@ impl Embedded {
         match k.code {
             KeyCode::Char('/' | 'f') => {
                 let v = self.metrics.search.clone();
-                self.start_prompt(
-                    PromptTarget::MetricSearch,
-                    "search metrics",
-                    "type to filter · ↵ done",
-                    &v,
-                );
+                self.start_prompt(PromptTarget::MetricSearch, "search metrics", "type to filter · ↵ done", &v);
                 Some(Outcome::Consumed)
             }
             KeyCode::Esc if !self.metrics.search.is_empty() => {
@@ -207,11 +181,8 @@ impl Embedded {
                 Some(Outcome::Consumed)
             }
             KeyCode::Enter | KeyCode::Right => {
-                let info = self
-                    .metrics
-                    .sel
-                    .selected()
-                    .and_then(|i| self.metrics.visible().get(i).map(|m| (*m).clone()))?;
+                let info =
+                    self.metrics.sel.selected().and_then(|i| self.metrics.visible().get(i).map(|m| (*m).clone()))?;
                 let aggs = aggs_for(&info);
                 self.metrics.chart = Some(ChartState {
                     info,
@@ -247,8 +218,7 @@ impl Embedded {
         );
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let [sl, table_area] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+        let [sl, table_area] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
         f.render_widget(
             Line::from(vec![
                 Span::styled(" ⌕ ", theme::accent()),
@@ -275,10 +245,8 @@ impl Embedded {
                     Cell::from(mi.name.clone()).style(theme::text()),
                     Cell::from(Span::styled(kind.0.to_string(), Style::new().fg(kind.1))),
                     Cell::from(mi.unit.clone()).style(theme::dim()),
-                    Cell::from(Line::from(compact(mi.series_count as f64)).right_aligned())
-                        .style(theme::text()),
-                    Cell::from(Line::from(compact(mi.point_count as f64)).right_aligned())
-                        .style(theme::dim()),
+                    Cell::from(Line::from(compact(mi.series_count as f64)).right_aligned()).style(theme::text()),
+                    Cell::from(Line::from(compact(mi.point_count as f64)).right_aligned()).style(theme::dim()),
                     Cell::from(mi.services.join(" ")).style(theme::muted()),
                 ])
             })
@@ -303,29 +271,17 @@ impl Embedded {
         ];
         let n = rows.len();
         let sel = m.sel.selected();
-        widgets::fit_offset(
-            m.sel.offset_mut(),
-            sel,
-            n,
-            table_area.height.saturating_sub(1),
-        );
+        widgets::fit_offset(m.sel.offset_mut(), sel, n, table_area.height.saturating_sub(1));
         f.render_stateful_widget(
-            Table::new(rows, widths)
-                .header(header)
-                .row_highlight_style(theme::selected())
-                .highlight_symbol("▌"),
+            Table::new(rows, widths).header(header).row_highlight_style(theme::selected()).highlight_symbol("▌"),
             table_area,
             &mut m.sel,
         );
         if empty {
             let (msg, style) = match &m.error {
                 Some(e) => (format!("⚠ {e}"), theme::error()),
-                None if m.refreshed.is_some() && !m.list.is_empty() => {
-                    ("no metric matches".into(), theme::muted())
-                }
-                None if m.refreshed.is_some() => {
-                    ("no metrics in this window".into(), theme::muted())
-                }
+                None if m.refreshed.is_some() && !m.list.is_empty() => ("no metric matches".into(), theme::muted()),
+                None if m.refreshed.is_some() => ("no metrics in this window".into(), theme::muted()),
                 None => ("loading…".into(), theme::muted()),
             };
             widgets::placeholder(f, table_area, &msg, style);
@@ -335,11 +291,7 @@ impl Embedded {
     fn draw_metric_chart(&mut self, f: &mut Frame, area: Rect) {
         let window_secs = self.window_secs();
         let Some(c) = &self.metrics.chart else { return };
-        let unit = c
-            .result
-            .as_ref()
-            .map(|r| r.unit.clone())
-            .unwrap_or_else(|| c.info.unit.clone());
+        let unit = c.result.as_ref().map(|r| r.unit.clone()).unwrap_or_else(|| c.info.unit.clone());
         let mut chips = vec![Span::styled(" agg ", theme::dim())];
         for (i, a) in c.aggs.iter().enumerate() {
             if i == c.agg {
@@ -358,31 +310,15 @@ impl Embedded {
             "{} · {}{}",
             c.info.name,
             c.info.metric_type,
-            if unit.is_empty() {
-                String::new()
-            } else {
-                format!(" · {unit}")
-            }
+            if unit.is_empty() { String::new() } else { format!(" · {unit}") }
         );
         let block = widgets::panel(&title, true);
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let series = c
-            .result
-            .as_ref()
-            .map(|r| r.series.as_slice())
-            .unwrap_or(&[]);
-        let legend_h = if inner.height > 14 {
-            (series.len().min(8) as u16 + 1).max(2)
-        } else {
-            0
-        };
-        let [chips_area, chart_area, legend_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(4),
-            Constraint::Length(legend_h),
-        ])
-        .areas(inner);
+        let series = c.result.as_ref().map(|r| r.series.as_slice()).unwrap_or(&[]);
+        let legend_h = if inner.height > 14 { (series.len().min(8) as u16 + 1).max(2) } else { 0 };
+        let [chips_area, chart_area, legend_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(4), Constraint::Length(legend_h)]).areas(inner);
         f.render_widget(Line::from(chips), chips_area);
         if c.result.is_none() {
             let (msg, style) = match &c.error {
@@ -400,25 +336,14 @@ impl Embedded {
                 s.labels.values().cloned().collect::<Vec<_>>().join(" · ")
             }
         };
-        let points: Vec<Vec<(f64, f64)>> = series
-            .iter()
-            .map(|s| {
-                s.points
-                    .iter()
-                    .map(|p| (p.time.timestamp() as f64, p.value))
-                    .collect()
-            })
-            .collect();
+        let points: Vec<Vec<(f64, f64)>> =
+            series.iter().map(|s| s.points.iter().map(|p| (p.time.timestamp() as f64, p.value)).collect()).collect();
         let shown: Vec<Series> = series
             .iter()
             .zip(&points)
             .take(theme::SERIES.len())
             .enumerate()
-            .map(|(i, (s, p))| Series {
-                name: widgets::trunc(&label(s), 30),
-                color: theme::SERIES[i],
-                points: p,
-            })
+            .map(|(i, (s, p))| Series { name: widgets::trunc(&label(s), 30), color: theme::SERIES[i], points: p })
             .collect();
         let chart_block = ratatui::widgets::Block::default();
         let now = chrono::Utc::now().timestamp() as f64;
@@ -431,25 +356,12 @@ impl Embedded {
                 .take(8)
                 .map(|(i, s)| {
                     let vals: Vec<f64> = s.points.iter().map(|p| p.value).collect();
-                    let (mn, mx) = vals
-                        .iter()
-                        .fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
-                    let avg = if vals.is_empty() {
-                        0.0
-                    } else {
-                        vals.iter().sum::<f64>() / vals.len() as f64
-                    };
+                    let (mn, mx) = vals.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+                    let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 };
                     let last = vals.last().copied().unwrap_or(0.0);
                     let color = theme::SERIES.get(i).copied().unwrap_or(theme::DIM);
                     let num = |v: f64| {
-                        Cell::from(
-                            Line::from(if vals.is_empty() {
-                                "–".into()
-                            } else {
-                                fmt(v)
-                            })
-                            .right_aligned(),
-                        )
+                        Cell::from(Line::from(if vals.is_empty() { "–".into() } else { fmt(v) }).right_aligned())
                     };
                     Row::new(vec![
                         Cell::from(Span::styled("━━", Style::new().fg(color))),

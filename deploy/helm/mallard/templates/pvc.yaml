@@ -1,0 +1,24 @@
+{{- $p := .Values.catalog.duckdb.persistence -}}
+{{- if and (eq .Values.catalog.type "duckdb") (not $p.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mallard.pvcName" . }}
+  labels:
+    {{- include "mallard.labels" . | nindent 4 }}
+  annotations:
+    # Keep the catalog when the release is uninstalled: without it the
+    # Parquet files in the bucket cannot be read.
+    helm.sh/resource-policy: keep
+    {{- with $p.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $p.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $p.size }}
+{{- end }}

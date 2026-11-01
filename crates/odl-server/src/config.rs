@@ -198,11 +198,7 @@ impl Default for IngestConfig {
 
 impl Default for RetentionConfig {
     fn default() -> Self {
-        Self {
-            traces: "7d".into(),
-            logs: "7d".into(),
-            metrics: "30d".into(),
-        }
+        Self { traces: "7d".into(), logs: "7d".into(), metrics: "30d".into() }
     }
 }
 
@@ -223,12 +219,7 @@ impl Default for MaintenanceConfig {
 
 impl Default for QueryConfig {
     fn default() -> Self {
-        Self {
-            max_concurrent: 4,
-            timeout: "30s".into(),
-            enable_sql: false,
-            max_window: "31d".into(),
-        }
+        Self { max_concurrent: 4, timeout: "30s".into(), enable_sql: false, max_window: "31d".into() }
     }
 }
 
@@ -289,10 +280,9 @@ impl Config {
     pub fn load_with_prefix(path: Option<&Path>, env_prefix: &str) -> Result<Self> {
         let mut root = toml::Value::try_from(Config::default())?;
         if let Some(path) = path {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading config file {}", path.display()))?;
-            let file: toml::Value =
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+            let text =
+                std::fs::read_to_string(path).with_context(|| format!("reading config file {}", path.display()))?;
+            let file: toml::Value = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
             merge(&mut root, file);
         }
         apply_env(&mut root, env_prefix, std::env::vars())?;
@@ -305,26 +295,11 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         for (name, v) in [
             ("ingest.flush_interval", &self.ingest.flush_interval),
-            (
-                "maintenance.compact_interval",
-                &self.maintenance.compact_interval,
-            ),
-            (
-                "maintenance.full_compact_interval",
-                &self.maintenance.full_compact_interval,
-            ),
-            (
-                "maintenance.retention_interval",
-                &self.maintenance.retention_interval,
-            ),
-            (
-                "maintenance.snapshot_retention",
-                &self.maintenance.snapshot_retention,
-            ),
-            (
-                "maintenance.file_cleanup_delay",
-                &self.maintenance.file_cleanup_delay,
-            ),
+            ("maintenance.compact_interval", &self.maintenance.compact_interval),
+            ("maintenance.full_compact_interval", &self.maintenance.full_compact_interval),
+            ("maintenance.retention_interval", &self.maintenance.retention_interval),
+            ("maintenance.snapshot_retention", &self.maintenance.snapshot_retention),
+            ("maintenance.file_cleanup_delay", &self.maintenance.file_cleanup_delay),
             ("query.timeout", &self.query.timeout),
             ("query.max_window", &self.query.max_window),
             ("retention.traces", &self.retention.traces),
@@ -337,28 +312,16 @@ impl Config {
             ("ingest.max_buffer_bytes", &self.ingest.max_buffer_bytes),
             ("ingest.max_request_bytes", &self.ingest.max_request_bytes),
             ("storage.target_file_size", &self.storage.target_file_size),
-            (
-                "maintenance.small_file_size",
-                &self.maintenance.small_file_size,
-            ),
+            ("maintenance.small_file_size", &self.maintenance.small_file_size),
         ] {
             parse_bytes(v).with_context(|| format!("{name} = {v:?}"))?;
         }
         // Empty strings are ignored as tokens, so they do not count.
         for (name, v) in [
             ("ingest.flush_interval", &self.ingest.flush_interval),
-            (
-                "maintenance.compact_interval",
-                &self.maintenance.compact_interval,
-            ),
-            (
-                "maintenance.full_compact_interval",
-                &self.maintenance.full_compact_interval,
-            ),
-            (
-                "maintenance.retention_interval",
-                &self.maintenance.retention_interval,
-            ),
+            ("maintenance.compact_interval", &self.maintenance.compact_interval),
+            ("maintenance.full_compact_interval", &self.maintenance.full_compact_interval),
+            ("maintenance.retention_interval", &self.maintenance.retention_interval),
             ("query.timeout", &self.query.timeout),
         ] {
             if parse_duration(v)?.is_zero() {
@@ -370,14 +333,11 @@ impl Config {
         }
         // An empty token is almost always a missing secret; refuse it instead
         // of silently running without authentication.
-        for (name, list) in [
-            ("auth.api_tokens", &self.auth.api_tokens),
-            ("auth.ingest_tokens", &self.auth.ingest_tokens),
-        ] {
+        for (name, list) in
+            [("auth.api_tokens", &self.auth.api_tokens), ("auth.ingest_tokens", &self.auth.ingest_tokens)]
+        {
             if list.iter().any(|t| t.trim().is_empty()) {
-                bail!(
-                    "{name} contains an empty token (is the secret/env var set?); remove it or set a value"
-                );
+                bail!("{name} contains an empty token (is the secret/env var set?); remove it or set a value");
             }
         }
         if self.query.enable_sql && self.auth.api_tokens.iter().all(|t| t.trim().is_empty()) {
@@ -435,9 +395,7 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 /// binary units (`KiB`, `MiB`, `GiB`) powers of 1024.
 pub fn parse_bytes(s: &str) -> Result<u64> {
     let s = s.trim();
-    let idx = s
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(s.len());
+    let idx = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
     let (num, unit) = s.split_at(idx);
     let num: f64 = num.parse().with_context(|| format!("invalid size {s:?}"))?;
     let mult: f64 = match unit.trim().to_ascii_lowercase().as_str() {
@@ -473,11 +431,7 @@ fn merge(base: &mut toml::Value, over: toml::Value) {
 
 /// Apply `ODL_SECTION__KEY=value` overrides. The value is parsed as TOML when
 /// possible (numbers, booleans, arrays) and as a string otherwise.
-fn apply_env(
-    root: &mut toml::Value,
-    prefix: &str,
-    vars: impl Iterator<Item = (String, String)>,
-) -> Result<()> {
+fn apply_env(root: &mut toml::Value, prefix: &str, vars: impl Iterator<Item = (String, String)>) -> Result<()> {
     for (k, v) in vars {
         let Some(rest) = k.strip_prefix(prefix) else {
             continue;
@@ -488,10 +442,8 @@ fn apply_env(
         }
         // Keep the raw text for string settings (e.g. retention "0"); parse
         // numbers, booleans and arrays as TOML otherwise.
-        let existing_is_string = path
-            .iter()
-            .try_fold(&*root, |cur, seg| cur.get(seg.as_str()))
-            .is_some_and(|v| v.is_str());
+        let existing_is_string =
+            path.iter().try_fold(&*root, |cur, seg| cur.get(seg.as_str())).is_some_and(|v| v.is_str());
         let value = if existing_is_string {
             toml::Value::String(v.clone())
         } else {
@@ -502,16 +454,12 @@ fn apply_env(
         };
         let mut cur = &mut *root;
         for (i, seg) in path.iter().enumerate() {
-            let table = cur
-                .as_table_mut()
-                .with_context(|| format!("env override {k}: {seg} is not a section"))?;
+            let table = cur.as_table_mut().with_context(|| format!("env override {k}: {seg} is not a section"))?;
             if i == path.len() - 1 {
                 table.insert(seg.clone(), value.clone());
                 break;
             }
-            cur = table
-                .entry(seg.clone())
-                .or_insert_with(|| toml::Value::Table(Default::default()));
+            cur = table.entry(seg.clone()).or_insert_with(|| toml::Value::Table(Default::default()));
         }
     }
     Ok(())
@@ -528,8 +476,7 @@ fn interpolate(v: &mut toml::Value, lookup: &dyn Fn(&str) -> Option<String>) -> 
                 let after = &rest[start + 2..];
                 let end = after.find('}').context("unterminated ${ in config value")?;
                 let name = &after[..end];
-                let val = lookup(name)
-                    .with_context(|| format!("config references ${{{name}}} but it is not set"))?;
+                let val = lookup(name).with_context(|| format!("config references ${{{name}}} but it is not set"))?;
                 out.push_str(&val);
                 rest = &after[end + 1..];
             }
@@ -554,10 +501,7 @@ mod tests {
         assert_eq!(parse_bytes("100").unwrap(), 100);
         assert!(parse_bytes("5XB").is_err());
         assert_eq!(parse_duration("0").unwrap(), Duration::ZERO);
-        assert_eq!(
-            parse_duration("7d").unwrap(),
-            Duration::from_secs(7 * 86400)
-        );
+        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(7 * 86400));
     }
 
     #[test]
@@ -567,15 +511,9 @@ mod tests {
             &mut root,
             "ODL_",
             vec![
-                (
-                    "ODL_STORAGE__DATA_PATH".to_string(),
-                    "s3://b/p/".to_string(),
-                ),
+                ("ODL_STORAGE__DATA_PATH".to_string(), "s3://b/p/".to_string()),
                 ("ODL_QUERY__MAX_CONCURRENT".to_string(), "8".to_string()),
-                (
-                    "ODL_AUTH__API_TOKENS".to_string(),
-                    "[\"${TOK}\"]".to_string(),
-                ),
+                ("ODL_AUTH__API_TOKENS".to_string(), "[\"${TOK}\"]".to_string()),
                 ("ODL_RETENTION__TRACES".to_string(), "0".to_string()),
                 ("UNRELATED".to_string(), "x".to_string()),
             ]

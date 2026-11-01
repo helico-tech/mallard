@@ -82,10 +82,7 @@ impl Maintenance {
         let handle = std::thread::Builder::new()
             .name("odl-maintenance".into())
             .spawn(move || run(conn, schema, settings, stats, stop2))?;
-        Ok(Self {
-            stop,
-            handle: Some(handle),
-        })
+        Ok(Self { stop, handle: Some(handle) })
     }
 
     pub fn stop(mut self) {
@@ -124,9 +121,7 @@ fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: A
             next_full = Instant::now() + s.full_compact_interval;
             next_compact = Instant::now() + s.compact_interval;
         } else if now >= next_compact {
-            task(&stats, "compaction", || {
-                compact(&conn, &schema, Some(s.small_file_size))
-            });
+            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size)));
             next_compact = Instant::now() + s.compact_interval;
         } else {
             std::thread::sleep(Duration::from_millis(500));
@@ -141,10 +136,8 @@ fn jitter(max: Duration) -> Duration {
     if ms == 0 {
         return Duration::ZERO;
     }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u64;
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u64;
     let seed = nanos ^ ((std::process::id() as u64) << 20);
     Duration::from_millis(xxhash_rust::xxh3::xxh3_64(&seed.to_le_bytes()) % ms)
 }
@@ -165,13 +158,7 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
             (false, msg)
         }
     };
-    stats.maintenance(MaintenanceInfo {
-        task: name.to_string(),
-        at: Utc::now(),
-        duration_ms: ms,
-        ok,
-        detail,
-    });
+    stats.maintenance(MaintenanceInfo { task: name.to_string(), at: Utc::now(), duration_ms: ms, ok, detail });
 }
 
 /// Flush inlined data and merge adjacent files. `max_file_size = None` merges
@@ -194,9 +181,7 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
     let mut merged = 0i64;
     let mut created = 0i64;
     for t in TABLES {
-        let size = max_file_size
-            .map(|b| format!(", max_file_size => {b}"))
-            .unwrap_or_default();
+        let size = max_file_size.map(|b| format!(", max_file_size => {b}")).unwrap_or_default();
         let sql = format!(
             "SELECT coalesce(sum(files_processed), 0)::BIGINT, coalesce(sum(files_created), 0)::BIGINT \
              FROM ducklake_merge_adjacent_files({}, {}, schema => {}{size})",
@@ -208,48 +193,29 @@ pub fn compact(conn: &Connection, schema: &str, max_file_size: Option<u64>) -> R
         merged += p;
         created += c;
     }
-    let flushed = if flushed < 0 {
-        "FAILED to flush".to_string()
-    } else {
-        format!("flushed {flushed}")
-    };
-    Ok(format!(
-        "{flushed} inlined rows; merged {merged} files into {created}"
-    ))
+    let flushed = if flushed < 0 { "FAILED to flush".to_string() } else { format!("flushed {flushed}") };
+    Ok(format!("{flushed} inlined rows; merged {merged} files into {created}"))
 }
 
 /// Cut-off for a retention: aligned to the UTC day when retention >= 1 day.
 pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> DateTime<Utc> {
     let raw = now - TimeDelta::from_std(retention).unwrap_or(TimeDelta::MAX);
-    if retention >= Duration::from_secs(86_400) {
-        raw.duration_trunc(TimeDelta::days(1)).unwrap_or(raw)
-    } else {
-        raw
-    }
+    if retention >= Duration::from_secs(86_400) { raw.duration_trunc(TimeDelta::days(1)).unwrap_or(raw) } else { raw }
 }
 
 pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String> {
     let now = Utc::now();
     let mut deleted = 0usize;
     for t in TABLES {
-        let Some((_, keep)) = s
-            .retention
-            .iter()
-            .find(|(sig, _)| *sig == t.signal.as_str())
-        else {
+        let Some((_, keep)) = s.retention.iter().find(|(sig, _)| *sig == t.signal.as_str()) else {
             continue;
         };
         if keep.is_zero() {
             continue;
         }
         let cutoff = retention_cutoff(now, *keep).naive_utc();
-        let n = conn.execute(
-            &format!(
-                "DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?",
-                t.name, t.time_column
-            ),
-            [cutoff],
-        )?;
+        let n =
+            conn.execute(&format!("DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?", t.name, t.time_column), [cutoff])?;
         deleted += n;
     }
     let mut detail = format!("deleted {deleted} expired rows");
@@ -257,8 +223,7 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
         // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
         // time zone can't shift the cut-off.
         let epoch = |d: Duration| -> f64 {
-            (now - TimeDelta::from_std(d).unwrap_or(TimeDelta::zero())).timestamp_micros() as f64
-                / 1e6
+            (now - TimeDelta::from_std(d).unwrap_or(TimeDelta::zero())).timestamp_micros() as f64 / 1e6
         };
         let snap_cut = epoch(s.snapshot_retention);
         let expired: i64 = conn.query_row(
@@ -295,9 +260,7 @@ pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String
                 warn!(error = %super::redact(&e.to_string()), "deleting orphaned files failed");
                 0
             });
-        detail += &format!(
-            "; expired {expired} snapshots; removed {cleaned} old and {orphans} orphaned files"
-        );
+        detail += &format!("; expired {expired} snapshots; removed {cleaned} old and {orphans} orphaned files");
     }
     Ok(detail)
 }

@@ -1,5 +1,17 @@
-target
-.data
-data
-.git
-.claude
+# Keep the Docker build context small: only sources are needed.
+target/
+.data/
+data/
+.git/
+.claude/
+**/node_modules/
+**/*.ducklake
+**/*.ducklake.wal
+e2e/
+bench/
+deploy/helm/
+work/
+docs/
+**/*.md
+!crates/**/*.md
+.DS_Store

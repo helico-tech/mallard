@@ -59,9 +59,7 @@ pub fn tokenize(s: &str) -> Vec<String> {
 /// `250` (ms), `250ms`, `1.5s`, `2m`, `100us`.
 pub fn parse_ms(s: &str) -> Option<f64> {
     let s = s.trim();
-    let idx = s
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(s.len());
+    let idx = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
     let (n, unit) = s.split_at(idx);
     let n: f64 = n.parse().ok()?;
     let mult = match unit {
@@ -93,25 +91,17 @@ pub fn parse_trace_filter(s: &str) -> Result<TraceFilter, String> {
             Some((k, v)) => match k {
                 "service" | "svc" | "s" => f.service = Some(v.to_string()),
                 "op" | "operation" | "name" | "o" => f.operation = Some(v.to_string()),
-                "min" | "min_ms" => {
-                    f.min_ms = Some(parse_ms(v).ok_or(format!("bad duration {v:?}"))?)
-                }
-                "max" | "max_ms" => {
-                    f.max_ms = Some(parse_ms(v).ok_or(format!("bad duration {v:?}"))?)
-                }
+                "min" | "min_ms" => f.min_ms = Some(parse_ms(v).ok_or(format!("bad duration {v:?}"))?),
+                "max" | "max_ms" => f.max_ms = Some(parse_ms(v).ok_or(format!("bad duration {v:?}"))?),
                 "errors" | "error" => f.errors_only = matches!(v, "1" | "true" | "yes" | "on"),
                 "" => return Err(format!("missing key in {tok:?}")),
                 _ => f.attrs.push(format!("{k}={v}")),
             },
             None => match tok.to_ascii_lowercase().as_str() {
                 "errors" | "error" | "err" => f.errors_only = true,
-                t if t.starts_with('>') => {
-                    f.min_ms = Some(parse_ms(&t[1..]).ok_or(format!("bad duration {tok:?}"))?)
-                }
+                t if t.starts_with('>') => f.min_ms = Some(parse_ms(&t[1..]).ok_or(format!("bad duration {tok:?}"))?),
                 _ => {
-                    return Err(format!(
-                        "unknown filter {tok:?} (try service=, op=, errors, min=, key=value)"
-                    ));
+                    return Err(format!("unknown filter {tok:?} (try service=, op=, errors, min=, key=value)"));
                 }
             },
         }
@@ -146,11 +136,7 @@ impl TraceFilter {
     pub fn to_query(&self) -> String {
         let mut parts = Vec::new();
         let q = |v: &str| {
-            if v.contains(' ') {
-                format!("\"{v}\"")
-            } else {
-                v.to_string()
-            }
+            if v.contains(' ') { format!("\"{v}\"") } else { v.to_string() }
         };
         if let Some(s) = &self.service {
             parts.push(format!("service={}", q(s)));
@@ -180,17 +166,13 @@ mod tests {
 
     #[test]
     fn tokenizes_quotes() {
-        assert_eq!(
-            tokenize(r#"op="GET /cart" errors"#),
-            vec!["op=GET /cart", "errors"]
-        );
+        assert_eq!(tokenize(r#"op="GET /cart" errors"#), vec!["op=GET /cart", "errors"]);
         assert_eq!(tokenize("  a   b "), vec!["a", "b"]);
     }
 
     #[test]
     fn trace_filter() {
-        let f = parse_trace_filter(r#"service=checkout op="GET /x" errors min=1.5s http.route=/x"#)
-            .unwrap();
+        let f = parse_trace_filter(r#"service=checkout op="GET /x" errors min=1.5s http.route=/x"#).unwrap();
         assert_eq!(f.service.as_deref(), Some("checkout"));
         assert_eq!(f.operation.as_deref(), Some("GET /x"));
         assert!(f.errors_only);

@@ -157,22 +157,8 @@ pub enum Cmd {
 }
 
 impl Win {
-    fn parts(
-        &self,
-    ) -> (
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-    ) {
-        (
-            self.from,
-            self.to,
-            if self.from.is_some() {
-                None
-            } else {
-                Some(self.since.clone())
-            },
-        )
+    fn parts(&self) -> (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
+        (self.from, self.to, if self.from.is_some() { None } else { Some(self.since.clone()) })
     }
 }
 
@@ -231,14 +217,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
         }
         Cmd::Services { w, all_spans } => {
             let (from, to, since) = w.parts();
-            let v = c
-                .services(&ServiceQuery {
-                    from,
-                    to,
-                    since,
-                    entry_only: Some(!all_spans),
-                })
-                .await?;
+            let v = c.services(&ServiceQuery { from, to, since, entry_only: Some(!all_spans) }).await?;
             if out == Output::Json {
                 json(&v)
             } else {
@@ -246,21 +225,9 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Ops {
-            w,
-            service,
-            all_spans,
-        } => {
+        Cmd::Ops { w, service, all_spans } => {
             let (from, to, since) = w.parts();
-            let v = c
-                .operations(&OperationQuery {
-                    from,
-                    to,
-                    since,
-                    service,
-                    entry_only: Some(!all_spans),
-                })
-                .await?;
+            let v = c.operations(&OperationQuery { from, to, since, service, entry_only: Some(!all_spans) }).await?;
             if out == Output::Json {
                 json(&v)
             } else {
@@ -268,16 +235,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Traces {
-            w,
-            service,
-            operation,
-            errors,
-            min_ms,
-            max_ms,
-            attr,
-            limit,
-        } => {
+        Cmd::Traces { w, service, operation, errors, min_ms, max_ms, attr, limit } => {
             let (from, to, since) = w.parts();
             let v = c
                 .traces(&TraceQuery {
@@ -300,20 +258,8 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Trace {
-            trace_id,
-            since,
-            attributes,
-        } => {
-            let t = c
-                .trace(
-                    &trace_id,
-                    &TraceGetQuery {
-                        since: Some(since),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+        Cmd::Trace { trace_id, since, attributes } => {
+            let t = c.trace(&trace_id, &TraceGetQuery { since: Some(since), ..Default::default() }).await?;
             if out == Output::Json {
                 json(&t)
             } else {
@@ -321,16 +267,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Logs {
-            w,
-            service,
-            level,
-            query,
-            trace,
-            attr,
-            limit,
-            follow,
-        } => {
+        Cmd::Logs { w, service, level, query, trace, attr, limit, follow } => {
             let min_severity = level.as_deref().map(severity).transpose()?;
             let (from, to, since) = w.parts();
             let q = LogQuery {
@@ -361,11 +298,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 match tail.poll().await {
                     Ok(v) => {
                         for r in &v {
-                            if out == Output::Json {
-                                println!("{}", serde_json::to_string(r)?)
-                            } else {
-                                print_log(r)
-                            }
+                            if out == Output::Json { println!("{}", serde_json::to_string(r)?) } else { print_log(r) }
                         }
                     }
                     Err(e) => eprintln!("{} {e}", "poll failed:".yellow()),
@@ -378,15 +311,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
         }
         Cmd::Metrics { w, service, query } => {
             let (from, to, since) = w.parts();
-            let v = c
-                .metrics(&MetricListQuery {
-                    from,
-                    to,
-                    since,
-                    service,
-                    q: query,
-                })
-                .await?;
+            let v = c.metrics(&MetricListQuery { from, to, since, service, q: query }).await?;
             if out == Output::Json {
                 json(&v)
             } else {
@@ -394,15 +319,7 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Metric {
-            name,
-            w,
-            service,
-            agg,
-            by,
-            attr,
-            step,
-        } => {
+        Cmd::Metric { name, w, service, agg, by, attr, step } => {
             let (from, to, since) = w.parts();
             let r = c
                 .metric_query(&MetricQuery {

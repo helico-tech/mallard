@@ -1,7 +1,7 @@
 # 0003 — Pin the sibling libraries to commits
 
 ## Status
-accepted
+superseded by 0004
 
 ## Context
 Plain path deps (`../otel-ducklake/crates/...`) build whatever is in the

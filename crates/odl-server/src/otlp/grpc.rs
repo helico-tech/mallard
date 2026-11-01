@@ -25,10 +25,7 @@ pub struct Otlp(pub Arc<Ingest>);
 
 impl Otlp {
     fn check_auth<T>(&self, req: &TReq<T>) -> Result<(), Status> {
-        let header = req
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok());
+        let header = req.metadata().get("authorization").and_then(|v| v.to_str().ok());
         if self.0.tokens.allows(header) {
             Ok(())
         } else {
@@ -59,10 +56,8 @@ impl TraceService for Otlp {
         self.check_auth(&request)?;
         let a = Otlp::export(self, Request::Traces(request.into_inner())).await?;
         Ok(Response::new(ExportTraceServiceResponse {
-            partial_success: (a.rejected > 0).then_some(ExportTracePartialSuccess {
-                rejected_spans: a.rejected as i64,
-                error_message: a.message,
-            }),
+            partial_success: (a.rejected > 0)
+                .then_some(ExportTracePartialSuccess { rejected_spans: a.rejected as i64, error_message: a.message }),
         }))
     }
 }

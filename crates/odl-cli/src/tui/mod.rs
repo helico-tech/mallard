@@ -192,12 +192,7 @@ impl Embedded {
 
     /// Jump to a trace (and its logs).
     pub fn open_trace(&mut self, trace_id: &str) {
-        let id: String = trace_id
-            .trim()
-            .chars()
-            .filter(|c| c.is_ascii_hexdigit())
-            .collect::<String>()
-            .to_lowercase();
+        let id: String = trace_id.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_lowercase();
         if id.len() != 32 {
             self.flash_error(format!("not a trace id: {trace_id}"));
             return;
@@ -249,10 +244,7 @@ impl Embedded {
         }
         if due(self.stats_at, Duration::from_secs(5)) && !self.loader.is_pending(Kind::Stats) {
             let c = self.client.clone();
-            if self
-                .loader
-                .spawn(Kind::Stats, async move { c.stats().await }, Data::Stats)
-            {
+            if self.loader.spawn(Kind::Stats, async move { c.stats().await }, Data::Stats) {
                 self.stats_at = Some(Instant::now());
             }
         }
@@ -301,9 +293,7 @@ impl Embedded {
     fn apply_error(&mut self, kind: Kind, e: String) {
         match kind {
             Kind::Stats => self.stats_error = Some(e.clone()),
-            Kind::Services | Kind::Operations | Kind::SpanSeries => {
-                self.overview.error = Some(e.clone())
-            }
+            Kind::Services | Kind::Operations | Kind::SpanSeries => self.overview.error = Some(e.clone()),
             Kind::LogSeries => self.overview.error = Some(e.clone()),
             Kind::LogVolume | Kind::Logs | Kind::LogTail => self.logs.error = Some(e.clone()),
             Kind::Traces => self.traces.error = Some(e.clone()),
@@ -331,11 +321,7 @@ impl Embedded {
 
     fn cycle_window(&mut self, forward: bool) {
         let n = self.windows.len();
-        self.win = if forward {
-            (self.win + 1) % n
-        } else {
-            (self.win + n - 1) % n
-        };
+        self.win = if forward { (self.win + 1) % n } else { (self.win + n - 1) % n };
         self.invalidate();
         self.flash(format!("time window: last {}", self.since()));
     }
@@ -372,9 +358,7 @@ impl Embedded {
         if let Some(o) = handled {
             return o;
         }
-        if k.modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return Outcome::Ignored;
         }
         match k.code {
@@ -390,11 +374,7 @@ impl Embedded {
             KeyCode::Tab | KeyCode::BackTab => {
                 let i = VIEWS.iter().position(|(v, _)| *v == self.view).unwrap_or(0);
                 let n = VIEWS.len();
-                let j = if k.code == KeyCode::Tab {
-                    (i + 1) % n
-                } else {
-                    (i + n - 1) % n
-                };
+                let j = if k.code == KeyCode::Tab { (i + 1) % n } else { (i + n - 1) % n };
                 self.set_view(VIEWS[j].0);
                 Outcome::Consumed
             }
@@ -416,19 +396,8 @@ impl Embedded {
         }
     }
 
-    pub(crate) fn start_prompt(
-        &mut self,
-        target: PromptTarget,
-        label: &'static str,
-        help: &'static str,
-        value: &str,
-    ) {
-        self.prompt = Some(Prompt {
-            target,
-            label,
-            help,
-            input: Input::new(value),
-        });
+    pub(crate) fn start_prompt(&mut self, target: PromptTarget, label: &'static str, help: &'static str, value: &str) {
+        self.prompt = Some(Prompt { target, label, help, input: Input::new(value) });
     }
 
     fn prompt_key(&mut self, k: &KeyEvent) {
@@ -468,13 +437,9 @@ impl Embedded {
             f.render_widget(Paragraph::new("window too small"), area);
             return;
         }
-        let [header, tabs, body, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [header, tabs, body, footer] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
+                .areas(area);
         self.draw_header(f, header);
         self.draw_tabs(f, tabs);
         match self.view {
@@ -504,29 +469,17 @@ impl Embedded {
         let (ok, label) = self.live();
         let mut right = vec![];
         if self.loader.any_pending() {
-            right.push(Span::styled(
-                format!("{} ", SPIN[self.spin % SPIN.len()]),
-                theme::dim(),
-            ));
+            right.push(Span::styled(format!("{} ", SPIN[self.spin % SPIN.len()]), theme::dim()));
         }
         if let Some(r) = self.ingest_rate {
             right.push(Span::styled("↗ ", theme::muted()));
-            right.push(Span::styled(
-                format!("{}/s", crate::fmt::compact(r)),
-                theme::text(),
-            ));
+            right.push(Span::styled(format!("{}/s", crate::fmt::compact(r)), theme::text()));
             right.push(Span::styled(" ingest  ", theme::muted()));
         }
         right.push(Span::styled("◷ ", theme::muted()));
-        right.push(Span::styled(
-            format!("last {}", self.since()),
-            theme::accent(),
-        ));
+        right.push(Span::styled(format!("last {}", self.since()), theme::accent()));
         right.push(Span::raw("  "));
-        right.push(Span::styled(
-            "● ",
-            Style::new().fg(if ok { theme::OK } else { theme::ERR }),
-        ));
+        right.push(Span::styled("● ", Style::new().fg(if ok { theme::OK } else { theme::ERR })));
         right.push(Span::styled(format!("{label} "), theme::dim()));
         let right = Line::from(right);
         let rw = right.width() as u16;
@@ -534,27 +487,14 @@ impl Embedded {
             Span::styled(" ◆ otel-ducklake ", theme::accent()),
             Span::styled("│ ", theme::muted()),
             Span::styled(
-                widgets::trunc(
-                    self.client.base_url(),
-                    area.width.saturating_sub(rw + 22) as usize,
-                ),
+                widgets::trunc(self.client.base_url(), area.width.saturating_sub(rw + 22) as usize),
                 theme::dim(),
             ),
         ]);
-        f.render_widget(
-            Block::default().style(Style::new().bg(theme::SURFACE)),
-            area,
-        );
+        f.render_widget(Block::default().style(Style::new().bg(theme::SURFACE)), area);
         f.render_widget(left, area);
         if rw < area.width {
-            f.render_widget(
-                right,
-                Rect {
-                    x: area.x + area.width - rw,
-                    width: rw,
-                    ..area
-                },
-            );
+            f.render_widget(right, Rect { x: area.x + area.width - rw, width: rw, ..area });
         }
     }
 
@@ -562,10 +502,7 @@ impl Embedded {
         let mut spans = vec![Span::raw(" ")];
         for (i, (v, name)) in VIEWS.iter().enumerate() {
             if *v == self.view {
-                spans.push(Span::styled(
-                    format!(" {} {name} ", i + 1),
-                    theme::badge(theme::ACCENT),
-                ));
+                spans.push(Span::styled(format!(" {} {name} ", i + 1), theme::badge(theme::ACCENT)));
             } else {
                 spans.push(Span::styled(format!(" {}", i + 1), theme::muted()));
                 spans.push(Span::styled(format!(" {name} "), theme::dim()));
@@ -597,20 +534,9 @@ impl Embedded {
         if let Some((msg, is_err, _)) = &self.flash {
             let text = format!(" {} ", widgets::trunc(msg, (area.width / 2) as usize));
             let w = Line::from(text.as_str()).width() as u16;
-            let style = if *is_err {
-                theme::badge(theme::ERR)
-            } else {
-                theme::badge(theme::OK)
-            };
+            let style = if *is_err { theme::badge(theme::ERR) } else { theme::badge(theme::OK) };
             if w < area.width {
-                f.render_widget(
-                    Span::styled(text, style),
-                    Rect {
-                        x: area.right() - w,
-                        width: w,
-                        ..area
-                    },
-                );
+                f.render_widget(Span::styled(text, style), Rect { x: area.right() - w, width: w, ..area });
                 // Hints get the rest, with a one-cell gap.
                 hints_area.width = area.width.saturating_sub(w + 1);
             }
@@ -625,21 +551,11 @@ impl Embedded {
             }
             View::Overview => vec![("↵", "operations"), ("t", "window"), ("r", "refresh")],
             View::Traces if self.traces.detail.is_some() => {
-                vec![
-                    ("j/k", "span"),
-                    ("pgup/dn", "scroll"),
-                    ("l", "logs"),
-                    ("e", "errors"),
-                    ("esc", "back"),
-                ]
+                vec![("j/k", "span"), ("pgup/dn", "scroll"), ("l", "logs"), ("e", "errors"), ("esc", "back")]
             }
-            View::Traces => vec![
-                ("/", "filter"),
-                ("E", "errors only"),
-                ("↵", "open"),
-                ("e", "errors"),
-                ("t", "window"),
-            ],
+            View::Traces => {
+                vec![("/", "filter"), ("E", "errors only"), ("↵", "open"), ("e", "errors"), ("t", "window")]
+            }
             View::Logs if self.logs.detail.is_some() => {
                 vec![("o", "open trace"), ("j/k", "scroll"), ("esc", "close")]
             }
@@ -651,12 +567,7 @@ impl Embedded {
                 ("o", "trace"),
             ],
             View::Metrics if self.metrics.chart.is_some() => {
-                vec![
-                    ("a", "aggregation"),
-                    ("b", "group by"),
-                    ("esc", "back"),
-                    ("t", "window"),
-                ]
+                vec![("a", "aggregation"), ("b", "group by"), ("esc", "back"), ("t", "window")]
             }
             View::Metrics => vec![("/", "search"), ("↵", "chart"), ("t", "window")],
             View::Status => vec![("r", "refresh")],
@@ -674,22 +585,10 @@ impl Embedded {
             ("q  ctrl-c", "quit"),
             ("", ""),
             ("Overview", "↵ service → operations → traces"),
-            (
-                "Traces",
-                "/ filter  E errors only  ↵ waterfall  l logs  e errors",
-            ),
-            (
-                "",
-                "filter: service=checkout op=\"GET /\" errors min=250ms key=value",
-            ),
-            (
-                "Logs",
-                "/ filter  s severity  space follow  ↵ details  o open trace",
-            ),
-            (
-                "",
-                "filter: service=api level=warn trace=<id> words to find",
-            ),
+            ("Traces", "/ filter  E errors only  ↵ waterfall  l logs  e errors"),
+            ("", "filter: service=checkout op=\"GET /\" errors min=250ms key=value"),
+            ("Logs", "/ filter  s severity  space follow  ↵ details  o open trace"),
+            ("", "filter: service=api level=warn trace=<id> words to find"),
             ("Metrics", "/ search  ↵ chart  a aggregation  b group by"),
         ];
         let w = 78.min(area.width);
@@ -706,10 +605,9 @@ impl Embedded {
             })
             .collect();
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                widgets::panel("Keys", true)
-                    .title_bottom(Line::from(" any key to close ").right_aligned()),
-            ),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(widgets::panel("Keys", true).title_bottom(Line::from(" any key to close ").right_aligned())),
             r,
         );
     }
@@ -754,11 +652,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut Embedded) -> Re
         // other tasks away first.
         let multi = tokio::runtime::Handle::try_current()
             .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
-        let ready = if multi {
-            tokio::task::block_in_place(|| event::poll(timeout))?
-        } else {
-            event::poll(timeout)?
-        };
+        let ready = if multi { tokio::task::block_in_place(|| event::poll(timeout))? } else { event::poll(timeout)? };
         if ready {
             // Drain queued events before redrawing to stay responsive.
             loop {

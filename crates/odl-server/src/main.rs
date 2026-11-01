@@ -9,11 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[derive(Parser)]
-#[command(
-    name = "otel-ducklake",
-    version,
-    about = "OpenTelemetry collector backed by DuckLake"
-)]
+#[command(name = "otel-ducklake", version, about = "OpenTelemetry collector backed by DuckLake")]
 struct Cli {
     /// Config file (TOML). Environment variables ODL_<SECTION>__<KEY> override it.
     #[arg(short, long, env = "ODL_CONFIG", global = true)]
@@ -54,14 +50,8 @@ fn init_tracing(format: &str) {
         .unwrap_or_else(|_| "info,tower_http=warn,h2=warn,tonic=warn".into());
     // No ANSI colors when logs go to a file or a container log driver.
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let b = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(ansi);
-    if format == "json" {
-        b.json().init()
-    } else {
-        b.init()
-    }
+    let b = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi);
+    if format == "json" { b.json().init() } else { b.init() }
 }
 
 #[tokio::main]
@@ -89,11 +79,7 @@ async fn main() -> Result<()> {
             let conn = lake.connect()?;
             let settings = odl_server::store::maintenance::Settings::from_config(&cfg)?;
             let t0 = std::time::Instant::now();
-            let small = odl_server::store::maintenance::compact(
-                &conn,
-                &lake.schema,
-                Some(settings.small_file_size),
-            )?;
+            let small = odl_server::store::maintenance::compact(&conn, &lake.schema, Some(settings.small_file_size))?;
             info!(detail = %small, "compaction");
             if full {
                 let d = odl_server::store::maintenance::compact(&conn, &lake.schema, None)?;
@@ -113,10 +99,7 @@ async fn main() -> Result<()> {
         Cmd::Serve => {
             let cfg = Config::load(cli.config.as_deref())?;
             init_tracing(&cfg.server.log_format);
-            info!(
-                version = env!("CARGO_PKG_VERSION"),
-                "starting otel-ducklake"
-            );
+            info!(version = env!("CARGO_PKG_VERSION"), "starting otel-ducklake");
             let server = Server::new(cfg).await?;
             let shutdown = CancellationToken::new();
             let sd = shutdown.clone();

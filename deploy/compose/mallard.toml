@@ -1,0 +1,24 @@
+# Config used by deploy/compose/docker-compose.yml. ${NAME} = env var NAME.
+[server]
+public_url = "${MALLARD_PUBLIC_URL}"
+api_tokens = ["${MALLARD_API_TOKEN}"]
+
+[storage]
+catalog = "${MALLARD_CATALOG}"
+data_path = "s3://mallard/lake/"
+
+[[storage.secrets]]
+type = "s3"
+key_id = "${AWS_ACCESS_KEY_ID}"
+secret = "${AWS_SECRET_ACCESS_KEY}"
+region = "us-east-1"
+endpoint = "rustfs:9000"
+url_style = "path"
+use_ssl = false
+
+[sentry]
+# Sourcemap bundles, next to the lake in the same bucket.
+storage_url = "s3://mallard/artifacts"
+s3_endpoint = "http://rustfs:9000"
+s3_region = "us-east-1"
+s3_path_style = true

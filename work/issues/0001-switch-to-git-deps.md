@@ -1,5 +1,5 @@
 ---
-status: todo
+status: wontfix
 type: debt
 created: 2026-11-01
 ---
@@ -15,3 +15,5 @@ When sentry-ducklake and otel-ducklake are pushed (helico-tech/...), use
 `git = "...", rev = "..."` deps, drop `scripts/pin-libs.sh` and `libs.lock`,
 simplify the Dockerfile, and remove the `obs-pin` worktrees with
 `git worktree remove` + `git worktree prune`.
+
+Superseded by ADR 0004: the repos were merged into mallard.

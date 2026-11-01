@@ -1,0 +1,69 @@
+# mallard configuration. Every key is optional; shown values are defaults.
+# Environment variables override the file: MALLARD_<SECTION>__<KEY>, e.g.
+#   MALLARD_STORAGE__DATA_PATH=s3://my-bucket/lake/
+#   MALLARD_OTEL__RETENTION__TRACES=3d
+#   MALLARD_SENTRY__RETENTION_DAYS=30
+# "${NAME}" inside a value is replaced by environment variable NAME.
+
+[server]
+http_addr = "0.0.0.0:8080"        # Sentry ingest (/sentry), APIs (/sentry/v1, /otel/api/v1), OTLP/HTTP (/v1/*), /metrics
+otlp_http_addr = "0.0.0.0:4318"   # OTLP/HTTP on the standard port
+otlp_grpc_addr = "0.0.0.0:4317"   # OTLP/gRPC
+public_url = "http://localhost:8080"   # how SDKs reach http_addr; Sentry DSNs use <public_url>/sentry
+api_tokens = []                   # bearer tokens for both query APIs; Sentry's API needs at least one
+ingest_tokens = []                # bearer tokens for OTLP ingest; empty = open
+log_format = "text"               # text | json
+
+# One DuckLake catalog for both errors (schema "sentry") and telemetry (schema "otel").
+[storage]
+# "data/catalog.ducklake" (DuckDB file), "sqlite:data/catalog.sqlite",
+# or "postgres:host=pg dbname=ducklake user=mallard password=${PGPASSWORD}" (multi-replica)
+catalog = "data/catalog.ducklake"
+data_path = "data/lake/"          # local path, s3://, gs://, az://, r2:// ...
+data_inlining_row_limit = 1000
+target_file_size = "128MB"
+row_group_size = 122880
+extensions = []
+# [[storage.secrets]]             # object storage credentials (DuckDB secrets)
+# type = "s3"
+# key_id = "${S3_ACCESS_KEY_ID}"
+# secret = "${S3_SECRET_ACCESS_KEY}"
+# endpoint = "minio:9000"
+# url_style = "path"
+# use_ssl = false
+
+[duckdb]
+memory_limit = ""                 # e.g. "2GB"
+threads = 0                       # 0 = all cores
+temp_directory = ""
+extension_directory = ""
+autoinstall_extensions = true
+
+# otel-ducklake: see its config reference for all keys.
+[otel.ingest]
+flush_interval = "5s"
+flush_rows = 200000
+max_buffer_bytes = "512MB"
+max_request_bytes = "32MB"
+
+[otel.retention]                  # "0" keeps data forever
+traces = "7d"
+logs = "7d"
+metrics = "30d"
+
+[otel.maintenance]
+enabled = true
+compact_interval = "10m"
+
+[otel.query]
+max_concurrent = 4
+timeout = "30s"
+max_window = "31d"
+enable_sql = false
+
+# sentry-ducklake: see its config reference for all keys.
+[sentry]
+retention_days = 90
+# Sourcemap bundles (optional; without it sourcemap upload answers 501).
+# Same forms as data_path; S3 credentials come from AWS_* env vars.
+# storage_url = "data/artifacts"

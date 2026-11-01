@@ -7,8 +7,7 @@ pub mod http;
 use std::sync::Arc;
 
 use opentelemetry_proto::tonic::collector::{
-    logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
-    trace::v1::ExportTraceServiceRequest,
+    logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest, trace::v1::ExportTraceServiceRequest,
 };
 
 use crate::{
@@ -26,13 +25,7 @@ use crate::{
 pub fn estimate_expanded_bytes(req: &Request) -> u64 {
     use prost::Message;
     fn attr_bytes(r: Option<&opentelemetry_proto::tonic::resource::v1::Resource>) -> u64 {
-        r.map(|r| {
-            r.attributes
-                .iter()
-                .map(|kv| kv.encoded_len() as u64 + 16)
-                .sum()
-        })
-        .unwrap_or(0)
+        r.map(|r| r.attributes.iter().map(|kv| kv.encoded_len() as u64 + 16).sum()).unwrap_or(0)
     }
     const ROW: u64 = 96;
     let (per_resource, encoded): (u64, usize) = match req {
@@ -50,11 +43,7 @@ pub fn estimate_expanded_bytes(req: &Request) -> u64 {
             r.resource_logs
                 .iter()
                 .map(|rl| {
-                    let n: u64 = rl
-                        .scope_logs
-                        .iter()
-                        .map(|s| s.log_records.len() as u64)
-                        .sum();
+                    let n: u64 = rl.scope_logs.iter().map(|s| s.log_records.len() as u64).sum();
                     n * (attr_bytes(rl.resource.as_ref()) + ROW)
                 })
                 .sum(),
@@ -140,12 +129,10 @@ impl Ingest {
     /// conversion is CPU work proportional to the payload.
     pub async fn handle(self: &Arc<Self>, req: Request) -> Result<Accepted, IngestError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.handle_blocking(req))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "ingest task failed");
-                IngestError::Internal("internal error while converting the request".into())
-            })?
+        tokio::task::spawn_blocking(move || this.handle_blocking(req)).await.map_err(|e| {
+            tracing::error!(error = %e, "ingest task failed");
+            IngestError::Internal("internal error while converting the request".into())
+        })?
     }
 
     pub fn handle_blocking(&self, req: Request) -> Result<Accepted, IngestError> {
@@ -176,9 +163,6 @@ impl Ingest {
             });
         }
         self.stats.record_request(signal, accepted, rejected);
-        Ok(Accepted {
-            rejected,
-            message: c.reject_reason.unwrap_or_default(),
-        })
+        Ok(Accepted { rejected, message: c.reject_reason.unwrap_or_default() })
     }
 }

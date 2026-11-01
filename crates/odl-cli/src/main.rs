@@ -6,20 +6,10 @@ use odl_client::Client;
 use owo_colors::OwoColorize;
 
 #[derive(Parser)]
-#[command(
-    name = "odl",
-    version,
-    about = "Query otel-ducklake from the terminal",
-    propagate_version = true
-)]
+#[command(name = "odl", version, about = "Query otel-ducklake from the terminal", propagate_version = true)]
 struct Cli {
     /// Query API base URL.
-    #[arg(
-        long,
-        env = "ODL_URL",
-        default_value = "http://localhost:8080",
-        global = true
-    )]
+    #[arg(long, env = "ODL_URL", default_value = "http://localhost:8080", global = true)]
     url: String,
     /// API bearer token.
     #[arg(long, env = "ODL_TOKEN", global = true, hide_env_values = true)]
@@ -35,10 +25,7 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
     let result = async {
-        let ctx = Ctx {
-            client: Client::new(&cli.url, cli.token.clone())?,
-            output: cli.output,
-        };
+        let ctx = Ctx { client: Client::new(&cli.url, cli.token.clone())?, output: cli.output };
         run(cli.cmd, &ctx).await
     }
     .await;

@@ -4,15 +4,12 @@ use std::collections::HashMap;
 
 use duckdb::{Connection, params_from_iter, types::Value};
 use odl_api::{
-    OperationSummary, RedStats, ServiceSummary, Span, SpanEvent, SpanLink, SpanSeries,
-    SpanSeriesPoint, Trace, TraceSummary,
+    OperationSummary, RedStats, ServiceSummary, Span, SpanEvent, SpanLink, SpanSeries, SpanSeriesPoint, Trace,
+    TraceSummary,
 };
 use serde::Deserialize;
 
-use super::{
-    Filter, QResult, QueryError, Window, bad, from_micros, json_col, parse_trace_id, span_hex,
-    trace_hex,
-};
+use super::{Filter, QResult, QueryError, Window, bad, from_micros, json_col, parse_trace_id, span_hex, trace_hex};
 
 /// Entry spans: where requests enter a service.
 const ENTRY: &str = "(kind IN ('SERVER', 'CONSUMER') OR parent_span_id IS NULL)";
@@ -26,9 +23,7 @@ const RED_AGGS: &str = "count(*) AS n, count(*) FILTER (WHERE status_code = 'ERR
 fn red(row: &duckdb::Row, first: usize, secs: f64) -> duckdb::Result<RedStats> {
     let n: i64 = row.get(first)?;
     let errors: i64 = row.get(first + 1)?;
-    let ms = |i: usize| -> duckdb::Result<f64> {
-        Ok(row.get::<_, Option<f64>>(first + i)?.unwrap_or(0.0) / 1e6)
-    };
+    let ms = |i: usize| -> duckdb::Result<f64> { Ok(row.get::<_, Option<f64>>(first + i)?.unwrap_or(0.0) / 1e6) };
     Ok(RedStats {
         span_count: n as u64,
         error_count: errors as u64,
@@ -57,12 +52,8 @@ pub fn services(conn: &Connection, w: &Window, entry_only: bool) -> QResult<Vec<
     params.push(Value::Boolean(entry_only));
     let mut stmt = conn.prepare(&sql)?;
     let secs = w.secs();
-    let rows = stmt.query_map(params_from_iter(params), |r| {
-        Ok(ServiceSummary {
-            name: r.get(0)?,
-            red: red(r, 1, secs)?,
-        })
-    })?;
+    let rows =
+        stmt.query_map(params_from_iter(params), |r| Ok(ServiceSummary { name: r.get(0)?, red: red(r, 1, secs)? }))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -87,12 +78,7 @@ pub fn operations(
     let mut stmt = conn.prepare(&sql)?;
     let secs = w.secs();
     let rows = stmt.query_map(params_from_iter(f.params), |r| {
-        Ok(OperationSummary {
-            service: r.get(0)?,
-            name: r.get(1)?,
-            kind: r.get(2)?,
-            red: red(r, 3, secs)?,
-        })
+        Ok(OperationSummary { service: r.get(0)?, name: r.get(1)?, kind: r.get(2)?, red: red(r, 3, secs)? })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -124,9 +110,7 @@ pub fn span_series(
     let mut stmt = conn.prepare(&sql)?;
     let secs = step as f64;
     let mut by_bucket: HashMap<i64, RedStats> = HashMap::new();
-    for row in stmt.query_map(params_from_iter(f.params), |r| {
-        Ok((r.get::<_, i64>(0)?, red(r, 1, secs)?))
-    })? {
+    for row in stmt.query_map(params_from_iter(f.params), |r| Ok((r.get::<_, i64>(0)?, red(r, 1, secs)?)))? {
         let (b, s) = row?;
         by_bucket.insert(b, s);
     }
@@ -145,10 +129,7 @@ pub fn span_series(
             }
         })
         .collect();
-    Ok(SpanSeries {
-        step_secs: step,
-        points,
-    })
+    Ok(SpanSeries { step_secs: step, points })
 }
 
 pub struct TraceSearch<'a> {
@@ -288,11 +269,7 @@ pub fn span_from_row(r: &duckdb::Row) -> duckdb::Result<Span> {
         resource_attributes: json_col(r.get(14)?),
         events: events
             .into_iter()
-            .map(|e| SpanEvent {
-                time: from_micros(e.time),
-                name: e.name,
-                attributes: e.attributes,
-            })
+            .map(|e| SpanEvent { time: from_micros(e.time), name: e.name, attributes: e.attributes })
             .collect(),
         links: links
             .into_iter()
@@ -316,20 +293,12 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let spans: Vec<Span> = stmt
-        .query_map(
-            params_from_iter([Value::Text(tid.clone()), w.from_param(), w.to_param()]),
-            span_from_row,
-        )?
+        .query_map(params_from_iter([Value::Text(tid.clone()), w.from_param(), w.to_param()]), span_from_row)?
         .collect::<Result<_, _>>()?;
     if spans.is_empty() {
-        return Err(QueryError::NotFound(format!(
-            "trace {tid} not found in the time window"
-        )));
+        return Err(QueryError::NotFound(format!("trace {tid} not found in the time window")));
     }
-    Ok(Trace {
-        trace_id: tid,
-        spans,
-    })
+    Ok(Trace { trace_id: tid, spans })
 }
 
 pub fn clamp_limit(limit: Option<u32>, default: u32, max: u32) -> QResult<u32> {

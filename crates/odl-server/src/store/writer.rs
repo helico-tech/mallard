@@ -64,13 +64,7 @@ pub enum Backpressure {
 
 impl WriteBuffer {
     pub fn new(max_bytes: u64, flush_rows: u64, stats: Arc<Stats>) -> Self {
-        Self {
-            state: Mutex::new(State::default()),
-            cv: Condvar::new(),
-            max_bytes,
-            flush_rows,
-            stats,
-        }
+        Self { state: Mutex::new(State::default()), cv: Condvar::new(), max_bytes, flush_rows, stats }
     }
 
     /// Add batches. All or nothing.
@@ -79,32 +73,22 @@ impl WriteBuffer {
             return Ok(());
         }
         let (rows, bytes) = batches.iter().fold((0u64, 0u64), |(r, b), (_, batch)| {
-            (
-                r + batch.num_rows() as u64,
-                b + batch.get_array_memory_size() as u64,
-            )
+            (r + batch.num_rows() as u64, b + batch.get_array_memory_size() as u64)
         });
         if bytes > self.max_bytes {
-            return Err(Backpressure::TooLarge {
-                bytes,
-                max: self.max_bytes,
-            });
+            return Err(Backpressure::TooLarge { bytes, max: self.max_bytes });
         }
         let mut st = self.state.lock().unwrap();
         let used = st.bytes + st.inflight_bytes;
         if used + bytes > self.max_bytes {
-            return Err(Backpressure::Full {
-                buffered: used,
-                max: self.max_bytes,
-            });
+            return Err(Backpressure::Full { buffered: used, max: self.max_bytes });
         }
         for (t, b) in batches {
             st.tables[t as usize].push(b);
         }
         st.rows += rows;
         st.bytes += bytes;
-        self.stats
-            .set_buffered(st.rows, st.bytes + st.inflight_bytes);
+        self.stats.set_buffered(st.rows, st.bytes + st.inflight_bytes);
         if st.rows >= self.flush_rows {
             self.cv.notify_one();
         }
@@ -165,8 +149,7 @@ impl WriteBuffer {
             st.rows += rows;
             st.bytes += bytes;
         }
-        self.stats
-            .set_buffered(st.rows, st.bytes + st.inflight_bytes);
+        self.stats.set_buffered(st.rows, st.bytes + st.inflight_bytes);
     }
 }
 
@@ -187,11 +170,9 @@ fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Res
             .appender_with_columns_to_catalog_and_db(name, CATALOG, schema, &cols)
             .with_context(|| format!("opening appender for {name}"))?;
         for b in batches {
-            app.append_record_batch(b.clone())
-                .with_context(|| format!("appending to {name}"))?;
+            app.append_record_batch(b.clone()).with_context(|| format!("appending to {name}"))?;
         }
-        app.flush()
-            .with_context(|| format!("flushing appender for {name}"))?;
+        app.flush().with_context(|| format!("flushing appender for {name}"))?;
     }
     tx.commit().context("committing DuckLake snapshot")?;
     Ok(())
@@ -203,22 +184,14 @@ pub struct Flusher {
 }
 
 impl Flusher {
-    pub fn start(
-        lake: &Lake,
-        buffer: Arc<WriteBuffer>,
-        interval: Duration,
-        stats: Arc<Stats>,
-    ) -> Result<Self> {
+    pub fn start(lake: &Lake, buffer: Arc<WriteBuffer>, interval: Duration, stats: Arc<Stats>) -> Result<Self> {
         let conn = lake.connect()?;
         let schema = lake.schema.clone();
         let buf = buffer.clone();
         let handle = std::thread::Builder::new()
             .name("odl-flusher".into())
             .spawn(move || run(conn, schema, buf, interval, stats))?;
-        Ok(Self {
-            handle: Some(handle),
-            buffer,
-        })
+        Ok(Self { handle: Some(handle), buffer })
     }
 
     /// Flush what is left and wait for the thread to finish.
@@ -239,13 +212,7 @@ impl Drop for Flusher {
     }
 }
 
-fn run(
-    conn: Connection,
-    schema: String,
-    buf: Arc<WriteBuffer>,
-    interval: Duration,
-    stats: Arc<Stats>,
-) {
+fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Duration, stats: Arc<Stats>) {
     let mut failures: u32 = 0;
     // Attempts after shutdown started (failures before that don't count).
     let mut shutdown_attempts: u32 = 0;
@@ -288,18 +255,14 @@ fn run(
                 if shutdown {
                     shutdown_attempts += 1;
                     if shutdown_attempts >= 3 {
-                        warn!(
-                            rows,
-                            "giving up flushing at shutdown; buffered data is lost"
-                        );
+                        warn!(rows, "giving up flushing at shutdown; buffered data is lost");
                         break;
                     }
                 }
                 let backoff = if shutdown {
                     Duration::from_millis(500)
                 } else {
-                    Duration::from_millis(500 * 2u64.pow(failures.min(6)))
-                        .min(Duration::from_secs(30))
+                    Duration::from_millis(500 * 2u64.pow(failures.min(6))).min(Duration::from_secs(30))
                 };
                 buf.sleep_unless_shutdown(backoff);
             }
@@ -340,9 +303,6 @@ mod tests {
     #[test]
     fn single_oversized_batch_is_rejected_permanently() {
         let buf = WriteBuffer::new(10, 1_000_000, Arc::new(Stats::default()));
-        assert!(matches!(
-            buf.push(vec![(TableId::Logs, b(1000))]),
-            Err(Backpressure::TooLarge { .. })
-        ));
+        assert!(matches!(buf.push(vec![(TableId::Logs, b(1000))]), Err(Backpressure::TooLarge { .. })));
     }
 }

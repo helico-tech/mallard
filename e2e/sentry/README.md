@@ -33,7 +33,7 @@ npm test
   (never 8765) with its own temp dir, waits for `GET /readyz`, and kills it
   at the end. The server binary is:
   1. `$SDL_BIN` if set, else
-  2. `../target/debug/sentry-ducklake`, built with `cargo build -p sdl-server`
+  2. `../../target/debug/sentry-ducklake`, built with `cargo build -p sdl-server`
      if it is missing. It is **not** rebuilt when it exists: run
      `cargo build -p sdl-server` after changing server code.
 - Events are committed before the ingest request returns, so tests read

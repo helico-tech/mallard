@@ -30,8 +30,8 @@ use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
     logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     metrics::v1::{
-        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
-        ResourceMetrics, ScopeMetrics, Sum, metric::Data, number_data_point,
+        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
+        ScopeMetrics, Sum, metric::Data, number_data_point,
     },
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span},
@@ -41,11 +41,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use tokio::sync::Semaphore;
 
 #[derive(Parser, Clone)]
-#[command(
-    name = "odl-loadgen",
-    version,
-    about = "Send realistic OTLP traffic to an OTLP/HTTP endpoint"
-)]
+#[command(name = "odl-loadgen", version, about = "Send realistic OTLP traffic to an OTLP/HTTP endpoint")]
 struct Args {
     /// OTLP/HTTP base URL.
     #[arg(long, env = "OTLP_ENDPOINT", default_value = "http://localhost:4318")]
@@ -114,10 +110,7 @@ const ROUTES: &[Route] = &[
         http_route: "/product/{id}",
         method: "GET",
         base_ms: 6.0,
-        calls: &[
-            "gateway:GET /api/products/{id}",
-            "gateway:GET /api/recommendations",
-        ],
+        calls: &["gateway:GET /api/products/{id}", "gateway:GET /api/recommendations"],
     },
     Route {
         service: "frontend",
@@ -213,12 +206,7 @@ const ROUTES: &[Route] = &[
         http_route: "",
         method: "",
         base_ms: 15.0,
-        calls: &[
-            "inventory:ReserveStock",
-            "payment:Charge",
-            "db:INSERT orders",
-            "notification:SendEmail",
-        ],
+        calls: &["inventory:ReserveStock", "payment:Charge", "db:INSERT orders", "notification:SendEmail"],
     },
     Route {
         service: "inventory",
@@ -236,22 +224,8 @@ const ROUTES: &[Route] = &[
         base_ms: 120.0,
         calls: &["db:INSERT payments"],
     },
-    Route {
-        service: "notification",
-        name: "SendEmail",
-        http_route: "",
-        method: "",
-        base_ms: 30.0,
-        calls: &[],
-    },
-    Route {
-        service: "search",
-        name: "Query",
-        http_route: "",
-        method: "",
-        base_ms: 18.0,
-        calls: &["cache:GET"],
-    },
+    Route { service: "notification", name: "SendEmail", http_route: "", method: "", base_ms: 30.0, calls: &[] },
+    Route { service: "search", name: "Query", http_route: "", method: "", base_ms: 18.0, calls: &["cache:GET"] },
 ];
 
 /// Leaf client calls: (kind, system, latency ms)
@@ -278,9 +252,7 @@ const SERVICES: &[&str] = &[
 fn kv(k: &str, v: &str) -> KeyValue {
     KeyValue {
         key: k.into(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(v.into())),
-        }),
+        value: Some(AnyValue { value: Some(any_value::Value::StringValue(v.into())) }),
         ..Default::default()
     }
 }
@@ -288,9 +260,7 @@ fn kv(k: &str, v: &str) -> KeyValue {
 fn kv_i(k: &str, v: i64) -> KeyValue {
     KeyValue {
         key: k.into(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::IntValue(v)),
-        }),
+        value: Some(AnyValue { value: Some(any_value::Value::IntValue(v)) }),
         ..Default::default()
     }
 }
@@ -303,14 +273,7 @@ fn resource(service: &str) -> Resource {
             kv("deployment.environment.name", "production"),
             kv("host.name", &format!("{service}-7d9f8b-x2k4p")),
             kv("k8s.namespace.name", "shop"),
-            kv(
-                "telemetry.sdk.language",
-                if service == "frontend" {
-                    "nodejs"
-                } else {
-                    "go"
-                },
-            ),
+            kv("telemetry.sdk.language", if service == "frontend" { "nodejs" } else { "go" }),
         ],
         ..Default::default()
     }
@@ -349,24 +312,14 @@ impl Gen<'_> {
         self.rng.random::<u64>().max(1).to_be_bytes().to_vec()
     }
 
-    fn log(
-        &mut self,
-        service: &'static str,
-        t: u64,
-        span_id: &[u8],
-        sev: i32,
-        text: &str,
-        body: String,
-    ) {
+    fn log(&mut self, service: &'static str, t: u64, span_id: &[u8], sev: i32, text: &str, body: String) {
         self.out.n_logs += 1;
         self.out.logs.entry(service).or_default().push(LogRecord {
             time_unix_nano: t,
             observed_time_unix_nano: t,
             severity_number: sev,
             severity_text: text.into(),
-            body: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(body)),
-            }),
+            body: Some(AnyValue { value: Some(any_value::Value::StringValue(body)) }),
             trace_id: self.trace_id.to_vec(),
             span_id: span_id.to_vec(),
             attributes: vec![kv("code.function", "handle")],
@@ -375,13 +328,7 @@ impl Gen<'_> {
     }
 
     /// Generate the span tree for `route` starting at `start`; returns end time.
-    fn route(
-        &mut self,
-        route: &Route,
-        start: u64,
-        parent: Option<Vec<u8>>,
-        depth: usize,
-    ) -> (u64, bool) {
+    fn route(&mut self, route: &Route, start: u64, parent: Option<Vec<u8>>, depth: usize) -> (u64, bool) {
         let id = self.span_id();
         let own = latency(self.rng, route.base_ms);
         let mut t = start + (own * 0.3 * 1e6) as u64;
@@ -403,11 +350,7 @@ impl Gen<'_> {
                     trace_id: self.trace_id.to_vec(),
                     span_id: cid,
                     parent_span_id: id.clone(),
-                    name: if system == "redis" {
-                        format!("redis {name}")
-                    } else {
-                        name.to_string()
-                    },
+                    name: if system == "redis" { format!("redis {name}") } else { name.to_string() },
                     kind: 3,
                     start_time_unix_nano: t,
                     end_time_unix_nano: end,
@@ -439,10 +382,7 @@ impl Gen<'_> {
                     start_time_unix_nano: t,
                     end_time_unix_nano: end + net,
                     attributes: vec![kv("server.address", svc)],
-                    status: child_failed.then(|| Status {
-                        code: 2,
-                        message: String::new(),
-                    }),
+                    status: child_failed.then(|| Status { code: 2, message: String::new() }),
                     ..Default::default()
                 });
                 t = end + net;
@@ -453,11 +393,7 @@ impl Gen<'_> {
         let own_fail = self.fail && !failed && route_children == 0;
         let failed = failed || own_fail;
         let end = t + (own * 0.7 * 1e6) as u64;
-        let status_code: u16 = if failed {
-            if route.service == "payment" { 502 } else { 500 }
-        } else {
-            200
-        };
+        let status_code: u16 = if failed { if route.service == "payment" { 502 } else { 500 } } else { 200 };
         let mut attrs = vec![];
         if !route.http_route.is_empty() {
             attrs.push(kv("http.request.method", route.method));
@@ -471,30 +407,15 @@ impl Gen<'_> {
                 ));
                 attrs.push(kv(
                     "client.address",
-                    &format!(
-                        "10.0.{}.{}",
-                        self.rng.random_range(0..255),
-                        self.rng.random_range(1..255)
-                    ),
+                    &format!("10.0.{}.{}", self.rng.random_range(0..255), self.rng.random_range(1..255)),
                 ));
                 // High-cardinality values, as in real traffic.
-                let path = route
-                    .http_route
-                    .replace("{id}", &self.rng.random_range(1..50_000u32).to_string());
+                let path = route.http_route.replace("{id}", &self.rng.random_range(1..50_000u32).to_string());
                 let sid: u64 = self.rng.random();
-                attrs.push(kv(
-                    "url.full",
-                    &format!("https://shop.example.com{path}?utm_source=mail&sid={sid:016x}"),
-                ));
-                attrs.push(kv(
-                    "user.id",
-                    &format!("u-{}", self.rng.random_range(1..20_000u32)),
-                ));
+                attrs.push(kv("url.full", &format!("https://shop.example.com{path}?utm_source=mail&sid={sid:016x}")));
+                attrs.push(kv("user.id", &format!("u-{}", self.rng.random_range(1..20_000u32))));
                 let rid: u128 = self.rng.random();
-                attrs.push(kv(
-                    "http.request.header.x-request-id",
-                    &format!("{rid:032x}"),
-                ));
+                attrs.push(kv("http.request.header.x-request-id", &format!("{rid:032x}")));
             }
         } else {
             attrs.push(kv("rpc.system", "grpc"));
@@ -509,17 +430,10 @@ impl Gen<'_> {
                 attributes: vec![
                     kv(
                         "exception.type",
-                        if route.service == "payment" {
-                            "PaymentDeclinedError"
-                        } else {
-                            "TimeoutError"
-                        },
+                        if route.service == "payment" { "PaymentDeclinedError" } else { "TimeoutError" },
                     ),
                     kv("exception.message", "upstream request failed"),
-                    kv(
-                        "exception.stacktrace",
-                        "at handle (handler.go:42)\nat serve (server.go:118)",
-                    ),
+                    kv("exception.stacktrace", "at handle (handler.go:42)\nat serve (server.go:118)"),
                 ],
                 ..Default::default()
             });
@@ -537,18 +451,12 @@ impl Gen<'_> {
             events,
             status: failed.then(|| Status {
                 code: 2,
-                message: if own_fail {
-                    "upstream request failed".into()
-                } else {
-                    String::new()
-                },
+                message: if own_fail { "upstream request failed".into() } else { String::new() },
             }),
             ..Default::default()
         });
         let dur_ms = (end - start) as f64 / 1e6;
-        self.out
-            .requests
-            .push((route.service, route.name, status_code, dur_ms));
+        self.out.requests.push((route.service, route.name, status_code, dur_ms));
         // logs
         if self.rng.random_bool(self.logs_per_span.min(1.0)) {
             let user = self.rng.random_range(1..20_000u32);
@@ -559,21 +467,11 @@ impl Gen<'_> {
                 &id,
                 9,
                 "INFO",
-                format!(
-                    "handled {} for user u-{user} order {order:08x} in {:.1}ms",
-                    route.name, dur_ms
-                ),
+                format!("handled {} for user u-{user} order {order:08x} in {:.1}ms", route.name, dur_ms),
             );
         }
         if dur_ms > route.base_ms * 4.0 && self.rng.random_bool(0.5) {
-            self.log(
-                route.service,
-                end,
-                &id,
-                13,
-                "WARN",
-                format!("slow request {} took {:.0}ms", route.name, dur_ms),
-            );
+            self.log(route.service, end, &id, 13, "WARN", format!("slow request {} took {:.0}ms", route.name, dur_ms));
         }
         if own_fail {
             self.log(
@@ -582,10 +480,7 @@ impl Gen<'_> {
                 &id,
                 17,
                 "ERROR",
-                format!(
-                    "{} failed: upstream request failed (status {status_code})",
-                    route.name
-                ),
+                format!("{} failed: upstream request failed (status {status_code})", route.name),
             );
         }
         (end, failed)
@@ -609,16 +504,10 @@ fn gen_traces(rng: &mut StdRng, n: usize, times: &[u64], args: &Args) -> Out {
             pick -= w;
         }
         let trace_id: [u8; 16] = rng.random();
-        let fail =
-            rng.random_bool(args.error_rate.clamp(0.0, 1.0)) || (idx == 2 && rng.random_bool(0.05));
+        let fail = rng.random_bool(args.error_rate.clamp(0.0, 1.0)) || (idx == 2 && rng.random_bool(0.05));
         let spans_per_trace = 7.0;
-        let mut g = Gen {
-            rng,
-            trace_id,
-            fail,
-            logs_per_span: args.logs_per_trace / spans_per_trace * 1.6,
-            out: &mut out,
-        };
+        let mut g =
+            Gen { rng, trace_id, fail, logs_per_span: args.logs_per_trace / spans_per_trace * 1.6, out: &mut out };
         g.route(entry[idx], t, None, 0);
     }
     out
@@ -654,10 +543,7 @@ fn logs_request(out: &mut Out) -> ExportLogsServiceRequest {
             .map(|(svc, log_records)| ResourceLogs {
                 resource: Some(resource(svc)),
                 scope_logs: vec![ScopeLogs {
-                    scope: Some(InstrumentationScope {
-                        name: "app".into(),
-                        ..Default::default()
-                    }),
+                    scope: Some(InstrumentationScope { name: "app".into(), ..Default::default() }),
                     log_records,
                     ..Default::default()
                 }],
@@ -671,9 +557,7 @@ fn logs_request(out: &mut Out) -> ExportLogsServiceRequest {
 // Metrics state (cumulative)
 // ---------------------------------------------------------------------------
 
-const BOUNDS: [f64; 14] = [
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
-];
+const BOUNDS: [f64; 14] = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0];
 
 #[derive(Default)]
 struct HistState {
@@ -690,20 +574,16 @@ struct MetricsState {
 
 impl MetricsState {
     fn new(start_ns: u64) -> Self {
-        Self {
-            start_ns,
-            counters: HashMap::new(),
-            hists: HashMap::new(),
-        }
+        Self { start_ns, counters: HashMap::new(), hists: HashMap::new() }
     }
 
     fn record(&mut self, reqs: &[(&'static str, &'static str, u16, f64)]) {
         for (svc, route, status, ms) in reqs {
             *self.counters.entry((svc, route, *status)).or_default() += 1;
-            let h = self.hists.entry((svc, route)).or_insert_with(|| HistState {
-                buckets: vec![0; BOUNDS.len() + 1],
-                ..Default::default()
-            });
+            let h = self
+                .hists
+                .entry((svc, route))
+                .or_insert_with(|| HistState { buckets: vec![0; BOUNDS.len() + 1], ..Default::default() });
             let s = ms / 1000.0;
             h.count += 1;
             h.sum += s;
@@ -765,18 +645,14 @@ impl MetricsState {
                 ResourceMetrics {
                     resource: Some(resource(svc)),
                     scope_metrics: vec![ScopeMetrics {
-                        scope: Some(InstrumentationScope {
-                            name: "app.metrics".into(),
-                            ..Default::default()
-                        }),
+                        scope: Some(InstrumentationScope { name: "app.metrics".into(), ..Default::default() }),
                         metrics: vec![
                             m(
                                 "app.requests",
                                 "{request}",
                                 Data::Sum(Sum {
                                     data_points: req_pts,
-                                    aggregation_temporality: AggregationTemporality::Cumulative
-                                        as i32,
+                                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
                                     is_monotonic: true,
                                 }),
                             ),
@@ -785,24 +661,11 @@ impl MetricsState {
                                 "s",
                                 Data::Histogram(Histogram {
                                     data_points: hist_pts,
-                                    aggregation_temporality: AggregationTemporality::Cumulative
-                                        as i32,
+                                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
                                 }),
                             ),
-                            m(
-                                "process.memory.usage",
-                                "By",
-                                Data::Gauge(Gauge {
-                                    data_points: vec![gauge(mem)],
-                                }),
-                            ),
-                            m(
-                                "process.cpu.utilization",
-                                "1",
-                                Data::Gauge(Gauge {
-                                    data_points: vec![gauge(cpu)],
-                                }),
-                            ),
+                            m("process.memory.usage", "By", Data::Gauge(Gauge { data_points: vec![gauge(mem)] })),
+                            m("process.cpu.utilization", "1", Data::Gauge(Gauge { data_points: vec![gauge(cpu)] })),
                         ],
                         ..Default::default()
                     }],
@@ -872,11 +735,7 @@ impl Sender {
                 this.c.requests.fetch_add(1, Relaxed);
                 match res {
                     Ok(resp) if resp.status().is_success() => {
-                        this.c
-                            .latencies
-                            .lock()
-                            .unwrap()
-                            .push(t0.elapsed().as_secs_f64() * 1000.0);
+                        this.c.latencies.lock().unwrap().push(t0.elapsed().as_secs_f64() * 1000.0);
                         let ctr = [&this.c.spans, &this.c.logs, &this.c.points][kind];
                         ctr.fetch_add(items, Relaxed);
                         return;
@@ -889,10 +748,7 @@ impl Sender {
                     Ok(resp) => {
                         let s = resp.status();
                         let text = resp.text().await.unwrap_or_default();
-                        eprintln!(
-                            "{path}: HTTP {s}: {}",
-                            text.chars().take(200).collect::<String>()
-                        );
+                        eprintln!("{path}: HTTP {s}: {}", text.chars().take(200).collect::<String>());
                         this.c.failed.fetch_add(1, Relaxed);
                         return;
                     }
@@ -914,20 +770,12 @@ impl Sender {
 }
 
 fn report(c: &Counters, elapsed: f64, prev: &mut (u64, u64, u64, f64)) {
-    let (s, l, p) = (
-        c.spans.load(Relaxed),
-        c.logs.load(Relaxed),
-        c.points.load(Relaxed),
-    );
+    let (s, l, p) = (c.spans.load(Relaxed), c.logs.load(Relaxed), c.points.load(Relaxed));
     let dt = (elapsed - prev.3).max(1e-9);
     let mut lat = std::mem::take(&mut *c.latencies.lock().unwrap());
     lat.sort_by(f64::total_cmp);
     let pct = |q: f64| {
-        if lat.is_empty() {
-            0.0
-        } else {
-            lat[((lat.len() - 1) as f64 * q) as usize]
-        }
+        if lat.is_empty() { 0.0 } else { lat[((lat.len() - 1) as f64 * q) as usize] }
     };
     println!(
         "{:>6.0}s  spans {:>8.0}/s  logs {:>7.0}/s  points {:>6.0}/s  | total spans {:>10}  logs {:>9}  | req p50 {:>6.1}ms p99 {:>7.1}ms  throttled {}  failed {}",
@@ -957,9 +805,7 @@ async fn main() -> Result<()> {
     }
     let metrics_every = humantime::parse_duration(&args.metrics_interval)?.as_nanos() as u64;
     let sender = Arc::new(Sender {
-        http: reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?,
+        http: reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?,
         endpoint: args.endpoint.trim_end_matches('/').to_string(),
         token: args.token.clone(),
         gzip: args.gzip,
@@ -982,29 +828,15 @@ async fn main() -> Result<()> {
         let mut mstate = MetricsState::new(sim);
         let mut next_metrics = sim + metrics_every;
         let step_ns = (args.batch as f64 / args.rate * 1e9) as u64;
-        println!(
-            "backfilling {bf} at {} traces per simulated second ...",
-            args.rate
-        );
+        println!("backfilling {bf} at {} traces per simulated second ...", args.rate);
         while sim < end {
-            let times: Vec<u64> = (0..args.batch)
-                .map(|_| sim + rng.random_range(0..step_ns.max(1)))
-                .collect();
+            let times: Vec<u64> = (0..args.batch).map(|_| sim + rng.random_range(0..step_ns.max(1))).collect();
             let mut out = gen_traces(&mut rng, args.batch, &times, &args);
             mstate.record(&out.requests);
             let (ns, nl) = (out.n_spans, out.n_logs);
-            sender
-                .send(
-                    "/v1/traces",
-                    traces_request(&mut out).encode_to_vec(),
-                    ns,
-                    0,
-                )
-                .await;
+            sender.send("/v1/traces", traces_request(&mut out).encode_to_vec(), ns, 0).await;
             if nl > 0 {
-                sender
-                    .send("/v1/logs", logs_request(&mut out).encode_to_vec(), nl, 1)
-                    .await;
+                sender.send("/v1/logs", logs_request(&mut out).encode_to_vec(), nl, 1).await;
             }
             sim += step_ns;
             while next_metrics <= sim.min(end) {
@@ -1040,24 +872,14 @@ async fn main() -> Result<()> {
             next += interval;
             let base = now_ns();
             let spread = interval.as_nanos() as u64;
-            let times: Vec<u64> = (0..args.batch)
-                .map(|_| base.saturating_sub(rng.random_range(0..spread.max(1))))
-                .collect();
+            let times: Vec<u64> =
+                (0..args.batch).map(|_| base.saturating_sub(rng.random_range(0..spread.max(1)))).collect();
             let mut out = gen_traces(&mut rng, args.batch, &times, &args);
             mstate.record(&out.requests);
             let (ns, nl) = (out.n_spans, out.n_logs);
-            sender
-                .send(
-                    "/v1/traces",
-                    traces_request(&mut out).encode_to_vec(),
-                    ns,
-                    0,
-                )
-                .await;
+            sender.send("/v1/traces", traces_request(&mut out).encode_to_vec(), ns, 0).await;
             if nl > 0 {
-                sender
-                    .send("/v1/logs", logs_request(&mut out).encode_to_vec(), nl, 1)
-                    .await;
+                sender.send("/v1/logs", logs_request(&mut out).encode_to_vec(), nl, 1).await;
             }
             if Instant::now() >= next_metrics {
                 let (m, n) = mstate.export(&mut rng, now_ns());

@@ -21,11 +21,7 @@ pub enum Error {
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("{status}: {message}")]
-    Api {
-        status: u16,
-        error: String,
-        message: String,
-    },
+    Api { status: u16, error: String, message: String },
 }
 
 impl Error {
@@ -60,11 +56,7 @@ impl Client {
             .timeout(Duration::from_secs(60))
             .user_agent(concat!("odl-client/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self {
-            http,
-            base,
-            token: token.filter(|t| !t.is_empty()),
-        })
+        Ok(Self { http, base, token: token.filter(|t| !t.is_empty()) })
     }
 
     pub fn base_url(&self) -> &str {
@@ -88,27 +80,12 @@ impl Client {
         let text = resp.text().await.unwrap_or_default();
         let (error, message) = match serde_json::from_str::<ApiError>(&text) {
             Ok(e) => (e.error, e.message),
-            Err(_) => (
-                "http".to_string(),
-                if text.is_empty() {
-                    status.to_string()
-                } else {
-                    text
-                },
-            ),
+            Err(_) => ("http".to_string(), if text.is_empty() { status.to_string() } else { text }),
         };
-        Err(Error::Api {
-            status: status.as_u16(),
-            error,
-            message,
-        })
+        Err(Error::Api { status: status.as_u16(), error, message })
     }
 
-    async fn get<T: DeserializeOwned, Q: Serialize + ?Sized>(
-        &self,
-        path: &str,
-        q: &Q,
-    ) -> Result<T> {
+    async fn get<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T> {
         Self::send(self.req(reqwest::Method::GET, path).query(q)).await
     }
 
@@ -147,10 +124,7 @@ impl Client {
         self.get("/api/v1/metrics/query", q).await
     }
     pub async fn sql(&self, query: &str, limit: Option<u32>) -> Result<SqlResponse> {
-        let body = SqlRequest {
-            query: query.to_string(),
-            limit,
-        };
+        let body = SqlRequest { query: query.to_string(), limit };
         Self::send(self.req(reqwest::Method::POST, "/api/v1/sql").json(&body)).await
     }
 }
@@ -175,13 +149,7 @@ impl LogTail {
     /// `query` are kept (`limit` caps each poll, default 500); its window and
     /// order are managed by the tail.
     pub fn new(client: Client, query: LogQuery, start: DateTime<Utc>) -> Self {
-        Self {
-            client,
-            query,
-            lookback: TimeDelta::seconds(30),
-            cursor: start,
-            seen: HashSet::new(),
-        }
+        Self { client, query, lookback: TimeDelta::seconds(30), cursor: start, seen: HashSet::new() }
     }
 
     /// How far each poll looks back for late records (default 30 s).

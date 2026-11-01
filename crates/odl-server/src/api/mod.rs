@@ -83,14 +83,8 @@ impl From<QueryError> for ApiErr {
         match e {
             QueryError::BadRequest(m) => ApiErr(StatusCode::BAD_REQUEST, "bad_request".into(), m),
             QueryError::NotFound(m) => ApiErr(StatusCode::NOT_FOUND, "not_found".into(), m),
-            e @ QueryError::Timeout(_) => {
-                ApiErr(StatusCode::GATEWAY_TIMEOUT, "timeout".into(), e.to_string())
-            }
-            e @ QueryError::Busy => ApiErr(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "busy".into(),
-                e.to_string(),
-            ),
+            e @ QueryError::Timeout(_) => ApiErr(StatusCode::GATEWAY_TIMEOUT, "timeout".into(), e.to_string()),
+            e @ QueryError::Busy => ApiErr(StatusCode::SERVICE_UNAVAILABLE, "busy".into(), e.to_string()),
             QueryError::Internal(e) => {
                 // Details (paths, bucket names, connection strings) stay in the log.
                 tracing::error!(error = %crate::store::redact(&format!("{e:#}")), "query failed");
@@ -106,14 +100,7 @@ impl From<QueryError> for ApiErr {
 
 impl IntoResponse for ApiErr {
     fn into_response(self) -> Response {
-        (
-            self.0,
-            Json(ApiError {
-                error: self.1,
-                message: self.2,
-            }),
-        )
-            .into_response()
+        (self.0, Json(ApiError { error: self.1, message: self.2 })).into_response()
     }
 }
 
@@ -129,10 +116,7 @@ where
 {
     type Rejection = ApiErr;
 
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        state: &S,
-    ) -> Result<Self, ApiErr> {
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, state: &S) -> Result<Self, ApiErr> {
         Query::<T>::from_request_parts(parts, state)
             .await
             .map(|Query(v)| Q(v))
@@ -183,10 +167,7 @@ pub fn router(state: Arc<ApiState>) -> (Router, utoipa::openapi::OpenApi) {
     let spec_json = openapi.to_json().unwrap_or_default();
     let docs_html = scalar_html();
     let router = api
-        .route(
-            "/openapi.json",
-            get(move || async move { ([(header::CONTENT_TYPE, "application/json")], spec_json) }),
-        )
+        .route("/openapi.json", get(move || async move { ([(header::CONTENT_TYPE, "application/json")], spec_json) }))
         .route("/docs", get(move || async move { Html(docs_html) }));
     (router, openapi)
 }
@@ -223,29 +204,19 @@ fn scalar_html() -> String {
 }
 
 async fn auth(State(st): S, req: Request, next: Next) -> Response {
-    let header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let header = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
     if st.tokens.allows(header) {
         next.run(req).await
     } else {
-        ApiErr(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized".into(),
-            "invalid or missing bearer token".into(),
-        )
-        .into_response()
+        ApiErr(StatusCode::UNAUTHORIZED, "unauthorized".into(), "invalid or missing bearer token".into())
+            .into_response()
     }
 }
 
 #[utoipa::path(get, path = "/api/v1/health", tag = "system",
     responses((status = 200, description = "Server is up", body = Health)))]
 async fn health() -> Json<Health> {
-    Json(Health {
-        status: "ok".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-    })
+    Json(Health { status: "ok".into(), version: env!("CARGO_PKG_VERSION").into() })
 }
 
 #[utoipa::path(get, path = "/api/v1/stats", tag = "system", security(("bearer" = [])),
@@ -273,11 +244,7 @@ async fn stats(State(st): S) -> R<odl_api::Stats> {
 async fn services(State(st): S, Q(q): Q<ServiceQuery>) -> R<Vec<ServiceSummary>> {
     let w = window(&st, &q)?;
     let entry = q.entry_only.unwrap_or(true);
-    Ok(Json(
-        st.reader
-            .run(move |c| traces::services(c, &w, entry))
-            .await?,
-    ))
+    Ok(Json(st.reader.run(move |c| traces::services(c, &w, entry)).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/operations", tag = "traces", params(OperationQuery), security(("bearer" = [])),
@@ -286,11 +253,7 @@ async fn services(State(st): S, Q(q): Q<ServiceQuery>) -> R<Vec<ServiceSummary>>
 async fn operations(State(st): S, Q(q): Q<OperationQuery>) -> R<Vec<OperationSummary>> {
     let w = window(&st, &q)?;
     let entry = q.entry_only.unwrap_or(true);
-    Ok(Json(
-        st.reader
-            .run(move |c| traces::operations(c, &w, q.service.as_deref(), entry))
-            .await?,
-    ))
+    Ok(Json(st.reader.run(move |c| traces::operations(c, &w, q.service.as_deref(), entry)).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/spans/series", tag = "traces", params(SpanSeriesQuery), security(("bearer" = [])),
@@ -302,16 +265,7 @@ async fn span_series(State(st): S, Q(q): Q<SpanSeriesQuery>) -> R<SpanSeries> {
     let entry = q.entry_only.unwrap_or(true);
     Ok(Json(
         st.reader
-            .run(move |c| {
-                traces::span_series(
-                    c,
-                    &w,
-                    step,
-                    q.service.as_deref(),
-                    q.operation.as_deref(),
-                    entry,
-                )
-            })
+            .run(move |c| traces::span_series(c, &w, step, q.service.as_deref(), q.operation.as_deref(), entry))
             .await?,
     ))
 }
@@ -348,16 +302,8 @@ async fn search_traces(State(st): S, Q(q): Q<TraceQuery>) -> R<Vec<TraceSummary>
     responses((status = 200, body = Trace), (status = 404, body = ApiError)))]
 async fn get_trace(State(st): S, Path(trace_id): Path<String>, Q(q): Q<TraceGetQuery>) -> R<Trace> {
     // Without a window, look back a week.
-    let w = Window::resolve(
-        &q.window(),
-        std::time::Duration::from_secs(7 * 86400),
-        st.reader.max_window,
-    )?;
-    Ok(Json(
-        st.reader
-            .run(move |c| traces::get(c, &w, &trace_id))
-            .await?,
-    ))
+    let w = Window::resolve(&q.window(), std::time::Duration::from_secs(7 * 86400), st.reader.max_window)?;
+    Ok(Json(st.reader.run(move |c| traces::get(c, &w, &trace_id)).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/logs", tag = "logs", params(LogQuery), security(("bearer" = [])),
@@ -369,9 +315,7 @@ async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> R<Vec<LogRecord>> {
         None | Some("desc") => false,
         Some("asc") => true,
         Some(o) => {
-            return Err(
-                QueryError::BadRequest(format!("order must be asc or desc, got {o:?}")).into(),
-            );
+            return Err(QueryError::BadRequest(format!("order must be asc or desc, got {o:?}")).into());
         }
     };
     Ok(Json(
@@ -400,22 +344,14 @@ async fn search_logs(State(st): S, Q(q): Q<LogQuery>) -> R<Vec<LogRecord>> {
 async fn log_series(State(st): S, Q(q): Q<LogSeriesQuery>) -> R<LogSeries> {
     let w = window(&st, &q)?;
     let step = w.step(q.step.as_deref())?;
-    Ok(Json(
-        st.reader
-            .run(move |c| logs::series(c, &w, step, q.service.as_deref(), q.q.as_deref()))
-            .await?,
-    ))
+    Ok(Json(st.reader.run(move |c| logs::series(c, &w, step, q.service.as_deref(), q.q.as_deref())).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/metrics", tag = "metrics", params(MetricListQuery), security(("bearer" = [])),
     responses((status = 200, body = Vec<MetricInfo>), (status = 400, body = ApiError)))]
 async fn list_metrics(State(st): S, Q(q): Q<MetricListQuery>) -> R<Vec<MetricInfo>> {
     let w = window(&st, &q)?;
-    Ok(Json(
-        st.reader
-            .run(move |c| metrics::list(c, &w, q.service.as_deref(), q.q.as_deref()))
-            .await?,
-    ))
+    Ok(Json(st.reader.run(move |c| metrics::list(c, &w, q.service.as_deref(), q.q.as_deref())).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/metrics/query", tag = "metrics", params(MetricQuery), security(("bearer" = [])),
@@ -455,9 +391,5 @@ async fn run_sql(State(st): S, J(req): J<SqlRequest>) -> R<SqlResponse> {
     }
     let limit = clamp_limit(req.limit, 1000, 100_000)?;
     let schema = st.schema.clone();
-    Ok(Json(
-        st.reader
-            .run(move |c| sql::run(c, &schema, &req.query, limit))
-            .await?,
-    ))
+    Ok(Json(st.reader.run(move |c| sql::run(c, &schema, &req.query, limit)).await?))
 }

@@ -1,0 +1,29 @@
+[package]
+name = "mallard"
+description = "mallard: errors, traces, logs and metrics on one DuckLake. Server, CLI and TUI in one binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mallard"
+path = "src/main.rs"
+
+[dependencies]
+mallard-server.workspace = true
+mallard-client.workspace = true
+odl-cli.workspace = true
+sdl-cli.workspace = true
+duckdb.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics-exporter-prometheus.workspace = true
+futures.workspace = true
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }

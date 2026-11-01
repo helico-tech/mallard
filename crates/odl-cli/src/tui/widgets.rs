@@ -8,9 +8,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{
-        Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Paragraph, Sparkline, Widget,
-    },
+    widgets::{Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Paragraph, Sparkline, Widget},
 };
 
 use super::theme;
@@ -20,16 +18,8 @@ pub fn panel(title: &str, focused: bool) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if focused {
-            theme::border_focus()
-        } else {
-            theme::border()
-        })
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(title.to_string(), theme::title()),
-            Span::raw(" "),
-        ]))
+        .border_style(if focused { theme::border_focus() } else { theme::border() })
+        .title(Line::from(vec![Span::raw(" "), Span::styled(title.to_string(), theme::title()), Span::raw(" ")]))
 }
 
 /// Panel with a right-aligned secondary title (e.g. counts, loading state).
@@ -43,25 +33,13 @@ pub fn placeholder(f: &mut Frame, area: Rect, msg: &str, style: Style) {
         return;
     }
     let y = area.y + area.height / 2;
-    let r = Rect {
-        x: area.x,
-        y,
-        width: area.width,
-        height: 1,
-    };
-    f.render_widget(
-        Paragraph::new(Span::styled(msg.to_string(), style)).alignment(Alignment::Center),
-        r,
-    );
+    let r = Rect { x: area.x, y, width: area.width, height: 1 };
+    f.render_widget(Paragraph::new(Span::styled(msg.to_string(), style)).alignment(Alignment::Center), r);
 }
 
 pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let [v] = Layout::vertical([Constraint::Length(height.min(area.height))])
-        .flex(Flex::Center)
-        .areas(area);
-    let [h] = Layout::horizontal([Constraint::Length(width.min(area.width))])
-        .flex(Flex::Center)
-        .areas(v);
+    let [v] = Layout::vertical([Constraint::Length(height.min(area.height))]).flex(Flex::Center).areas(area);
+    let [h] = Layout::horizontal([Constraint::Length(width.min(area.width))]).flex(Flex::Center).areas(v);
     h
 }
 
@@ -100,48 +78,30 @@ pub struct Tile<'a> {
 
 impl Tile<'_> {
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme::border());
+        let block =
+            Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::border());
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.height == 0 || inner.width == 0 {
             return;
         }
-        let rows = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner);
+        let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]).split(inner);
         f.render_widget(
             Line::from(vec![
-                Span::styled(
-                    self.label.to_uppercase(),
-                    theme::dim().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(self.label.to_uppercase(), theme::dim().add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled(self.sub.clone(), theme::muted()),
             ]),
             rows[0],
         );
         f.render_widget(
-            Span::styled(
-                self.value.clone(),
-                Style::new().fg(self.color).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(self.value.clone(), Style::new().fg(self.color).add_modifier(Modifier::BOLD)),
             rows[1],
         );
         if rows[2].height > 0 && !self.spark.is_empty() {
             let n = rows[2].width as usize;
             let data = &self.spark[self.spark.len().saturating_sub(n)..];
-            f.render_widget(
-                Sparkline::default()
-                    .data(data)
-                    .style(Style::new().fg(self.color)),
-                rows[2],
-            );
+            f.render_widget(Sparkline::default().data(data).style(Style::new().fg(self.color)), rows[2]);
         }
     }
 }
@@ -165,11 +125,7 @@ pub fn time_labels(x0: f64, x1: f64) -> Vec<String> {
     };
     [x0, (x0 + x1) / 2.0, x1]
         .iter()
-        .map(|t| {
-            DateTime::from_timestamp(*t as i64, 0)
-                .map(|d| local(d, fmt))
-                .unwrap_or_default()
-        })
+        .map(|t| DateTime::from_timestamp(*t as i64, 0).map(|d| local(d, fmt)).unwrap_or_default())
         .collect()
 }
 
@@ -242,10 +198,7 @@ pub fn time_chart(
             Axis::default()
                 .bounds([y0, y1])
                 .style(theme::muted())
-                .labels(
-                    [fmt_y(y0), fmt_y((y0 + y1) / 2.0), fmt_y(y1)]
-                        .map(|l| Span::styled(l, theme::muted())),
-                ),
+                .labels([fmt_y(y0), fmt_y((y0 + y1) / 2.0), fmt_y(y1)].map(|l| Span::styled(l, theme::muted()))),
         )
         // Legends live in panel titles / tables so they never cover data.
         .legend_position(None);
@@ -266,13 +219,7 @@ impl Widget for StackedBars<'_> {
         if area.width == 0 || area.height == 0 || self.buckets.is_empty() {
             return;
         }
-        let max = self
-            .buckets
-            .iter()
-            .map(|b| b.iter().sum::<u64>())
-            .max()
-            .unwrap_or(0)
-            .max(1);
+        let max = self.buckets.iter().map(|b| b.iter().sum::<u64>()).max().unwrap_or(0).max(1);
         let cols = area.width as usize;
         // Resample buckets to the available width (merge or stretch).
         let n = self.buckets.len();
@@ -295,9 +242,7 @@ impl Widget for StackedBars<'_> {
                 let h = if cum == 0 {
                     0
                 } else {
-                    ((cum as f64 / merged as f64) / max as f64 * total_eighths as f64)
-                        .round()
-                        .max(1.0) as u64
+                    ((cum as f64 / merged as f64) / max as f64 * total_eighths as f64).round().max(1.0) as u64
                 };
                 bounds.push(h.min(total_eighths));
             }
@@ -376,11 +321,7 @@ mod tests {
     fn stacked_bars_render() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 4, 3));
         let buckets = vec![vec![1, 1], vec![0, 0], vec![2, 4]];
-        StackedBars {
-            buckets: &buckets,
-            colors: &[Color::Red, Color::Blue],
-        }
-        .render(buf.area, &mut buf);
+        StackedBars { buckets: &buckets, colors: &[Color::Red, Color::Blue] }.render(buf.area, &mut buf);
         // tallest column is full height
         assert_eq!(buf[(3, 0)].symbol(), "█");
     }

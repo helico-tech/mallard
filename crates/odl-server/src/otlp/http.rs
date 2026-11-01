@@ -14,9 +14,7 @@ use axum::{
 };
 use opentelemetry_proto::tonic::collector::{
     logs::v1::{ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse},
-    metrics::v1::{
-        ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-    },
+    metrics::v1::{ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse},
     trace::v1::{ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse},
 };
 use prost::Message;
@@ -44,32 +42,21 @@ pub fn router(ingest: Arc<Ingest>) -> Router {
 fn error(status: StatusCode, fmt: Format, msg: String) -> Response {
     // OTLP: error bodies are google.rpc.Status; a plain message is accepted by exporters.
     let mut resp = match fmt {
-        Format::Json => (
-            status,
-            [(header::CONTENT_TYPE, "application/json")],
-            serde_json::json!({ "message": msg }).to_string(),
-        )
-            .into_response(),
+        Format::Json => {
+            (status, [(header::CONTENT_TYPE, "application/json")], serde_json::json!({ "message": msg }).to_string())
+                .into_response()
+        }
         Format::Proto => (status, [(header::CONTENT_TYPE, "text/plain")], msg).into_response(),
     };
     if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE {
-        resp.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+        resp.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
     }
     resp
 }
 
 fn format(headers: &HeaderMap) -> Result<Format, String> {
-    let ct = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/x-protobuf");
-    let base = ct
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/x-protobuf");
+    let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     match base.as_str() {
         "application/x-protobuf" | "application/protobuf" => Ok(Format::Proto),
         "application/json" => Ok(Format::Json),
@@ -79,10 +66,7 @@ fn format(headers: &HeaderMap) -> Result<Format, String> {
 
 /// Decompress (gzip/zstd/identity) with a size cap.
 fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, String> {
-    let enc = headers
-        .get(header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("identity");
+    let enc = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("identity");
     let mut out = Vec::new();
     let reader: Box<dyn Read> = match enc.trim().to_ascii_lowercase().as_str() {
         "" | "identity" => return Ok(body.to_vec()),
@@ -91,10 +75,7 @@ fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, 
         "zstd" => Box::new(zstd::stream::read::Decoder::new(&body[..]).map_err(|e| e.to_string())?),
         other => return Err(format!("unsupported content encoding {other}")),
     };
-    reader
-        .take(max as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(|e| format!("decompressing body: {e}"))?;
+    reader.take(max as u64 + 1).read_to_end(&mut out).map_err(|e| format!("decompressing body: {e}"))?;
     if out.len() > max {
         return Err(format!("decompressed body larger than {max} bytes"));
     }
@@ -103,12 +84,9 @@ fn decode_body(headers: &HeaderMap, body: Bytes, max: usize) -> Result<Vec<u8>, 
 
 fn ok_response<T: Message + serde::Serialize>(fmt: Format, msg: &T) -> Response {
     match fmt {
-        Format::Proto => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/x-protobuf")],
-            msg.encode_to_vec(),
-        )
-            .into_response(),
+        Format::Proto => {
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/x-protobuf")], msg.encode_to_vec()).into_response()
+        }
         Format::Json => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
@@ -123,38 +101,29 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
         Ok(f) => f,
         Err(m) => return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, Format::Json, m),
     };
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
     if !ingest.tokens.allows(auth) {
-        return error(
-            StatusCode::UNAUTHORIZED,
-            fmt,
-            "invalid or missing bearer token".into(),
-        );
+        return error(StatusCode::UNAUTHORIZED, fmt, "invalid or missing bearer token".into());
     }
     let max = ingest.max_request_bytes;
     // Decompress and decode off the async runtime.
     let decoded = tokio::task::spawn_blocking(move || -> Result<Request, String> {
         let raw = decode_body(&headers, body, max)?;
-        let decode_err =
-            |e: &dyn std::fmt::Display| format!("invalid OTLP {} payload: {e}", signal.as_str());
+        let decode_err = |e: &dyn std::fmt::Display| format!("invalid OTLP {} payload: {e}", signal.as_str());
         Ok(match (signal, fmt) {
-            (Signal::Traces, Format::Proto) => Request::Traces(
-                ExportTraceServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?,
-            ),
+            (Signal::Traces, Format::Proto) => {
+                Request::Traces(ExportTraceServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+            }
             (Signal::Traces, Format::Json) => {
                 Request::Traces(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
             }
-            (Signal::Logs, Format::Proto) => Request::Logs(
-                ExportLogsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?,
-            ),
-            (Signal::Logs, Format::Json) => {
-                Request::Logs(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
+            (Signal::Logs, Format::Proto) => {
+                Request::Logs(ExportLogsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
             }
-            (Signal::Metrics, Format::Proto) => Request::Metrics(
-                ExportMetricsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?,
-            ),
+            (Signal::Logs, Format::Json) => Request::Logs(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?),
+            (Signal::Metrics, Format::Proto) => {
+                Request::Metrics(ExportMetricsServiceRequest::decode(&raw[..]).map_err(|e| decode_err(&e))?)
+            }
             (Signal::Metrics, Format::Json) => {
                 Request::Metrics(serde_json::from_slice(&raw).map_err(|e| decode_err(&e))?)
             }

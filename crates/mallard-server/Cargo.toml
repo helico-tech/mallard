@@ -1,0 +1,33 @@
+[package]
+name = "mallard-server"
+description = "The mallard server: Sentry-compatible errors plus OpenTelemetry traces, logs and metrics on one DuckLake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sdl-server.workspace = true
+odl-server.workspace = true
+duckdb.workspace = true
+axum.workspace = true
+tonic.workspace = true
+tower-http.workspace = true
+tower = { workspace = true, features = ["util"] }
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+figment.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+[dev-dependencies]
+mallard-client.workspace = true
+uuid.workspace = true
+futures.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+figment = { workspace = true, features = ["test"] }
+tempfile = "3"
+reqwest.workspace = true

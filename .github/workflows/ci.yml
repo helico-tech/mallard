@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  helm:
+    name: helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - name: Lint and render every CI values file
+        run: |
+          set -e
+          chart=deploy/helm/mallard
+          for f in "$chart"/ci/*.yaml; do
+            echo "::group::$f"
+            helm lint "$chart" --strict -f "$f"
+            helm template ci "$chart" -f "$f" > /dev/null
+            echo "::endgroup::"
+          done
+
+  docker:
+    name: docker build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: false
+          load: true
+          tags: mallard:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the image
+        run: |
+          set -e
+          docker run -d --name mallard -p 8080:8080 -p 4318:4318 --read-only --tmpfs /tmp \
+            -v mallard-data:/data -e 'MALLARD_SERVER__API_TOKENS=["ci"]' mallard:ci
+          for _ in $(seq 1 60); do
+            curl -fsS localhost:8080/readyz && break
+            sleep 1
+          done
+          curl -fsS localhost:8080/readyz
+          curl -fsS -XPOST -H 'Authorization: Bearer ci' -H 'content-type: application/json' \
+            localhost:8080/sentry/v1/projects -d '{"name":"ci"}'
+          curl -fsS -XPOST -H 'content-type: application/json' localhost:4318/v1/traces -d '{"resourceSpans":[]}'
+          docker exec mallard mallard --url http://localhost:8080 --token ci status
+      - name: Server logs
+        if: always()
+        run: docker logs mallard || true
+
+  e2e-sentry:
+    name: e2e (real Sentry SDKs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build server
+        run: cargo build -p sdl-server --locked
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: e2e/sentry/package-lock.json
+      - name: Install e2e dependencies
+        working-directory: e2e/sentry
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run e2e tests
+        working-directory: e2e/sentry
+        env:
+          SDL_BIN: ${{ github.workspace }}/target/debug/sentry-ducklake
+        run: npm test

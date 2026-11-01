@@ -550,9 +550,7 @@ pub fn parse_attribute_filter(s: &str) -> Result<Vec<(String, String)>, String> 
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|p| {
-            let (k, v) = p
-                .split_once('=')
-                .ok_or_else(|| format!("attribute filter `{p}` must look like key=value"))?;
+            let (k, v) = p.split_once('=').ok_or_else(|| format!("attribute filter `{p}` must look like key=value"))?;
             let k = k.trim();
             if k.is_empty() {
                 return Err(format!("attribute filter `{p}` has an empty key"));
@@ -569,10 +567,7 @@ mod tests {
     #[test]
     fn attribute_filter_parses() {
         let f = parse_attribute_filter("http.route=/a, k = v ,").unwrap();
-        assert_eq!(
-            f,
-            vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]
-        );
+        assert_eq!(f, vec![("http.route".into(), "/a".into()), ("k".into(), "v".into())]);
         assert!(parse_attribute_filter("novalue").is_err());
         assert!(parse_attribute_filter("=x").is_err());
     }

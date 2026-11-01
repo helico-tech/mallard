@@ -1,0 +1,6 @@
+# Single pod, DuckDB-file catalog and Parquet files on the PVC.
+publicUrl: http://mallard.local
+apiToken: test-token
+storage:
+  dataPath: /data/lake/
+  artifactsUrl: /data/artifacts

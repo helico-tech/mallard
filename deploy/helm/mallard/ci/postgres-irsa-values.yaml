@@ -1,0 +1,21 @@
+# AWS: S3 through IRSA (no static keys), Postgres catalog from an existing Secret.
+publicUrl: https://mallard.example.com
+existingSecret: mallard-tokens
+existingSecretIngestKey: ingest-token
+storage:
+  dataPath: s3://my-bucket/mallard/lake/
+  artifactsUrl: s3://my-bucket/mallard/artifacts
+catalog:
+  type: postgres
+  postgres:
+    existingSecret: mallard-catalog
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mallard
+ingress:
+  enabled: true
+  className: nginx
+serviceMonitor:
+  enabled: true
+podDisruptionBudget:
+  enabled: true

@@ -121,12 +121,7 @@ impl Drop for CancelGuard {
 impl Reader {
     pub fn new(conns: Vec<Connection>, timeout: Duration, max_window: Duration) -> Self {
         let n = conns.len();
-        Self {
-            conns: Arc::new(Mutex::new(conns)),
-            sem: Arc::new(Semaphore::new(n)),
-            timeout,
-            max_window,
-        }
+        Self { conns: Arc::new(Mutex::new(conns)), sem: Arc::new(Semaphore::new(n)), timeout, max_window }
     }
 
     /// Run `f` on a pooled connection in a blocking thread, with a timeout.
@@ -142,24 +137,11 @@ impl Reader {
             .await
             .map_err(|_| QueryError::Busy)?
             .map_err(|_| QueryError::Busy)?;
-        let conn = self
-            .conns
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .pop()
-            .ok_or(QueryError::Busy)?;
+        let conn = self.conns.lock().unwrap_or_else(|p| p.into_inner()).pop().ok_or(QueryError::Busy)?;
         let handle = conn.interrupt_handle();
         let done = Arc::new(Mutex::new(false));
-        let mut guard = CancelGuard {
-            handle: handle.clone(),
-            done: done.clone(),
-            armed: true,
-        };
-        let pooled = Pooled {
-            conn: Some(conn),
-            pool: self.conns.clone(),
-            _permit: permit,
-        };
+        let mut guard = CancelGuard { handle: handle.clone(), done: done.clone(), armed: true };
+        let pooled = Pooled { conn: Some(conn), pool: self.conns.clone(), _permit: permit };
         let done2 = done.clone();
         let mut task = tokio::task::spawn_blocking(move || {
             let pooled = pooled;
@@ -217,10 +199,7 @@ impl Window {
             return Err(bad("`from` must be before `to`"));
         }
         if (to - from).to_std().unwrap_or(Duration::MAX) > max {
-            return Err(bad(format!(
-                "time window larger than query.max_window ({})",
-                humantime::format_duration(max)
-            )));
+            return Err(bad(format!("time window larger than query.max_window ({})", humantime::format_duration(max))));
         }
         Ok(Self { from, to })
     }
@@ -245,14 +224,11 @@ impl Window {
                 let d = parse_duration(s).map_err(|e| bad(format!("invalid step={s:?}: {e}")))?;
                 // At most one bucket for the whole window (also bounds all
                 // arithmetic on the step below).
-                d.as_secs()
-                    .clamp(1, (secs.ceil() as u64).clamp(1, 366 * 86400))
+                d.as_secs().clamp(1, (secs.ceil() as u64).clamp(1, 366 * 86400))
             }
             None => {
-                const NICE: [u64; 17] = [
-                    1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600,
-                    86400,
-                ];
+                const NICE: [u64; 17] =
+                    [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 86400];
                 let raw = (secs / 60.0).ceil() as u64;
                 *NICE.iter().find(|n| **n >= raw).unwrap_or(&86400)
             }
@@ -268,17 +244,12 @@ impl Window {
         let step = step as i64;
         let first = self.from.timestamp().div_euclid(step) * step;
         let last = (self.to.timestamp() - 1).div_euclid(step) * step;
-        (0..=((last - first) / step).max(0))
-            .map(|i| first + i * step)
-            .collect()
+        (0..=((last - first) / step).max(0)).map(|i| first + i * step).collect()
     }
 }
 
 pub fn ts_value(t: NaiveDateTime) -> Value {
-    Value::Timestamp(
-        duckdb::types::TimeUnit::Microsecond,
-        t.and_utc().timestamp_micros(),
-    )
+    Value::Timestamp(duckdb::types::TimeUnit::Microsecond, t.and_utc().timestamp_micros())
 }
 
 pub fn from_micros(us: i64) -> DateTime<Utc> {
@@ -318,10 +289,7 @@ impl Filter {
     }
 
     pub fn window(&mut self, col: &str, w: &Window) {
-        self.add(
-            format!("{col} >= ? AND {col} < ?"),
-            [w.from_param(), w.to_param()],
-        );
+        self.add(format!("{col} >= ? AND {col} < ?"), [w.from_param(), w.to_param()]);
     }
 
     /// `key=value` filters on span/log/metric attributes or resource attributes.
@@ -330,12 +298,7 @@ impl Filter {
             for (k, v) in odl_api::parse_attribute_filter(spec).map_err(bad)? {
                 self.add(
                     "(attributes[?] = ? OR resource_attributes[?] = ?)",
-                    [
-                        Value::Text(k.clone()),
-                        Value::Text(v.clone()),
-                        Value::Text(k),
-                        Value::Text(v),
-                    ],
+                    [Value::Text(k.clone()), Value::Text(v.clone()), Value::Text(k), Value::Text(v)],
                 );
             }
         }
@@ -343,18 +306,13 @@ impl Filter {
     }
 
     pub fn sql(&self) -> String {
-        if self.clauses.is_empty() {
-            "TRUE".into()
-        } else {
-            self.clauses.join(" AND ")
-        }
+        if self.clauses.is_empty() { "TRUE".into() } else { self.clauses.join(" AND ") }
     }
 }
 
 /// Parse a JSON column produced by `to_json(...)` into a value.
 pub fn json_col<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
-    s.and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -364,20 +322,12 @@ mod tests {
 
     #[test]
     fn windows() {
-        let w = TimeWindow {
-            since: Some("1h".into()),
-            ..Default::default()
-        };
+        let w = TimeWindow { since: Some("1h".into()), ..Default::default() };
         let r = Window::resolve(&w, Duration::from_secs(60), Duration::from_secs(7200)).unwrap();
         assert!((r.secs() - 3600.0).abs() < 1.0);
         assert_eq!(r.step(None).unwrap(), 60);
-        let too_big = TimeWindow {
-            since: Some("3h".into()),
-            ..Default::default()
-        };
-        assert!(
-            Window::resolve(&too_big, Duration::from_secs(60), Duration::from_secs(7200)).is_err()
-        );
+        let too_big = TimeWindow { since: Some("3h".into()), ..Default::default() };
+        assert!(Window::resolve(&too_big, Duration::from_secs(60), Duration::from_secs(7200)).is_err());
         assert!(r.step(Some("100ms")).is_ok());
         assert!(r.step(Some("0s")).is_ok());
     }
