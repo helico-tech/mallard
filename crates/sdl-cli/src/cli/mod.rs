@@ -130,7 +130,7 @@ impl Ctx {
     }
 
     /// The `--project`, or the only project on the server.
-    pub(crate) async fn resolve_project(&self) -> Result<String> {
+    pub async fn resolve_project(&self) -> Result<String> {
         if let Some(p) = &self.project {
             return Ok(p.clone());
         }

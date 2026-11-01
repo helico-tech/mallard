@@ -21,6 +21,7 @@ pub use mallard_term::error::Hints;
 pub use tui::{Embedded, Outcome};
 
 use clap::{Args, Subcommand, ValueEnum};
+use mallard_term::wait::WaitArgs;
 use mallard_term::window::WindowArgs;
 
 #[derive(Subcommand, Debug)]
@@ -218,6 +219,8 @@ pub enum EventsCmd {
         /// Only events in this window (default: all; with --trace 30d).
         #[command(flatten)]
         window: WindowArgs,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// One event: exception, stack trace, breadcrumbs, tags, user, request
     /// (JSON: concise; --raw adds the Sentry payload).

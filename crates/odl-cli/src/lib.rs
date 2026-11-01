@@ -7,6 +7,7 @@
 //! The same shape as `sdl_cli`: `Command`, `Ctx::new(client).with_json(…)`,
 //! `describe`, `HINTS`, `Embedded::open_trace`.
 
+mod compare;
 mod errors;
 mod fmt;
 mod severity;
@@ -26,6 +27,7 @@ use clap::Subcommand;
 use mallard_term::color::{ColorChoice, Out, alert};
 use mallard_term::error::{Described, Failure, Kind, usage};
 use mallard_term::output::{Format, List, Output};
+use mallard_term::wait::{WaitArgs, until};
 use mallard_term::window::{Window, WindowArgs};
 use odl_client::{Client, LogTail, api::*};
 
@@ -56,6 +58,9 @@ pub struct OpsArgs {
     pub service: Option<String>,
     #[arg(long)]
     pub all_spans: bool,
+    /// Also the same window this long earlier (e.g. 1d): p95 and error rate before, and the change.
+    #[arg(long, value_name = "DUR", value_parser = mallard_term::window::parse_since)]
+    pub compare: Option<String>,
 }
 
 /// `traces` (default window 1h).
@@ -82,6 +87,8 @@ pub struct TraceListArgs {
     /// Max traces (`-l` still works).
     #[arg(short = 'n', short_alias = 'l', long, default_value_t = 30)]
     pub limit: u32,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 /// `logs` (default window 1h).
@@ -103,9 +110,15 @@ pub struct LogArgs {
     pub attr: Vec<String>,
     #[arg(short = 'n', long, default_value_t = 100)]
     pub limit: u32,
-    /// Keep printing new records (from --from/--since on, until Ctrl-C).
-    #[arg(short, long, conflicts_with_all = ["to", "around"])]
+    /// Keep printing new records (from --from/--since on, until Ctrl-C, --for or --until-match).
+    #[arg(short, long, conflicts_with_all = ["to", "around", "wait"])]
     pub follow: bool,
+    /// With -f: stop after this long, e.g. 2m (exit 0; exit 8 with --until-match and no match).
+    #[arg(long = "for", value_name = "DUR", value_parser = mallard_term::window::parse_since, requires = "follow")]
+    pub for_: Option<String>,
+    /// With -f: stop after the first record whose body contains this text (case-insensitive).
+    #[arg(long, value_name = "TEXT", requires = "follow")]
+    pub until_match: Option<String>,
     /// Logs around this time (RFC 3339 or a duration ago), oldest first:
     /// from --around minus --window to --around plus --window.
     #[arg(long, value_parser = mallard_term::window::parse_time, conflicts_with_all = ["since", "from", "to"])]
@@ -113,6 +126,8 @@ pub struct LogArgs {
     /// How far before and after --around, e.g. 30s, 2m.
     #[arg(long, default_value = "1m", value_parser = mallard_term::window::parse_since, requires = "around")]
     pub window: String,
+    #[command(flatten)]
+    pub wait: WaitArgs,
 }
 
 /// `metrics` (default window 1h).
@@ -354,27 +369,45 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             let v = c.services(&ServiceQuery { from, to, since, entry_only: Some(!all_spans) }).await?;
             print_list(ctx, List::new(v).window(win), services_text)
         }
-        Command::Ops(OpsArgs { w, service, all_spans }) => {
+        Command::Ops(OpsArgs { w, service, all_spans, compare: None }) => {
             let (win, (from, to, since)) = window(&w)?;
             let v = c.operations(&OperationQuery { from, to, since, service, entry_only: Some(!all_spans) }).await?;
             print_list(ctx, List::new(v).window(win), operations_text)
         }
+        Command::Ops(OpsArgs { w, service, all_spans, compare: Some(shift) }) => {
+            let win = w.resolve(DEFAULT_WINDOW)?;
+            let back = chrono::TimeDelta::from_std(mallard_term::window::parse_duration(&shift).map_err(usage)?)?;
+            let q = |from, to| OperationQuery {
+                from: Some(from),
+                to: Some(to),
+                since: None,
+                service: service.clone(),
+                entry_only: Some(!all_spans),
+            };
+            let (q_now, q_before) = (q(win.from, win.to), q(win.from - back, win.to - back));
+            let (now, before) = tokio::join!(c.operations(&q_now), c.operations(&q_before));
+            let v = compare::join(now?, before?);
+            print_list(ctx, List::new(v).window(win), |v| compare::compare_text(v, &shift))
+        }
         Command::Traces(a) => {
-            let (win, (from, to, since)) = window(&a.w)?;
-            let v = c
-                .traces(&TraceQuery {
+            // The window is resolved on every try: with --wait it moves along.
+            let fetch = || async {
+                let (win, (from, to, since)) = window(&a.w)?;
+                let q = TraceQuery {
                     from,
                     to,
                     since,
-                    service: a.service,
-                    operation: a.operation,
+                    service: a.service.clone(),
+                    operation: a.operation.clone(),
                     errors_only: Some(a.errors),
                     min_duration_ms: a.min_ms,
                     max_duration_ms: a.max_ms,
                     attributes: attrs(&a.attr),
                     limit: Some(a.limit),
-                })
-                .await?;
+                };
+                anyhow::Ok((win, c.traces(&q).await?))
+            };
+            let ((win, v), waited) = until(&ctx.output, &a.wait, fetch, |(_, v)| !v.is_empty()).await?.split();
             let list = List::new(v).limit(Some(a.limit)).window(win);
             let sentry = match &ctx.errors {
                 Some(l) => Some(sentry_counts(l.as_ref(), &list.items, win).await),
@@ -383,7 +416,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             if ctx.output.text() {
                 ctx.out.line(&traces_text(&list.items, sentry.as_deref()))?;
                 ctx.output.truncation_note(&list);
-                return Ok(());
+                return waited;
             }
             let mut items = Vec::with_capacity(list.items.len());
             for (i, t) in list.items.iter().enumerate() {
@@ -394,7 +427,8 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                 items.push(item);
             }
             let List { count, limit, truncated, window, .. } = list;
-            ctx.output.list(&List { items, count, limit, truncated, next_cursor: None, window })
+            ctx.output.list(&List { items, count, limit, truncated, next_cursor: None, window })?;
+            waited
         }
         Command::Trace { trace_id, since, attributes } => {
             let id = &trace_id;
@@ -405,7 +439,8 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                 // The server's query.max_window is smaller than the window
                 // asked for: fall back to one day.
                 Err(e) if e.is_window_too_large() && since != "24h" => {
-                    eprintln!("note: --since {since} is larger than the server allows; searching the last 24h");
+                    ctx.output
+                        .note(format!("--since {since} is larger than the server allows; searching the last 24h"));
                     get("24h".into()).await?
                 }
                 r => r?,
@@ -476,37 +511,45 @@ async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
                 .ok_or_else(|| usage(format!("unknown level {l:?} (trace, debug, info, warn, error, fatal or 1-24)")))
         })
         .transpose()?;
-    let (win, order) = match a.around {
-        Some(t) => {
-            let d = chrono::TimeDelta::from_std(mallard_term::window::parse_duration(&a.window).map_err(usage)?)?;
-            (Window { from: t - d, to: t + d }, LogOrder::Asc)
-        }
-        None => (a.w.resolve(DEFAULT_WINDOW)?, LogOrder::Desc),
+    let resolve = || -> Result<(Window, LogOrder)> {
+        Ok(match a.around {
+            Some(t) => {
+                let d = chrono::TimeDelta::from_std(mallard_term::window::parse_duration(&a.window).map_err(usage)?)?;
+                (Window { from: t - d, to: t + d }, LogOrder::Asc)
+            }
+            None => (a.w.resolve(DEFAULT_WINDOW)?, LogOrder::Desc),
+        })
     };
-    let q = LogQuery {
+    let query = |win: Window, order: LogOrder| LogQuery {
         from: Some(win.from),
         to: if a.follow { None } else { Some(win.to) },
         since: None,
-        service: a.service,
+        service: a.service.clone(),
         min_severity,
-        q: a.query,
-        trace_id: a.trace,
+        q: a.query.clone(),
+        trace_id: a.trace.clone(),
         attributes: attrs(&a.attr),
         limit: Some(a.limit),
         order: Some(order),
     };
     if !a.follow {
-        let mut v = c.logs(&q).await?;
-        if order == LogOrder::Desc {
-            v.reverse(); // print oldest first, like a log file
-        }
+        // The window is resolved on every try: with --wait it moves along.
+        let fetch = || async {
+            let (win, order) = resolve()?;
+            let mut v = c.logs(&query(win, order)).await?;
+            if order == LogOrder::Desc {
+                v.reverse(); // print oldest first, like a log file
+            }
+            anyhow::Ok((win, v))
+        };
+        let ((win, v), waited) = until(&ctx.output, &a.wait, fetch, |(_, v)| !v.is_empty()).await?.split();
         let list = List::new(v).limit(Some(a.limit)).window(win);
         if ctx.output.text() {
             if !list.items.is_empty() {
                 ctx.out.line(&list.items.iter().map(log_line).collect::<Vec<_>>().join("\n"))?;
             }
             ctx.output.truncation_note(&list);
-            return Ok(());
+            return waited;
         }
         let items = list.items.iter().map(|r| log_json(r, ctx.output.raw)).collect::<Result<Vec<_>>>()?;
         let l = List {
@@ -517,15 +560,21 @@ async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
             next_cursor: None,
             window: list.window,
         };
-        return ctx.output.list(&l);
+        ctx.output.list(&l)?;
+        return waited;
     }
+    let (win, order) = resolve()?;
+    let q = query(win, order);
     // Start where --from/--since say; the first poll shows the newest
     // `--limit` records of that window, like `tail -n N -f`.
     let mut tail = LogTail::new(c.clone(), q, win.from);
+    let stop = Stop::new(a.for_.as_deref(), a.until_match.as_deref())?;
     // One Ctrl-C future for the whole loop, so a signal that arrives
-    // while a request is in flight is not lost.
+    // while a request is in flight is not lost. The same for --for.
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    let time_up = after(stop.for_.as_ref().map(|(_, d)| *d));
+    tokio::pin!(time_up);
     loop {
         tokio::select! {
             res = tail.poll() => match res {
@@ -537,15 +586,65 @@ async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
                             // A stream is NDJSON in json mode too.
                             ctx.output.record(&log_json(r, ctx.output.raw)?)?;
                         }
+                        if stop.matches(r) {
+                            return Ok(());
+                        }
                     }
                 }
                 Err(e) => eprintln!("{} {}", alert("poll failed:"), describe(&e, c.base_url(), &ctx.hints)),
             },
             _ = &mut ctrl_c => return Ok(()),
+            _ = &mut time_up => return stop.expired(),
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(2)) => {}
             _ = &mut ctrl_c => return Ok(()),
+            _ = &mut time_up => return stop.expired(),
+        }
+    }
+}
+
+/// Resolves after `d`, or never.
+async fn after(d: Option<Duration>) {
+    match d {
+        Some(d) => tokio::time::sleep(d).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// When `logs -f` stops by itself: `--for` and `--until-match`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stop {
+    /// `--for`, as typed, and how long.
+    for_: Option<(String, Duration)>,
+    /// `--until-match`, lowercased.
+    needle: Option<String>,
+}
+
+impl Stop {
+    fn new(for_: Option<&str>, until_match: Option<&str>) -> Result<Stop> {
+        let for_ = for_
+            .map(|f| mallard_term::window::parse_duration(f).map(|d| (f.to_string(), d)).map_err(usage))
+            .transpose()?;
+        Ok(Stop { for_, needle: until_match.map(str::to_lowercase) })
+    }
+
+    /// The record has the `--until-match` text in its body.
+    fn matches(&self, r: &LogRecord) -> bool {
+        self.needle.as_ref().is_some_and(|n| r.body.to_lowercase().contains(n.as_str()))
+    }
+
+    /// `--for` is over: fine, unless a match was asked for (exit 8).
+    fn expired(&self) -> Result<()> {
+        match (&self.needle, &self.for_) {
+            (Some(_), Some((f, _))) => Err(anyhow::Error::new(
+                Described::new(
+                    Kind::Unmet,
+                    format!("no log matched {:?} within {f}", self.needle.as_deref().unwrap_or_default()),
+                )
+                .hint("raise --for, or check the text and filters"),
+            )),
+            _ => Ok(()),
         }
     }
 }
@@ -593,6 +692,42 @@ mod tests {
         assert!(parse(&["logs", "--around", "10m", "--since", "1h"]).is_err(), "around or a window");
         assert!(parse(&["logs", "--around", "10m", "-f"]).is_err(), "around or follow");
         assert!(parse(&["logs", "--window", "30s"]).is_err(), "--window needs --around");
+    }
+
+    #[test]
+    fn follow_stops_by_itself() {
+        let Command::Logs(a) = parse(&["logs", "-f", "--for", "2m", "--until-match", "Ready"]).unwrap() else {
+            panic!()
+        };
+        let stop = Stop::new(a.for_.as_deref(), a.until_match.as_deref()).unwrap();
+        assert_eq!(stop.for_, Some(("2m".into(), Duration::from_secs(120))));
+        let mut r = record();
+        r.body = "server is READY now".into();
+        assert!(stop.matches(&r), "case-insensitive substring of the body");
+        assert!(!stop.matches(&record()));
+        let e = stop.expired().unwrap_err();
+        assert_eq!(mallard_term::error::exit_code(&Err(e)), 8, "--for over without a match");
+        let only_for = Stop::new(Some("1s"), None).unwrap();
+        assert!(only_for.expired().is_ok() && !only_for.matches(&r));
+        assert!(parse(&["logs", "--for", "1m"]).is_err(), "--for needs -f");
+        assert!(parse(&["logs", "-f", "--wait", "1m"]).is_err(), "-f or --wait");
+    }
+
+    fn record() -> LogRecord {
+        LogRecord {
+            time: Utc::now(),
+            observed_time: Utc::now(),
+            service_name: "checkout".into(),
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: "hi".into(),
+            trace_id: None,
+            span_id: None,
+            event_name: String::new(),
+            scope_name: String::new(),
+            attributes: Default::default(),
+            resource_attributes: Default::default(),
+        }
     }
 
     #[test]
