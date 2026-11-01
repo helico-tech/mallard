@@ -71,11 +71,26 @@ that talks HTTP only.
 - One flusher thread wakes every `flush_interval` or when `flush_rows` is
   reached. It appends all batches with DuckDB's Arrow appender in one
   transaction: one DuckLake snapshot per flush.
-- On failure the batches go back to the front of the buffer and the flush is
-  retried with exponential back-off (max 30 s). After 3 failures in a row
-  each batch is written on its own: a batch that fails while others succeed
-  (not a conflict) can never be written, so it is dropped, logged at `error`
-  and counted in `dropped_rows`; when every batch fails nothing is dropped.
+- A failed flush is either transient or permanent (`is_permanent` in
+  `store/writer.rs`):
+  - **Transient** (the default): the batches go back to the front of the
+    buffer and the flush is retried with exponential back-off (max 30 s),
+    never dropped. This covers every commit error (that is where Parquet
+    files and the catalog are written: object store, network, credentials,
+    catalog down) and append errors that name a transient cause (`IO Error`,
+    `HTTP Error`, connection, out of memory, interrupt, timeout, conflict).
+  - **Permanent**: any other error while appending to one table, i.e. the
+    batch does not fit that table (a column renamed, dropped or retyped by
+    hand, a missing table, a type mismatch, a panic in the conversion).
+    That table's batches are then written one by one: those that still fail
+    permanently are dropped, logged at `error` with the table and counted
+    in `dropped_rows` (`odl_dropped_rows_total{table}`). The other tables
+    are flushed right away, so one broken table does not block the others
+    or fill the buffer.
+  Appender errors often carry no DuckDB error type ("the column must exist
+  in the table"), so the rule lists the transient causes, not the permanent
+  ones. An unknown transient cause during an append could drop a batch;
+  storage errors happen at commit, which is never permanent.
   On shutdown the buffer is drained (3 attempts).
 - Durability: data is acknowledged when it is in memory. See
   [ADR 0003](adr/0003-ingest-durability.md) for why there is no queue or WAL,
@@ -134,6 +149,7 @@ cleanup are catalog-wide; in mallard the otel side owns them (ADR 0001).
 | failure | effect |
 |---|---|
 | object store / catalog unavailable | flushes fail and are retried; buffer fills; receivers return 429/`UNAVAILABLE`; exporters retry. Queries fail with 500. |
+| one table no longer accepts our rows (schema edited by hand) | that table's batches are dropped (`dropped_rows`, `error` log); other tables keep flushing. |
 | process killed (SIGKILL, OOM) | up to `flush_interval` of acknowledged data in memory is lost. |
 | SIGTERM / Ctrl-C | receivers stop accepting, buffer is flushed, maintenance stops, exit. |
 | query too slow | interrupted after `query.timeout` → 504. |

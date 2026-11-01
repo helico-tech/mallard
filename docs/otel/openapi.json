@@ -1156,7 +1156,7 @@
           "dropped_rows": {
             "type": "integer",
             "format": "int64",
-            "description": "Rows dropped because they could not be written while other data\ncould (details in the server log).",
+            "description": "Rows dropped because their table refused them with a permanent\nerror, e.g. a column changed by hand (details in the server log).",
             "minimum": 0
           },
           "flush_errors": {

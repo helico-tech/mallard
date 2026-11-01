@@ -77,10 +77,10 @@ impl Stats {
         *self.last_flush_error.lock().unwrap() = Some(msg);
     }
 
-    /// Rows that could not be written and were dropped.
-    pub fn dropped(&self, rows: u64) {
+    /// Rows of `table` that could not be written and were dropped.
+    pub fn dropped(&self, table: &'static str, rows: u64) {
         self.dropped_rows.fetch_add(rows, Relaxed);
-        metrics::counter!("odl_dropped_rows_total").increment(rows);
+        metrics::counter!("odl_dropped_rows_total", "table" => table).increment(rows);
     }
 
     pub fn maintenance(&self, info: MaintenanceInfo) {

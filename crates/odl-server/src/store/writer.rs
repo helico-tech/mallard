@@ -10,15 +10,18 @@
 //! are refused and receivers answer with a retryable error (HTTP 429 / gRPC
 //! UNAVAILABLE). OTLP exporters retry these with back-off.
 //!
-//! Failure: if a flush fails (e.g. object store down) the batches are put back
-//! and retried with exponential back-off. After [`ISOLATE_AFTER`] failures in
-//! a row, each batch is written on its own: when some batches succeed and
-//! another one keeps failing (not a conflict), that batch can never be
-//! written ("poison") and is dropped, logged and counted in `dropped_rows`,
-//! so it cannot block all later data. When every batch fails, the cause is
-//! the storage, and nothing is dropped. Data that was acknowledged but not
-//! yet flushed is lost only if the process dies hard
-//! (see docs/adr/0003-ingest-durability.md).
+//! Failure: a failed flush is classified ([`is_permanent`]).
+//! - Transient (storage, network, conflicts, commit; the default): the
+//!   batches are put back and retried with exponential back-off, never
+//!   dropped.
+//! - Permanent (appending to one table failed because the data does not fit
+//!   that table, e.g. a column type was changed by hand): that table's
+//!   batches are written one by one; those that still fail permanently are
+//!   dropped, logged and counted in `dropped_rows`. The other tables are
+//!   flushed right away, so one broken table cannot block every signal.
+//!
+//! Data that was acknowledged but not yet flushed is lost only if the process
+//! dies hard (see docs/adr/0003-ingest-durability.md).
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -36,9 +39,6 @@ use super::{CATALOG, Lake, schema::TableId};
 use crate::stats::Stats;
 
 const N: usize = TableId::ALL.len();
-
-/// Failed flushes in a row before batches are written one by one.
-const ISOLATE_AFTER: u32 = 3;
 
 #[derive(Default)]
 struct State {
@@ -174,34 +174,80 @@ fn batch_size(b: &RecordBatch) -> (u64, u64) {
     (b.num_rows() as u64, b.get_array_memory_size() as u64)
 }
 
-/// Append all batches in one transaction. A panic in the DuckDB or Arrow
-/// code is returned as an error, so the flusher thread keeps running.
-fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Result<()> {
-    catch_unwind(AssertUnwindSafe(|| write_tx(conn, schema, tables)))
-        .unwrap_or_else(|p| Err(anyhow::anyhow!("flush panicked: {}", panic_message(&*p))))
+/// A failed flush.
+#[derive(Debug)]
+struct FlushError {
+    /// The table being appended to; `None` when the transaction itself
+    /// failed (begin or commit).
+    table: Option<TableId>,
+    error: anyhow::Error,
 }
 
-fn write_tx(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+/// Message parts of errors that retrying can fix even while appending:
+/// storage, network, memory, interrupts, conflicts. Appender errors often
+/// carry no DuckDB error type ("the column must exist in the table"), so
+/// this is the list of exceptions, not of permanent errors.
+const TRANSIENT: &[&str] = &[
+    "IO Error",
+    "HTTP Error",
+    "Connection",
+    "connection",
+    "Out of Memory",
+    "out of memory",
+    "Interrupt",
+    "timeout",
+    "Timeout",
+    "conflict",
+    "Conflict",
+];
+
+/// True when retrying `e` cannot help: appending to one table failed
+/// (opening its appender or converting a batch to its columns), and not
+/// for a transient reason ([`TRANSIENT`]). Commit errors are never
+/// permanent: that is where data reaches the object store and catalog, so
+/// a storage outage never drops data.
+fn is_permanent(e: &FlushError) -> bool {
+    if e.table.is_none() {
+        return false;
+    }
+    let msg = format!("{:#}", e.error);
+    !TRANSIENT.iter().any(|t| msg.contains(t))
+}
+
+/// Append all batches in one transaction. A panic in the DuckDB or Arrow
+/// code is returned as an error, so the flusher thread keeps running.
+fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Result<(), FlushError> {
+    let tx_err = |error| FlushError { table: None, error };
+    let tx = conn.unchecked_transaction().map_err(|e| tx_err(e.into()))?;
     for id in TableId::ALL {
         let batches = &tables[id as usize];
         if batches.is_empty() {
             continue;
         }
-        let def = id.def();
-        let name = def.name;
-        // Append by column name, so a table that a newer version extended
-        // with extra columns (rolling upgrade) still accepts our batches.
-        let cols: Vec<&str> = def.columns.iter().map(|c| c.0).collect();
-        let mut app = conn
-            .appender_with_columns_to_catalog_and_db(name, CATALOG, schema, &cols)
-            .with_context(|| format!("opening appender for {name}"))?;
-        for b in batches {
-            app.append_record_batch(b.clone()).with_context(|| format!("appending to {name}"))?;
-        }
-        app.flush().with_context(|| format!("flushing appender for {name}"))?;
+        // On error `tx` is dropped, which rolls back.
+        catch_unwind(AssertUnwindSafe(|| append(conn, schema, id, batches)))
+            .unwrap_or_else(|p| Err(anyhow::anyhow!("appending to {} panicked: {}", id.def().name, panic_message(&*p))))
+            .map_err(|error| FlushError { table: Some(id), error })?;
     }
-    tx.commit().context("committing DuckLake snapshot")?;
+    catch_unwind(AssertUnwindSafe(|| tx.commit().map_err(anyhow::Error::from)))
+        .unwrap_or_else(|p| Err(anyhow::anyhow!("commit panicked: {}", panic_message(&*p))))
+        .context("committing DuckLake snapshot")
+        .map_err(tx_err)
+}
+
+fn append(conn: &Connection, schema: &str, id: TableId, batches: &[RecordBatch]) -> Result<()> {
+    let def = id.def();
+    let name = def.name;
+    // Append by column name, so a table that a newer version extended
+    // with extra columns (rolling upgrade) still accepts our batches.
+    let cols: Vec<&str> = def.columns.iter().map(|c| c.0).collect();
+    let mut app = conn
+        .appender_with_columns_to_catalog_and_db(name, CATALOG, schema, &cols)
+        .with_context(|| format!("opening appender for {name}"))?;
+    for b in batches {
+        app.append_record_batch(b.clone()).with_context(|| format!("appending to {name}"))?;
+    }
+    app.flush().with_context(|| format!("flushing appender for {name}"))?;
     Ok(())
 }
 
@@ -209,36 +255,34 @@ pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> &str {
     p.downcast_ref::<&str>().copied().or_else(|| p.downcast_ref::<String>().map(String::as_str)).unwrap_or("panic")
 }
 
-/// Write every batch in its own transaction. Batches that fail while others
-/// succeed are dropped (unless the error is a conflict); when nothing
-/// succeeds, everything is kept. Returns what is left and the rows written.
-fn write_isolated(conn: &Connection, schema: &str, taken: Taken, stats: &Stats) -> (Taken, u64) {
-    let mut left = Taken { tables: Default::default(), rows: 0, bytes: 0 };
-    let mut failed = Vec::new();
+/// `table` failed permanently: write its batches one by one, each in its own
+/// transaction. Batches that fail permanently again are dropped; batches
+/// that fail transiently stay in `taken`. Returns what is left and the rows
+/// written.
+fn isolate_table(conn: &Connection, schema: &str, mut taken: Taken, table: TableId, stats: &Stats) -> (Taken, u64) {
+    let i = table as usize;
+    let name = table.def().name;
     let mut written = 0u64;
-    for (i, batches) in taken.tables.into_iter().enumerate() {
-        for b in batches {
-            let mut one: [Vec<RecordBatch>; N] = Default::default();
-            one[i].push(b);
-            match write(conn, schema, &one) {
-                Ok(()) => written += one[i][0].num_rows() as u64,
-                Err(e) => failed.push((i, one[i].pop().expect("one batch"), e)),
+    for b in std::mem::take(&mut taken.tables[i]) {
+        let (rows, bytes) = batch_size(&b);
+        let mut one: [Vec<RecordBatch>; N] = Default::default();
+        one[i].push(b);
+        match write(conn, schema, &one) {
+            Ok(()) => written += rows,
+            Err(e) if is_permanent(&e) => {
+                let msg = super::redact(&format!("{:#}", e.error));
+                error!(table = name, rows, error = %msg, "dropping a batch that cannot be written to this table");
+                stats.dropped(name, rows);
+            }
+            Err(_) => {
+                taken.tables[i].append(&mut one[i]);
+                continue;
             }
         }
+        taken.rows -= rows;
+        taken.bytes -= bytes;
     }
-    for (i, b, e) in failed {
-        let (rows, bytes) = batch_size(&b);
-        let msg = super::redact(&format!("{e:#}"));
-        if written > 0 && !super::is_conflict(&e) {
-            error!(table = TableId::ALL[i].def().name, rows, error = %msg, "dropping a batch that cannot be written");
-            stats.dropped(rows);
-        } else {
-            left.tables[i].push(b);
-            left.rows += rows;
-            left.bytes += bytes;
-        }
-    }
-    (left, written)
+    (taken, written)
 }
 
 pub struct Flusher {
@@ -276,8 +320,11 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
     let mut failures: u32 = 0;
     // Attempts after shutdown started (failures before that don't count).
     let mut shutdown_attempts: u32 = 0;
+    // How long to wait for more data; zero right after a partial flush.
+    let mut wait = interval;
     loop {
-        let (taken, shutdown) = buf.take(interval);
+        let (taken, shutdown) = buf.take(wait);
+        wait = interval;
         let (rows, bytes) = (taken.rows, taken.bytes);
         if rows == 0 {
             buf.settle(bytes, None);
@@ -304,28 +351,39 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
             }
             Err(e) => {
                 failures += 1;
-                let msg = super::redact(&format!("{e:#}"));
-                if super::is_conflict(&e) {
-                    // e.g. retention or another replica touched the table; retried.
-                    warn!(rows, failures, error = %msg, "flush conflicted with another transaction; will retry");
-                } else {
-                    error!(rows, failures, error = %msg, "flush failed; will retry");
-                }
-                stats.flush_err(msg);
-                let back = if failures >= ISOLATE_AFTER {
-                    let (left, written) = write_isolated(&conn, &schema, taken, &stats);
-                    if written > 0 {
-                        stats.flush_ok(written, t0.elapsed().as_secs_f64() * 1000.0);
+                let msg = super::redact(&format!("{:#}", e.error));
+                stats.flush_err(msg.clone());
+                let back = match e.table.filter(|_| is_permanent(&e)) {
+                    Some(t) => {
+                        error!(
+                            table = t.def().name,
+                            rows,
+                            error = %msg,
+                            "flush failed with a permanent error for one table; writing its batches one by one"
+                        );
+                        let (left, written) = isolate_table(&conn, &schema, taken, t, &stats);
+                        if written > 0 {
+                            stats.flush_ok(written, t0.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        left
                     }
-                    left
-                } else {
-                    taken
+                    None => {
+                        if super::is_conflict(&e.error) {
+                            // e.g. retention or another replica touched the table; retried.
+                            warn!(rows, failures, error = %msg, "flush conflicted with another transaction; will retry");
+                        } else {
+                            error!(rows, failures, error = %msg, "flush failed; will retry");
+                        }
+                        taken
+                    }
                 };
                 let progress = back.rows < rows;
                 buf.settle(bytes, (back.rows > 0).then_some(back));
                 if progress {
-                    // Some batches were written or dropped: try the rest right away.
+                    // Some batches were written or dropped: flush the rest
+                    // (the other tables) without waiting.
                     failures = 0;
+                    wait = Duration::ZERO;
                     continue;
                 }
                 if shutdown {
@@ -376,42 +434,130 @@ mod tests {
         assert_eq!(st.tables[TableId::Logs as usize].len(), 2);
     }
 
-    /// A batch that can never be written must not block later data.
-    #[test]
-    fn poison_batch_is_dropped_and_the_rest_written() {
+    fn lake(dir: &tempfile::TempDir) -> Lake {
+        let mut cfg = crate::config::Config::default();
+        cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
+        cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
+        Lake::open(&cfg).unwrap()
+    }
+
+    fn logs(n: usize) -> Vec<(TableId, RecordBatch)> {
         use opentelemetry_proto::tonic::{
             collector::logs::v1::ExportLogsServiceRequest,
             logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
         };
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs { log_records: vec![LogRecord::default(); n], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        crate::otlp::convert::convert_logs(&req).batches
+    }
+
+    fn spans(n: u8) -> Vec<(TableId, RecordBatch)> {
+        use opentelemetry_proto::tonic::{
+            collector::trace::v1::ExportTraceServiceRequest,
+            trace::v1::{ResourceSpans, ScopeSpans, Span},
+        };
+        let spans =
+            (1..=n).map(|i| Span { trace_id: vec![1; 16], span_id: vec![i; 8], ..Default::default() }).collect();
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans { spans, ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        crate::otlp::convert::convert_traces(&req).batches
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    }
+
+    /// Poll `done` for up to 30 s.
+    fn wait_for(what: impl Fn() -> String, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < deadline, "{}", what());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// A batch that can never be written must not block later data.
+    #[test]
+    fn poison_batch_is_dropped_and_the_rest_written() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = crate::config::Config::default();
-        cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
-        cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
-        let lake = Lake::open(&cfg).unwrap();
+        let lake = lake(&dir);
         let stats = Arc::new(Stats::default());
         let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
         // Wrong columns for `logs`: the appender always refuses it.
         buf.push(vec![(TableId::Logs, b(10))]).unwrap();
-        let req = ExportLogsServiceRequest {
-            resource_logs: vec![ResourceLogs {
-                scope_logs: vec![ScopeLogs { log_records: vec![LogRecord::default(); 3], ..Default::default() }],
-                ..Default::default()
-            }],
-        };
-        buf.push(crate::otlp::convert::convert_logs(&req).batches).unwrap();
+        buf.push(logs(3)).unwrap();
         let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
         let conn = lake.connect().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let n: i64 = conn.query_row("SELECT count(*) FROM logs", [], |r| r.get(0)).unwrap();
-            if n == 3 && stats.ingest(0).dropped_rows == 10 {
-                break;
-            }
-            assert!(Instant::now() < deadline, "logs={n}, dropped={}", stats.ingest(0).dropped_rows);
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        wait_for(
+            || format!("logs={}, dropped={}", count(&conn, "logs"), stats.ingest(0).dropped_rows),
+            || count(&conn, "logs") == 3 && stats.ingest(0).dropped_rows == 10,
+        );
         flusher.stop();
         assert_eq!(buf.state.lock().unwrap().rows, 0, "nothing left behind");
+    }
+
+    /// A table that no longer accepts our rows (here: a column renamed by
+    /// hand) loses its batches; the other tables keep flushing at full speed.
+    #[test]
+    fn a_broken_table_does_not_block_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let conn = lake.connect().unwrap();
+        conn.execute_batch("ALTER TABLE logs RENAME COLUMN body TO body_by_hand").unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
+        let t0 = Instant::now();
+        for round in 1..=3u8 {
+            buf.push(logs(4).into_iter().chain(spans(round)).collect()).unwrap();
+            let want = (1..=round as i64).sum::<i64>();
+            wait_for(
+                || format!("round {round}: spans={}, dropped={}", count(&conn, "spans"), stats.ingest(0).dropped_rows),
+                || count(&conn, "spans") == want && stats.ingest(0).dropped_rows == 4 * round as u64,
+            );
+        }
+        // No back-off between rounds: a permanent error is handled at once.
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert_eq!(count(&conn, "logs"), 0);
+        flusher.stop();
+        assert_eq!(buf.state.lock().unwrap().rows, 0, "nothing left behind");
+    }
+
+    #[test]
+    fn classifies_flush_errors() {
+        let e = |table: Option<TableId>, msg: &str| FlushError { table, error: anyhow::anyhow!(msg.to_string()) };
+        let logs = Some(TableId::Logs);
+        for msg in [
+            "Conversion Error: Could not convert string 'x' to INT32",
+            "Binder Error: Referenced column \"body\" not found",
+            "Catalog Error: Table with name logs does not exist!",
+            "Invalid Input Error: expected 14 columns",
+            "appending to logs panicked: index out of bounds",
+            "opening appender for logs: the column must exist in the table",
+            "appending to logs: incorrect column count in AppendDataChunk, expected 14, got 1",
+        ] {
+            assert!(is_permanent(&e(logs, msg)), "{msg}");
+        }
+        for msg in [
+            "IO Error: Could not write file \"s3://bucket/x.parquet\"",
+            "HTTP Error: HTTP PUT error on 's3://bucket/x.parquet' (HTTP 503)",
+            "Out of Memory Error: failed to allocate",
+            "IO Error: Unable to connect to Postgres at localhost:5432: Connection refused",
+            "TransactionContext Error: Catalog write-write conflict on alter with table \"logs\"",
+            "Invalid Input Error: Transaction conflict: cannot add data to table logs",
+        ] {
+            assert!(!is_permanent(&e(logs, msg)), "{msg}");
+        }
+        // Commit errors are never pinned on a table: always retried.
+        assert!(!is_permanent(&e(None, "Conversion Error: during commit")));
     }
 
     #[test]
