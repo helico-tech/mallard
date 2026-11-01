@@ -386,7 +386,7 @@ impl Embedded {
                 .take(8)
                 .map(|(i, s)| {
                     let vals: Vec<f64> = s.points.iter().map(|p| p.value).collect();
-                    let (mn, mx) = vals.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+                    let (mn, mx) = crate::fmt::min_max(&vals);
                     let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 };
                     let last = vals.last().copied().unwrap_or(0.0);
                     let color = theme::SERIES.get(i).copied().unwrap_or(theme::DIM);

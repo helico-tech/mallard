@@ -105,21 +105,16 @@ pub fn error_rate_color(r: f64) -> Color {
 
 /// Short severity label and color for an OTLP severity number.
 pub fn severity(n: u8, text: &str) -> (&'static str, Color) {
-    match n {
-        1..=4 => ("TRACE", MUTED),
-        5..=8 => ("DEBUG", DIM),
-        9..=12 => ("INFO", CYAN),
-        13..=16 => ("WARN", WARN),
-        17..=20 => ("ERROR", ERR),
-        21..=24 => ("FATAL", Color::Rgb(255, 80, 110)),
-        _ => match text.to_ascii_uppercase().as_str() {
-            t if t.starts_with("ERR") => ("ERROR", ERR),
-            t if t.starts_with("WARN") => ("WARN", WARN),
-            t if t.starts_with("INFO") => ("INFO", CYAN),
-            t if t.starts_with("DEBUG") => ("DEBUG", DIM),
-            _ => ("-", MUTED),
-        },
-    }
+    let name = crate::severity::name(n, text);
+    let color = match name {
+        "DEBUG" => DIM,
+        "INFO" => CYAN,
+        "WARN" => WARN,
+        "ERROR" => ERR,
+        "FATAL" => Color::Rgb(255, 80, 110),
+        _ => MUTED,
+    };
+    (name, color)
 }
 
 /// Badge style: dark text on a colored background.

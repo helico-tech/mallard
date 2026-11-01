@@ -186,7 +186,7 @@ impl Embedded {
             errors_only: Some(f.errors_only),
             min_duration_ms: f.min_ms,
             max_duration_ms: f.max_ms,
-            attributes: (!f.attrs.is_empty()).then(|| f.attrs.join(",")),
+            attributes: crate::attrs(&f.attrs),
             limit: Some(200),
             ..Default::default()
         };

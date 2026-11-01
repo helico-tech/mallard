@@ -72,18 +72,6 @@ pub fn parse_ms(s: &str) -> Option<f64> {
     Some(n * mult)
 }
 
-pub fn parse_level(s: &str) -> Option<u8> {
-    Some(match s.to_ascii_lowercase().as_str() {
-        "trace" => 1,
-        "debug" => 5,
-        "info" => 9,
-        "warn" | "warning" => 13,
-        "error" | "err" => 17,
-        "fatal" => 21,
-        n => n.parse::<u8>().ok().filter(|v| *v <= 24)?,
-    })
-}
-
 pub fn parse_trace_filter(s: &str) -> Result<TraceFilter, String> {
     let mut f = TraceFilter::default();
     for tok in tokenize(s) {
@@ -117,7 +105,7 @@ pub fn parse_log_filter(s: &str) -> Result<LogFilter, String> {
             Some((k, v)) if !k.is_empty() => match k {
                 "service" | "svc" | "s" => f.service = Some(v.to_string()),
                 "level" | "lvl" | "severity" | "sev" => {
-                    f.level = Some(parse_level(v).ok_or(format!("unknown level {v:?}"))?)
+                    f.level = Some(crate::severity::parse(v).ok_or(format!("unknown level {v:?}"))?)
                 }
                 "trace" | "trace_id" => f.trace = Some(v.to_string()),
                 _ => f.attrs.push(format!("{k}={v}")),

@@ -22,7 +22,7 @@ use crate::{
         Embedded, Outcome, PromptTarget, due,
         loader::{Data, Kind},
         nav,
-        query::{LogFilter, parse_level, parse_log_filter, tokenize},
+        query::{LogFilter, parse_log_filter, tokenize},
         theme, widgets,
     },
 };
@@ -91,7 +91,7 @@ impl Default for State {
 pub fn cycle_level(query: &str) -> (String, Option<u8>) {
     let toks = tokenize(query);
     let is_level = |t: &str| t.split_once('=').is_some_and(|(k, _)| matches!(k, "level" | "lvl" | "severity" | "sev"));
-    let cur = toks.iter().find(|t| is_level(t)).and_then(|t| parse_level(t.split_once('=').unwrap().1));
+    let cur = toks.iter().find(|t| is_level(t)).and_then(|t| crate::severity::parse(t.split_once('=').unwrap().1));
     let next = match cur {
         None => Some(("info", 9)),
         Some(n) if n < 13 => Some(("warn", 13)),
@@ -134,7 +134,7 @@ impl State {
             min_severity: self.filter.level,
             q: self.filter.text.clone(),
             trace_id: self.filter.trace.clone(),
-            attributes: (!self.filter.attrs.is_empty()).then(|| self.filter.attrs.join(",")),
+            attributes: crate::attrs(&self.filter.attrs),
             ..Default::default()
         }
     }

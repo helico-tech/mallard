@@ -10,18 +10,9 @@ use ratatui::{
 };
 
 use crate::{
-    fmt::{bytes, compact, ms},
+    fmt::{bytes, compact, ms, uptime},
     tui::{Embedded, theme, widgets},
 };
-
-fn uptime(s: u64) -> String {
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m {}s", s / 60, s % 60),
-        3600..86400 => format!("{}h {}m", s / 3600, (s % 3600) / 60),
-        _ => format!("{}d {}h", s / 86400, (s % 86400) / 3600),
-    }
-}
 
 impl Embedded {
     pub(crate) fn draw_status(&mut self, f: &mut Frame, area: Rect) {

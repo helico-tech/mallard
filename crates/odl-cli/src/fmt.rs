@@ -201,7 +201,7 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
     put!(
         out,
         "uptime {}   catalog {}   data {}   snapshot {}",
-        humanize_secs(s.uptime_secs),
+        uptime(s.uptime_secs),
         clean(&s.storage.catalog_type).cyan(),
         clean(&s.storage.data_path).cyan(),
         s.storage.snapshot_id
@@ -258,13 +258,19 @@ pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
     out
 }
 
-fn humanize_secs(s: u64) -> String {
+/// Server uptime, e.g. `5m 3s`, `2h 10m`, `3d 4h`.
+pub(crate) fn uptime(s: u64) -> String {
     match s {
         0..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        3600..86400 => format!("{}h{}m", s / 3600, (s % 3600) / 60),
-        _ => format!("{}d{}h", s / 86400, (s % 86400) / 3600),
+        60..3600 => format!("{}m {}s", s / 60, s % 60),
+        3600..86400 => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+        _ => format!("{}d {}h", s / 86400, (s % 86400) / 3600),
     }
+}
+
+/// Smallest and largest value (`(MAX, MIN)` when empty).
+pub(crate) fn min_max(v: &[f64]) -> (f64, f64) {
+    v.iter().fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)))
 }
 
 pub(crate) fn services_text(v: &[ServiceSummary]) -> String {
@@ -377,27 +383,12 @@ fn fmt_attrs(a: &Attributes) -> String {
 }
 
 fn severity_label(n: u8, text: &str) -> String {
-    let text = clean(text);
-    let name = match n {
-        0 => {
-            if text.is_empty() {
-                "-"
-            } else {
-                &text
-            }
-        }
-        1..=4 => "TRACE",
-        5..=8 => "DEBUG",
-        9..=12 => "INFO",
-        13..=16 => "WARN",
-        17..=20 => "ERROR",
-        _ => "FATAL",
-    };
+    let name = crate::severity::name(n, text);
     let padded = format!("{name:<5}");
-    match n {
-        17.. => padded.red().bold().to_string(),
-        13..=16 => padded.yellow().to_string(),
-        9..=12 => padded.green().to_string(),
+    match name {
+        "ERROR" | "FATAL" => padded.red().bold().to_string(),
+        "WARN" => padded.yellow().to_string(),
+        "INFO" => padded.green().to_string(),
         _ => padded.dimmed().to_string(),
     }
 }
@@ -437,7 +428,7 @@ pub(crate) fn metrics_text(v: &[MetricInfo]) -> String {
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn sparkline(vals: &[f64]) -> String {
-    let (lo, hi) = vals.iter().fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+    let (lo, hi) = min_max(vals);
     vals.iter()
         .map(|v| if hi > lo { SPARK[(((v - lo) / (hi - lo)) * 7.0).round() as usize] } else { SPARK[3] })
         .collect()
@@ -465,7 +456,7 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
             continue;
         };
         let label = if s.labels.is_empty() { "(all)".to_string() } else { fmt_attrs(&s.labels) };
-        let (min, max) = vals.iter().fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+        let (min, max) = min_max(&vals);
         let avg = vals.iter().sum::<f64>() / vals.len() as f64;
         t.add_row(vec![
             Cell::new(label),

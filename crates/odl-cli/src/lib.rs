@@ -4,6 +4,7 @@
 //! - [`tui::Embedded`]: the TUI as a component without terminal setup.
 
 mod fmt;
+mod severity;
 pub mod tui;
 
 /// For the `odl` binary.
@@ -180,23 +181,9 @@ impl Win {
     }
 }
 
-fn attrs(a: &[String]) -> Option<String> {
+/// Attribute filters `k=v` as the API takes them: comma separated.
+pub(crate) fn attrs(a: &[String]) -> Option<String> {
     (!a.is_empty()).then(|| a.join(","))
-}
-
-fn severity(level: &str) -> Result<u8> {
-    Ok(match level.to_ascii_lowercase().as_str() {
-        "trace" => 1,
-        "debug" => 5,
-        "info" => 9,
-        "warn" | "warning" => 13,
-        "error" => 17,
-        "fatal" => 21,
-        n => match n.parse::<u8>() {
-            Ok(v) if v <= 24 => v,
-            _ => bail!("unknown level {level:?}"),
-        },
-    })
 }
 
 /// Print `v` as pretty JSON or as the text `text` makes of it.
@@ -277,7 +264,10 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             print(out, &t, |t| trace_lines(t, attributes).join("\n"))
         }
         Cmd::Logs { w, service, level, query, trace, attr, limit, follow } => {
-            let min_severity = level.as_deref().map(severity).transpose()?;
+            let min_severity = level
+                .as_deref()
+                .map(|l| severity::parse(l).ok_or_else(|| anyhow::anyhow!("unknown level {l:?}")))
+                .transpose()?;
             let (from, to, since) = w.parts();
             let q = LogQuery {
                 from,
