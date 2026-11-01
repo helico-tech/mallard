@@ -34,6 +34,8 @@ pub const MAX_BUNDLE_SIZE: usize = 512 * 1024 * 1024;
 pub const MAX_ENTRY_SIZE: u64 = 64 * 1024 * 1024;
 /// Max size of manifest.json.
 pub const MAX_MANIFEST_SIZE: u64 = 16 * 1024 * 1024;
+/// Bundles assembled at the same time; more wait.
+const MAX_CONCURRENT_ASSEMBLIES: usize = 2;
 /// Max distinct minified files looked up per event.
 pub const MAX_REFS_PER_EVENT: usize = 50;
 
@@ -152,7 +154,13 @@ impl AssembleResponse {
     }
 }
 
-type ParsedMap = Arc<ResolvedSourceMap>;
+/// A parsed map with its approximate size in memory, for the cache budget.
+struct CachedMap {
+    map: ResolvedSourceMap,
+    bytes: usize,
+}
+
+type ParsedMap = Arc<CachedMap>;
 
 pub struct SourceMaps {
     storage: Option<Storage>,
@@ -164,6 +172,8 @@ pub struct SourceMaps {
     lookups: Cache<(u32, String), Option<ArtifactLocation>>,
     /// Checksums currently being assembled.
     assembling: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Bounds concurrent assemblies (each holds up to MAX_BUNDLE_SIZE).
+    assembly_slots: tokio::sync::Semaphore,
 }
 
 impl SourceMaps {
@@ -178,15 +188,12 @@ impl SourceMaps {
                 .build(),
             maps: Cache::builder()
                 .max_capacity(budget / 2)
-                // A parsed map costs roughly 4x its token count in bytes; we
-                // only know the source size cheaply, so weigh by tokens.
-                .weigher(|_k: &(String, String), m: &ParsedMap| {
-                    (m.map.get_token_count() as usize * 24 + 1024).try_into().unwrap_or(u32::MAX)
-                })
+                .weigher(|_k: &(String, String), m: &ParsedMap| m.bytes.try_into().unwrap_or(u32::MAX))
                 .time_to_idle(Duration::from_secs(3600))
                 .build(),
             lookups: Cache::builder().max_capacity(50_000).time_to_live(Duration::from_secs(60)).build(),
             assembling: Default::default(),
+            assembly_slots: tokio::sync::Semaphore::new(MAX_CONCURRENT_ASSEMBLIES),
         }
     }
 
@@ -257,6 +264,7 @@ impl SourceMaps {
         }
         // Removed on drop, also when the client disconnects mid-assembly.
         let _guard = AssemblingGuard { set: self.assembling.clone(), checksum: req.checksum.clone() };
+        let _slot = self.assembly_slots.acquire().await.map_err(anyhow::Error::from)?;
         // The protocol reports assembly failures in the body (state "error").
         match self.do_assemble(db, storage, &req, project_ids, &object_key).await {
             Ok(()) => Ok(AssembleResponse::state("ok")),
@@ -280,29 +288,31 @@ impl SourceMaps {
         object_key: &str,
     ) -> Result<(), SourcemapError> {
         let mut data = Vec::new();
-        let mut hasher = Sha1::new();
         for c in &req.chunks {
             let chunk = storage
                 .get(&format!("chunks/{c}"))
                 .await?
                 .ok_or_else(|| bad_request("Not all chunks available for assembling"))?;
-            hasher.update(&chunk);
             data.extend_from_slice(&chunk);
             if data.len() > MAX_BUNDLE_SIZE {
                 return Err(bad_request("bundle is too large"));
             }
         }
-        if hex::encode(hasher.finalize()) != req.checksum {
-            return Err(bad_request("Reported checksum mismatch"));
-        }
-        let zip_bytes = Bytes::from(bundle_zip(&data).to_vec());
-        let (files, m_release, m_dist) = {
-            let z = zip_bytes.clone();
-            tokio::task::spawn_blocking(move || index_bundle(&z))
-                .await
-                .map_err(anyhow::Error::from)?
-                .map_err(|e| bad_request(format!("{e:#}")))?
-        };
+        // Hashing and reading the zip are CPU work on up to 512 MiB.
+        let data = Bytes::from(data);
+        let checksum = req.checksum.clone();
+        let (zip_bytes, index) = tokio::task::spawn_blocking(move || {
+            if sha1_hex(&data) != checksum {
+                return Err(bad_request("Reported checksum mismatch"));
+            }
+            // A view into `data`, not a copy.
+            let zip = data.slice(data.len() - bundle_zip(&data).len()..);
+            let index = index_bundle(&zip).map_err(|e| bad_request(format!("{e:#}")))?;
+            Ok((zip, index))
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
+        let (files, m_release, m_dist) = index;
         let release = req.version.clone().filter(|v| v != "undefined" && !v.is_empty()).or(m_release);
         let dist = req.dist.clone().or(m_dist);
         if files.iter().all(|f| f.debug_id.is_none()) && release.is_none() {
@@ -421,7 +431,7 @@ impl SourceMaps {
         project_id: u32,
         event: &Value,
         refs: Vec<SourceMapRef>,
-    ) -> HashMap<String, ParsedMap> {
+    ) -> HashMap<String, Arc<ResolvedSourceMap>> {
         let mut out = HashMap::new();
         let release = event.get("release").and_then(Value::as_str);
         let dist = event.get("dist").and_then(Value::as_str);
@@ -431,7 +441,7 @@ impl SourceMaps {
             {
                 // The map url depends on the frame's origin (`~/x.map`), so
                 // it is set per event on a cheap clone of the cached map.
-                let mut per_event = (*m).clone();
+                let mut per_event = m.map.clone();
                 per_event.map_url = map_url_for(loc.map_url.as_deref(), &r.abs_path);
                 out.insert(r.abs_path.clone(), Arc::new(per_event));
             }
@@ -475,18 +485,19 @@ fn map_url_for(map_url: Option<&str>, abs_path: &str) -> String {
     }
 }
 
-fn parse_from_bundle(zip_bytes: &Bytes, loc: &ArtifactLocation, how: &'static str) -> Result<ResolvedSourceMap> {
+fn parse_from_bundle(zip_bytes: &Bytes, loc: &ArtifactLocation, how: &'static str) -> Result<CachedMap> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..]))?;
     let map_bytes = read_entry(&mut zip, &loc.map_path)?;
     let map = Arc::new(symbolicate::parse_sourcemap(&map_bytes)?);
     let minified = match &loc.minified_path {
-        Some(p) => read_entry(&mut zip, p)
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok())
-            .map(|s| Arc::new(SourceView::new(Arc::from(s)))),
+        Some(p) => read_entry(&mut zip, p).ok().and_then(|b| String::from_utf8(b).ok()),
         None => None,
     };
-    Ok(ResolvedSourceMap { map, minified, map_url: String::new(), resolved_with: how })
+    // The parsed map keeps names and sourcesContent (about the map's size)
+    // plus decoded tokens; the minified source is kept whole.
+    let bytes = map_bytes.len() + map.get_token_count() as usize * 24 + minified.as_ref().map_or(0, String::len);
+    let minified = minified.map(|s| Arc::new(SourceView::new(Arc::from(s))));
+    Ok(CachedMap { map: ResolvedSourceMap { map, minified, map_url: String::new(), resolved_with: how }, bytes })
 }
 
 #[cfg(test)]
