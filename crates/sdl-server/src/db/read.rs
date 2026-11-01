@@ -26,14 +26,23 @@ pub struct Window {
     pub end: DateTime<Utc>,
 }
 
+/// A `since` value that is not a usable window.
+#[derive(Debug, thiserror::Error)]
+pub enum WindowError {
+    #[error("invalid duration {0:?}: {1}")]
+    Invalid(String, humantime::DurationError),
+    #[error("duration {0:?} is too large")]
+    TooLarge(String),
+}
+
 impl Window {
-    pub fn parse(since: Option<&str>, default: &str, now: DateTime<Utc>) -> Result<Window, String> {
+    pub fn parse(since: Option<&str>, default: &str, now: DateTime<Utc>) -> Result<Window, WindowError> {
         let s = since.unwrap_or(default);
-        let d = humantime::parse_duration(s).map_err(|e| format!("invalid duration {s:?}: {e}"))?;
+        let d = humantime::parse_duration(s).map_err(|e| WindowError::Invalid(s.into(), e))?;
         let start = chrono::Duration::from_std(d)
             .ok()
             .and_then(|d| now.checked_sub_signed(d))
-            .ok_or_else(|| format!("duration {s:?} is too large"))?;
+            .ok_or_else(|| WindowError::TooLarge(s.into()))?;
         Ok(Window { start, end: now })
     }
     fn start_us(&self) -> i64 {

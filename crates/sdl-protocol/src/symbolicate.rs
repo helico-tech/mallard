@@ -32,8 +32,18 @@ pub struct ResolvedSourceMap {
     pub minified: Option<Arc<SourceView>>,
     /// URL (or bundle path) of the map; relative sources resolve against it.
     pub map_url: String,
-    /// "debug-id" or "release", reported in `frame.data.resolved_with`.
-    pub resolved_with: &'static str,
+    /// How the map was found, reported in `frame.data.resolved_with`.
+    pub resolved_with: ResolvedWith,
+}
+
+/// How a map was found for a minified file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolvedWith {
+    /// `debug-id`
+    DebugId,
+    /// `release` (release + dist + url)
+    Release,
 }
 
 impl std::fmt::Debug for ResolvedSourceMap {
@@ -293,7 +303,7 @@ mod tests {
             map: Arc::new(sm),
             minified: Some(Arc::new(SourceView::new(Arc::from(minified)))),
             map_url: "https://cdn.test/assets/main.js.map".into(),
-            resolved_with: "debug-id",
+            resolved_with: ResolvedWith::DebugId,
         }
     }
 

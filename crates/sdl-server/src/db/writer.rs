@@ -27,7 +27,7 @@ pub struct EventWrite {
     pub project_id: u32,
     pub event: ProcessedEvent,
     pub payload_json: String,
-    pub reply: oneshot::Sender<Result<(), String>>,
+    pub reply: oneshot::Sender<Result<(), Arc<anyhow::Error>>>,
 }
 
 /// Errors of writer commands that callers answer differently.
@@ -394,7 +394,7 @@ impl Writer {
                 tracing::error!(events = n, error = format!("{e:#}"), "batch failed");
             }
         }
-        let reply = result.map_err(|e| e.to_string());
+        let reply = result.map_err(Arc::new);
         for ev in batch {
             let _ = ev.reply.send(reply.clone());
         }

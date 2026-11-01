@@ -50,6 +50,12 @@ impl From<WriteError> for ApiErr {
     }
 }
 
+impl From<read::WindowError> for ApiErr {
+    fn from(e: read::WindowError) -> Self {
+        bad(e.to_string())
+    }
+}
+
 fn bad(msg: impl Into<String>) -> ApiErr {
     ApiErr(StatusCode::BAD_REQUEST, msg.into())
 }
@@ -243,7 +249,7 @@ async fn list_issues(State(state): S, Path(p): Path<String>, Query(q): Query<Iss
         .ok_or_else(|| bad("status must be unresolved, resolved, ignored or all"))?;
     let sort = read::IssueSort::parse(q.sort.as_deref())
         .ok_or_else(|| bad("sort must be last_seen, first_seen, count or users"))?;
-    let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
+    let w = Window::parse(q.since.as_deref(), "14d", Utc::now())?;
     Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w, status, sort)).await?))
 }
 
@@ -257,7 +263,7 @@ async fn get_issue(
 ) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
-    let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
+    let w = Window::parse(q.since.as_deref(), "14d", Utc::now())?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
@@ -275,7 +281,7 @@ async fn update_issue(
         .db
         .call(|reply| WriteCmd::SetStatus { project_id: pid, group_hash: g, status: req.status, reason: "user", reply })
         .await?;
-    let w = Window::parse(None, "14d", Utc::now()).map_err(bad)?;
+    let w = Window::parse(None, "14d", Utc::now())?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
@@ -303,7 +309,7 @@ async fn events_by_trace(State(state): S, Query(q): Query<TraceQuery>) -> ApiRes
         .as_deref()
         .map(|s| sdl_protocol::event::parse_span_id(s).ok_or_else(|| bad("span_id must be 16 hex characters")))
         .transpose()?;
-    let w = Window::parse(q.since.as_deref(), "30d", Utc::now()).map_err(bad)?;
+    let w = Window::parse(q.since.as_deref(), "30d", Utc::now())?;
     let limit = q.limit.unwrap_or(50);
     Ok(Json(state.db.read(move |c, ns| read::events_by_trace(c, ns, t, span, &w, limit)).await?))
 }
@@ -341,7 +347,7 @@ async fn project_stats(
     Query(q): Query<WindowQuery>,
 ) -> ApiResult<ProjectStats> {
     let pid = project(&state, &p)?.id;
-    let w = Window::parse(q.since.as_deref(), "24h", Utc::now()).map_err(bad)?;
+    let w = Window::parse(q.since.as_deref(), "24h", Utc::now())?;
     let interval_us = q
         .interval
         .as_deref()

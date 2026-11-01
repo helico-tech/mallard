@@ -16,7 +16,7 @@ use crate::storage::Storage;
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use moka::future::Cache;
-use sdl_protocol::symbolicate::{self, ResolvedSourceMap, SourceMapRef};
+use sdl_protocol::symbolicate::{self, ResolvedSourceMap, ResolvedWith, SourceMapRef};
 use serde::Deserialize;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
@@ -110,8 +110,15 @@ struct Manifest {
     dist: Option<String>,
 }
 
+/// What a bundle's `manifest.json` says.
+pub struct BundleIndex {
+    pub files: Vec<NewBundleFile>,
+    pub release: Option<String>,
+    pub dist: Option<String>,
+}
+
 /// Read `manifest.json` from a bundle zip into index rows.
-pub fn index_bundle(zip_bytes: &[u8]) -> Result<(Vec<NewBundleFile>, Option<String>, Option<String>)> {
+pub fn index_bundle(zip_bytes: &[u8]) -> Result<BundleIndex> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).context("bundle is not a zip file")?;
     let mut manifest = String::new();
     zip.by_name("manifest.json")
@@ -134,23 +141,33 @@ pub fn index_bundle(zip_bytes: &[u8]) -> Result<(Vec<NewBundleFile>, Option<Stri
         }
         files.push(NewBundleFile { debug_id, url: f.url, file_type, zip_path: path, sourcemap_url });
     }
-    Ok((files, m.release.filter(|r| r != "undefined" && !r.is_empty()), m.dist))
+    Ok(BundleIndex { files, release: m.release.filter(|r| r != "undefined" && !r.is_empty()), dist: m.dist })
+}
+
+/// `state` of an assemble response (sentry-cli polls until ok or error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssembleState {
+    Ok,
+    NotFound,
+    Assembling,
+    Error,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AssembleResponse {
-    pub state: &'static str,
+    pub state: AssembleState,
     #[serde(rename = "missingChunks")]
     pub missing_chunks: Vec<String>,
     pub detail: Option<String>,
 }
 
 impl AssembleResponse {
-    fn state(state: &'static str) -> Self {
+    fn state(state: AssembleState) -> Self {
         AssembleResponse { state, missing_chunks: vec![], detail: None }
     }
     fn error(detail: impl Into<String>) -> Self {
-        AssembleResponse { state: "error", missing_chunks: vec![], detail: Some(detail.into()) }
+        AssembleResponse { state: AssembleState::Error, missing_chunks: vec![], detail: Some(detail.into()) }
     }
 }
 
@@ -251,23 +268,20 @@ impl SourceMaps {
         }
         let already = db.caches.bundle_known(&req.checksum, &project_ids);
         if already {
-            return Ok(AssembleResponse::state("ok"));
+            return Ok(AssembleResponse::state(AssembleState::Ok));
         }
-        if !missing.is_empty() {
-            return Ok(AssembleResponse { state: "not_found", missing_chunks: missing, detail: None });
-        }
-        if req.chunks.is_empty() {
-            return Ok(AssembleResponse { state: "not_found", missing_chunks: vec![], detail: None });
+        if !missing.is_empty() || req.chunks.is_empty() {
+            return Ok(AssembleResponse { state: AssembleState::NotFound, missing_chunks: missing, detail: None });
         }
         if !self.assembling.lock().expect("lock").insert(req.checksum.clone()) {
-            return Ok(AssembleResponse::state("assembling"));
+            return Ok(AssembleResponse::state(AssembleState::Assembling));
         }
         // Removed on drop, also when the client disconnects mid-assembly.
         let _guard = AssemblingGuard { set: self.assembling.clone(), checksum: req.checksum.clone() };
         let _slot = self.assembly_slots.acquire().await.map_err(anyhow::Error::from)?;
         // The protocol reports assembly failures in the body (state "error").
         match self.do_assemble(db, storage, &req, project_ids, &object_key).await {
-            Ok(()) => Ok(AssembleResponse::state("ok")),
+            Ok(()) => Ok(AssembleResponse::state(AssembleState::Ok)),
             Err(SourcemapError::Internal(e)) => {
                 tracing::error!(checksum = %req.checksum, error = format!("{e:#}"), "assembling bundle failed");
                 Ok(AssembleResponse::error("internal error (see server log)"))
@@ -312,7 +326,7 @@ impl SourceMaps {
         })
         .await
         .map_err(anyhow::Error::from)??;
-        let (files, m_release, m_dist) = index;
+        let BundleIndex { files, release: m_release, dist: m_dist } = index;
         let release = req.version.clone().filter(|v| v != "undefined" && !v.is_empty()).or(m_release);
         let dist = req.dist.clone().or(m_dist);
         if files.iter().all(|f| f.debug_id.is_none()) && release.is_none() {
@@ -347,7 +361,7 @@ impl SourceMaps {
         r: &SourceMapRef,
         release: Option<&str>,
         dist: Option<&str>,
-    ) -> Option<(ArtifactLocation, &'static str)> {
+    ) -> Option<(ArtifactLocation, ResolvedWith)> {
         // Only ids of stored maps reach the database: debug ids come from
         // the client and are cheap to make up.
         if let Some(id) = r.debug_id
@@ -360,7 +374,7 @@ impl SourceMaps {
                 .try_get_with(key, db.read(move |c, ns| read::find_by_debug_id(c, ns, project_id, id)))
                 .await;
             match loc {
-                Ok(Some(l)) => return Some((l, "debug-id")),
+                Ok(Some(l)) => return Some((l, ResolvedWith::DebugId)),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = format!("{e:#}"), "debug id lookup failed"),
             }
@@ -380,7 +394,7 @@ impl SourceMaps {
             )
             .await;
         match loc {
-            Ok(l) => l.map(|l| (l, "release")),
+            Ok(l) => l.map(|l| (l, ResolvedWith::Release)),
             Err(e) => {
                 tracing::warn!(error = format!("{e:#}"), "release artifact lookup failed");
                 None
@@ -388,7 +402,7 @@ impl SourceMaps {
         }
     }
 
-    async fn load_map(&self, loc: &ArtifactLocation, resolved_with: &'static str) -> Option<ParsedMap> {
+    async fn load_map(&self, loc: &ArtifactLocation, resolved_with: ResolvedWith) -> Option<ParsedMap> {
         let storage = self.storage.as_ref()?;
         let key = (loc.bundle_id.clone(), loc.map_path.clone());
         let loc = loc.clone();
@@ -485,7 +499,7 @@ fn map_url_for(map_url: Option<&str>, abs_path: &str) -> String {
     }
 }
 
-fn parse_from_bundle(zip_bytes: &Bytes, loc: &ArtifactLocation, how: &'static str) -> Result<CachedMap> {
+fn parse_from_bundle(zip_bytes: &Bytes, loc: &ArtifactLocation, how: ResolvedWith) -> Result<CachedMap> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..]))?;
     let map_bytes = read_entry(&mut zip, &loc.map_path)?;
     let map = Arc::new(symbolicate::parse_sourcemap(&map_bytes)?);
@@ -554,7 +568,7 @@ mod tests {
             ],
             Some("1.0"),
         );
-        let (files, release, _) = index_bundle(bundle_zip(&b)).unwrap();
+        let BundleIndex { files, release, .. } = index_bundle(bundle_zip(&b)).unwrap();
         assert_eq!(release.as_deref(), Some("1.0"));
         assert_eq!(files.len(), 2);
         let js = files.iter().find(|f| f.file_type == "minified_source").unwrap();
@@ -579,7 +593,7 @@ mod tests {
         }
         let data = buf.into_inner();
         assert_eq!(&data[..4], b"SYSB");
-        let (files, _, _) = index_bundle(bundle_zip(&data)).unwrap();
+        let files = index_bundle(bundle_zip(&data)).unwrap().files;
         assert_eq!(files.len(), 1);
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bundle_zip(&data))).unwrap();
         assert_eq!(read_entry(&mut zip, "files/_/_/main.js").unwrap(), b"x");
