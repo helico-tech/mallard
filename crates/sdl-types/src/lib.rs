@@ -27,15 +27,37 @@ impl IssueStatus {
             IssueStatus::Ignored => "ignored",
         }
     }
-    pub fn parse(s: &str) -> Option<Self> {
+}
+
+impl std::fmt::Display for IssueStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for IssueStatus {
+    type Err = UnknownStatus;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "unresolved" => Some(Self::Unresolved),
-            "resolved" => Some(Self::Resolved),
-            "ignored" => Some(Self::Ignored),
-            _ => None,
+            "unresolved" => Ok(Self::Unresolved),
+            "resolved" => Ok(Self::Resolved),
+            "ignored" => Ok(Self::Ignored),
+            _ => Err(UnknownStatus(s.to_string())),
         }
     }
 }
+
+/// A string that is not an [`IssueStatus`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownStatus(pub String);
+
+impl std::fmt::Display for UnknownStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown issue status {:?} (unresolved, resolved or ignored)", self.0)
+    }
+}
+
+impl std::error::Error for UnknownStatus {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -296,4 +318,17 @@ pub struct WindowQuery {
     /// Bucket size for time series, e.g. `1h` (default: window / 24).
     #[serde(default)]
     pub interval: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_status_round_trips() {
+        for s in [IssueStatus::Unresolved, IssueStatus::Resolved, IssueStatus::Ignored] {
+            assert_eq!(s.to_string().parse::<IssueStatus>(), Ok(s));
+        }
+        assert_eq!("all".parse::<IssueStatus>(), Err(UnknownStatus("all".into())));
+    }
 }

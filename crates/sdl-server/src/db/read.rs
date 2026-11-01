@@ -72,14 +72,70 @@ fn trends(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, groups: &[u64
     Ok(out)
 }
 
-pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, w: &Window) -> Result<IssueList> {
-    let status = q.status.clone().unwrap_or_else(|| "unresolved".into());
-    let sort = match q.sort.as_deref() {
-        Some("first_seen") => "first_us",
-        Some("count") => "cnt",
-        Some("users") => "users",
-        _ => "last_us",
-    };
+/// `status` filter of the issue list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    All,
+    Only(IssueStatus),
+}
+
+impl StatusFilter {
+    /// `None` (the default) means unresolved issues.
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s {
+            None => Some(Self::Only(IssueStatus::Unresolved)),
+            Some("all") => Some(Self::All),
+            Some(s) => s.parse().ok().map(Self::Only),
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Only(s) => s.as_str(),
+        }
+    }
+}
+
+/// `sort` of the issue list (always descending).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueSort {
+    LastSeen,
+    FirstSeen,
+    Count,
+    Users,
+}
+
+impl IssueSort {
+    /// `None` (the default) means `last_seen`.
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s {
+            None | Some("last_seen") => Some(Self::LastSeen),
+            Some("first_seen") => Some(Self::FirstSeen),
+            Some("count") => Some(Self::Count),
+            Some("users") => Some(Self::Users),
+            Some(_) => None,
+        }
+    }
+    fn column(self) -> &'static str {
+        match self {
+            Self::LastSeen => "last_us",
+            Self::FirstSeen => "first_us",
+            Self::Count => "cnt",
+            Self::Users => "users",
+        }
+    }
+}
+
+pub fn list_issues(
+    conn: &Connection,
+    ns: &Ns,
+    project_id: u32,
+    q: &IssueQuery,
+    w: &Window,
+    status: StatusFilter,
+    sort: IssueSort,
+) -> Result<IssueList> {
+    let status = status.as_str();
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
 
     let mut filters = String::new();
@@ -96,13 +152,14 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
     // Phase 1: rank issues with cheap aggregates only (count, max). Distinct
     // users are only computed for all groups when sorting by them, and then
     // approximately.
-    let users_expr = if sort == "users" { "approx_count_distinct(user_key)" } else { "0" };
+    let users_expr = if sort == IssueSort::Users { "approx_count_distinct(user_key)" } else { "0" };
+    let sort = sort.column();
     let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(project_id as i32), Box::new(w.start_us())];
     p.extend(filter_params.iter().map(|b| clone_param(b.as_ref())));
     p.push(Box::new(project_id as i32)); // st
     p.push(Box::new(project_id as i32)); // issues join
-    p.push(Box::new(status.clone()));
-    p.push(Box::new(status.clone()));
+    p.push(Box::new(status));
+    p.push(Box::new(status));
     let mut search = String::new();
     if let Some(text) = q.query.as_ref().filter(|t| !t.trim().is_empty()) {
         // Matches the issue's first title and culprit.
@@ -142,7 +199,7 @@ pub fn list_issues(conn: &Connection, ns: &Ns, project_id: u32, q: &IssueQuery, 
             level: r.get(3)?,
             platform: r.get(4)?,
             exception_type: r.get(5)?,
-            status: IssueStatus::parse(&r.get::<_, String>(6)?).unwrap_or_default(),
+            status: r.get::<_, String>(6)?.parse().unwrap_or_default(),
             first_seen: us_to_dt(r.get(7)?),
             count: r.get::<_, i64>(8)? as u64,
             last_seen: us_to_dt(r.get(9)?),
@@ -280,7 +337,7 @@ pub fn issue_detail(
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
     })? {
         let (at, s, reason) = row?;
-        activity.push(IssueActivity { at: us_to_dt(at), status: IssueStatus::parse(&s).unwrap_or_default(), reason });
+        activity.push(IssueActivity { at: us_to_dt(at), status: s.parse().unwrap_or_default(), reason });
     }
     let status = activity.first().map(|a| a.status).unwrap_or_default();
 
@@ -729,6 +786,17 @@ mod tests {
     use super::*;
 
     const DAY_US: i64 = 86_400_000_000;
+
+    #[test]
+    fn issue_list_filters() {
+        assert_eq!(StatusFilter::parse(None), Some(StatusFilter::Only(IssueStatus::Unresolved)));
+        assert_eq!(StatusFilter::parse(Some("all")), Some(StatusFilter::All));
+        assert_eq!(StatusFilter::parse(Some("ignored")), Some(StatusFilter::Only(IssueStatus::Ignored)));
+        assert_eq!(StatusFilter::parse(Some("nope")), None);
+        assert_eq!(IssueSort::parse(None), Some(IssueSort::LastSeen));
+        assert_eq!(IssueSort::parse(Some("users")), Some(IssueSort::Users));
+        assert_eq!(IssueSort::parse(Some("last_sene")), None, "typos are rejected, not ignored");
+    }
 
     #[test]
     fn stats_buckets_default_min_and_max() {

@@ -239,14 +239,12 @@ async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Projec
     responses((status = 200, body = IssueList), (status = 404, body = ApiError)))]
 async fn list_issues(State(state): S, Path(p): Path<String>, Query(q): Query<IssueQuery>) -> ApiResult<IssueList> {
     let pid = project(&state, &p)?.id;
-    if let Some(s) = q.status.as_deref()
-        && s != "all"
-        && IssueStatus::parse(s).is_none()
-    {
-        return Err(bad("status must be unresolved, resolved, ignored or all"));
-    }
+    let status = read::StatusFilter::parse(q.status.as_deref())
+        .ok_or_else(|| bad("status must be unresolved, resolved, ignored or all"))?;
+    let sort = read::IssueSort::parse(q.sort.as_deref())
+        .ok_or_else(|| bad("sort must be last_seen, first_seen, count or users"))?;
     let w = Window::parse(q.since.as_deref(), "14d", Utc::now()).map_err(bad)?;
-    Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w)).await?))
+    Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w, status, sort)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues/{issue_id}",

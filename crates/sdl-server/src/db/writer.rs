@@ -179,7 +179,7 @@ pub fn load_caches(conn: &Connection, ns: &Ns, caches: &Caches) -> Result<()> {
     let mut issues = caches.issues.write().expect("lock");
     for row in rows {
         let (p, g, s) = row?;
-        issues.insert((p, g), IssueStatus::parse(&s).unwrap_or_default());
+        issues.insert((p, g), s.parse().unwrap_or_default());
     }
     let n_issues = issues.len();
     drop(issues);
