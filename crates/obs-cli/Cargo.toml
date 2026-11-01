@@ -1,0 +1,18 @@
+[package]
+name = "obs-cli"
+description = "obs: command line and terminal UI for obs-ducklake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "obs"
+path = "src/main.rs"
+
+[dependencies]
+obs-client.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+serde_json.workspace = true

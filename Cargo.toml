@@ -16,6 +16,7 @@ sdl-client = { path = "../sentry-ducklake/crates/sdl-client" }
 sdl-types = { path = "../sentry-ducklake/crates/sdl-types" }
 odl-server = { path = "../otel-ducklake/crates/odl-server" }
 odl-api = { path = "../otel-ducklake/crates/odl-api" }
+odl-client = { path = "../otel-ducklake/crates/odl-client" }
 obs-client = { path = "crates/obs-client" }
 # Must stay identical to both libraries (ADR 0001).
 duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono", "json", "parquet"] }
