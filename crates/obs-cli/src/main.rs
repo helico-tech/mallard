@@ -34,6 +34,11 @@ enum Cmd {
         #[arg(short, long)]
         since: Option<String>,
     },
+    /// Traces, logs and metrics (otel-ducklake commands).
+    Otel {
+        #[command(subcommand)]
+        cmd: odl_cli::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -42,6 +47,10 @@ async fn main() -> Result<()> {
     let client = Client::new(&cli.url, cli.token.as_deref())?;
     match cli.cmd {
         Cmd::Status => status(&client, cli.json).await,
+        Cmd::Otel { cmd } => {
+            let output = if cli.json { odl_cli::Output::Json } else { odl_cli::Output::Table };
+            odl_cli::run(cmd, &odl_cli::Ctx { client: client.otel.clone(), output }).await
+        }
         Cmd::Trace { trace_id, since } => {
             let t = client.trace_overview_since(&trace_id, since.as_deref()).await?;
             if cli.json {

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 obs-client.workspace = true
+odl-cli.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
