@@ -36,46 +36,46 @@ trait Pane {
     }
 }
 
-impl Pane for sdl_cli::Embedded {
+impl Pane for mallard_sentry_cli::Embedded {
     fn title(&self) -> &'static str {
         "Errors"
     }
     fn draw(&mut self, f: &mut Frame, area: Rect) {
-        sdl_cli::Embedded::draw(self, f, area)
+        mallard_sentry_cli::Embedded::draw(self, f, area)
     }
     fn handle(&mut self, ev: &Event) -> Outcome {
         self.handle_event(ev)
     }
     fn tick(&mut self) {
-        sdl_cli::Embedded::tick(self)
+        mallard_sentry_cli::Embedded::tick(self)
     }
     fn open_trace(&mut self, trace_id: &str) {
-        sdl_cli::Embedded::open_trace(self, trace_id)
+        mallard_sentry_cli::Embedded::open_trace(self, trace_id)
     }
     fn open_trace_event(&mut self, trace_id: &str, event_id: &str) {
-        sdl_cli::Embedded::open_trace_event(self, trace_id, event_id)
+        mallard_sentry_cli::Embedded::open_trace_event(self, trace_id, event_id)
     }
     fn take_fatal(&mut self) -> Option<String> {
-        sdl_cli::Embedded::take_fatal(self)
+        mallard_sentry_cli::Embedded::take_fatal(self)
     }
 }
 
-impl Pane for odl_cli::Embedded {
+impl Pane for mallard_otel_cli::Embedded {
     fn title(&self) -> &'static str {
         "Telemetry"
     }
     fn draw(&mut self, f: &mut Frame, area: Rect) {
-        odl_cli::Embedded::draw(self, f, area)
+        mallard_otel_cli::Embedded::draw(self, f, area)
     }
     fn handle(&mut self, ev: &Event) -> Outcome {
         self.handle_event(ev)
     }
     fn tick(&mut self) {
-        odl_cli::Embedded::tick(self)
+        mallard_otel_cli::Embedded::tick(self)
     }
     fn open_trace(&mut self, trace_id: &str) {
         // An invalid id is shown in the tab itself.
-        let _ = odl_cli::Embedded::open_trace(self, trace_id);
+        let _ = mallard_otel_cli::Embedded::open_trace(self, trace_id);
     }
 }
 
@@ -153,8 +153,8 @@ impl Host {
 
 /// The otel TUI, with its "x: errors of this trace" jump enabled (the
 /// errors tab can answer it) and Sentry errors marked on traces and spans.
-fn telemetry_pane(client: &Client) -> odl_cli::Embedded {
-    let mut pane = odl_cli::Embedded::new(client.otel.clone());
+fn telemetry_pane(client: &Client) -> mallard_otel_cli::Embedded {
+    let mut pane = mallard_otel_cli::Embedded::new(client.otel.clone());
     pane.set_errors_enabled(true);
     pane.set_error_lookup(std::sync::Arc::new(crate::errors::SentryErrors(client.clone())));
     pane
@@ -164,7 +164,7 @@ pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
     // Fail fast with a clear message instead of an empty screen.
     client.sentry.info().await.map_err(|e| crate::described(mallard_client::Error::Sentry(e), client.base_url()))?;
     let tabs: Vec<Box<dyn Pane>> = vec![
-        Box::new(sdl_cli::Embedded::new(client.sentry.clone(), project).with_hints(crate::ERRORS_HINTS)),
+        Box::new(mallard_sentry_cli::Embedded::new(client.sentry.clone(), project).with_hints(crate::ERRORS_HINTS)),
         Box::new(telemetry_pane(client)),
     ];
     let mut host = Host { tabs, active: ERRORS, base_url: client.base_url().to_string() };
@@ -322,7 +322,10 @@ mod tests {
     async fn library_panes_draw_inside_their_area() {
         let c = Client::new("http://127.0.0.1:9", None).unwrap();
         let mut h = Host {
-            tabs: vec![Box::new(sdl_cli::Embedded::new(c.sentry.clone(), None)), Box::new(telemetry_pane(&c))],
+            tabs: vec![
+                Box::new(mallard_sentry_cli::Embedded::new(c.sentry.clone(), None)),
+                Box::new(telemetry_pane(&c)),
+            ],
             active: ERRORS,
             base_url: c.base_url().into(),
         };
@@ -341,7 +344,10 @@ mod tests {
     async fn help_on_both_tabs_lists_the_same_shared_keys() {
         let c = Client::new("http://127.0.0.1:9", None).unwrap();
         let mut h = Host {
-            tabs: vec![Box::new(sdl_cli::Embedded::new(c.sentry.clone(), None)), Box::new(telemetry_pane(&c))],
+            tabs: vec![
+                Box::new(mallard_sentry_cli::Embedded::new(c.sentry.clone(), None)),
+                Box::new(telemetry_pane(&c)),
+            ],
             active: ERRORS,
             base_url: c.base_url().into(),
         };

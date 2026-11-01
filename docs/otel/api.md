@@ -90,7 +90,7 @@ share an id, the newest is returned. 404 when there is none.
   21-24 FATAL.
 - Live tail: poll with `from=<last seen time minus a margin>&order=asc` and
   drop records already seen. Data becomes visible after the flush interval
-  (5 s), so look back a bit. `odl_client::LogTail` does this.
+  (5 s), so look back a bit. `mallard_otel_client::LogTail` does this.
 
 ### Metric queries (`/metrics/query`)
 
@@ -171,5 +171,5 @@ curl -s -X POST "$API/sql" -H "Authorization: Bearer $TOKEN" -H 'content-type: a
   -d '{"query":"SELECT service_name, count(*) FROM spans GROUP BY 1"}' | jq
 ```
 
-Typed clients: Rust [`odl-client`](../crates/odl-client). For other
+Typed clients: Rust [`mallard-otel-client`](../crates/mallard-otel-client). For other
 languages, generate one from `openapi.json` (e.g. `openapi-generator`).

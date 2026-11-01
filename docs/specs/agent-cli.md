@@ -69,7 +69,7 @@ Aliases: `errors` = `sentry`, `telemetry` = `otel`.
 
 ### 1.3 HTTP APIs the CLI can use
 
-**Sentry side** (`crates/sdl-server/src/api.rs`, mounted at `/sentry`, bearer token):
+**Sentry side** (`crates/mallard-sentry-server/src/api.rs`, mounted at `/sentry`, bearer token):
 
 | route | params |
 |---|---|
@@ -89,7 +89,7 @@ Aliases: `errors` = `sentry`, `telemetry` = `otel`.
 
 Errors: `{"error": "<message>"}` (no code field). Window: `since` only, no `from/to`.
 
-**OTel side** (`crates/odl-server/src/api/mod.rs`, mounted at `/otel`):
+**OTel side** (`crates/mallard-otel-server/src/api/mod.rs`, mounted at `/otel`):
 `GET /api/v1/health` (no auth), `stats`, `services`, `operations`,
 `spans/series`, `traces`, `traces/{id}`, `logs`, `logs/series`, `metrics`,
 `metrics/query`, `POST /api/v1/sql`. Window: `since` or `from/to` (RFC 3339),
@@ -637,7 +637,7 @@ upload (sentry-cli works), natural-language search, dashboards/alerts.
 - `mallard errors issues list --since` and other Sentry-side windows have no
   client-side `value_parser` (the otel side validates with `check_window`).
 - `events show` text says "Breadcrumbs (newest first)" but showed ascending
-  times with `sdl-loadgen` data. Checked with `@sentry/node` 11: SDKs send
+  times with `mallard-sentry-loadgen` data. Checked with `@sentry/node` 11: SDKs send
   oldest first, so the label is right and the loadgen had the wrong order
   (fixed).
 - `send-test` default message still says "hello from the sdl CLI".

@@ -9,8 +9,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-sdl-server.workspace = true
-odl-server.workspace = true
+mallard-sentry-server.workspace = true
+mallard-otel-server.workspace = true
 mallard-common = { workspace = true, features = ["server"] }
 mallard-duck.workspace = true
 axum.workspace = true
@@ -24,8 +24,8 @@ anyhow.workspace = true
 tracing.workspace = true
 metrics-exporter-prometheus.workspace = true
 # The bridge (src/bridge): Sentry transactions <-> OTel spans and exceptions.
-sdl-protocol.workspace = true
-sdl-types.workspace = true
+mallard-sentry-protocol.workspace = true
+mallard-sentry-api.workspace = true
 opentelemetry-proto.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

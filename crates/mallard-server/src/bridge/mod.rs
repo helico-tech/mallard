@@ -1,18 +1,18 @@
 //! The bridge between the two sides (docs/adr/0009-bridge.md), in process:
 //!
 //! - Sentry transactions and span items (span streaming, ADR 0013) → OTel
-//!   spans: sdl-server hands each `transaction` and `span` item to
+//!   spans: mallard-sentry-server hands each `transaction` and `span` item to
 //!   [`Transactions`], which queues it for `dedupe_window`. The
 //!   [`TransactionWorker`] then converts it on a blocking thread, drops the
 //!   spans the app also sent over OTLP ([`OtlpSpans`], ADR 0010) and
-//!   buffers the rest with `odl_server::Server::ingest_traces`. A full
+//!   buffers the rest with `mallard_otel_server::Server::ingest_traces`. A full
 //!   queue or OTel buffer drops it (counted); Sentry ingest never waits.
-//! - OTel exceptions → Sentry events: odl-server shows every buffered
+//! - OTel exceptions → Sentry events: mallard-otel-server shows every buffered
 //!   OTLP request to [`OtlpHook`], which remembers its span ids and queues
 //!   the exceptions in it. The [`ExceptionWorker`] holds each one for
 //!   `dedupe_window`, drops it when a Sentry SDK sent an event for the same
 //!   trace + span, and otherwise stores it with
-//!   `sdl_server::Server::ingest_event` in the project of its service.
+//!   `mallard_sentry_server::Server::ingest_event` in the project of its service.
 
 pub mod exception;
 pub mod span;
@@ -28,7 +28,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use odl_server::IngestError as OtelError;
+use mallard_otel_server::IngestError as OtelError;
 use opentelemetry_proto::tonic::collector::{logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -67,7 +67,11 @@ pub struct Workers {
 
 /// Install the hooks `cfg` turns on. Returns the workers to run (with
 /// their `run`) for the halves that are on.
-pub fn install(cfg: &BridgeConfig, sentry: &sdl_server::Server, otel: &Arc<odl_server::Server>) -> Result<Workers> {
+pub fn install(
+    cfg: &BridgeConfig,
+    sentry: &mallard_sentry_server::Server,
+    otel: &Arc<mallard_otel_server::Server>,
+) -> Result<Workers> {
     let mut workers = Workers::default();
     let mut hook = OtlpHook::default();
     if cfg.transactions {
@@ -194,14 +198,14 @@ impl Transactions {
     }
 }
 
-impl sdl_server::TransactionSink for Transactions {
-    fn transaction(&self, t: sdl_server::Transaction) {
+impl mallard_sentry_server::TransactionSink for Transactions {
+    fn transaction(&self, t: mallard_sentry_server::Transaction) {
         self.queue(Kind::Transaction, t.project_slug, &t.payload);
     }
 }
 
-impl sdl_server::SpanSink for Transactions {
-    fn spans(&self, s: sdl_server::Spans<'_>) {
+impl mallard_sentry_server::SpanSink for Transactions {
+    fn spans(&self, s: mallard_sentry_server::Spans<'_>) {
         let kind: fn(span::Defaults) -> Kind = match s.content_type {
             Some(span::V2_CONTENT_TYPE) => Kind::Spans,
             None => Kind::Standalone,
@@ -247,7 +251,7 @@ impl TransactionWorker {
 }
 
 struct SpanStore {
-    otel: Arc<odl_server::Server>,
+    otel: Arc<mallard_otel_server::Server>,
     otlp_spans: Arc<OtlpSpans>,
 }
 
@@ -373,7 +377,7 @@ fn count_exception(result: &'static str) {
 /// Spans that a Sentry SDK event was stored for, recently.
 struct SeenSpans(moka::sync::Cache<(Uuid, u64), ()>);
 
-impl sdl_server::EventObserver for SeenSpans {
+impl mallard_sentry_server::EventObserver for SeenSpans {
     fn event_stored(&self, _project_id: u32, trace_id: Uuid, span_id: u64) {
         self.0.insert((trace_id, span_id), ());
     }
@@ -387,7 +391,7 @@ struct OtlpHook {
     exceptions: Option<Exceptions>,
 }
 
-impl odl_server::IngestHook for OtlpHook {
+impl mallard_otel_server::IngestHook for OtlpHook {
     fn traces(&self, req: &ExportTraceServiceRequest) {
         if let Some(spans) = &self.spans {
             spans.record(req);
@@ -421,7 +425,7 @@ impl Exceptions {
 }
 
 struct Ctx {
-    sentry: sdl_server::Server,
+    sentry: mallard_sentry_server::Server,
     seen: Arc<SeenSpans>,
     default_project: String,
 }
@@ -456,7 +460,7 @@ impl Ctx {
         let Some(project) = self.project(&e).await else { return "no_project" };
         match self.sentry.ingest_event(project, exception::to_sentry_event(&e)).await {
             Ok(_) => "stored",
-            Err(sdl_server::IngestError::QueueFull) => "sentry_full",
+            Err(mallard_sentry_server::IngestError::QueueFull) => "sentry_full",
             Err(err) => {
                 tracing::warn!(error = %err, "storing an OTel exception failed");
                 "error"
@@ -494,7 +498,7 @@ impl Ctx {
 /// A valid project slug for a service name (`unknown_service:node` →
 /// `unknown-service-node`).
 fn service_slug(service: &str) -> String {
-    let mut s = sdl_types::slugify(service);
+    let mut s = mallard_sentry_api::slugify(service);
     s.truncate(64);
     let s = s.trim_end_matches('-').to_string();
     if s.is_empty() {

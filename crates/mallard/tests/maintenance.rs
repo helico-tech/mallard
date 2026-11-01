@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use common::*;
-use mallard_client::{Client, sdl_client::types::CreateProject};
+use mallard_client::{Client, mallard_sentry_client::types::CreateProject};
 
 async fn maintenance(config: &Path, extra: &[&str]) -> Output {
     let (config, extra) = (config.to_path_buf(), extra.iter().map(|s| s.to_string()).collect::<Vec<_>>());

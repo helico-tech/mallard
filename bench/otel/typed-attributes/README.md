@@ -5,7 +5,7 @@ Should frequent attributes (`http.route`, `http.response.status_code`,
 columns or a shredded `VARIANT`? (otel issue 0003.)
 
 Same data as the sort-order experiment: 2 h of synthetic shop traffic from
-`odl-loadgen --seed 7`, 4.05 M spans, one compacted file. DuckDB 2.0.0,
+`mallard-otel-loadgen --seed 7`, 4.05 M spans, one compacted file. DuckDB 2.0.0,
 DuckLake 1.1, 4 threads. 21% of the spans have `http.route`.
 
 Timings are the median of 7 runs, two rounds. The machine was busy with
@@ -87,7 +87,7 @@ ODL_STORAGE__CATALOG=$WORK/catalog.ducklake ODL_STORAGE__DATA_PATH=$WORK/lake/ \
 ODL_STORAGE__DATA_INLINING_ROW_LIMIT=0 ODL_MAINTENANCE__ENABLED=false \
 ODL_SERVER__OTLP_HTTP_ADDR=127.0.0.1:24318 ODL_SERVER__OTLP_GRPC_ADDR=127.0.0.1:24317 \
 ODL_SERVER__API_ADDR=127.0.0.1:28080 otel-ducklake serve &
-odl-loadgen --endpoint http://127.0.0.1:24318 --backfill 2h --rate 50 --batch 200 --concurrency 8 --seed 7
+mallard-otel-loadgen --endpoint http://127.0.0.1:24318 --backfill 2h --rate 50 --batch 200 --concurrency 8 --seed 7
 kill -INT %1
 # 2. build the variants, then time the queries (replace ${WORK} and ${END})
 duckdb < build-variants.sql

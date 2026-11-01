@@ -1,5 +1,5 @@
 //! Runs the real `mallard` binary's Sentry commands against a tiny fake
-//! HTTP server (the Sentry API is under `/sentry`). Moved from `sdl-cli`
+//! HTTP server (the Sentry API is under `/sentry`). Moved from `mallard-sentry-cli`
 //! when the standalone `sdl` binary was removed.
 
 use std::io::{BufRead, BufReader, Read, Write};

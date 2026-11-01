@@ -285,11 +285,11 @@ fn json_of(v: &AnyValue) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mallard_sentry_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
     use opentelemetry_proto::tonic::{
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
         trace::v1::{ResourceSpans, ScopeSpans, Span, span::Event},
     };
-    use sdl_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
 
     fn kv(k: &str, v: &str) -> KeyValue {
         KeyValue {

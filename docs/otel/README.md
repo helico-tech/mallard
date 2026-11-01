@@ -2,7 +2,7 @@
 
 > **Retired binary.** This page describes the standalone `otel-ducklake`
 > server and `odl` CLI, which are gone (story 0002/06). The code lives on as
-> the `odl-*` libraries inside mallard: run `mallard serve` (query API under
+> the `mallard-otel-*` libraries inside mallard: run `mallard serve` (query API under
 > `/otel`, OTLP on :4318/:4317) and the `mallard` CLI; see the
 > [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
 
@@ -78,7 +78,7 @@ From source (Rust 1.90+; the first build compiles DuckDB and takes ~2 min):
 ```sh
 cargo build --release
 ./target/release/otel-ducklake serve &                 # data in ./data/
-./target/release/odl-loadgen --rate 20 --duration 0 &  # demo traffic
+./target/release/mallard-otel-loadgen --rate 20 --duration 0 &  # demo traffic
 ./target/release/odl tui
 ```
 
@@ -119,11 +119,11 @@ curl localhost:8080/openapi.json   # the API
 ## Project layout
 
 ```
-crates/odl-api       API types (OpenAPI schema source)
-crates/odl-server    collector + query API (bin: otel-ducklake)
-crates/odl-client    typed HTTP client
-crates/odl-cli       CLI and TUI (bin: odl)
-crates/odl-loadgen   load generator (bin: odl-loadgen)
+crates/mallard-otel-api       API types (OpenAPI schema source)
+crates/mallard-otel-server    collector + query API (bin: otel-ducklake)
+crates/mallard-otel-client    typed HTTP client
+crates/mallard-otel-cli       CLI and TUI (bin: odl)
+crates/mallard-otel-loadgen   load generator (bin: mallard-otel-loadgen)
 deploy/ charts/      compose files and Helm chart
 bench/               reproducible experiments
 docs/ work/          documentation and work tracking

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use mallard_client::sdl_client::types::Project;
+use mallard_client::mallard_sentry_client::types::Project;
 use serde::Serialize;
 
 use crate::Run;
@@ -39,7 +39,7 @@ struct Setup {
 
 pub(crate) async fn run(r: &Run, a: SetupArgs) -> Result<()> {
     let ctx = r.sentry();
-    let (project, created) = sdl_cli::create_or_get(&ctx, &a.name, a.slug, a.platform).await?;
+    let (project, created) = mallard_sentry_cli::create_or_get(&ctx, &a.name, a.slug, a.platform).await?;
     // Both answers are optional: older servers, or a side that is down,
     // still give a DSN and the CLI's own URL.
     let (info, stats) = tokio::join!(r.client.sentry.info(), r.client.otel.stats());

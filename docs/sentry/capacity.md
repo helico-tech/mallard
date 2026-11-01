@@ -17,7 +17,7 @@ Parquet.
   generator on the same machine (the generator competes for CPU).
 - Build: `--release`, DuckDB 2.0.0, DuckLake 1.1, DuckDB-file catalog, local
   storage, default settings unless noted.
-- Load: `sdl-loadgen` sends realistic browser JS errors: 15 frames, 30
+- Load: `mallard-sentry-loadgen` sends realistic browser JS errors: 15 frames, 30
   breadcrumbs, tags, user, request, trace context; ~2.5 KB raw JSON, gzip'd
   to ~1.2 KB on the wire, 5.2 KB after normalization. 200 distinct issues
   with a skewed (Zipf-like) distribution, 5,000 users.
@@ -30,13 +30,13 @@ Reproduce (the numbers below were measured with the standalone
 `mallard serve`):
 
 ```sh
-cargo build --release -p mallard -p sdl-loadgen
+cargo build --release -p mallard -p mallard-sentry-loadgen
 MALLARD_SERVER__API_TOKENS=dev MALLARD_STORAGE__CATALOG=/tmp/mallard/catalog.ducklake \
 MALLARD_STORAGE__DATA_PATH=/tmp/mallard/lake/ MALLARD_DUCKDB__MEMORY_LIMIT=2GB MALLARD_DUCKDB__THREADS=4 \
   ./target/release/mallard serve &
-./target/release/sdl-loadgen --url http://127.0.0.1:8080 --token dev ingest --rate 0 --events 1000000 --concurrency 1024
+./target/release/mallard-sentry-loadgen --url http://127.0.0.1:8080 --token dev ingest --rate 0 --events 1000000 --concurrency 1024
 curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maintenance   # flush + compact now
-./target/release/sdl-loadgen --url http://127.0.0.1:8080 --token dev query
+./target/release/mallard-sentry-loadgen --url http://127.0.0.1:8080 --token dev query
 ```
 
 ## Ingest
@@ -60,7 +60,7 @@ curl -XPOST -H 'Authorization: Bearer dev' http://127.0.0.1:8080/sentry/v1/maint
 
 ## Queries
 
-`sdl-loadgen query`, p50 of 10 runs, one project, 30-day window:
+`mallard-sentry-loadgen query`, p50 of 10 runs, one project, 30-day window:
 
 | Query | 755k, not compacted | 755k compacted | 3.26M, not compacted | 3.26M compacted | 1M compacted, 2 GB / 4 threads |
 |---|---|---|---|---|---|

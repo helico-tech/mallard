@@ -146,5 +146,5 @@ itself speaks plain HTTP/gRPC.
 |---|---|---|
 | `ODL_URL` | `odl` | Query API base URL (default `http://localhost:8080`). |
 | `ODL_TOKEN` | `odl` | API bearer token. |
-| `OTLP_ENDPOINT` | `odl-loadgen` | OTLP/HTTP base URL (default `http://localhost:4318`). |
-| `ODL_INGEST_TOKEN` | `odl-loadgen` | Ingest bearer token. |
+| `OTLP_ENDPOINT` | `mallard-otel-loadgen` | OTLP/HTTP base URL (default `http://localhost:4318`). |
+| `ODL_INGEST_TOKEN` | `mallard-otel-loadgen` | Ingest bearer token. |

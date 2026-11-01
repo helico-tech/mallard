@@ -20,7 +20,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
 JS end-to-end tests with real Sentry SDKs against `mallard serve`: `e2e/sentry/README.md`.
-After API changes: `UPDATE_OPENAPI=1 cargo test -p odl-server -p sdl-server --test openapi`
+After API changes: `UPDATE_OPENAPI=1 cargo test -p mallard-otel-server -p mallard-sentry-server --test openapi`
 rewrites `docs/otel/openapi.json` and `docs/sentry/openapi.json` (tests check them).
 Helm: `helm lint --strict deploy/helm/mallard -f deploy/helm/mallard/ci/<file>.yaml`;
 the rendered `mallard.toml` must pass `mallard check -c <file>`.
@@ -36,8 +36,8 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction, maintenance lease |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
 | `crates/mallard-term` | terminal output both sides share: `clean()`, tables, formats (UTC), colour, error kinds and exit codes, `--format`/`--fields`/list envelope (`output`), `--since/--from/--to` (`window`), `--wait` (`wait`), TUI theme/keys/`Outcome` (ADR 0006, 0008) |
-| `crates/sdl-*` | Sentry side: `sdl-protocol` (pure protocol), `sdl-server` (ingest, writer, `/v1` API), `sdl-types`, `sdl-client`, `sdl-cli` (commands + TUI component), `sdl-loadgen` |
-| `crates/odl-*` | OpenTelemetry side: `odl-server` (OTLP receivers, storage, maintenance, query API), `odl-api`, `odl-client`, `odl-cli` (commands + TUI component), `odl-loadgen` |
+| `crates/mallard-sentry-*` | Sentry side: `mallard-sentry-protocol` (pure protocol), `mallard-sentry-server` (ingest, writer, `/v1` API), `mallard-sentry-api`, `mallard-sentry-client`, `mallard-sentry-cli` (commands + TUI component), `mallard-sentry-loadgen` |
+| `crates/mallard-otel-*` | OpenTelemetry side: `mallard-otel-server` (OTLP receivers, storage, maintenance, query API), `mallard-otel-api`, `mallard-otel-client`, `mallard-otel-cli` (commands + TUI component), `mallard-otel-loadgen` |
 | `config/` | example configs |
 | `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
@@ -46,8 +46,8 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 Only `mallard` is built as a product binary (plus the load generators
-`sdl-loadgen` and `odl-loadgen`, which target mallard); `mallard-server` and the
-`sdl-*`/`odl-*` server and CLI crates are libraries.
+`mallard-sentry-loadgen` and `mallard-otel-loadgen`, which target mallard); `mallard-server` and the
+`mallard-sentry-*`/`mallard-otel-*` server and CLI crates are libraries.
 
 ## Rules
 
@@ -71,7 +71,7 @@ Only `mallard` is built as a product binary (plus the load generators
   shared connection; `mallard-server` owns `[duckdb]`.
 - All timestamps are UTC `TIMESTAMP` (bundled DuckDB has no ICU).
 - Tables are append-only. Sentry: write rows only on the writer thread
-  (`sdl-server/src/db/writer.rs`), flush and compact on the maintenance thread
+  (`mallard-sentry-server/src/db/writer.rs`), flush and compact on the maintenance thread
   (`db/maintenance.rs`, ADR 0014); mutable state is an append-only log; several
   processes may share a catalog, so read one `issues` row per group (ADR 0021).
   Otel: column order in `store/schema.rs` must match `otlp/convert.rs`.

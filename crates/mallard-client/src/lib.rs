@@ -10,12 +10,12 @@
 //! # Ok(()) }
 //! ```
 
-pub use odl_client;
-pub use sdl_client;
+pub use mallard_otel_client;
+pub use mallard_sentry_client;
 
 use chrono::{DateTime, Utc};
-use odl_client::api::{LogQuery, LogRecord, Span, TraceGetQuery};
-use sdl_client::types::EventSummary;
+use mallard_otel_client::api::{LogQuery, LogRecord, Span, TraceGetQuery};
+use mallard_sentry_client::types::EventSummary;
 use serde::Serialize;
 
 /// The message already includes the inner error, so it is not also
@@ -24,21 +24,21 @@ use serde::Serialize;
 #[non_exhaustive]
 pub enum Error {
     #[error("sentry: {0}")]
-    Sentry(sdl_client::Error),
+    Sentry(mallard_sentry_client::Error),
     #[error("otel: {0}")]
-    Otel(odl_client::Error),
+    Otel(mallard_otel_client::Error),
     #[error("invalid trace id {0:?}: expected 32 hex characters")]
     InvalidTraceId(String),
 }
 
-impl From<sdl_client::Error> for Error {
-    fn from(e: sdl_client::Error) -> Self {
+impl From<mallard_sentry_client::Error> for Error {
+    fn from(e: mallard_sentry_client::Error) -> Self {
         Error::Sentry(e)
     }
 }
 
-impl From<odl_client::Error> for Error {
-    fn from(e: odl_client::Error) -> Self {
+impl From<mallard_otel_client::Error> for Error {
+    fn from(e: mallard_otel_client::Error) -> Self {
         Error::Otel(e)
     }
 }
@@ -79,8 +79,8 @@ impl std::fmt::Display for TraceId {
 pub struct Client {
     base: String,
     token: Option<String>,
-    pub sentry: sdl_client::Client,
-    pub otel: odl_client::Client,
+    pub sentry: mallard_sentry_client::Client,
+    pub otel: mallard_otel_client::Client,
 }
 
 impl std::fmt::Debug for Client {
@@ -111,8 +111,8 @@ impl Client {
     pub fn new(base_url: &str, token: Option<&str>) -> Result<Self, Error> {
         let base = base_url.trim_end_matches('/').to_string();
         let token = token.filter(|t| !t.is_empty()).map(str::to_string);
-        let sentry = sdl_client::Client::new(&format!("{base}/sentry"), token.as_deref())?;
-        let otel = odl_client::Client::new(&format!("{base}/otel"), token.as_deref())?;
+        let sentry = mallard_sentry_client::Client::new(&format!("{base}/sentry"), token.as_deref())?;
+        let otel = mallard_otel_client::Client::new(&format!("{base}/otel"), token.as_deref())?;
         Ok(Client { base, token, sentry, otel })
     }
 
@@ -160,9 +160,12 @@ impl Client {
             }
         };
         let errors = async {
-            let q =
-                sdl_client::types::TraceQuery { trace_id: id.to_string(), since: since.clone(), ..Default::default() };
-            let w = sdl_client::types::WindowRange { from, to, step: None };
+            let q = mallard_sentry_client::types::TraceQuery {
+                trace_id: id.to_string(),
+                since: since.clone(),
+                ..Default::default()
+            };
+            let w = mallard_sentry_client::types::WindowRange { from, to, step: None };
             Ok::<_, Error>(self.sentry.events_by_trace_in(&q, &w).await?.events)
         };
         let logs = async {
@@ -171,7 +174,7 @@ impl Client {
                 since: since.clone(),
                 from,
                 to,
-                order: Some(odl_client::api::LogOrder::Asc),
+                order: Some(mallard_otel_client::api::LogOrder::Asc),
                 limit: Some(TRACE_LOG_LIMIT + 1),
                 ..Default::default()
             };

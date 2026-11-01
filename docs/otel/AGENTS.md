@@ -9,11 +9,11 @@ through an OpenAPI query API, a CLI and a TUI.
 
 ## Map
 
-- `crates/odl-api`: API types (source of the OpenAPI schema)
-- `crates/odl-server`: receivers, storage, maintenance, query API; bin `otel-ducklake`
-- `crates/odl-client`: typed HTTP client (+ `LogTail`)
-- `crates/odl-cli`: bin `odl` (CLI + `odl tui`)
-- `crates/odl-loadgen`: load generator
+- `crates/mallard-otel-api`: API types (source of the OpenAPI schema)
+- `crates/mallard-otel-server`: receivers, storage, maintenance, query API; bin `otel-ducklake`
+- `crates/mallard-otel-client`: typed HTTP client (+ `LogTail`)
+- `crates/mallard-otel-cli`: bin `odl` (CLI + `odl tui`)
+- `crates/mallard-otel-loadgen`: load generator
 - `config/`: example config; `deploy/`: compose files; `charts/`: Helm chart
 - `bench/`: reproducible experiments and capacity runs
 - `docs/`: [architecture](docs/architecture.md), [data model](docs/data-model.md),
@@ -29,7 +29,7 @@ cargo build --release                 # first build compiles DuckDB (~2 min)
 cargo test --workspace                # unit + e2e (real DuckLake in temp dirs)
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all
-cargo run -p odl-server -- openapi > docs/openapi.json   # after API changes (a test checks it)
+cargo run -p mallard-otel-server -- openapi > docs/openapi.json   # after API changes (a test checks it)
 ```
 
 ## Rules
@@ -41,7 +41,7 @@ cargo run -p odl-server -- openapi > docs/openapi.json   # after API changes (a 
 - Table columns are append-only; column order in `store/schema.rs` must match
   `otlp/convert.rs`.
 - User input reaches SQL only as bound parameters.
-- Public library surface (`Server`, `odl_client`, `odl_cli::{Command, Ctx,
+- Public library surface (`Server`, `mallard_otel_client`, `mallard_otel_cli::{Command, Ctx,
   run, Embedded}`) is used by mallard. Don't break it silently. DuckDB set-up
   (`open_connection`, extensions, secrets) lives in `crates/mallard-duck`.
 - Work tracking: `work/queue.md` → stories/issues; decisions → `docs/adr/`.

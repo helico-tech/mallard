@@ -24,7 +24,7 @@ Design rules:
    time, the client's clock is off and the event and its breadcrumbs shift by
    that difference. Ingest then replaces a `timestamp` more than 60 s after or
    30 days before the receive time with the receive time (`MAX_SECS_IN_FUTURE`
-   / `MAX_SECS_IN_PAST` in `sdl-protocol`), so it stays close to
+   / `MAX_SECS_IN_PAST` in `mallard-sentry-protocol`), so it stays close to
    `received_at`. Partitions, retention, event lists, trace lookups and the
    issue activity log use `received_at` / write time.
 

@@ -1,7 +1,7 @@
 # Data model
 
 How otel-ducklake stores OpenTelemetry data in DuckLake, and why. The table
-definitions live in [`crates/odl-server/src/store/schema.rs`](../crates/odl-server/src/store/schema.rs);
+definitions live in [`crates/mallard-otel-server/src/store/schema.rs`](../crates/mallard-otel-server/src/store/schema.rs);
 this document explains them.
 
 ## Goals

@@ -9,7 +9,7 @@ Sentry.init({ dsn: "https://<public_key>@errors.example.com/1" });
 
 ## Verified clients
 
-Tested end to end in CI (`e2e/`, `crates/sdl-server/tests/`):
+Tested end to end in CI (`e2e/`, `crates/mallard-sentry-server/tests/`):
 
 | Client | Version | What is verified |
 |---|---|---|

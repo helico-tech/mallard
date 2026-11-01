@@ -152,7 +152,7 @@ async fn hex16(
     from: chrono::DateTime<chrono::Utc>,
     to: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<Match>> {
-    let q = mallard_client::odl_client::api::TraceGetQuery { from: Some(from), to: Some(to), since: None };
+    let q = mallard_client::mallard_otel_client::api::TraceGetQuery { from: Some(from), to: Some(to), since: None };
     let (issues, span) = tokio::join!(issues(r, id), r.client.otel.span(id, &q));
     let mut out = Vec::new();
     let mut errors = Vec::new();
@@ -186,7 +186,7 @@ async fn issues(r: &Run, id: &str) -> Result<Vec<Match>> {
         None => c.projects().await.map_err(err)?,
     };
     let lookups = projects.iter().map(|p| async move {
-        let q = mallard_client::sdl_client::types::WindowQuery::default();
+        let q = mallard_client::mallard_sentry_client::types::WindowQuery::default();
         (p, c.issue(&p.slug, id, &q).await)
     });
     let mut out = Vec::new();

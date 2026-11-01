@@ -7,7 +7,7 @@ binaries are thin wrappers around them. The libraries install no global state
 ## Server
 
 ```rust
-use odl_server::{Server, config::Config};
+use mallard_otel_server::{Server, config::Config};
 
 // Config: build in code, deserialize it as a section of your own TOML,
 // or load file + env with your own prefix.
@@ -54,9 +54,9 @@ let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // sch
 ## Client
 
 ```rust
-let c = odl_client::Client::new("http://localhost:8080", Some(token))?;
-let svcs = c.services(&odl_client::api::ServiceQuery { since: Some("1h".into()), ..Default::default() }).await?;
-let mut tail = odl_client::LogTail::new(c.clone(), Default::default(), chrono::Utc::now());
+let c = mallard_otel_client::Client::new("http://localhost:8080", Some(token))?;
+let svcs = c.services(&mallard_otel_client::api::ServiceQuery { since: Some("1h".into()), ..Default::default() }).await?;
+let mut tail = mallard_otel_client::LogTail::new(c.clone(), Default::default(), chrono::Utc::now());
 let new_records = tail.poll().await?;
 ```
 
@@ -65,13 +65,13 @@ let new_records = tail.poll().await?;
 ```rust
 // Mount the `odl` commands under your own CLI:
 #[derive(clap::Subcommand)]
-enum Top { #[command(subcommand)] Otel(odl_cli::Command), /* ... */ }
-let result = odl_cli::run(cmd, &odl_cli::Ctx::new(client).with_json(false).with_hints(my_hints)).await;
+enum Top { #[command(subcommand)] Otel(mallard_otel_cli::Command), /* ... */ }
+let result = mallard_otel_cli::run(cmd, &mallard_otel_cli::Ctx::new(client).with_json(false).with_hints(my_hints)).await;
 // `error: …` on stderr and an ExitCode, as every mallard CLI does:
 let code = mallard_term::error::report(result, mallard_term::color::ColorChoice::Auto);
 
 // Embed the TUI as a component (you own the terminal and the event loop):
-let mut otel = odl_cli::Embedded::new(client);
+let mut otel = mallard_otel_cli::Embedded::new(client);
 // in your loop: otel.tick(); terminal.draw(|f| otel.draw(f, area)); match otel.handle_event(&ev) { .. }
 ```
 
@@ -83,7 +83,7 @@ Requirements and hooks:
   `EventStream` or a separate thread.
 - `Embedded::set_errors_enabled(true)` shows the `x errors` hint when your
   host handles `Outcome::Jump` (off by default).
-- An error tracker of your own: implement `odl_cli::ErrorLookup` (error
+- An error tracker of your own: implement `mallard_otel_cli::ErrorLookup` (error
   events of many trace ids in one call) and pass it to
   `Embedded::set_error_lookup` and `Ctx::with_error_lookup`. Trace lists then
   show an error count per trace (`sentry` column, JSON `sentry_errors`),

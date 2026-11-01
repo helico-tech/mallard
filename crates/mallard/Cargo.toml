@@ -22,8 +22,8 @@ server = ["dep:mallard-server"]
 [dependencies]
 mallard-server = { workspace = true, optional = true }
 mallard-client.workspace = true
-odl-cli.workspace = true
-sdl-cli.workspace = true
+mallard-otel-cli.workspace = true
+mallard-sentry-cli.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

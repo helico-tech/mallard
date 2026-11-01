@@ -2238,13 +2238,13 @@ dependencies = [
  "crossterm",
  "futures",
  "mallard-client",
+ "mallard-otel-cli",
+ "mallard-sentry-cli",
  "mallard-server",
  "mallard-term",
  "metrics-exporter-prometheus",
- "odl-cli",
  "ratatui",
  "reqwest",
- "sdl-cli",
  "serde",
  "serde_json",
  "tempfile",
@@ -2258,8 +2258,8 @@ name = "mallard-client"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "odl-client",
- "sdl-client",
+ "mallard-otel-client",
+ "mallard-sentry-client",
  "serde",
  "thiserror 2.0.21",
  "tokio",
@@ -2304,6 +2304,234 @@ dependencies = [
 ]
 
 [[package]]
+name = "mallard-otel-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mallard-common",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "utoipa",
+]
+
+[[package]]
+name = "mallard-otel-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "crossterm",
+ "futures",
+ "humantime",
+ "mallard-otel-client",
+ "mallard-term",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "unicode-width",
+]
+
+[[package]]
+name = "mallard-otel-client"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mallard-otel-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "mallard-otel-loadgen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "flate2",
+ "humantime",
+ "opentelemetry-proto",
+ "prost",
+ "rand 0.10.3",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
+name = "mallard-otel-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "clap",
+ "flate2",
+ "futures",
+ "humantime",
+ "mallard-common",
+ "mallard-duck",
+ "mallard-otel-api",
+ "mallard-otel-client",
+ "memchr",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "opentelemetry-proto",
+ "prost",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+ "uuid",
+ "xxhash-rust",
+ "zstd 0.13.3",
+]
+
+[[package]]
+name = "mallard-sentry-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mallard-common",
+ "serde",
+ "serde_json",
+ "utoipa",
+]
+
+[[package]]
+name = "mallard-sentry-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "crossterm",
+ "futures",
+ "mallard-sentry-api",
+ "mallard-sentry-client",
+ "mallard-term",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "mallard-sentry-client"
+version = "0.1.0"
+dependencies = [
+ "mallard-sentry-api",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "mallard-sentry-loadgen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "flate2",
+ "hdrhistogram",
+ "mallard-common",
+ "mallard-sentry-client",
+ "rand 0.10.3",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "mallard-sentry-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "flate2",
+ "regex",
+ "serde",
+ "serde_json",
+ "sourcemap",
+ "thiserror 2.0.21",
+ "url",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "mallard-sentry-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "chrono",
+ "clap",
+ "crossbeam-channel",
+ "flate2",
+ "futures",
+ "hex",
+ "http-body-util",
+ "mallard-common",
+ "mallard-duck",
+ "mallard-sentry-api",
+ "mallard-sentry-protocol",
+ "metrics",
+ "moka",
+ "object_store",
+ "rand 0.10.3",
+ "reqwest",
+ "sentry",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sourcemap",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "url",
+ "utoipa",
+ "utoipa-axum",
+ "uuid",
+ "xxhash-rust",
+ "zip",
+]
+
+[[package]]
 name = "mallard-server"
 version = "0.1.0"
 dependencies = [
@@ -2315,16 +2543,16 @@ dependencies = [
  "mallard-client",
  "mallard-common",
  "mallard-duck",
+ "mallard-otel-server",
+ "mallard-sentry-api",
+ "mallard-sentry-protocol",
+ "mallard-sentry-server",
  "metrics",
  "metrics-exporter-prometheus",
  "moka",
- "odl-server",
  "opentelemetry-proto",
  "regex",
  "reqwest",
- "sdl-protocol",
- "sdl-server",
- "sdl-types",
  "serde",
  "serde_json",
  "tempfile",
@@ -2900,108 +3128,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-time",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "odl-api"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "mallard-common",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "utoipa",
-]
-
-[[package]]
-name = "odl-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "comfy-table",
- "crossterm",
- "futures",
- "humantime",
- "mallard-term",
- "odl-client",
- "ratatui",
- "serde",
- "serde_json",
- "tokio",
- "unicode-width",
-]
-
-[[package]]
-name = "odl-client"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "odl-api",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "odl-loadgen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "flate2",
- "humantime",
- "opentelemetry-proto",
- "prost",
- "rand 0.10.3",
- "reqwest",
- "tokio",
-]
-
-[[package]]
-name = "odl-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "axum",
- "base64 0.23.1",
- "chrono",
- "clap",
- "flate2",
- "futures",
- "humantime",
- "mallard-common",
- "mallard-duck",
- "memchr",
- "metrics",
- "metrics-exporter-prometheus",
- "odl-api",
- "odl-client",
- "opentelemetry-proto",
- "prost",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tonic",
- "tower",
- "tower-http 0.7.1",
- "tracing",
- "utoipa",
- "utoipa-axum",
- "uuid",
- "xxhash-rust",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3960,132 +4086,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "sdl-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "comfy-table",
- "crossterm",
- "futures",
- "mallard-term",
- "ratatui",
- "reqwest",
- "sdl-client",
- "sdl-types",
- "serde",
- "serde_json",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sdl-client"
-version = "0.1.0"
-dependencies = [
- "percent-encoding",
- "reqwest",
- "sdl-types",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "sdl-loadgen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "flate2",
- "hdrhistogram",
- "mallard-common",
- "rand 0.10.3",
- "reqwest",
- "sdl-client",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "sdl-protocol"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "bytes",
- "chrono",
- "flate2",
- "regex",
- "serde",
- "serde_json",
- "sourcemap",
- "thiserror 2.0.21",
- "url",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "sdl-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "chrono",
- "clap",
- "crossbeam-channel",
- "flate2",
- "futures",
- "hex",
- "http-body-util",
- "mallard-common",
- "mallard-duck",
- "metrics",
- "moka",
- "object_store",
- "rand 0.10.3",
- "reqwest",
- "sdl-protocol",
- "sdl-types",
- "sentry",
- "serde",
- "serde_json",
- "sha1",
- "sourcemap",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml",
- "tower",
- "tower-http 0.7.1",
- "tracing",
- "url",
- "utoipa",
- "utoipa-axum",
- "uuid",
- "xxhash-rust",
- "zip",
-]
-
-[[package]]
-name = "sdl-types"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "mallard-common",
- "serde",
- "serde_json",
- "utoipa",
-]
 
 [[package]]
 name = "security-framework"

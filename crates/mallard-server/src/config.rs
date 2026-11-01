@@ -29,7 +29,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub duckdb: DuckDbConfig,
     pub otel: OtelConfig,
-    pub sentry: sdl_server::Config,
+    pub sentry: mallard_sentry_server::Config,
     pub bridge: BridgeConfig,
 }
 
@@ -121,10 +121,10 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OtelConfig {
-    pub ingest: odl_server::config::IngestConfig,
-    pub retention: odl_server::config::RetentionConfig,
-    pub maintenance: odl_server::config::MaintenanceConfig,
-    pub query: odl_server::config::QueryConfig,
+    pub ingest: mallard_otel_server::config::IngestConfig,
+    pub retention: mallard_otel_server::config::RetentionConfig,
+    pub maintenance: mallard_otel_server::config::MaintenanceConfig,
+    pub query: mallard_otel_server::config::QueryConfig,
 }
 
 impl Config {
@@ -179,16 +179,16 @@ impl Config {
     }
 
     /// The otel-ducklake config with the shared settings applied.
-    pub fn otel_config(&self) -> odl_server::config::Config {
+    pub fn otel_config(&self) -> mallard_otel_server::config::Config {
         let o = &self.otel;
-        odl_server::config::Config {
+        mallard_otel_server::config::Config {
             server: Default::default(),
             storage: StorageConfig { artifacts_path: String::new(), ..self.storage.clone() },
             ingest: o.ingest.clone(),
             retention: o.retention.clone(),
             maintenance: o.maintenance.clone(),
             query: o.query.clone(),
-            auth: odl_server::config::AuthConfig {
+            auth: mallard_otel_server::config::AuthConfig {
                 api_tokens: self.server.api_tokens.clone(),
                 ingest_tokens: self.server.ingest_tokens.clone(),
             },
@@ -198,12 +198,12 @@ impl Config {
 
     /// What mallard decides for the Sentry side. Otel owns catalog-wide
     /// maintenance (ADR 0001); global DuckDB settings belong to `[duckdb]`.
-    pub fn sentry_host(&self) -> sdl_server::Host {
+    pub fn sentry_host(&self) -> mallard_sentry_server::Host {
         let artifacts = &self.storage.artifacts_path;
-        sdl_server::Host {
+        mallard_sentry_server::Host {
             public_url: format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/')),
             api_tokens: self.server.api_tokens.clone(),
-            artifacts: (!artifacts.is_empty()).then(|| sdl_server::Artifacts {
+            artifacts: (!artifacts.is_empty()).then(|| mallard_sentry_server::Artifacts {
                 url: artifacts.clone(),
                 options: mallard_duck::object_store_options(&self.storage, artifacts),
             }),

@@ -25,7 +25,7 @@ and run `otel-ducklake serve` with a config file.
 ## Container image
 
 `ghcr.io/helico-tech/otel-ducklake:<version>` (linux/amd64 and linux/arm64)
-contains `otel-ducklake`, `odl` and `odl-loadgen`.
+contains `otel-ducklake`, `odl` and `mallard-otel-loadgen`.
 
 - DuckDB extensions (ducklake, httpfs, aws, azure, postgres, sqlite, icu) are
   baked in at `/opt/duckdb/extensions`, and auto-install is off: the image

@@ -1,5 +1,5 @@
-//! Shared building blocks of mallard's two sides (Sentry `sdl-*`, OTel
-//! `odl-*`) and of `mallard-*`.
+//! Shared building blocks of mallard's two sides (Sentry `mallard-sentry-*`, OTel
+//! `mallard-otel-*`) and of `mallard-*`.
 //!
 //! Always available (light: serde, chrono, humantime):
 //! - [`duration`]: `5s`/`7d`/`0` parsing and serde,

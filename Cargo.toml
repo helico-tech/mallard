@@ -10,17 +10,17 @@ repository = "https://github.com/helico-tech/mallard"
 rust-version = "1.95"
 
 [workspace.dependencies]
-# In-tree crates: sdl-* = Sentry side, odl-* = OpenTelemetry side,
+# In-tree crates: mallard-sentry-* = Sentry side, mallard-otel-* = OpenTelemetry side,
 # mallard-* = the app that bundles both.
-sdl-types = { path = "crates/sdl-types" }
-sdl-protocol = { path = "crates/sdl-protocol" }
-sdl-client = { path = "crates/sdl-client" }
-sdl-server = { path = "crates/sdl-server" }
-sdl-cli = { path = "crates/sdl-cli" }
-odl-api = { path = "crates/odl-api" }
-odl-client = { path = "crates/odl-client" }
-odl-server = { path = "crates/odl-server" }
-odl-cli = { path = "crates/odl-cli" }
+mallard-sentry-api = { path = "crates/mallard-sentry-api" }
+mallard-sentry-protocol = { path = "crates/mallard-sentry-protocol" }
+mallard-sentry-client = { path = "crates/mallard-sentry-client" }
+mallard-sentry-server = { path = "crates/mallard-sentry-server" }
+mallard-sentry-cli = { path = "crates/mallard-sentry-cli" }
+mallard-otel-api = { path = "crates/mallard-otel-api" }
+mallard-otel-client = { path = "crates/mallard-otel-client" }
+mallard-otel-server = { path = "crates/mallard-otel-server" }
+mallard-otel-cli = { path = "crates/mallard-otel-cli" }
 mallard-common = { path = "crates/mallard-common" }
 mallard-duck = { path = "crates/mallard-duck" }
 mallard-server = { path = "crates/mallard-server" }

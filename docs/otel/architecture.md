@@ -32,11 +32,11 @@ flowchart LR
 
 | crate | kind | role |
 |---|---|---|
-| `odl-api` | lib | Request/response types shared by server and clients. They are the source of the OpenAPI schema. |
-| `odl-server` | lib + bin `otel-ducklake` | Receivers, storage, maintenance, query API. Embeddable (see [embedding.md](embedding.md)). |
-| `odl-client` | lib | Async typed HTTP client for the query API, including `LogTail` (live tail). |
-| `odl-cli` | lib + bin `odl` | CLI commands and the TUI (`odl tui`); both embeddable. |
-| `odl-loadgen` | bin `odl-loadgen` | Realistic OTLP traffic for benchmarks and demos. |
+| `mallard-otel-api` | lib | Request/response types shared by server and clients. They are the source of the OpenAPI schema. |
+| `mallard-otel-server` | lib + bin `otel-ducklake` | Receivers, storage, maintenance, query API. Embeddable (see [embedding.md](embedding.md)). |
+| `mallard-otel-client` | lib | Async typed HTTP client for the query API, including `LogTail` (live tail). |
+| `mallard-otel-cli` | lib + bin `odl` | CLI commands and the TUI (`odl tui`); both embeddable. |
+| `mallard-otel-loadgen` | bin `mallard-otel-loadgen` | Realistic OTLP traffic for benchmarks and demos. |
 
 The client side (`odl`) does not link DuckDB. It is a small static binary
 that talks HTTP only.

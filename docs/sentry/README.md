@@ -2,7 +2,7 @@
 
 > **Retired binary.** This page describes the standalone `sentry-ducklake`
 > server and `sdl` CLI, which are gone (story 0002/06). The code lives on
-> as the `sdl-*` libraries inside mallard: run `mallard serve` (Sentry under
+> as the `mallard-sentry-*` libraries inside mallard: run `mallard serve` (Sentry under
 > `/sentry`, DSNs `<public_url>/sentry/<id>`) and the `mallard` CLI; see the
 > [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
 
@@ -35,18 +35,18 @@ Sentry.init({ dsn: "https://3f1c...@errors.example.com/1" });   // that's the on
 # 1. Run it (local disk storage; use s3://bucket/prefix in production)
 docker run -p 8000:8000 -e SDL_API_TOKEN=secret -e SDL_STORAGE_URL=/data/storage \
   -v sdl-data:/data sentry-ducklake:latest
-# or: SDL_API_TOKEN=secret SDL_STORAGE_URL=./.data/storage cargo run --release -p sdl-server
+# or: SDL_API_TOKEN=secret SDL_STORAGE_URL=./.data/storage cargo run --release -p mallard-sentry-server
 
 # 2. Create a project and get its DSN
 export SDL_URL=http://localhost:8000 SDL_TOKEN=secret
-cargo run -p sdl-cli -- projects create web --platform javascript
+cargo run -p mallard-sentry-cli -- projects create web --platform javascript
 
 # 3. Put the DSN in Sentry.init, or try it right away:
-cargo run -p sdl-cli -- send-test --dsn "http://<key>@localhost:8000/1"
+cargo run -p mallard-sentry-cli -- send-test --dsn "http://<key>@localhost:8000/1"
 
 # 4. Look at it
-cargo run -p sdl-cli -- issues list -p web
-cargo run -p sdl-cli -- tui
+cargo run -p mallard-sentry-cli -- issues list -p web
+cargo run -p mallard-sentry-cli -- tui
 open http://localhost:8000/docs        # API reference (Scalar)
 ```
 
@@ -74,7 +74,7 @@ Details: [architecture](docs/architecture.md) · [data model](docs/data-model.md
 | What of the Sentry protocol is supported | [docs/compatibility.md](docs/compatibility.md) |
 | Sourcemaps with sentry-cli / Vite plugin | [docs/sourcemaps.md](docs/sourcemaps.md) |
 | Load test results and capacity | [docs/capacity.md](docs/capacity.md) |
-| CLI and TUI | [crates/sdl-cli/README.md](crates/sdl-cli/README.md) |
+| CLI and TUI | [crates/mallard-sentry-cli/README.md](crates/mallard-sentry-cli/README.md) |
 | API reference | `GET /docs` (Scalar) or `GET /openapi.json` on a running server |
 | Embedding the server as a library | [docs/architecture.md#embedding](docs/architecture.md#embedding) |
 | Tests with real SDKs | [e2e/README.md](e2e/README.md) |
@@ -85,7 +85,7 @@ Details: [architecture](docs/architecture.md) · [data model](docs/data-model.md
 cargo test --workspace                       # unit + integration (Rust SDK)
 cargo clippy --workspace --all-targets -- -D warnings
 cd e2e && npm ci && npx playwright install chromium && npm test   # real JS SDKs
-cargo run --release -p sdl-loadgen -- --token secret ingest --rate 500 --duration 60s
+cargo run --release -p mallard-sentry-loadgen -- --token secret ingest --rate 500 --duration 60s
 ```
 
 The first build compiles DuckDB from source (a few minutes).

@@ -43,7 +43,7 @@ not these: there they are a usage error (exit 2) that says so.
 The old paths still work, hidden: `mallard errors …` (= the `sdl` command
 set: `info`, `stats`, `maintenance`, …) and `mallard telemetry …` (= `odl`:
 `health`, `status`, `metric`, waterfall `trace`, …). Side details:
-[crates/sdl-cli/README.md](../crates/sdl-cli/README.md), [otel/cli.md](otel/cli.md).
+[crates/mallard-sentry-cli/README.md](../crates/mallard-sentry-cli/README.md), [otel/cli.md](otel/cli.md).
 
 ## Shared flags
 

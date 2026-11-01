@@ -74,5 +74,5 @@ this trace (in `mallard tui`), `?` help, Ctrl-C quit. All times are UTC.
 | `s`, space | logs: cycle severity, pause/follow |
 | `a` / `b` | metric chart: cycle aggregation, set group-by |
 
-The TUI is also a library component (`odl_cli::Embedded`) for embedding
+The TUI is also a library component (`mallard_otel_cli::Embedded`) for embedding
 in other terminal apps; see [embedding.md](embedding.md).

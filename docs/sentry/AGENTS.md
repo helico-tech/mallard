@@ -11,18 +11,18 @@ GCS / Azure / local disk). Rust workspace; HTTP API with OpenAPI; CLI + TUI.
 - `cargo build --workspace` / `cargo test --workspace` (DuckDB compiles from
   source the first time: ~2 min).
 - JS end-to-end tests (real Sentry SDKs, browser, sourcemaps): see `e2e/README.md`.
-- Run locally: `SDL_API_TOKEN=dev SDL_STORAGE_URL=./.data/storage cargo run -p sdl-server`.
+- Run locally: `SDL_API_TOKEN=dev SDL_STORAGE_URL=./.data/storage cargo run -p mallard-sentry-server`.
 - `cargo clippy --workspace --all-targets -- -D warnings` must pass.
 
 ## Map
-- `crates/sdl-protocol` - pure Sentry protocol: envelopes, auth, normalization,
+- `crates/mallard-sentry-protocol` - pure Sentry protocol: envelopes, auth, normalization,
   grouping, sourcemap symbolication. No I/O.
-- `crates/sdl-server` - library + `sentry-ducklake` binary: ingest, writer,
+- `crates/mallard-sentry-server` - library + `sentry-ducklake` binary: ingest, writer,
   DuckLake schema, `/v1` API, sentry-cli sourcemap upload, storage.
-- `crates/sdl-types` - `/v1` API types (shared by server, client, CLI).
-- `crates/sdl-client` - typed async client.
-- `crates/sdl-cli` - `sdl` CLI and `sdl tui`.
-- `crates/sdl-loadgen` - load generator for capacity tests.
+- `crates/mallard-sentry-api` - `/v1` API types (shared by server, client, CLI).
+- `crates/mallard-sentry-client` - typed async client.
+- `crates/mallard-sentry-cli` - `sdl` CLI and `sdl tui`.
+- `crates/mallard-sentry-loadgen` - load generator for capacity tests.
 - `e2e/` - JS end-to-end tests with real SDKs.
 - `deploy/` - Docker, docker compose, Helm chart.
 
