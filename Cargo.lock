@@ -2959,6 +2959,7 @@ dependencies = [
  "clap",
  "duckdb",
  "flate2",
+ "futures",
  "humantime",
  "odl-api",
  "odl-client",

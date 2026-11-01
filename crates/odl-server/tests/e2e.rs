@@ -647,3 +647,81 @@ async fn serve_stops_when_background_fails_to_start() {
         .expect("serve must return when the background jobs fail");
     assert!(r.is_err());
 }
+
+fn lake_config(dir: &std::path::Path) -> Config {
+    let mut cfg = Config::default();
+    cfg.storage.catalog = dir.join("c.ducklake").to_string_lossy().into();
+    cfg.storage.data_path = format!("{}/", dir.join("lake").to_string_lossy());
+    cfg.storage.data_inlining_row_limit = 0;
+    cfg.ingest.flush_interval = Duration::from_millis(100);
+    cfg.maintenance.enabled = false;
+    cfg
+}
+
+/// The token is checked before the body is read: a client without a token
+/// cannot make the server buffer a body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_ingest_checks_the_token_before_reading_the_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = lake_config(dir.path());
+    cfg.auth.ingest_tokens = vec!["in".into()];
+    let server = Server::new(cfg).await.unwrap();
+    // A body that never ends: reading it would hang.
+    let body = Body::from_stream(futures::stream::pending::<Result<Vec<u8>, std::io::Error>>());
+    let req = Request::post("/v1/traces").header(header::CONTENT_TYPE, "application/x-protobuf").body(body).unwrap();
+    let resp = tokio::time::timeout(Duration::from_secs(5), server.otlp_http_router().oneshot(req))
+        .await
+        .expect("answered without reading the body")
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// OTLP/gRPC through a real tonic client: the token is checked before the
+/// message is decoded, and an accepted export is queryable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_roundtrip_and_auth_before_decoding() {
+    use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = lake_config(dir.path());
+    cfg.auth.ingest_tokens = vec!["in".into()];
+    cfg.ingest.max_request_bytes = odl_server::config::ByteSize(64 * 1024);
+    let server = Arc::new(Server::new(cfg).await.unwrap());
+    let shutdown = CancellationToken::new();
+    let (s2, sd) = (server.clone(), shutdown.clone());
+    let bg = tokio::spawn(async move { s2.run_background(async move { sd.cancelled().await }).await.unwrap() });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let grpc = tonic::transport::Server::builder().add_routes(server.grpc_routes());
+    let sd = shutdown.clone();
+    let grpc_task = tokio::spawn(async move {
+        grpc.serve_with_incoming_shutdown(tonic::transport::server::TcpIncoming::from(listener), sd.cancelled_owned())
+            .await
+    });
+    let mut client = TraceServiceClient::connect(format!("http://{addr}")).await.unwrap();
+
+    // Larger than max_request_bytes and without a token: refused for the token,
+    // so the message was never decoded.
+    let mut big = traces_req(now_ns());
+    big.resource_spans[0].resource.as_mut().unwrap().attributes.push(kv("big", &"x".repeat(100 * 1024)));
+    let err = client.export(big).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+
+    let mut req = tonic::Request::new(traces_req(now_ns() - 1_000_000_000));
+    req.metadata_mut().insert("authorization", "Bearer in".parse().unwrap());
+    client.export(req).await.expect("authorized export");
+    let api = server.api_router();
+    let mut found = false;
+    for _ in 0..50 {
+        let get = Request::get(format!("/api/v1/traces/{TRACE_HEX}?since=1h")).body(Body::empty()).unwrap();
+        if api.clone().oneshot(get).await.unwrap().status() == StatusCode::OK {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "trace sent over gRPC is queryable");
+    shutdown.cancel();
+    grpc_task.await.unwrap().unwrap();
+    bg.await.unwrap();
+}

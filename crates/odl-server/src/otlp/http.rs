@@ -7,8 +7,9 @@ use std::{io::Read, sync::Arc};
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request as HttpRequest, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -36,7 +37,28 @@ pub fn router(ingest: Arc<Ingest>) -> Router {
         .route("/v1/logs", post(logs))
         .route("/v1/metrics", post(metrics))
         .layer(DefaultBodyLimit::max(limit))
+        .layer(middleware::from_fn_with_state(ingest.clone(), admit))
         .with_state(ingest)
+}
+
+/// Runs before the body is read: check the token, then reserve memory for
+/// the body so concurrent requests cannot exhaust it.
+async fn admit(State(ingest): State<Arc<Ingest>>, req: HttpRequest, next: Next) -> Response {
+    let headers = req.headers();
+    let fmt = format(headers).unwrap_or(Format::Json);
+    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    if !ingest.tokens.allows(auth) {
+        return error(StatusCode::UNAUTHORIZED, fmt, "invalid or missing bearer token".into());
+    }
+    let identity = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|e| e.trim().is_empty() || e.trim().eq_ignore_ascii_case("identity"));
+    let len = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok());
+    let Some(_inflight) = ingest.admit(len.filter(|_| identity)) else {
+        return error(StatusCode::TOO_MANY_REQUESTS, fmt, "too many requests in flight; retry later".into());
+    };
+    next.run(req).await
 }
 
 fn error(status: StatusCode, fmt: Format, msg: String) -> Response {
@@ -101,10 +123,6 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
         Ok(f) => f,
         Err(m) => return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, Format::Json, m),
     };
-    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    if !ingest.tokens.allows(auth) {
-        return error(StatusCode::UNAUTHORIZED, fmt, "invalid or missing bearer token".into());
-    }
     let max = ingest.max_request_bytes;
     // Decompress and decode off the async runtime.
     let decoded = tokio::task::spawn_blocking(move || -> Result<Request, String> {

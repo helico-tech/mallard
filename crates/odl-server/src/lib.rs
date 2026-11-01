@@ -81,12 +81,13 @@ impl Server {
         let stats = Arc::new(Stats::default());
         let max_buffer_bytes = cfg.ingest.max_buffer_bytes.0;
         let buffer = Arc::new(WriteBuffer::new(max_buffer_bytes, cfg.ingest.flush_rows, stats.clone()));
-        let ingest = Arc::new(Ingest {
-            buffer: buffer.clone(),
-            stats: stats.clone(),
-            tokens: Tokens::new(&cfg.auth.ingest_tokens),
-            max_request_bytes: usize::try_from(cfg.ingest.max_request_bytes.0).unwrap_or(usize::MAX),
-        });
+        let ingest = Arc::new(Ingest::new(
+            buffer.clone(),
+            stats.clone(),
+            Tokens::new(&cfg.auth.ingest_tokens),
+            usize::try_from(cfg.ingest.max_request_bytes.0).unwrap_or(usize::MAX),
+            max_buffer_bytes,
+        ));
         let conns = (0..cfg.query.max_concurrent).map(|_| lake.connect()).collect::<Result<Vec<_>>>()?;
         let reader = Arc::new(Reader::new(conns, cfg.query.timeout, cfg.query.max_window));
         let api_state = Arc::new(ApiState {

@@ -77,7 +77,7 @@ scope = "s3://otel"               # optional: only use for this prefix
 |---|---|---|
 | `flush_interval` | `5s` | Max time data waits in memory. Also the max loss on a hard crash. |
 | `flush_rows` | `200000` | Flush early at this many buffered rows. |
-| `max_buffer_bytes` | `512MB` | Above this, receivers answer HTTP 429 / gRPC `UNAVAILABLE` (retryable). |
+| `max_buffer_bytes` | `512MB` | Above this, receivers answer HTTP 429 / gRPC `UNAVAILABLE` (retryable). Request bodies being received and decoded have a budget of the same size (a gRPC request or a compressed HTTP body reserves `max_request_bytes`); when it is used up, new requests get the same retryable answer. |
 | `max_request_bytes` | `32MB` | Max OTLP request size after decompression. A request whose in-memory form would exceed `max_buffer_bytes` (resource attributes repeat on every row) is refused with 413 / `INVALID_ARGUMENT`. |
 
 ## `[retention]`

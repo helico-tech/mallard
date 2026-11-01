@@ -95,6 +95,7 @@ pub struct IngestConfig {
     /// Flush early when this many rows are buffered.
     pub flush_rows: u64,
     /// Reject new requests (back-pressure) when the buffer holds more than this, e.g. `512MB`.
+    /// Also the budget for request bodies being received and decoded.
     pub max_buffer_bytes: ByteSize,
     /// Max size of one OTLP request body (after decompression), e.g. `32MB`.
     pub max_request_bytes: ByteSize,
