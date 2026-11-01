@@ -2303,13 +2303,20 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "hex",
  "mallard-client",
  "mallard-common",
  "mallard-duck",
+ "metrics",
  "metrics-exporter-prometheus",
+ "moka",
  "odl-server",
+ "opentelemetry-proto",
+ "regex",
  "reqwest",
+ "sdl-protocol",
  "sdl-server",
+ "sdl-types",
  "serde",
  "serde_json",
  "tempfile",
@@ -2319,6 +2326,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]

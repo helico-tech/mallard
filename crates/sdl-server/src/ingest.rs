@@ -11,9 +11,9 @@
 // only on the (cold) rejection path, so its size does not matter.
 #![allow(clippy::result_large_err)]
 
-use crate::AppState;
 use crate::db::{EnqueueError, EventWrite, WriteCmd};
 use crate::sourcemaps::MAX_REFS_PER_EVENT;
+use crate::{AppState, IngestError, Transaction};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Request, State};
@@ -64,12 +64,47 @@ fn sentry_error(status: StatusCode, detail: &str) -> Response {
     r
 }
 
+/// Where an event comes from.
+pub(crate) struct Source {
+    pub project_id: u32,
+    pub client_ip: Option<String>,
+    /// Sent by a Sentry SDK (reported to the event observer).
+    pub from_sdk: bool,
+}
+
+/// The ingest answer for an event that could not be stored.
+fn ingest_error(e: IngestError) -> Response {
+    let status = match e {
+        IngestError::QueueFull => StatusCode::TOO_MANY_REQUESTS,
+        IngestError::ShuttingDown | IngestError::StoreFailed => StatusCode::SERVICE_UNAVAILABLE,
+        IngestError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        IngestError::UnknownProject => StatusCode::NOT_FOUND,
+    };
+    sentry_error(status, &e.to_string())
+}
+
+/// Give a transaction to the host's sink, or drop it when there is none.
+fn forward_transaction(state: &AppState, project_id: u32, payload: Bytes) {
+    let sink = state.transaction_sink.get();
+    let slug = state.db.caches.project(project_id).map(|p| p.slug);
+    match (sink, slug) {
+        (Some(sink), Some(project_slug)) => sink.transaction(Transaction { project_id, project_slug, payload }),
+        _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => "transaction").increment(1),
+    }
+}
+
 struct Incoming {
     project_id: u32,
     /// Key from a header or the query string (already checked).
     header_key: Option<String>,
     client_ip: Option<String>,
     body: Bytes,
+}
+
+impl Incoming {
+    fn source(&self) -> Source {
+        Source { project_id: self.project_id, client_ip: self.client_ip.clone(), from_sdk: true }
+    }
 }
 
 async fn read_request(state: &AppState, project_id: &str, req: Request) -> Result<Incoming, Response> {
@@ -213,13 +248,15 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
                     Ok(v) => v,
                     Err(e) => return sentry_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")),
                 };
-                match process_event(&state, &inc, raw, env.event_id()).await {
+                match process_event(&state, &inc.source(), raw, env.event_id()).await {
                     Ok(id) => stored_id = Some(id),
-                    Err(r) => return r,
+                    Err(e) => return ingest_error(e),
                 }
             }
-            // Accepted and dropped: transactions, sessions, client reports,
-            // attachments, replays, profiles, check-ins, logs, feedback...
+            // Stored by the host when it set a sink (mallard: as traces).
+            "transaction" => forward_transaction(&state, inc.project_id, item.payload.clone()),
+            // Accepted and dropped: sessions, client reports, attachments,
+            // replays, profiles, check-ins, logs, feedback...
             // This server stores errors only (see docs/compatibility.md).
             _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => item_type_label(ty)).increment(1),
         }
@@ -256,19 +293,24 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
     };
     // Transactions sent to /store/ by very old SDKs are not errors.
     if raw.get("type").and_then(Value::as_str) == Some("transaction") {
-        metrics::counter!("sdl_ingest_items_dropped_total", "type" => "transaction").increment(1);
+        forward_transaction(&state, inc.project_id, json_bytes.into());
         return axum::Json(json!({ "id": raw.get("event_id") })).into_response();
     }
-    let r = match process_event(&state, &inc, raw, None).await {
+    let r = match process_event(&state, &inc.source(), raw, None).await {
         Ok(id) => axum::Json(json!({ "id": id })).into_response(),
-        Err(r) => r,
+        Err(e) => ingest_error(e),
     };
     metrics::histogram!("sdl_ingest_request_seconds", "endpoint" => "store").record(started.elapsed().as_secs_f64());
     r
 }
 
 /// Normalize, symbolicate, group and store one event. Returns its id.
-async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Option<&str>) -> Result<String, Response> {
+pub(crate) async fn process_event(
+    state: &AppState,
+    src: &Source,
+    raw: Value,
+    hint: Option<&str>,
+) -> Result<String, IngestError> {
     if raw.get("type").and_then(Value::as_str).is_some_and(|t| t != "error" && t != "default") {
         // e.g. "transaction" or "feedback" sent as an event item.
         let id = raw.get("event_id").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -281,7 +323,7 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     let claimed_id =
         raw.get("event_id").and_then(Value::as_str).and_then(parse_uuid).or_else(|| hint.and_then(parse_uuid));
     let mut claim = match claimed_id {
-        Some(id) => match Claim::new(&state.recent_events, (inc.project_id, id)) {
+        Some(id) => match Claim::new(&state.recent_events, (src.project_id, id)) {
             Some(c) => Some(c),
             None => {
                 metrics::counter!("sdl_ingest_duplicates_total").increment(1);
@@ -293,15 +335,15 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
 
     let received_at = Utc::now();
     let mut ctx = NormalizeContext::new(received_at);
-    ctx.client_ip = inc.client_ip.clone();
+    ctx.client_ip = src.client_ip.clone();
     ctx.event_id_hint = hint.map(str::to_string);
     // Normalizing, symbolicating and grouping are CPU work: keep them off
     // the async worker threads.
     let blocking_err = |e: tokio::task::JoinError| {
         tracing::error!(error = %e, "event processing panicked");
-        sentry_error(StatusCode::INTERNAL_SERVER_ERROR, "event processing failed")
+        IngestError::Internal
     };
-    let want_refs = state.sourcemaps.applies_to(&state.db, inc.project_id);
+    let want_refs = state.sourcemaps.applies_to(&state.db, src.project_id);
     let (ev, refs) = tokio::task::spawn_blocking(move || {
         let ev = normalize_event(raw, &ctx);
         let refs = if want_refs { symbolicate::collect_refs(&ev, MAX_REFS_PER_EVENT) } else { Vec::new() };
@@ -309,7 +351,7 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     })
     .await
     .map_err(blocking_err)?;
-    let maps = state.sourcemaps.resolve(&state.db, inc.project_id, &ev, refs).await;
+    let maps = state.sourcemaps.resolve(&state.db, src.project_id, &ev, refs).await;
     let (event, payload_json) = tokio::task::spawn_blocking(move || {
         let mut ev = ev;
         if !maps.is_empty() {
@@ -322,16 +364,16 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     .await
     .map_err(blocking_err)?;
     let id = event.event_id.simple().to_string();
+    let observed = match (src.from_sdk, event.trace_id, event.span_id) {
+        (true, Some(t), Some(s)) => state.event_observer.get().map(|o| (o, t, s)),
+        _ => None,
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let cmd = WriteCmd::Event(Box::new(EventWrite { project_id: inc.project_id, event, payload_json, reply: tx }));
+    let cmd = WriteCmd::Event(Box::new(EventWrite { project_id: src.project_id, event, payload_json, reply: tx }));
     match state.db.try_send(cmd) {
         Ok(()) => {}
-        Err(EnqueueError::Full) => {
-            return Err(sentry_error(StatusCode::TOO_MANY_REQUESTS, "write queue full, retry later"));
-        }
-        Err(EnqueueError::Stopped) => {
-            return Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"));
-        }
+        Err(EnqueueError::Full) => return Err(IngestError::QueueFull),
+        Err(EnqueueError::Stopped) => return Err(IngestError::ShuttingDown),
     }
     // Queued: the event will most likely be stored even if this request
     // is cancelled now, so keep the claim unless the write fails.
@@ -344,16 +386,19 @@ async fn process_event(state: &AppState, inc: &Incoming, raw: Value, hint: Optio
     match rx.await {
         Ok(Ok(())) => {
             metrics::counter!("sdl_ingest_events_total").increment(1);
+            if let Some((o, t, s)) = observed {
+                o.event_stored(src.project_id, t, s);
+            }
             Ok(id)
         }
         Ok(Err(e)) => {
             set_keep(&mut claim, false);
             tracing::error!(error = format!("{e:#}"), "storing event failed");
-            Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "storing the event failed"))
+            Err(IngestError::StoreFailed)
         }
         Err(_) => {
             set_keep(&mut claim, false);
-            Err(sentry_error(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"))
+            Err(IngestError::ShuttingDown)
         }
     }
 }

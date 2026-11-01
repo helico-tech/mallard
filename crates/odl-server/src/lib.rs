@@ -24,6 +24,7 @@ mod query;
 mod stats;
 mod store;
 
+pub use otlp::{IngestError, IngestHook};
 pub use store::SCHEMA;
 
 use std::{future::Future, sync::Arc, time::Instant};
@@ -40,7 +41,7 @@ use mallard_common::auth::{AuthPolicy, Tokens};
 use crate::{
     api::ApiState,
     config::Config,
-    otlp::Ingest,
+    otlp::{Ingest, Request},
     query::Reader,
     stats::Stats,
     store::{
@@ -156,6 +157,26 @@ impl Server {
 
     pub fn config(&self) -> &Config {
         &self.cfg
+    }
+
+    /// Show every OTLP traces and logs request to `hook` once it is
+    /// buffered (both receivers). Set it once, before serving; a second
+    /// call is an error.
+    pub fn set_ingest_hook(&self, hook: Arc<dyn IngestHook>) -> Result<()> {
+        self.ingest.hook.set(hook).map_err(|_| anyhow::anyhow!("ingest hook already set"))
+    }
+
+    /// Buffer spans built in-process, like an OTLP export without the
+    /// network: same conversion, limits, back-pressure and stats. The ingest
+    /// hook does not see them. Blocking (CPU work); returns the number of
+    /// spans accepted.
+    pub fn ingest_traces(
+        &self,
+        req: opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest,
+    ) -> std::result::Result<u64, IngestError> {
+        let total: usize = req.resource_spans.iter().flat_map(|r| &r.scope_spans).map(|s| s.spans.len()).sum();
+        let a = self.ingest.buffer_request(Request::Traces(req), false)?;
+        Ok((total as u64).saturating_sub(a.rejected))
     }
 
     /// OTLP/HTTP routes: `POST /v1/traces`, `/v1/logs`, `/v1/metrics`.

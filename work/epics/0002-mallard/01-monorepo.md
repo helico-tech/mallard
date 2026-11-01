@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 created: 2026-11-01
 ---
 # 01 — Monorepo and one binary
@@ -16,5 +16,6 @@ All three repos in one, with history; one workspace; `mallard` = server + CLI + 
 ## Plan
 
 ## Progress log
+- 2026-11-01: Merged with full history of all three repos, pushed public to github.com/helico-tech/mallard (MIT OR Apache-2.0), CI green (Rust, Helm, Docker, Sentry JS e2e).
 
 ## Follow-ups

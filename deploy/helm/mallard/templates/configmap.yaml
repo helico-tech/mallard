@@ -63,6 +63,12 @@ data:
 
     [sentry.retention]
     events = {{ .Values.retention.errors | quote }}
+
+    [bridge]
+    transactions = {{ .Values.bridge.transactions }}
+    exceptions = {{ .Values.bridge.exceptions }}
+    default_project = {{ .Values.bridge.defaultProject | quote }}
+    dedupe_window = {{ .Values.bridge.dedupeWindow | quote }}
     {{- with .Values.extraConfig }}
 
     # extraConfig

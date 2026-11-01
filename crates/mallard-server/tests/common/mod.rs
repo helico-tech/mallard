@@ -42,8 +42,14 @@ pub struct Running {
 }
 
 pub async fn start(dir: &std::path::Path) -> Running {
+    start_with(dir, |_| {}).await
+}
+
+/// [`start`] with a config changed by `change`.
+pub async fn start_with(dir: &std::path::Path, change: impl FnOnce(&mut Config)) -> Running {
     let l = listeners().await;
-    let cfg = config(dir, &l);
+    let mut cfg = config(dir, &l);
+    change(&mut cfg);
     let url = cfg.server.public_url.clone();
     let otlp_url = format!("http://{}", cfg.server.otlp_http_addr);
     let metrics_url = format!("http://{}/metrics", cfg.server.metrics_addr);
@@ -110,5 +116,37 @@ pub async fn send_otlp(http: &reqwest::Client, otlp_url: &str, i: usize) {
     for (path, body) in [("traces", spans), ("logs", logs)] {
         let r = http.post(format!("{otlp_url}/v1/{path}")).json(&body).send().await.unwrap();
         assert!(r.status().is_success(), "otlp {path}: {}", r.status());
+    }
+}
+
+/// Post one Sentry envelope item (`event`, `transaction`, …) to a project.
+pub async fn send_envelope_item(
+    http: &reqwest::Client,
+    url: &str,
+    project: u32,
+    key: &str,
+    ty: &str,
+    payload: &serde_json::Value,
+) {
+    let body = format!("{}\n{}\n{}\n", json!({}), json!({"type": ty}), payload);
+    let r = http
+        .post(format!("{url}/sentry/api/{project}/envelope/"))
+        .header("X-Sentry-Auth", format!("Sentry sentry_version=7, sentry_key={key}"))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "sentry ingest: {}", r.status());
+}
+
+/// Poll `f` until it returns `Some`, or fail after 30 s.
+pub async fn eventually<T, F: std::future::Future<Output = Option<T>>>(what: &str, mut f: impl FnMut() -> F) -> T {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(v) = f().await {
+            return v;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }

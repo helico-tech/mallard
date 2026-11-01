@@ -155,6 +155,20 @@ fn to_project(state: &AppState, p: ProjectRow) -> Result<Project, ApiErr> {
     })
 }
 
+/// Slug rules for new projects.
+pub(crate) fn check_slug(slug: &str) -> Result<(), &'static str> {
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err("slug must be 1-64 chars of a-z, 0-9, - or _");
+    }
+    if slug.chars().all(|c| c.is_ascii_digit()) {
+        return Err("slug must not be numeric (it would clash with project ids)");
+    }
+    Ok(())
+}
+
 fn project(state: &AppState, r: &str) -> Result<ProjectRow, ApiErr> {
     state.db.caches.project_by_ref(r).ok_or_else(|| not_found("project"))
 }
@@ -188,15 +202,7 @@ async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
 async fn create_project(State(state): S, J(req): J<CreateProject>) -> Result<(StatusCode, Json<Project>), ApiErr> {
     let CreateProject { name, slug, platform } = req;
     let slug = slug.unwrap_or_else(|| slugify(&name));
-    if slug.is_empty()
-        || slug.len() > 64
-        || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    {
-        return Err(bad("slug must be 1-64 chars of a-z, 0-9, - or _"));
-    }
-    if slug.chars().all(|c| c.is_ascii_digit()) {
-        return Err(bad("slug must not be numeric (it would clash with project ids)"));
-    }
+    check_slug(&slug).map_err(bad)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(bad("name is required"));

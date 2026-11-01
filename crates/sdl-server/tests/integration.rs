@@ -428,6 +428,67 @@ async fn concurrent_retries_are_stored_once() {
     t.stop().await;
 }
 
+#[derive(Default)]
+struct Hooks {
+    transactions: std::sync::Mutex<Vec<sdl_server::Transaction>>,
+    events: std::sync::Mutex<Vec<(u32, uuid::Uuid, u64)>>,
+}
+impl sdl_server::TransactionSink for Hooks {
+    fn transaction(&self, t: sdl_server::Transaction) {
+        self.transactions.lock().unwrap().push(t);
+    }
+}
+impl sdl_server::EventObserver for Hooks {
+    fn event_stored(&self, project_id: u32, trace_id: uuid::Uuid, span_id: u64) {
+        self.events.lock().unwrap().push((project_id, trace_id, span_id));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_hooks_and_in_process_events() {
+    let t = TestServer::start().await;
+    let project = t.create_project("hooked").await;
+    let key = project["public_key"].as_str().unwrap();
+    let url = format!("{}/api/1/envelope/?sentry_key={key}", t.base);
+    let hooks = Arc::new(Hooks::default());
+    t.server.set_transaction_sink(hooks.clone()).unwrap();
+    t.server.set_event_observer(hooks.clone()).unwrap();
+    assert!(t.server.set_event_observer(hooks.clone()).is_err(), "set once");
+
+    let (trace, span) = ("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331");
+    let body = format!(
+        "{{}}\n{{\"type\":\"transaction\"}}\n{{\"type\":\"transaction\",\"transaction\":\"GET /\"}}\n\
+         {{\"type\":\"event\"}}\n{{\"message\":\"m\",\"contexts\":{{\"trace\":{{\"trace_id\":\"{trace}\",\"span_id\":\"{span}\"}}}}}}\n"
+    );
+    let r = t.http.post(&url).body(body).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let tx = hooks.transactions.lock().unwrap().clone();
+    assert_eq!(tx.len(), 1);
+    assert_eq!((tx[0].project_id, tx[0].project_slug.as_str()), (1, "hooked"));
+    assert!(std::str::from_utf8(&tx[0].payload).unwrap().contains("GET /"));
+    let seen = hooks.events.lock().unwrap().clone();
+    assert_eq!(seen, [(1, uuid::Uuid::parse_str(trace).unwrap(), 0xb7ad6b7169203331)]);
+
+    // In-process events: grouped like any other, deduped by id, not observed.
+    let ev = json!({"event_id": "1f6d8c0c43fc4630ad850ee518f1b9d2", "platform": "python",
+        "exception": {"values": [{"type": "ValueError", "value": "bad"}]},
+        "contexts": {"trace": {"trace_id": trace, "span_id": "00000000000000aa"}}});
+    for _ in 0..2 {
+        assert_eq!(t.server.ingest_event(1, ev.clone()).await.unwrap(), "1f6d8c0c43fc4630ad850ee518f1b9d2");
+    }
+    assert_eq!(t.server.ingest_event(9, ev).await, Err(sdl_server::IngestError::UnknownProject));
+    assert_eq!(hooks.events.lock().unwrap().len(), 1);
+    let issues = t.get("/v1/projects/hooked/issues?query=ValueError").await;
+    assert_eq!(issues["issues"][0]["count"], 1, "{issues}");
+
+    // Projects for in-process callers.
+    assert_eq!(t.server.project_by_slug("hooked"), Some(1));
+    let id = t.server.create_project("Checkout", "checkout", Some("python")).await.unwrap();
+    assert_eq!(t.server.create_project("Checkout", "checkout", None).await.unwrap(), id, "existing slug");
+    assert!(t.server.create_project("x", "42", None).await.is_err(), "numeric slug");
+    t.stop().await;
+}
+
 /// Build an artifact bundle like sentry-cli does (SYSB header + zip).
 fn bundle(debug_id: &str, minified: &str, map: &str) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());

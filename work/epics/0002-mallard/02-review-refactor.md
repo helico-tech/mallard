@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 created: 2026-11-01
 ---
 # 02 — Thorough review and idiomatic Rust
@@ -28,5 +28,6 @@ Review done 2026-11-01 by five parallel read-only reviewers; findings in
 3. Remaining low findings; final clippy pedantic pass; docs.
 
 ## Progress log
+- 2026-11-01: All five areas fixed and merged (≈170 of ≈180 findings; every bug with a regression test). Cross-side unification done: mallard-common, mallard-duck (ADR 0005), mallard-term (ADR 0006). Leftovers are marked `deferred` in [review/](review/) and tracked as issues.
 
 ## Follow-ups

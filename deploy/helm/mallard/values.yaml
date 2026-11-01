@@ -87,6 +87,19 @@ retention:
   logs: 7d
   metrics: 30d
 
+# Between the two sides (docs/adr/0009-bridge.md).
+bridge:
+  # Store Sentry transactions and their spans as OTel traces.
+  transactions: true
+  # Exceptions recorded by OTel SDKs become Sentry events and issues.
+  exceptions: true
+  # Project slug for exceptions whose service.name matches no project;
+  # empty = one project per service.
+  defaultProject: ""
+  # How long an OTel exception waits for a Sentry SDK event of the same
+  # span (then it is dropped as a duplicate). At most 10m.
+  dedupeWindow: 10s
+
 duckdb:
   # Keep it well below resources.limits.memory.
   memoryLimit: 1GB

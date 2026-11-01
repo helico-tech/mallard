@@ -10,6 +10,7 @@
 //!
 //! OTLP/gRPC is served on `server.otlp_grpc_addr`.
 
+pub mod bridge;
 pub mod config;
 
 use std::{net::SocketAddr, sync::Arc};
@@ -31,6 +32,8 @@ pub struct Platform {
     cfg: Arc<Config>,
     otel: Arc<odl_server::Server>,
     sentry: sdl_server::Server,
+    /// Stores OTel exceptions as Sentry events (`bridge.exceptions`).
+    bridge: Option<bridge::Worker>,
     metrics: Option<PrometheusHandle>,
 }
 
@@ -47,7 +50,8 @@ impl Platform {
         let sentry = sdl_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
             .await
             .context("starting sentry")?;
-        Ok(Platform { cfg: Arc::new(cfg), otel, sentry, metrics: None })
+        let bridge = bridge::install(&cfg.bridge, &sentry, &otel).context("starting the bridge")?;
+        Ok(Platform { cfg: Arc::new(cfg), otel, sentry, bridge, metrics: None })
     }
 
     /// Serve this Prometheus recorder at `/metrics`.
@@ -91,8 +95,9 @@ impl Platform {
 
     /// Serve on already bound listeners until `shutdown` is cancelled or
     /// any listener fails. Then stop the receivers first and flush both
-    /// libraries, so nothing arrives after the final flush.
-    pub async fn serve_on(self, listeners: Listeners, shutdown: CancellationToken) -> Result<()> {
+    /// libraries, so nothing arrives after the final flush. The bridge
+    /// stores the OTel exceptions it still holds before Sentry stops.
+    pub async fn serve_on(mut self, listeners: Listeners, shutdown: CancellationToken) -> Result<()> {
         let Listeners { http, otlp_http, otlp_grpc, metrics } = listeners;
         info!(
             http = %http.local_addr()?, otlp_http = %otlp_http.local_addr()?, otlp_grpc = %otlp_grpc.local_addr()?,
@@ -152,8 +157,17 @@ impl Platform {
             shutdown.cancel();
             r
         };
+        let bridge_done = CancellationToken::new();
+        let bridge = self.bridge.take();
+        let bridge_bg = async {
+            match bridge {
+                Some(w) => w.run(receivers_down.clone()).await,
+                None => receivers_down.cancelled().await,
+            }
+            bridge_done.cancel();
+        };
         let sentry_bg = async {
-            let r = self.sentry.run_background(receivers_down.clone().cancelled_owned()).await;
+            let r = self.sentry.run_background(bridge_done.clone().cancelled_owned()).await;
             shutdown.cancel();
             r
         };
@@ -166,7 +180,7 @@ impl Platform {
             d??;
             anyhow::Ok(())
         };
-        let (r, o, s) = tokio::join!(receivers, otel_bg, sentry_bg);
+        let (r, o, s, ()) = tokio::join!(receivers, otel_bg, sentry_bg, bridge_bg);
         info!("stopped");
         r?;
         o?;

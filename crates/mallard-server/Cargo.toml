@@ -27,13 +27,22 @@ serde.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 metrics-exporter-prometheus.workspace = true
+# The bridge (src/bridge): Sentry transactions <-> OTel spans and exceptions.
+sdl-protocol.workspace = true
+sdl-types.workspace = true
+opentelemetry-proto.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+metrics.workspace = true
+xxhash-rust.workspace = true
+regex = "1"
+hex = "0.4"
+moka = { version = "0.12", features = ["sync"] }
 
 [dev-dependencies]
 mallard-client.workspace = true
-uuid.workspace = true
 futures.workspace = true
 chrono.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
 
