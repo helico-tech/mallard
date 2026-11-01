@@ -4001,6 +4001,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "unicode-width",
  "url",
  "uuid",
 ]
@@ -4015,6 +4016,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
  "url",
 ]
 

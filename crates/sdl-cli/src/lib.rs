@@ -4,21 +4,24 @@
 //! TUI:
 //! - [`Command`] + [`run`]: the CLI subcommands (global flags such as the
 //!   server URL and token live in the host and arrive via [`Ctx`]).
-//! - [`tui::Embedded`]: the dashboard as a component without terminal setup.
+//! - [`Embedded`]: the dashboard as a component without terminal setup.
+
+#![warn(unreachable_pub)]
 
 mod cli;
-pub mod event_view;
+mod event_view;
 mod fmt;
 mod paint;
 mod send_test;
-pub mod tui;
+mod tui;
 
-pub use cli::{Ctx, describe, run};
+pub use cli::{Ctx, Hints, describe, run};
 pub use tui::{Embedded, Outcome};
 
 use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum Command {
     /// Server version, storage and ingest queue.
     Info,
@@ -59,6 +62,7 @@ pub enum Command {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum ProjectsCmd {
     /// All projects.
     List,
@@ -76,7 +80,7 @@ pub enum ProjectsCmd {
     Show { project: String },
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum StatusFilter {
     Unresolved,
     Resolved,
@@ -84,7 +88,22 @@ pub enum StatusFilter {
     All,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+impl StatusFilter {
+    pub const ALL: [StatusFilter; 4] =
+        [StatusFilter::Unresolved, StatusFilter::Resolved, StatusFilter::Ignored, StatusFilter::All];
+
+    /// The API's `status` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusFilter::Unresolved => "unresolved",
+            StatusFilter::Resolved => "resolved",
+            StatusFilter::Ignored => "ignored",
+            StatusFilter::All => "all",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SortBy {
     #[value(name = "last_seen")]
     LastSeen,
@@ -92,6 +111,30 @@ pub enum SortBy {
     FirstSeen,
     Count,
     Users,
+}
+
+impl SortBy {
+    pub const ALL: [SortBy; 4] = [SortBy::LastSeen, SortBy::FirstSeen, SortBy::Count, SortBy::Users];
+
+    /// The API's `sort` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SortBy::LastSeen => "last_seen",
+            SortBy::FirstSeen => "first_seen",
+            SortBy::Count => "count",
+            SortBy::Users => "users",
+        }
+    }
+
+    /// Name of the sorted column.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SortBy::LastSeen => "Last seen",
+            SortBy::FirstSeen => "First seen",
+            SortBy::Count => "Events",
+            SortBy::Users => "Users",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -118,6 +161,7 @@ pub struct IssueListArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum IssuesCmd {
     /// Issues with counts and a trend sparkline.
     List(IssueListArgs),
@@ -146,6 +190,7 @@ pub enum IssuesCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum EventsCmd {
     /// Newest events first.
     List {
@@ -168,6 +213,7 @@ pub enum EventsCmd {
 }
 
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum SourcemapsCmd {
     /// Artifact bundles of the project.
     List,

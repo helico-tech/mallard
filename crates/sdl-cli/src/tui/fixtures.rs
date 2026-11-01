@@ -4,11 +4,20 @@ use super::app::*;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use sdl_client::types::*;
 
-pub fn now() -> DateTime<Utc> {
+/// The text of a test terminal, one line per row.
+pub(super) fn screen(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buf = term.backend().buffer();
+    (0..buf.area.height)
+        .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 31, 12, 0, 0).unwrap()
 }
 
-pub fn projects() -> Vec<Project> {
+pub(super) fn projects() -> Vec<Project> {
     let p = |id: u32, slug: &str, name: &str| Project {
         id,
         slug: slug.into(),
@@ -42,7 +51,7 @@ fn issue(id: &str, title: &str, level: &str, count: u64, users: u64, mins_ago: i
     }
 }
 
-pub fn issues() -> Vec<IssueSummary> {
+pub(super) fn issues() -> Vec<IssueSummary> {
     vec![
         issue("a1", "TypeError: Cannot read properties of undefined (reading 'toUpperCase')", "error", 1234, 56, 3),
         issue("b2", "Error: inside span", "fatal", 42, 3, 90),
@@ -50,7 +59,7 @@ pub fn issues() -> Vec<IssueSummary> {
     ]
 }
 
-pub fn stats() -> ProjectStats {
+pub(super) fn stats() -> ProjectStats {
     let buckets = (0..48u64)
         .map(|i| StatsBucket {
             start: now() - Duration::minutes(30 * (48 - i as i64)),
@@ -73,7 +82,7 @@ pub fn stats() -> ProjectStats {
     }
 }
 
-pub fn issue_detail() -> IssueDetail {
+pub(super) fn issue_detail() -> IssueDetail {
     IssueDetail {
         summary: issues()[1].clone(),
         first_release: Some("web@1.2.0".into()),
@@ -95,7 +104,7 @@ pub fn issue_detail() -> IssueDetail {
     }
 }
 
-fn event_summary(id: &str, mins_ago: i64) -> EventSummary {
+pub(super) fn event_summary(id: &str, mins_ago: i64) -> EventSummary {
     EventSummary {
         event_id: id.into(),
         project_id: 1,
@@ -114,11 +123,11 @@ fn event_summary(id: &str, mins_ago: i64) -> EventSummary {
     }
 }
 
-pub fn event_list() -> EventList {
+pub(super) fn event_list() -> EventList {
     EventList { events: vec![event_summary("e1", 90), event_summary("e2", 200)], next_cursor: None }
 }
 
-pub fn event_detail() -> EventDetail {
+pub(super) fn event_detail() -> EventDetail {
     EventDetail {
         summary: event_summary("e1", 90),
         culprit: Some("smoke".into()),
@@ -127,7 +136,7 @@ pub fn event_detail() -> EventDetail {
     }
 }
 
-pub fn info() -> ServerInfo {
+pub(super) fn info() -> ServerInfo {
     ServerInfo {
         version: "0.1.0".into(),
         duckdb_version: "v2.0.0".into(),
@@ -139,7 +148,7 @@ pub fn info() -> ServerInfo {
 }
 
 /// App with projects, issues and stats loaded, as after startup.
-pub fn loaded_app() -> App {
+pub(super) fn loaded_app() -> App {
     let mut app = App::new("http://127.0.0.1:8000", None);
     app.start();
     app.on_response(Resp::Projects(Ok(projects())));
@@ -154,20 +163,20 @@ pub fn loaded_app() -> App {
     let key = app.issues_key().unwrap();
     app.on_response(Resp::Issues(key, Ok(IssueList { issues: issues(), window_start: now(), window_end: now() })));
     app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
-    app.pending.clear();
+    assert!(!app.loading(), "{:?}", app.pending);
     app.now = now();
     app
 }
 
 /// `loaded_app` with the detail view of issue `b2` open and event `e1` shown.
-pub fn detail_app() -> App {
+pub(super) fn detail_app() -> App {
     let mut app = loaded_app();
     app.issues_state.select(Some(1));
-    app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
+    let _ = app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
     app.on_response(Resp::Issue { id: "b2".into(), result: Ok(issue_detail()) });
-    app.on_response(Resp::Events { issue: "b2".into(), append: false, result: Ok(event_list()) });
+    app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
     app.on_response(Resp::Event { event_id: "e1".into(), result: Ok(event_detail()) });
-    app.pending.clear();
+    assert!(!app.loading(), "{:?}", app.pending);
     app.now = now();
     app
 }

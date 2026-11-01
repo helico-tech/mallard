@@ -9,15 +9,21 @@
 //! ```
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use reqwest::header::CONTENT_TYPE;
 pub use sdl_types as types;
 use sdl_types::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("invalid base url: {0}")]
     Url(String),
+    /// An id or slug that can't be a path segment (empty, `.` or `..`).
+    #[error("invalid path segment {0:?}")]
+    InvalidSegment(String),
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("{status}: {message}")]
@@ -34,32 +40,51 @@ impl Error {
 /// segment (so `/`, `?`, `#`, `%` and spaces can't change the path).
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
+/// Requests time out after this, except [`Client::maintenance`].
+const TIMEOUT: Duration = Duration::from_secs(30);
+/// Flush + compact + expire can take long on a large lake.
+const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Longest error body (in chars) kept as the message of [`Error::Api`].
+const MAX_ERROR_BODY: usize = 200;
+
 /// Encode one path segment. Empty, `.` and `..` segments are rejected:
 /// URL parsers resolve them (even percent-encoded) and the request would
 /// go to another path.
 fn segment(s: &str) -> Result<String, Error> {
     if s.is_empty() || s.chars().all(|c| c == '.') {
-        return Err(Error::Url(format!("invalid path segment {s:?}")));
+        return Err(Error::InvalidSegment(s.to_string()));
     }
     Ok(utf8_percent_encode(s, SEGMENT).to_string())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base: String,
-    token: String,
+    token: Option<String>,
+}
+
+/// The token is never printed.
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base", &self.base)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
     /// `base_url` may include a path prefix (e.g. `https://host/sentry`).
+    /// An empty `token` means no token: no `Authorization` header is sent.
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
         url::Url::parse(base_url).map_err(|e| Error::Url(e.to_string()))?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("sdl-client/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(TIMEOUT)
             .build()?;
-        Ok(Client { http, base: base_url.trim_end_matches('/').to_string(), token: token.to_string() })
+        let token = (!token.is_empty()).then(|| token.to_string());
+        Ok(Client { http, base: base_url.trim_end_matches('/').to_string(), token })
     }
 
     pub fn base_url(&self) -> &str {
@@ -70,21 +95,41 @@ impl Client {
         format!("{}{path}", self.base)
     }
 
-    async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> Result<T, Error> {
-        let resp = req.bearer_auth(&self.token).send().await?;
+    /// Send with the token; a non-success status becomes [`Error::Api`].
+    async fn checked(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, Error> {
+        let req = match &self.token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        };
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             return Err(Self::api_error(resp).await);
         }
-        Ok(resp.json().await?)
+        Ok(resp)
     }
 
-    /// `Error::Api` from a non-success response; the message is the
-    /// `ApiError.error` field when the body is one, else the raw body.
+    async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> Result<T, Error> {
+        Ok(self.checked(req).await?.json().await?)
+    }
+
+    /// `Error::Api` from a non-success response. The message is the
+    /// `ApiError.error` field when the body is one, else the start of a
+    /// plain-text body, else the status reason (so a proxy's HTML error
+    /// page becomes "Bad Gateway").
     async fn api_error(resp: reqwest::Response) -> Error {
-        let status = resp.status().as_u16();
+        let status = resp.status();
+        let plain = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("text/plain"));
         let text = resp.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<ApiError>(&text).map(|e| e.error).unwrap_or(text);
-        Error::Api { status, message }
+        let message = match serde_json::from_str::<ApiError>(&text) {
+            Ok(e) => e.error,
+            Err(_) if plain => shorten(text.trim(), MAX_ERROR_BODY),
+            Err(_) => status.canonical_reason().unwrap_or_default().to_string(),
+        };
+        Error::Api { status: status.as_u16(), message }
     }
 
     async fn get<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T, Error> {
@@ -126,18 +171,6 @@ impl Client {
         self.send(self.http.patch(url).json(&UpdateIssue { status })).await
     }
 
-    pub async fn resolve(&self, project: &str, issue_id: &str) -> Result<IssueDetail, Error> {
-        self.set_issue_status(project, issue_id, IssueStatus::Resolved).await
-    }
-
-    pub async fn ignore(&self, project: &str, issue_id: &str) -> Result<IssueDetail, Error> {
-        self.set_issue_status(project, issue_id, IssueStatus::Ignored).await
-    }
-
-    pub async fn unresolve(&self, project: &str, issue_id: &str) -> Result<IssueDetail, Error> {
-        self.set_issue_status(project, issue_id, IssueStatus::Unresolved).await
-    }
-
     /// Newest events first; set `q.issue` to restrict to one issue.
     pub async fn events(&self, project: &str, q: &EventQuery) -> Result<EventList, Error> {
         self.get(&format!("/v1/projects/{}/events", segment(project)?), q).await
@@ -166,16 +199,115 @@ impl Client {
         self.get(&format!("/v1/projects/{}/sourcemaps", segment(project)?), &()).await
     }
 
-    /// Flush, compact and expire now.
+    /// Flush, compact and expire now. Waits up to 10 minutes.
     pub async fn maintenance(&self) -> Result<(), Error> {
-        let resp = self.http.post(self.url("/v1/maintenance")).bearer_auth(&self.token).send().await?;
-        if resp.status().is_success() { Ok(()) } else { Err(Self::api_error(resp).await) }
+        self.checked(self.http.post(self.url("/v1/maintenance")).timeout(MAINTENANCE_TIMEOUT)).await?;
+        Ok(())
+    }
+}
+
+/// The first `max` chars of `s`, with "…" when cut.
+fn shorten(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    #[test]
+    fn debug_never_shows_the_token() {
+        let c = Client::new("http://127.0.0.1:9", "s3cret-token").unwrap();
+        let s = format!("{c:?}");
+        assert!(!s.contains("s3cret") && s.contains("<redacted>"), "{s}");
+    }
+
+    /// Answer one request with `status`, `content_type` and `body`; the
+    /// request head (request line + headers) comes back on the channel.
+    fn serve_once(status: u16, content_type: &'static str, body: String) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut head, mut len) = (String::new(), 0usize);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let _ = reader.read_exact(&mut vec![0; len]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tx.send(head);
+        });
+        (url, rx)
+    }
+
+    async fn api_message(status: u16, content_type: &'static str, body: &str) -> (u16, String) {
+        let (url, _) = serve_once(status, content_type, body.to_string());
+        match Client::new(&url, "t").unwrap().info().await {
+            Err(Error::Api { status, message }) => (status, message),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn api_errors_use_the_json_message_or_a_short_body() {
+        assert_eq!(
+            api_message(404, "application/json", r#"{"error":"project not found"}"#).await,
+            (404, "project not found".into())
+        );
+        let (_, m) = api_message(400, "text/plain; charset=utf-8", &"bad query ".repeat(100)).await;
+        assert!(m.starts_with("bad query") && m.ends_with('…') && m.chars().count() == MAX_ERROR_BODY + 1, "{m}");
+        let html = format!("<html><body>{}</body></html>", "x".repeat(10_000));
+        assert_eq!(api_message(502, "text/html", &html).await, (502, "Bad Gateway".into()));
+    }
+
+    #[tokio::test]
+    async fn maintenance_reads_errors_from_any_body() {
+        let (url, _) = serve_once(500, "application/json", r#"{"error":"disk full"}"#.into());
+        let r = Client::new(&url, "t").unwrap().maintenance().await;
+        assert!(matches!(r, Err(Error::Api { status: 500, message }) if message == "disk full"));
+        let (url, _) = serve_once(503, "text/html", "<h1>down</h1>".into());
+        let r = Client::new(&url, "t").unwrap().maintenance().await;
+        assert!(matches!(r, Err(Error::Api { status: 503, message }) if message == "Service Unavailable"));
+    }
+
+    #[test]
+    fn shorten_cuts_on_char_boundaries() {
+        assert_eq!(shorten("héllo", 10), "héllo");
+        assert_eq!(shorten("héllo", 2), "hé…");
+    }
+
+    #[tokio::test]
+    async fn empty_token_sends_no_authorization_header() {
+        let info =
+            r#"{"version":"1","duckdb_version":"v","catalog":"c","storage":"s","queue_depth":0,"queue_capacity":1}"#;
+        let (url, head) = serve_once(200, "application/json", info.into());
+        Client::new(&url, "").unwrap().info().await.unwrap();
+        let head = head.recv().unwrap().to_ascii_lowercase();
+        assert!(!head.contains("authorization"), "{head}");
+
+        let (url, head) = serve_once(200, "application/json", info.into());
+        Client::new(&url, "tok").unwrap().info().await.unwrap();
+        assert!(head.recv().unwrap().to_ascii_lowercase().contains("authorization: bearer tok"));
+    }
 
     #[test]
     fn path_segments_are_percent_encoded() {
@@ -186,7 +318,7 @@ mod tests {
         assert_eq!(segment("v1.2").unwrap(), "v1.2");
         assert_eq!(segment("é").unwrap(), "%C3%A9");
         for bad in ["", ".", "..", "..."] {
-            assert!(matches!(segment(bad), Err(Error::Url(_))), "{bad:?}");
+            assert!(matches!(segment(bad), Err(Error::InvalidSegment(s)) if s == bad), "{bad:?}");
         }
     }
 
@@ -194,8 +326,9 @@ mod tests {
     fn dot_segments_never_reach_the_server() {
         let c = Client::new("http://127.0.0.1:9", "t").unwrap();
         // The error is returned before any network I/O, so this resolves on the first poll.
-        assert!(matches!(block_on(c.project("..")), Err(Error::Url(_))));
-        assert!(matches!(block_on(c.issue("web", ".", &Default::default())), Err(Error::Url(_))));
+        assert!(matches!(block_on(c.project("..")), Err(Error::InvalidSegment(_))));
+        assert!(matches!(block_on(c.issue("web", ".", &Default::default())), Err(Error::InvalidSegment(_))));
+        assert!(matches!(Client::new("not a url", "t"), Err(Error::Url(_))));
     }
 
     /// Minimal executor for futures that resolve without I/O.

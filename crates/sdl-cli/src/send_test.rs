@@ -7,14 +7,14 @@ use serde_json::{Value, json};
 
 /// The parts of a DSN `{scheme}://{key}[:secret]@{host}[:port]/{path/}{project}`.
 #[derive(Debug, PartialEq)]
-pub struct Dsn {
+pub(crate) struct Dsn {
     pub public_key: String,
     pub project_id: String,
     /// `{scheme}://{host}[:port]{path}/api/{project}/envelope/`
     pub envelope_url: String,
 }
 
-pub fn parse_dsn(dsn: &str) -> Result<Dsn> {
+pub(crate) fn parse_dsn(dsn: &str) -> Result<Dsn> {
     let u = url::Url::parse(dsn.trim()).context("invalid DSN (expected http(s)://KEY@HOST/PROJECT_ID)")?;
     if u.scheme() != "http" && u.scheme() != "https" {
         bail!("invalid DSN: scheme must be http or https");
@@ -36,7 +36,7 @@ pub fn parse_dsn(dsn: &str) -> Result<Dsn> {
 
 /// A small but realistic error event: exception with an in-app frame and
 /// source context, a breadcrumb and tags.
-pub fn test_event(event_id: &str, message: &str) -> Value {
+pub(crate) fn test_event(event_id: &str, message: &str) -> Value {
     let now = Utc::now();
     json!({
         "event_id": event_id,
@@ -69,7 +69,7 @@ pub fn test_event(event_id: &str, message: &str) -> Value {
 }
 
 /// Envelope with one event item.
-pub fn envelope(dsn_str: &str, event: &Value) -> Vec<u8> {
+pub(crate) fn envelope(dsn_str: &str, event: &Value) -> Vec<u8> {
     let payload = serde_json::to_vec(event).expect("json");
     let header = json!({"event_id": event["event_id"], "dsn": dsn_str, "sent_at": Utc::now().to_rfc3339()});
     let item = json!({"type": "event", "length": payload.len(), "content_type": "application/json"});
@@ -83,12 +83,12 @@ pub fn envelope(dsn_str: &str, event: &Value) -> Vec<u8> {
     out
 }
 
-pub fn auth_header(key: &str) -> String {
+pub(crate) fn auth_header(key: &str) -> String {
     format!("Sentry sentry_version=7, sentry_key={key}, sentry_client=sdl-cli/{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Send and return the event id the server accepted.
-pub async fn send(dsn_str: &str, message: &str) -> Result<(Dsn, String)> {
+pub(crate) async fn send(dsn_str: &str, message: &str) -> Result<(Dsn, String)> {
     let dsn = parse_dsn(dsn_str)?;
     let event_id = uuid::Uuid::new_v4().simple().to_string();
     let body = envelope(dsn_str, &test_event(&event_id, message));

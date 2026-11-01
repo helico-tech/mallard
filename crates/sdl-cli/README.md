@@ -125,19 +125,28 @@ short terminals.
 The crate is also a library (`sdl_cli`) so other programs can mount it:
 
 - `sdl_cli::Command` + `sdl_cli::run(cmd, &Ctx)`: the subcommands above.
-  Global flags stay in the host; it passes `Ctx { client, project, json }`.
+  Global flags stay in the host; it builds
+  `Ctx::new(client).with_project(p).with_json(j).with_hints(h)`.
+  `Hints` names the host's command and env vars in messages
+  (default `Hints::SDL`: `sdl …`, `SDL_URL`, `SDL_TOKEN`, `SDL_PROJECT`).
+  Errors keep the `sdl_client::Error` as their source, so a host can
+  downcast them.
 - `sdl_cli::Embedded`: the TUI as a component without terminal setup:
-  `new(client, project)`, `draw(frame, area)` (draws only inside `area`),
-  `handle_event(&Event) -> Outcome` (`Consumed`, `Ignored`, `Quit`,
-  `OpenTrace(trace_id)`), `tick()` (call a few times per second; applies
-  finished loads, never blocks) and `show_trace_errors(trace_id)`.
+  `new(client, project)` (optionally `.with_hints(h)`), `draw(frame, area)`
+  (draws only inside `area`), `handle_event(&Event) -> Outcome`
+  (`Consumed`, `Ignored`, `Quit`, `OpenTrace(trace_id)`; `#[non_exhaustive]`),
+  `tick()` (call a few times per second; applies finished loads, never
+  blocks), `take_fatal()` and `show_trace_errors(trace_id)`.
   F1 and F2 and ctrl/alt keys (other than `ctrl-c`/`ctrl-q`, which return
   `Quit`) are `Ignored`.
   **Runtime requirement:** call `Embedded::new` inside a tokio runtime
   context (from async code, or under `Runtime::enter`); it panics otherwise.
   It keeps that runtime's handle and spawns loads on it, so `draw`,
   `handle_event`, `tick` and `show_trace_errors` may then be called from any
-  thread. A panicking load is caught and reported, not lost.
+  thread. Dropping it cancels the loads still running.
+  **Internal errors:** a panicking load is caught; `take_fatal()` returns
+  its message once (check it after `tick`). The panic hook has already run,
+  so the host should restore the terminal and exit with that error.
 
 ## Tests
 

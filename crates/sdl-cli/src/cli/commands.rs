@@ -1,160 +1,14 @@
-//! Non-interactive commands: fetch with `sdl-client`, print tables or JSON.
+//! The commands: fetch with `sdl-client`, print tables or JSON.
 
+use super::{Ctx, Hints, describe};
 use crate::event_view as ev;
 use crate::fmt;
 use crate::paint as p;
-use crate::{Command, EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd, SortBy, SourcemapsCmd, StatusFilter};
-use anyhow::{Result, anyhow, bail};
+use crate::{EventsCmd, IssueListArgs, IssuesCmd, ProjectsCmd};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, modifiers, presets};
-use sdl_client::Client;
 use sdl_client::types::*;
-use serde::Serialize;
-
-/// `println!` to a locked stdout that returns the error instead of
-/// panicking; `run` treats a closed pipe (`sdl issues list | head`) as success.
-macro_rules! out {
-    ($($arg:tt)*) => {{
-        use std::io::Write as _;
-        writeln!(std::io::stdout().lock(), $($arg)*)?
-    }};
-}
-
-/// One-line, actionable message for a client error. Safe to print: server
-/// text in it is stripped of control characters.
-pub fn describe(e: &sdl_client::Error, url: &str) -> String {
-    fmt::clean(&describe_raw(e, url))
-}
-
-fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
-    match e {
-        sdl_client::Error::Api { status: 401, .. } => "invalid token (set SDL_TOKEN or --token)".into(),
-        sdl_client::Error::Api { status: 403, .. } => "token not allowed to do this (check SDL_TOKEN)".into(),
-        sdl_client::Error::Api { status: 404, message } => {
-            if message.is_empty() {
-                "not found".into()
-            } else {
-                format!("not found: {message}")
-            }
-        }
-        sdl_client::Error::Api { status, message } if *status >= 500 => {
-            format!("server error ({status}): {message}")
-        }
-        sdl_client::Error::Api { status, message } => {
-            format!("request rejected ({status}): {message}")
-        }
-        sdl_client::Error::Url(m) if m.starts_with("invalid path segment") => {
-            format!("{m}: ids and slugs can't be empty, '.' or '..'")
-        }
-        sdl_client::Error::Url(m) => {
-            format!("invalid server url {url:?}: {m} (set SDL_URL or --url)")
-        }
-        sdl_client::Error::Http(h) if h.is_connect() => {
-            format!("cannot reach server at {url} (is it running? set SDL_URL)")
-        }
-        sdl_client::Error::Http(h) if h.is_timeout() => format!("request to {url} timed out"),
-        sdl_client::Error::Http(h) if h.is_decode() => {
-            format!("unexpected response from {url} (version mismatch?): {h}")
-        }
-        sdl_client::Error::Http(h) => format!("request to {url} failed: {h}"),
-    }
-}
-
-/// What the commands need besides their own arguments. A host that mounts
-/// [`Command`] builds this from its own global flags.
-pub struct Ctx {
-    pub client: Client,
-    /// Project id or slug; optional when the server has only one project.
-    pub project: Option<String>,
-    /// Print raw JSON instead of tables.
-    pub json: bool,
-}
-
-impl Ctx {
-    pub fn err(&self, e: sdl_client::Error) -> anyhow::Error {
-        anyhow!(describe(&e, self.client.base_url()))
-    }
-
-    fn url(&self) -> &str {
-        self.client.base_url()
-    }
-
-    /// The `--project`, or the only project on the server.
-    pub async fn project(&self) -> Result<String> {
-        if let Some(p) = &self.project {
-            return Ok(p.clone());
-        }
-        let projects = self.client.projects().await.map_err(|e| self.err(e))?;
-        match projects.as_slice() {
-            [one] => Ok(one.slug.clone()),
-            [] => bail!("no projects yet (create one: sdl projects create <name>)"),
-            many => {
-                let slugs: Vec<String> = many.iter().map(|p| fmt::clean(&p.slug)).collect();
-                bail!("several projects; pick one with -p or SDL_PROJECT ({})", slugs.join(", "))
-            }
-        }
-    }
-
-    fn print_json<T: Serialize>(&self, v: &T) -> Result<()> {
-        out!("{}", json_safe(&serde_json::to_string_pretty(v)?));
-        Ok(())
-    }
-}
-
-/// Run one command. Prints to stdout; errors are one-line, friendly messages.
-/// All text that comes from events or the server is stripped of terminal
-/// control characters before it is printed (except in `--json` output).
-pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
-    p::init();
-    match run_inner(cmd, ctx).await {
-        Err(e) if is_broken_pipe(&e) => Ok(()),
-        r => r,
-    }
-}
-
-/// serde escapes C0 control characters in JSON strings but writes DEL, C1
-/// (e.g. U+009B, an 8-bit CSI) and bidi overrides as they are. Escape those
-/// too; `\uXXXX` is the same JSON value, so the output stays lossless.
-fn json_safe(json: &str) -> String {
-    let mut out = String::with_capacity(json.len());
-    for c in json.chars() {
-        // Raw newlines are the pretty-printer's own; inside strings serde escapes them.
-        if (c.is_control() && c != '\n')
-            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-        {
-            out.push_str(&format!("\\u{:04x}", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn is_broken_pipe(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
-}
-
-async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
-    match cmd {
-        Command::SendTest { dsn, message } => send_test(&dsn, &message, ctx.json).await,
-        Command::Info => info(ctx).await,
-        Command::Projects(c) => projects(ctx, c).await,
-        Command::Issues(c) => issues(ctx, c).await,
-        Command::Events(c) => events(ctx, c).await,
-        Command::Stats { since, interval } => stats(ctx, since, interval).await,
-        Command::Sourcemaps(SourcemapsCmd::List) => sourcemaps(ctx).await,
-        Command::Maintenance => {
-            ctx.client.maintenance().await.map_err(|e| ctx.err(e))?;
-            if ctx.json {
-                out!("{{\"ok\":true}}");
-            } else {
-                out!("{} maintenance done (flushed, compacted, expired)", p::green("✓"));
-            }
-            Ok(())
-        }
-        Command::Tui => crate::tui::run(ctx).await,
-    }
-}
 
 fn table(headers: &[&str]) -> Table {
     let mut t = Table::new();
@@ -197,16 +51,17 @@ fn right(s: impl ToString) -> Cell {
 }
 
 fn kv(key: &str, value: &str) -> Result<()> {
-    out!("  {:<14} {value}", p::dim(key));
+    // Pad before coloring: escape codes would count as width.
+    out!("  {} {value}", p::dim(&fmt::pad(key, 14)));
     Ok(())
 }
 
-async fn info(ctx: &Ctx) -> Result<()> {
+pub(super) async fn info(ctx: &Ctx) -> Result<()> {
     let i = ctx.client.info().await.map_err(|e| ctx.err(e))?;
     if ctx.json {
         return ctx.print_json(&i);
     }
-    let i = fmt::sanitize(i, true);
+    let i = fmt::sanitize(i, true)?;
     out!("{} {}", p::bold("sentry-ducklake"), i.version);
     kv("server", ctx.url())?;
     kv("duckdb", &i.duckdb_version)?;
@@ -216,16 +71,16 @@ async fn info(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
+pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
     match cmd {
         ProjectsCmd::List => {
             let ps = ctx.client.projects().await.map_err(|e| ctx.err(e))?;
             if ctx.json {
                 return ctx.print_json(&ps);
             }
-            let ps = fmt::sanitize(ps, true);
+            let ps = fmt::sanitize(ps, true)?;
             if ps.is_empty() {
-                out!("no projects yet; create one with: sdl projects create <name>");
+                out!("no projects yet; create one with: {} projects create <name>", ctx.hints.command);
                 return Ok(());
             }
             let mut t = table(&["ID", "SLUG", "NAME", "PLATFORM", "DSN"]);
@@ -247,9 +102,9 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&pr);
             }
-            let pr = fmt::sanitize(pr, true);
+            let pr = fmt::sanitize(pr, true)?;
             out!("{} created project {} ({})", p::green("✓"), p::bold(&pr.slug), pr.id);
-            print_project(&pr)?;
+            print_project(&pr, &ctx.hints)?;
             Ok(())
         }
         ProjectsCmd::Show { project } => {
@@ -257,14 +112,14 @@ async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&pr);
             }
-            let pr = fmt::sanitize(pr, true);
-            print_project(&pr)?;
+            let pr = fmt::sanitize(pr, true)?;
+            print_project(&pr, &ctx.hints)?;
             Ok(())
         }
     }
 }
 
-fn print_project(pr: &Project) -> Result<()> {
+fn print_project(pr: &Project, h: &Hints) -> Result<()> {
     out!();
     out!("  {}", p::dim("DSN"));
     out!("  {}", p::bold(&p::cyan(&pr.dsn)));
@@ -276,47 +131,31 @@ fn print_project(pr: &Project) -> Result<()> {
     kv("public key", &pr.public_key)?;
     kv("created", &fmt::timestamp(pr.created_at))?;
     out!();
-    out!("  {}", p::dim(&format!("test it: sdl send-test --dsn {}", pr.dsn)));
+    out!("  {}", p::dim(&format!("test it: {} send-test --dsn {}", h.command, pr.dsn)));
     Ok(())
 }
 
 fn issue_query(a: &IssueListArgs) -> IssueQuery {
     IssueQuery {
-        status: Some(
-            match a.status {
-                StatusFilter::Unresolved => "unresolved",
-                StatusFilter::Resolved => "resolved",
-                StatusFilter::Ignored => "ignored",
-                StatusFilter::All => "all",
-            }
-            .into(),
-        ),
+        status: Some(a.status.as_str().into()),
         query: a.query.clone(),
         since: a.since.clone(),
-        sort: Some(
-            match a.sort {
-                SortBy::LastSeen => "last_seen",
-                SortBy::FirstSeen => "first_seen",
-                SortBy::Count => "count",
-                SortBy::Users => "users",
-            }
-            .into(),
-        ),
+        sort: Some(a.sort.as_str().into()),
         environment: a.env.clone(),
         release: a.release.clone(),
         limit: a.limit,
     }
 }
 
-async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
-    let project = ctx.project().await?;
+pub(super) async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
+    let project = ctx.resolve_project().await?;
     match cmd {
         IssuesCmd::List(a) => {
             let list = ctx.client.issues(&project, &issue_query(&a)).await.map_err(|e| ctx.err(e))?;
             if ctx.json {
                 return ctx.print_json(&list);
             }
-            let list = fmt::sanitize(list, true);
+            let list = fmt::sanitize(list, true)?;
             if list.issues.is_empty() {
                 out!("no issues match (window {} .. now)", fmt::timestamp(list.window_start));
                 return Ok(());
@@ -356,7 +195,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
             if ctx.json {
                 return ctx.print_json(&d);
             }
-            print_issue(&fmt::sanitize(d, true), &fmt::clean(&project))?;
+            print_issue(&fmt::sanitize(d, true)?, &fmt::clean(&project), &ctx.hints)?;
             Ok(())
         }
         IssuesCmd::Resolve { ids } => set_status(ctx, &project, &ids, IssueStatus::Resolved).await,
@@ -365,7 +204,7 @@ async fn issues(ctx: &Ctx, cmd: IssuesCmd) -> Result<()> {
     }
 }
 
-fn print_issue(d: &IssueDetail, project: &str) -> Result<()> {
+fn print_issue(d: &IssueDetail, project: &str, h: &Hints) -> Result<()> {
     let s = &d.summary;
     let now = Utc::now();
     out!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
@@ -393,9 +232,9 @@ fn print_issue(d: &IssueDetail, project: &str) -> Result<()> {
             for v in &f.top {
                 let pct = v.count as f64 * 100.0 / total as f64;
                 out!(
-                    "    {:<28} {:<20} {:>5.1}%  {}",
-                    fmt::truncate(&v.value, 28),
-                    p::cyan(&format!("{:<20}", fmt::hbar(v.count, total, 20))),
+                    "    {} {} {:>5.1}%  {}",
+                    fmt::pad(&fmt::truncate(&v.value, 28), 28),
+                    p::cyan(&fmt::pad(&fmt::hbar(v.count, total, 20), 20)),
                     pct,
                     p::dim(&v.count.to_string())
                 );
@@ -406,12 +245,14 @@ fn print_issue(d: &IssueDetail, project: &str) -> Result<()> {
         out!();
         out!("{}", p::bold("Activity"));
         for a in &d.activity {
-            out!("  {}  {:<10} {}", p::dim(&fmt::timestamp(a.at)), p::status(a.status.as_str()), p::dim(&a.reason));
+            let status = p::status(&fmt::pad(a.status.as_str(), 10));
+            out!("  {}  {status} {}", p::dim(&fmt::timestamp(a.at)), p::dim(&a.reason));
         }
     }
     if let Some(e) = &d.latest_event_id {
         out!();
-        out!("{}", p::dim(&format!("latest event: sdl events show {e} --issue {} -p {project}", s.id)));
+        let cmd = h.command;
+        out!("{}", p::dim(&format!("latest event: {cmd} events show {e} --issue {} -p {project}", s.id)));
     }
     Ok(())
 }
@@ -435,7 +276,7 @@ async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatu
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("{} {}: {}", p::red("✗"), fmt::clean(id), describe(&e, ctx.url()));
+                eprintln!("{} {}: {}", p::red("✗"), fmt::clean(id), describe(&e, ctx.url(), &ctx.hints));
             }
         }
     }
@@ -448,7 +289,7 @@ async fn set_status(ctx: &Ctx, project: &str, ids: &[String], status: IssueStatu
     Ok(())
 }
 
-async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
+pub(super) async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
     match cmd {
         EventsCmd::List { issue, trace, limit } => {
             let by_trace = trace.is_some();
@@ -456,14 +297,14 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
                 let q = TraceQuery { trace_id, limit, ..Default::default() };
                 ctx.client.events_by_trace_query(&q).await
             } else {
-                let project = ctx.project().await?;
+                let project = ctx.resolve_project().await?;
                 ctx.client.events(&project, &EventQuery { issue, limit, ..Default::default() }).await
             }
             .map_err(|e| ctx.err(e))?;
             if ctx.json {
                 return ctx.print_json(&list);
             }
-            let list = fmt::sanitize(list, true);
+            let list = fmt::sanitize(list, true)?;
             if list.events.is_empty() {
                 out!("no events");
                 return Ok(());
@@ -498,12 +339,12 @@ async fn events(ctx: &Ctx, cmd: EventsCmd) -> Result<()> {
             Ok(())
         }
         EventsCmd::Show { event_id, issue } => {
-            let project = ctx.project().await?;
+            let project = ctx.resolve_project().await?;
             let e = ctx.client.event(&project, &event_id, issue.as_deref()).await.map_err(|e| ctx.err(e))?;
             if ctx.json {
                 return ctx.print_json(&e);
             }
-            print_event(&fmt::sanitize(e, true))?;
+            print_event(&fmt::sanitize(e, true)?)?;
             Ok(())
         }
     }
@@ -515,7 +356,7 @@ fn section(title: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn print_event(e: &EventDetail) -> Result<()> {
+fn print_event(e: &EventDetail) -> Result<()> {
     let s = &e.summary;
     out!("{} {}", p::level(&format!("[{}]", s.level)), p::bold(&s.title));
     if let Some(c) = &e.culprit {
@@ -547,13 +388,8 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
     for (i, x) in exceptions.iter().enumerate() {
         section(if i == 0 { "Exception" } else { "Caused by" })?;
         let mut head = p::bold(&p::red(&x.headline()));
-        if let Some(m) = &x.mechanism {
-            let handled = match x.handled {
-                Some(false) => " · unhandled",
-                Some(true) => " · handled",
-                None => "",
-            };
-            head.push_str(&p::dim(&format!("  ({m}{handled})")));
+        if let Some(m) = x.mechanism_label() {
+            head.push_str(&p::dim(&format!("  ({m})")));
         }
         out!("  {head}");
         let frames = x.frames_newest_first(false);
@@ -588,10 +424,10 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
                 b.timestamp.map(|t| t.format("%H:%M:%S%.3f").to_string()).unwrap_or_else(|| "            ".into());
             let cat = b.category.clone().or_else(|| b.ty.clone()).unwrap_or_default();
             out!(
-                "  {}  {:<8} {:<16} {}",
+                "  {}  {} {} {}",
                 p::dim(&time),
-                p::level(&b.level),
-                p::cyan(&fmt::truncate(&cat, 16)),
+                p::level(&fmt::pad(&b.level, 8)),
+                p::cyan(&fmt::pad(&fmt::truncate(&cat, 16), 16)),
                 b.text()
             );
         }
@@ -599,9 +435,9 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
 
     if !e.tags.is_empty() {
         section("Tags")?;
-        let w = e.tags.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0).min(24);
+        let w = e.tags.iter().map(|(k, _)| fmt::width(k)).max().unwrap_or(0).min(24);
         for (k, v) in &e.tags {
-            out!("  {}  {v}", p::dim(&format!("{k:<w$}")));
+            out!("  {}  {v}", p::dim(&fmt::pad(k, w)));
         }
     }
 
@@ -626,8 +462,8 @@ pub fn print_event(e: &EventDetail) -> Result<()> {
     Ok(())
 }
 
-async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()> {
-    let project = ctx.project().await?;
+pub(super) async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()> {
+    let project = ctx.resolve_project().await?;
     let s = ctx
         .client
         .stats(&project, &WindowQuery { since: Some(since.clone()), interval })
@@ -636,7 +472,7 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
     if ctx.json {
         return ctx.print_json(&s);
     }
-    let s = fmt::sanitize(s, true);
+    let s = fmt::sanitize(s, true)?;
     out!(
         "{} {}",
         p::bold("Project stats"),
@@ -673,13 +509,13 @@ async fn stats(ctx: &Ctx, since: String, interval: Option<String>) -> Result<()>
     Ok(())
 }
 
-async fn sourcemaps(ctx: &Ctx) -> Result<()> {
-    let project = ctx.project().await?;
+pub(super) async fn sourcemaps(ctx: &Ctx) -> Result<()> {
+    let project = ctx.resolve_project().await?;
     let list = ctx.client.sourcemaps(&project).await.map_err(|e| ctx.err(e))?;
     if ctx.json {
         return ctx.print_json(&list);
     }
-    let list = fmt::sanitize(list, true);
+    let list = fmt::sanitize(list, true)?;
     if list.is_empty() {
         out!("no sourcemaps uploaded (upload with sentry-cli sourcemaps upload)");
         return Ok(());
@@ -700,28 +536,14 @@ async fn sourcemaps(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-async fn send_test(dsn: &str, message: &str, json: bool) -> Result<()> {
+pub(super) async fn send_test(dsn: &str, message: &str, ctx: &Ctx) -> Result<()> {
     let (d, id) = crate::send_test::send(dsn, message).await?;
-    if json {
+    if ctx.json {
         out!("{}", serde_json::json!({"id": id, "project_id": d.project_id, "url": d.envelope_url}));
     } else {
         out!("{} sent test event {} to project {}", p::green("✓"), p::bold(&id), d.project_id);
         out!("  {}", p::dim(&format!("POST {}", d.envelope_url)));
-        out!("  {}", p::dim(&format!("check it: sdl events show {id} -p {}", d.project_id)));
+        out!("  {}", p::dim(&format!("check it: {} events show {id} -p {}", ctx.hints.command, d.project_id)));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_output_escapes_c1_and_bidi_but_stays_equal() {
-        let v = serde_json::json!({"t": "a\u{9b}31m\u{202e}b\u{1b}c\nd"});
-        let out = json_safe(&serde_json::to_string_pretty(&v).unwrap());
-        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
-        assert!(out.contains("\\u009b") && out.contains("\\u202e"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), v);
-    }
 }
