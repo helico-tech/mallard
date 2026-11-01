@@ -4,7 +4,8 @@ Date: 2026-11-01
 
 ## Status
 
-accepted
+accepted; the last consequence (a WAL can be added later) is answered by
+[ADR 0013](../../adr/0013-no-write-ahead-log.md): no WAL
 
 ## Context
 

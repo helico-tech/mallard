@@ -130,37 +130,62 @@ export OTEL_SERVICE_NAME=checkout
 
 ### With an OpenTelemetry Collector in front (recommended for zero loss)
 
-otel-ducklake buffers in memory ([ADR 0003](adr/0003-ingest-durability.md)).
-If you can't lose even a few seconds of data on a crash, put a Collector with
-a persistent queue in front. It also gives you tail sampling, attribute
-scrubbing, and so on.
+The server keeps acknowledged data in memory until the next flush
+([ADR 0003](adr/0003-ingest-durability.md)). A hard crash (SIGKILL, OOM, power
+loss) loses at most `ingest.flush_interval` (5 s) of it. There is no built-in
+write-ahead log, and none is planned ([ADR 0013](../adr/0013-no-write-ahead-log.md)).
+If you can't lose those seconds, put a Collector with a persistent queue in
+front. It keeps data on disk until the server has accepted it, also while the
+server is down for an upgrade. You also get tail sampling, attribute scrubbing,
+and so on.
+
+Use the **contrib** distribution
+(`otel/opentelemetry-collector-contrib`): `file_storage` is not in the core
+one.
 
 ```yaml
 extensions:
   file_storage:
-    directory: /var/lib/otelcol/queue
+    directory: /var/lib/otelcol/queue   # must exist; keep it on a volume
+    fsync: true                         # also survive power loss; slower writes
 receivers:
   otlp:
-    protocols: {grpc: {}, http: {}}
-processors:
-  batch: {}
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
 exporters:
   otlphttp:
-    endpoint: http://otel-ducklake:4318
+    endpoint: http://mallard:4318       # standalone: http://otel-ducklake:4318
     compression: gzip
+    # headers: {Authorization: "Bearer ${env:INGEST_TOKEN}"}   # if auth.ingest_tokens is set
     sending_queue:
       enabled: true
-      storage: file_storage      # survives restarts of both sides
+      storage: file_storage             # the queue survives restarts of both sides
     retry_on_failure:
       enabled: true
-      max_elapsed_time: 0        # retry forever
+      max_elapsed_time: 0               # retry forever
 service:
   extensions: [file_storage]
   pipelines:
-    traces:  {receivers: [otlp], processors: [batch], exporters: [otlphttp]}
-    logs:    {receivers: [otlp], processors: [batch], exporters: [otlphttp]}
-    metrics: {receivers: [otlp], processors: [batch], exporters: [otlphttp]}
+    traces:  {receivers: [otlp], exporters: [otlphttp]}
+    logs:    {receivers: [otlp], exporters: [otlphttp]}
+    metrics: {receivers: [otlp], exporters: [otlphttp]}
 ```
+
+Good to know:
+
+- **No `batch` processor in these pipelines.** It holds data in memory and
+  answers the sender before the data reaches the queue, so a Collector crash
+  would lose it. The server batches anyway; small requests are fine.
+- The server answers 429/`UNAVAILABLE` when its buffer is full. The exporter
+  retries those, and the queue absorbs the wait. A full queue
+  (`sending_queue.queue_size`) makes the Collector refuse new data, and SDKs
+  then retry or drop it. Size the volume for the longest outage you want to
+  survive.
+- Delivery is at-least-once: a crash right after a flush can send a request
+  twice. Nothing removes such duplicates.
+- Kubernetes: run the Collector with its own PVC (a StatefulSet per replica),
+  so the queue survives a restart. The server itself needs no extra volume.
 
 ## TLS
 

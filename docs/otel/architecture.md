@@ -93,8 +93,10 @@ that talks HTTP only.
   storage errors happen at commit, which is never permanent.
   On shutdown the buffer is drained (3 attempts).
 - Durability: data is acknowledged when it is in memory. See
-  [ADR 0003](adr/0003-ingest-durability.md) for why there is no queue or WAL,
-  and how to get at-least-once delivery anyway.
+  [ADR 0003](adr/0003-ingest-durability.md) and
+  [ADR 0013](../adr/0013-no-write-ahead-log.md) for why there is no queue or
+  WAL, and [deployment.md](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss)
+  for at-least-once delivery with a Collector.
 
 ### Storage (`store/`)
 
@@ -150,7 +152,7 @@ cleanup are catalog-wide; in mallard the otel side owns them (ADR 0001).
 |---|---|
 | object store / catalog unavailable | flushes fail and are retried; buffer fills; receivers return 429/`UNAVAILABLE`; exporters retry. Queries fail with 500. |
 | one table no longer accepts our rows (schema edited by hand) | that table's batches are dropped (`dropped_rows`, `error` log); other tables keep flushing. |
-| process killed (SIGKILL, OOM) | up to `flush_interval` of acknowledged data in memory is lost. |
+| process killed (SIGKILL, OOM) | up to `flush_interval` of acknowledged data in memory is lost. To avoid that: a [Collector with a persistent queue](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss) in front. |
 | SIGTERM / Ctrl-C | receivers stop accepting, buffer is flushed, maintenance stops, exit. |
 | query too slow | interrupted after `query.timeout` → 504. |
 | too many queries | waits for a free connection up to `query.timeout` → 503. |
