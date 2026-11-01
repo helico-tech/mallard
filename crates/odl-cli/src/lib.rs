@@ -82,6 +82,9 @@ pub struct TraceListArgs {
     /// Max traces (`-l` still works).
     #[arg(short = 'n', short_alias = 'l', long, default_value_t = 30)]
     pub limit: u32,
+    /// Continue a list: the `next_cursor` of the previous page (same filters and window).
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 /// `logs` (default window 1h).
@@ -103,6 +106,10 @@ pub struct LogArgs {
     pub attr: Vec<String>,
     #[arg(short = 'n', long, default_value_t = 100)]
     pub limit: u32,
+    /// Continue a list with older records (newer with --around): the
+    /// `next_cursor` of the previous page (same filters and window).
+    #[arg(long, conflicts_with = "follow")]
+    pub cursor: Option<String>,
     /// Keep printing new records (from --from/--since on, until Ctrl-C).
     #[arg(short, long, conflicts_with_all = ["to", "around"])]
     pub follow: bool,
@@ -148,6 +155,26 @@ pub struct MetricArgs {
     pub step: Option<String>,
 }
 
+/// `attrs` (default window 1h).
+#[derive(clap::Args, Debug, Clone)]
+pub struct AttrArgs {
+    #[command(flatten)]
+    pub w: WindowArgs,
+    /// spans, logs or metrics.
+    #[arg(long, default_value = "spans")]
+    pub signal: AttributeSignal,
+    #[arg(short = 'S', long)]
+    pub service: Option<String>,
+    /// Top values of this key instead of the keys.
+    #[arg(short, long)]
+    pub key: Option<String>,
+    /// Only this metric (with --signal metrics).
+    #[arg(long)]
+    pub metric: Option<String>,
+    #[arg(short = 'n', long, default_value_t = 50)]
+    pub limit: u32,
+}
+
 /// `sql`.
 #[derive(clap::Args, Debug, Clone)]
 pub struct SqlArgs {
@@ -189,6 +216,10 @@ pub enum Command {
     Metric(MetricArgs),
     /// Run a read-only SQL query (server must enable it).
     Sql(SqlArgs),
+    /// Tables and columns that SQL can query.
+    Schema,
+    /// Attribute keys with counts, or the top values of one key (sampled).
+    Attrs(AttrArgs),
     /// Interactive terminal UI.
     Tui {
         /// Initial time window.
@@ -316,7 +347,7 @@ pub fn classify(e: &odl_client::Error, url: &str, hints: &Hints) -> Described {
     let f = match e {
         E::Api { status, code, message } => Failure::Status { status: *status, code, message },
         E::InvalidUrl(m) => Failure::InvalidUrl(m),
-        E::InvalidTraceId(_) => return Described::new(Kind::Usage, e.to_string()),
+        E::InvalidTraceId(_) | E::InvalidSpanId(_) => return Described::new(Kind::Usage, e.to_string()),
         E::Http(h) if h.is_connect() => Failure::Connect,
         E::Http(h) if h.is_timeout() => Failure::Timeout,
         E::Http(h) if h.is_decode() => Failure::Decode(h.to_string()),
@@ -361,8 +392,8 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         }
         Command::Traces(a) => {
             let (win, (from, to, since)) = window(&a.w)?;
-            let v = c
-                .traces(&TraceQuery {
+            let (v, next) = c
+                .traces_page(&TraceQuery {
                     from,
                     to,
                     since,
@@ -373,9 +404,11 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                     max_duration_ms: a.max_ms,
                     attributes: attrs(&a.attr),
                     limit: Some(a.limit),
+                    cursor: a.cursor,
                 })
                 .await?;
-            let list = List::new(v).limit(Some(a.limit)).window(win);
+            // The server says whether more exist: a full page is not truncated by itself.
+            let list = List { limit: Some(a.limit), ..List::new(v).cursor(next).window(win) };
             let sentry = match &ctx.errors {
                 Some(l) => Some(sentry_counts(l.as_ref(), &list.items, win).await),
                 None => None,
@@ -393,8 +426,8 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                 }
                 items.push(item);
             }
-            let List { count, limit, truncated, window, .. } = list;
-            ctx.output.list(&List { items, count, limit, truncated, next_cursor: None, window })
+            let List { count, limit, truncated, next_cursor, window, .. } = list;
+            ctx.output.list(&List { items, count, limit, truncated, next_cursor, window })
         }
         Command::Trace { trace_id, since, attributes } => {
             let id = &trace_id;
@@ -438,6 +471,36 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
         Command::Sql(SqlArgs { query, limit }) => {
             let r = c.sql(&query, Some(limit)).await?;
             print(ctx, &r, sql_text)
+        }
+        Command::Schema => {
+            let s = c.schema().await?;
+            print_list(ctx, List::new(s.tables), schema_text)
+        }
+        Command::Attrs(a) => {
+            let (win, (from, to, since)) = window(&a.w)?;
+            let key = a.key.clone();
+            let s = c
+                .attributes(&AttributeQuery {
+                    signal: a.signal,
+                    from,
+                    to,
+                    since,
+                    service: a.service,
+                    metric: a.metric,
+                    key: a.key,
+                    limit: Some(a.limit),
+                })
+                .await?;
+            if s.sampled_rows < s.total_rows && !ctx.output.text() {
+                eprintln!("note: counted in a sample of {} of {} rows", s.sampled_rows, s.total_rows);
+            }
+            let list = List::new(s.items.clone()).limit(Some(a.limit)).window(win);
+            if ctx.output.text() {
+                ctx.out.line(&attributes_text(&s, key.as_deref()))?;
+                ctx.output.truncation_note(&list);
+                return Ok(());
+            }
+            ctx.output.list(&list)
         }
         Command::Tui { since } => tui::run_standalone(c.clone(), &since).await,
     }
@@ -494,13 +557,14 @@ async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
         attributes: attrs(&a.attr),
         limit: Some(a.limit),
         order: Some(order),
+        cursor: a.cursor,
     };
     if !a.follow {
-        let mut v = c.logs(&q).await?;
+        let (mut v, next) = c.logs_page(&q).await?;
         if order == LogOrder::Desc {
             v.reverse(); // print oldest first, like a log file
         }
-        let list = List::new(v).limit(Some(a.limit)).window(win);
+        let list = List { limit: Some(a.limit), ..List::new(v).cursor(next).window(win) };
         if ctx.output.text() {
             if !list.items.is_empty() {
                 ctx.out.line(&list.items.iter().map(log_line).collect::<Vec<_>>().join("\n"))?;
@@ -514,7 +578,7 @@ async fn logs(ctx: &Ctx, a: LogArgs) -> Result<()> {
             count: list.count,
             limit: list.limit,
             truncated: list.truncated,
-            next_cursor: None,
+            next_cursor: list.next_cursor,
             window: list.window,
         };
         return ctx.output.list(&l);

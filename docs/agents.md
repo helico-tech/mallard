@@ -21,7 +21,10 @@ mallard status                             # exit 0: both sides up
 - Lists are one envelope:
   `{"items":[…],"count":20,"limit":20,"truncated":true,"next_cursor":null,"window":{"from":"…","to":"…"}}`.
   `truncated` means more exist: narrow the window or filters, or raise `--limit`.
-  `ndjson` prints one item per line instead (the truncation note goes to stderr).
+  `traces list` and `logs` also set `next_cursor`: repeat the call with
+  `--cursor <next_cursor> --from <window.from> --to <window.to>` for the next page.
+  `ndjson` prints one item per line instead (the truncation note, with the cursor,
+  goes to stderr).
 - Single objects (`show`, `status`, `setup`) are the object itself.
 - `--fields a,b,c` keeps only those top-level keys (an unknown field is exit 2 and
   the error lists the valid ones).
@@ -58,7 +61,7 @@ mallard logs --around <event timestamp> --window 2m -S <service>
 
 **What is this id?** (pasted from a log or a bug report)
 ```sh
-mallard find <32-hex trace or event id | 16-hex issue id>   # each match has "next": the command to run
+mallard find <32-hex trace or event id | 16-hex issue or span id>   # each match has "next": the command to run
 ```
 
 **Did my deploy add errors?**
@@ -118,8 +121,17 @@ mallard metrics show http.server.request.duration -g p95 -b http.route --since 6
 `max_window_secs`, `retention_secs`, `ingest_lag_secs` (how long new telemetry takes
 to show up), `ingest_auth`.
 
+**What can I filter on?** Attribute keys with counts, then the top values of one
+(from a sample of at most 10,000 rows of the window):
+```sh
+mallard schema attrs --signal spans -S checkout --since 1h      # keys: use with -a key=value
+mallard schema attrs --signal spans --key http.route            # top values
+mallard schema attrs --signal metrics --metric http.server.request.duration   # group-by keys (-b)
+```
+
 **Ad-hoc SQL** (telemetry tables `spans`, `logs`, `metric_points`, …; often off):
 ```sh
+mallard schema --format ndjson                                       # tables, time column, columns
 mallard sql "SELECT service_name, count(*) FROM spans GROUP BY 1"   # exit 7 when off
 ```
 

@@ -67,11 +67,11 @@ enum Cmd {
     Status,
     /// Create a project if it does not exist; print its DSN and the OTLP env vars.
     Setup(setup::SetupArgs),
-    /// What is this id (trace, event or issue)? Prints matches and the command to see more.
+    /// What is this id (trace, event, issue or span)? Prints matches and the command to see more.
     Find {
-        /// A trace or event id (32 hex) or an issue id (16 hex).
+        /// A trace or event id (32 hex) or an issue or span id (16 hex).
         id: String,
-        /// Where to look for traces and events (default 7d).
+        /// Where to look for traces, events and spans (default 7d).
         #[command(flatten)]
         window: WindowArgs,
     },
@@ -100,6 +100,8 @@ enum Cmd {
     Metrics(MetricsCmd),
     /// Read-only SQL over the telemetry tables (the server must enable it).
     Sql(odl_cli::SqlArgs),
+    /// Tables and columns for `sql`; `schema attrs`: attribute keys and values.
+    Schema(SchemaArgs),
     /// Uploaded sourcemap bundles.
     #[command(subcommand)]
     Sourcemaps(sdl_cli::SourcemapsCmd),
@@ -156,6 +158,21 @@ enum MetricsCmd {
     List(odl_cli::MetricListArgs),
     /// One metric over time: aggregate, group by attributes.
     Show(odl_cli::MetricArgs),
+}
+
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct SchemaArgs {
+    #[command(subcommand)]
+    cmd: Option<SchemaCmd>,
+}
+
+#[derive(Subcommand)]
+enum SchemaCmd {
+    /// Tables and columns that `sql` can query (the default).
+    Tables,
+    /// Attribute keys with counts, or the top values of one key (sampled; default window 1h).
+    Attrs(odl_cli::AttrArgs),
 }
 
 /// Hints in messages name mallard's commands and env vars.
@@ -257,6 +274,12 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Metrics(MetricsCmd::List(a)) => odl_cli::run(odl_cli::Command::Metrics(a), &r.otel()).await,
         Cmd::Metrics(MetricsCmd::Show(a)) => odl_cli::run(odl_cli::Command::Metric(a), &r.otel()).await,
         Cmd::Sql(a) => odl_cli::run(odl_cli::Command::Sql(a), &r.otel()).await,
+        Cmd::Schema(SchemaArgs { cmd: None | Some(SchemaCmd::Tables) }) => {
+            odl_cli::run(odl_cli::Command::Schema, &r.otel()).await
+        }
+        Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) => {
+            odl_cli::run(odl_cli::Command::Attrs(a), &r.otel()).await
+        }
         Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
         Cmd::Help { topic } => help::run(&topic, &r.output),
         Cmd::Errors { cmd } => sdl_cli::run(cmd, &r.sentry()).await,
@@ -325,6 +348,14 @@ mod tests {
             &["metrics", "list", "-q", "http"],
             &["metrics", "show", "http.server.duration", "-g", "p95", "-b", "http.route"],
             &["sql", "SELECT 1"],
+            &["schema"],
+            &["schema", "tables"],
+            &["schema", "attrs", "--signal", "spans", "-S", "checkout"],
+            &["schema", "attrs", "--signal", "logs", "--key", "http.route", "--since", "6h", "-n", "10"],
+            &["schema", "attrs", "--signal", "metrics", "--metric", "http.server.request.duration"],
+            &["traces", "list", "--cursor", "1730000000000000:0af7651916cd43dd8448eb211c80319c"],
+            &["logs", "--cursor", "1730000000000000:1f"],
+            &["find", "85fede14250ec6be"],
             &["sourcemaps", "list"],
             &["send-test", "--dsn", "http://k@h/1"],
             &["tui"],
@@ -374,6 +405,18 @@ mod tests {
         let cli = parse_ok(&["logs", "--format", "ndjson", "--raw"]);
         assert_eq!((cli.format, cli.raw), (Some(Format::Ndjson), true));
         assert!(try_parse(&["logs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn schema_and_cursor_flags() {
+        assert!(try_parse(&["schema", "attrs", "--signal", "events"]).is_err(), "spans, logs or metrics");
+        assert!(try_parse(&["schema", "nope"]).is_err());
+        assert!(try_parse(&["logs", "-f", "--cursor", "1:a"]).is_err(), "a follow has no pages");
+        let Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) = parse_ok(&["schema", "attrs"]).cmd else {
+            panic!("schema attrs")
+        };
+        assert_eq!((a.signal, a.limit, a.key), (mallard_client::odl_client::api::AttributeSignal::Spans, 50, None));
+        assert!(matches!(parse_ok(&["schema"]).cmd, Cmd::Schema(SchemaArgs { cmd: None })));
     }
 
     #[test]
