@@ -39,12 +39,12 @@ pub fn magenta(s: &str) -> String {
 pub fn cyan(s: &str) -> String {
     wrap("36", s)
 }
-/// Highlighted line (reverse video), used for the error line in source context.
+/// Highlighted line (bold yellow), used for the error line in source context.
 pub fn highlight(s: &str) -> String {
     wrap("1;33", s)
 }
 
-/// Color a level name: fatal/error red, warning yellow, info blue.
+/// Color a level name: fatal magenta, error red, warning yellow, info blue.
 pub fn level(l: &str) -> String {
     match l {
         "fatal" => magenta(l),

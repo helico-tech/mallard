@@ -1,7 +1,7 @@
 //! `sdl tui`: interactive dashboard.
 //!
 //! [`Embedded`] is the whole TUI as a component without terminal setup, so
-//! a host program (e.g. obs-ducklake) can draw it inside its own screen and
+//! a host program (e.g. mallard) can draw it inside its own screen and
 //! event loop. [`run`] is the standalone `sdl tui`: terminal setup, event
 //! loop and panic-safe restore around `Embedded`.
 
@@ -25,6 +25,7 @@ use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 
 /// What the host should do after [`Embedded::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +44,8 @@ pub enum Outcome {
 
 /// The TUI as an embeddable component. Data loads run as tasks on the tokio
 /// runtime that was current when [`Embedded::new`] was called; their results
-/// are picked up in [`Embedded::tick`].
+/// are picked up in [`Embedded::tick`]. Dropping it cancels the loads still
+/// running.
 pub struct Embedded {
     app: App,
     client: Client,
@@ -51,6 +53,16 @@ pub struct Embedded {
     tx: mpsc::UnboundedSender<Resp>,
     rx: mpsc::UnboundedReceiver<Resp>,
     started: bool,
+    /// Loads that may still be running.
+    tasks: Vec<AbortHandle>,
+}
+
+impl Drop for Embedded {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+    }
 }
 
 impl Embedded {
@@ -60,7 +72,7 @@ impl Embedded {
     pub fn new(client: Client, project: Option<String>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = Handle::current();
-        Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false }
+        Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false, tasks: vec![] }
     }
 
     /// Name the host's command and env vars in hints (default [`Hints::SDL`]).
@@ -122,10 +134,12 @@ impl Embedded {
         }
     }
 
-    fn dispatch(&self, reqs: Vec<Req>) {
+    fn dispatch(&mut self, reqs: Vec<Req>) {
+        self.tasks.retain(|t| !t.is_finished());
         for r in reqs {
             let kind = r.kind();
-            self.handle.spawn(guarded(kind, fetch(self.client.clone(), r, self.app.hints), self.tx.clone()));
+            let task = self.handle.spawn(guarded(kind, fetch(self.client.clone(), r, self.app.hints), self.tx.clone()));
+            self.tasks.push(task.abort_handle());
         }
     }
 }
@@ -219,6 +233,8 @@ pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
     };
     let mut events = crossterm::event::EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    // After a stall, tick once instead of a burst of ticks and redraws.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result: anyhow::Result<()> = async {
         loop {
             terminal.draw(|f| ui.draw(f, f.area()))?;
@@ -330,6 +346,27 @@ mod tests {
         ui.tick();
         assert_eq!(ui.take_fatal().as_deref(), Some("boom"));
         assert_eq!(ui.take_fatal(), None, "reported once");
+    }
+
+    /// Loads still running when the component is dropped are cancelled.
+    #[tokio::test]
+    async fn dropping_cancels_running_loads() {
+        // Accepts connections but never answers, so the loads hang.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let mut ui = Embedded::new(Client::new(&url, "t").unwrap(), Some("web".into()));
+        ui.tick();
+        let tasks = ui.tasks.clone();
+        assert!(!tasks.is_empty() && tasks.iter().all(|t| !t.is_finished()));
+        drop(ui);
+        tokio::task::yield_now().await;
+        for _ in 0..50 {
+            if tasks.iter().all(AbortHandle::is_finished) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("loads still running after drop");
     }
 
     #[tokio::test]

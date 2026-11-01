@@ -22,7 +22,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let result = match sdl_client::Client::new(&cli.url, &cli.token) {
         Ok(client) => {
@@ -38,6 +38,7 @@ async fn main() {
         } else {
             eprintln!("error: {e}");
         }
-        std::process::exit(1);
+        return std::process::ExitCode::FAILURE;
     }
+    std::process::ExitCode::SUCCESS
 }
