@@ -208,14 +208,6 @@ impl Storage {
     fn artifact_path_multi(&self, key: &str) -> ObjPath {
         key.split('/').filter(|s| !s.is_empty()).fold(self.artifacts.clone(), |p, part| p.join(part))
     }
-
-    /// Write and read back a probe object; used by readiness checks.
-    pub async fn probe(&self) -> Result<()> {
-        let key = "_probe";
-        self.put(key, Bytes::from_static(b"ok")).await?;
-        self.get(key).await?.context("probe object missing after write")?;
-        Ok(())
-    }
 }
 
 fn with_slash(p: &str) -> String {
@@ -284,6 +276,5 @@ mod tests {
         assert_eq!(s.get("chunks/abc").await.unwrap().unwrap(), Bytes::from_static(b"hi"));
         s.delete("chunks/abc").await.unwrap();
         assert!(s.get("chunks/abc").await.unwrap().is_none());
-        s.probe().await.unwrap();
     }
 }

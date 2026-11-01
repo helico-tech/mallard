@@ -21,14 +21,15 @@
 //! The library installs no global tracing subscriber or metrics recorder;
 //! it only emits `tracing` events and `metrics` counters.
 
-pub mod api;
-pub mod config;
-pub mod db;
-pub mod ingest;
-pub mod sourcemaps;
-pub mod storage;
+mod api;
+mod config;
+mod db;
+mod ingest;
+mod sourcemaps;
+mod storage;
 
 pub use config::Config;
+pub use db::install_all_extensions;
 
 use anyhow::{Context, Result};
 use db::Db;
@@ -37,14 +38,14 @@ use std::future::Future;
 use std::sync::Arc;
 use storage::Storage;
 
-pub struct AppState {
-    pub cfg: Config,
-    pub db: Db,
-    pub storage: Option<Storage>,
-    pub sourcemaps: SourceMaps,
-    pub tokens: Vec<String>,
+struct AppState {
+    cfg: Config,
+    db: Db,
+    storage: Option<Storage>,
+    sourcemaps: SourceMaps,
+    tokens: Vec<String>,
     /// Recently stored event ids per project, to drop SDK retries.
-    pub recent_events: moka::sync::Cache<(u32, uuid::Uuid), ()>,
+    recent_events: moka::sync::Cache<(u32, uuid::Uuid), ()>,
 }
 
 /// A running server: the database writer plus HTTP routers to mount.
@@ -97,10 +98,6 @@ impl Server {
             .time_to_live(std::time::Duration::from_secs(3600))
             .build();
         Server { state: Arc::new(AppState { cfg, db, storage, sourcemaps, tokens, recent_events }) }
-    }
-
-    pub fn state(&self) -> &Arc<AppState> {
-        &self.state
     }
 
     /// `/api/{project_id}/envelope/` and `/api/{project_id}/store/`.
