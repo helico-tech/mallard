@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { backTarget, lastTelemetryView, record, reset, screenAddress } from "./history";
+import { backTarget, forgetApp, lastTelemetryView, record, reset, screenAddress } from "./history";
 
 describe("back stacks, per side as in the TUI", () => {
   beforeEach(reset);
@@ -56,5 +56,16 @@ describe("back stacks, per side as in the TUI", () => {
     expect(screenAddress("/telemetry/metrics")).toBe("/telemetry/metrics/a.b?agg=p95");
     expect(lastTelemetryView()).toBe("/telemetry/metrics");
     expect(screenAddress("/errors")).toBe("/errors");
+  });
+
+  it("the app and the window are never restored; another app forgets its screens", () => {
+    record("/telemetry/traces", "?f=errors&w=6h&app=web");
+    expect(screenAddress("/telemetry/traces")).toBe("/telemetry/traces?f=errors");
+    record("/errors/web", "?status=all");
+    record("/telemetry/logs/x/y", "");
+    forgetApp();
+    expect(screenAddress("/errors")).toBe("/errors");
+    expect(screenAddress("/telemetry/traces")).toBe("/telemetry/traces?f=errors");
+    expect(screenAddress("/telemetry/logs")).toBe("/telemetry/logs");
   });
 });

@@ -6,10 +6,13 @@ import { Link, useNavigate } from "react-router-dom";
 import { otel } from "@/api/otel";
 import type { OperationSummary, ServiceSummary } from "@/api/types";
 import { useInterval } from "@/app/settings";
-import { useParam, useWindow } from "@/app/window";
+import { useParam, useScope, useWindow } from "@/app/window";
 import { ChartLegend, TimeChart } from "@/components/charts-kumo";
 import { useListNav } from "@/components/list";
-import { DataTable, EmptyState, ErrorState, Pad, Page, Section, Service, StaleNote, Stat, TableSkeleton } from "@/components/ui-bits";
+import { Ago, DataTable, EmptyState, ErrorState, Level, Pad, Page, Section, Service, StaleNote, Stat, TableSkeleton } from "@/components/ui-bits";
+import { NoErrors, NoTelemetry, WidenButton } from "@/components/scope-states";
+import { EventBars, useProjectStats } from "@/features/errors/IssuesPage";
+import { sentry } from "@/api/sentry";
 import { clean } from "@/lib/clean";
 import { rateClass, windowSeconds } from "@/lib/domain";
 import { compact, ms, percent } from "@/lib/format";
@@ -72,7 +75,7 @@ function Operations({ w, service }: { w: string; service: string }) {
   const navigate = useNavigate();
   const refetchInterval = useInterval(5000);
   const [, setService] = useParam("service");
-  const q = useQuery({ queryKey: ["otel", "operations", w, service], queryFn: ({ signal }) => otel.operations(w, service, signal), refetchInterval, placeholderData: keepPreviousData });
+  const q = useQuery({ queryKey: ["otel", "operations", w, service], queryFn: ({ signal }) => otel.operations(w, [service], signal), refetchInterval, placeholderData: keepPreviousData });
   const items = q.data ?? [];
   const back = () => setService("");
   const open = (o: OperationSummary) => navigate(`/telemetry/traces?f=${encodeURIComponent(setToken(`service=${service}`, "op", o.name))}&w=${w}`);
@@ -109,29 +112,22 @@ function Operations({ w, service }: { w: string; service: string }) {
   );
 }
 
-export default function OverviewPage() {
-  const { w } = useWindow("telemetry");
-  const [service] = useParam("service");
+/** The span numbers of a window, for every service or for the app's. */
+function useSpanNumbers(w: string, services: string[] | undefined, enabled = true) {
   const refetchInterval = useInterval(5000);
   const secs = windowSeconds(w);
-  const spanMs = secs * 1000;
-
-  const spans = useQuery({ queryKey: ["otel", "span-series", w], queryFn: ({ signal }) => otel.spanSeries(w, signal), refetchInterval, placeholderData: keepPreviousData });
-  const logs = useQuery({ queryKey: ["otel", "log-series", w], queryFn: ({ signal }) => otel.logSeries({ since: w }, signal), refetchInterval, placeholderData: keepPreviousData });
-  const stats = useQuery({ queryKey: ["otel", "stats"], queryFn: ({ signal }) => otel.stats(signal), refetchInterval });
-
-  const pts = useMemo(() => spans.data?.points ?? [], [spans.data]);
-  const step = spans.data?.step_secs || 1;
+  const q = useQuery({
+    queryKey: ["otel", "span-series", w, services],
+    enabled,
+    queryFn: ({ signal }) => otel.spanSeries(w, services, signal),
+    refetchInterval,
+    placeholderData: keepPreviousData,
+  });
+  const pts = useMemo(() => q.data?.points ?? [], [q.data]);
+  const step = q.data?.step_secs || 1;
   const count = pts.reduce((a, p) => a + p.count, 0);
   const errors = pts.reduce((a, p) => a + p.errors, 0);
   const p95 = count ? pts.reduce((a, p) => a + p.p95_ms * p.count, 0) / count : 0;
-  const logPts = logs.data?.points ?? [];
-  const logTotal = logPts.reduce((a, p) => a + p.total, 0);
-  const logErrors = logPts.reduce((a, p) => a + p.error, 0);
-  const errorRate = count ? errors / count : 0;
-  const ingest = stats.data?.ingest;
-  const bufferPct = ingest && ingest.max_buffer_bytes ? ingest.buffered_bytes / ingest.max_buffer_bytes : 0;
-
   const throughput = useMemo(() => [
     { name: "Requests/s", slot: 0, points: pts.map((p): [number, number] => [Date.parse(p.time), p.count / step]) },
     { name: "Errors/s", slot: 0, attention: true, points: pts.map((p): [number, number] => [Date.parse(p.time), p.errors / step]) },
@@ -143,6 +139,155 @@ export default function OverviewPage() {
     });
     return [line("p50", 0, (p) => p.p50_ms), line("p95", 1, (p) => p.p95_ms), line("p99", 2, (p) => p.p99_ms)];
   }, [pts]);
+  return { q, secs, pts, count, errors, p95, errorRate: count ? errors / count : 0, throughput, latency };
+}
+
+function SpanCharts({ numbers, w }: { numbers: ReturnType<typeof useSpanNumbers>; w: string }) {
+  const spanMs = windowSeconds(w) * 1000;
+  return (
+    <div className="grid shrink-0 gap-4 lg:grid-cols-[1.2fr_1fr]">
+      <Section title="Throughput" right={<ChartLegend lines={numbers.throughput} />}><Pad><TimeChart lines={numbers.throughput} height={200} format={compact} spanMs={spanMs} /></Pad></Section>
+      <Section title="Latency" right={<ChartLegend lines={numbers.latency} />}><Pad><TimeChart lines={numbers.latency} height={200} format={(v) => (v === 0 ? "0" : ms(v))} spanMs={spanMs} /></Pad></Section>
+    </div>
+  );
+}
+
+/** Failing first, then slowest. */
+function worstFirst(ops: OperationSummary[]): OperationSummary[] {
+  return [...ops].sort((a, b) => b.error_rate - a.error_rate || b.p95_ms - a.p95_ms).slice(0, 8);
+}
+
+function WorstOperations({ w, services }: { w: string; services: string[] }) {
+  const navigate = useNavigate();
+  const refetchInterval = useInterval(5000);
+  const q = useQuery({
+    queryKey: ["otel", "operations", w, services],
+    queryFn: ({ signal }) => otel.operations(w, services, signal),
+    refetchInterval,
+    placeholderData: keepPreviousData,
+  });
+  const items = useMemo(() => worstFirst(q.data ?? []), [q.data]);
+  const href = (o: OperationSummary) => `/telemetry/traces?f=${encodeURIComponent(setToken("", "op", o.name))}`;
+  const { selectedId, select } = useListNav({ listKey: `worst:${services.join()}`, items, idOf: (o) => `${o.name}|${o.kind}`, onOpen: (o) => navigate(href(o)) });
+  return (
+    <Section title="Worst operations" right={q.data ? "failing first, then slowest" : undefined}>
+      {q.isError && q.data && <StaleNote error={q.error} />}
+      {q.isError && !q.data ? <ErrorState error={q.error} onRetry={() => void q.refetch()} /> : q.isPending ? <TableSkeleton rows={4} /> : items.length === 0 ? (
+        <EmptyState title={`No operations in the last ${w}`} action={<WidenButton />} />
+      ) : (
+        <DataTable fixed>
+          <caption className="sr-only">Worst operations. Enter opens their traces.</caption>
+          <Table.Header variant="compact" sticky><Table.Row><Table.Head>Operation</Table.Head><Table.Head className="w-20 text-right">Errors</Table.Head><Table.Head className="w-20 text-right">p95</Table.Head><Table.Head className="hidden w-20 text-right @lg:table-cell">Rate</Table.Head></Table.Row></Table.Header>
+          <Table.Body>
+            {items.map((o) => {
+              const id = `${o.name}|${o.kind}`;
+              return (
+                <Table.Row key={id} data-row-id={id} aria-selected={selectedId === id} variant={selectedId === id ? "selected" : "default"} onClick={() => select(id)} onDoubleClick={() => navigate(href(o))}>
+                  <Table.Cell><Link to={href(o)} onClick={(e) => e.stopPropagation()} className="mono block truncate font-medium hover:underline" title={o.name}>{o.name}</Link></Table.Cell>
+                  <Table.Cell className={cn("text-right", rateClass(o.error_rate))}>{percent(o.error_rate)}</Table.Cell>
+                  <Table.Cell className="text-right">{ms(o.p95_ms)}</Table.Cell>
+                  <Table.Cell className="hidden text-right @lg:table-cell">{compact(o.rate_per_sec)}/s</Table.Cell>
+                </Table.Row>
+              );
+            })}
+          </Table.Body>
+        </DataTable>
+      )}
+    </Section>
+  );
+}
+
+function NewIssues({ project, w }: { project: string; w: string }) {
+  const refetchInterval = useInterval(5000);
+  const q = useQuery({
+    queryKey: ["sentry", "new-issues", project, w],
+    queryFn: ({ signal }) => sentry.issues(project, { status: "unresolved", since: w, sort: "first_seen", new: true, limit: 8 }, signal),
+    refetchInterval,
+    placeholderData: keepPreviousData,
+  });
+  const items = q.data?.issues ?? [];
+  const slug = encodeURIComponent(project);
+  return (
+    <Section title="New issues" right={<Link to={`/errors/${slug}?sort=first_seen`} className="hover:underline">All issues</Link>}>
+      {q.isError && q.data && <StaleNote error={q.error} />}
+      {q.isError && !q.data ? <ErrorState error={q.error} onRetry={() => void q.refetch()} /> : q.isPending ? <TableSkeleton rows={4} /> : items.length === 0 ? (
+        <EmptyState title={`No new issues in the last ${w}`} action={<WidenButton />} />
+      ) : (
+        <DataTable fixed>
+          <caption className="sr-only">Issues first seen in this time window, newest first.</caption>
+          <Table.Header variant="compact" sticky><Table.Row><Table.Head className="hidden w-24 @lg:table-cell">Level</Table.Head><Table.Head>Issue</Table.Head><Table.Head className="w-20 text-right">Events</Table.Head><Table.Head className="w-24">Last seen</Table.Head></Table.Row></Table.Header>
+          <Table.Body>
+            {items.map((i) => (
+              <Table.Row key={i.id}>
+                <Table.Cell className="hidden @lg:table-cell"><Level level={i.level} /></Table.Cell>
+                <Table.Cell><Link to={`/errors/${slug}/issues/${i.id}`} className="block truncate font-medium hover:underline" title={i.title}>{i.title}</Link></Table.Cell>
+                <Table.Cell className="text-right">{compact(i.count)}</Table.Cell>
+                <Table.Cell><Ago t={i.last_seen} /></Table.Cell>
+              </Table.Row>
+            ))}
+          </Table.Body>
+        </DataTable>
+      )}
+    </Section>
+  );
+}
+
+/** One app, one look: is it healthy? Every number leads to what it counts, and an app
+ *  with one side shows that side and says how to add the other (story 0004/05). */
+function AppHome() {
+  const { app, info, services, project, loading, error } = useScope();
+  const { w } = useWindow();
+  const telemetry = !!services?.length;
+  const numbers = useSpanNumbers(w, services ?? undefined, telemetry);
+  const stats = useProjectStats(project, w);
+  const s = stats.data;
+  const slug = encodeURIComponent(app);
+
+  if (loading) return <Page><TableSkeleton /></Page>;
+  if (error && !info) return <Page><ErrorState error={error} title="Could not load the apps" /></Page>;
+  if (!telemetry && !project) {
+    return (
+      <Page>
+        <Section><NoTelemetry /></Section>
+      </Page>
+    );
+  }
+  return (
+    <Page scroll>
+      <h1 className="shrink-0 text-lg font-semibold [overflow-wrap:anywhere]">{info?.name ?? clean(app)}</h1>
+      <Section>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] divide-x divide-kumo-hairline">
+          {telemetry && <Stat label="Error rate" href="/telemetry/traces?f=errors" value={numbers.q.data ? percent(numbers.errorRate) : "–"} valueClass={numbers.q.data ? rateClass(numbers.errorRate) : undefined} sub={numbers.q.data ? `${compact(numbers.errors)} failed` : " "} />}
+          {telemetry && <Stat label="p95 latency" href="/telemetry/traces" value={numbers.q.data ? ms(numbers.p95) : "–"} sub="avg of per-bucket p95" />}
+          {telemetry && <Stat label="Requests" href="/telemetry/traces" value={numbers.q.data ? `${compact(numbers.count / numbers.secs)}/s` : "–"} sub={numbers.q.data ? `${compact(numbers.count)} total` : " "} />}
+          {project && <Stat label="New issues" href={`/errors/${slug}?sort=first_seen`} value={s ? compact(s.new_issues) : "–"} valueClass={s && s.new_issues > 0 ? "text-kumo-warning" : undefined} sub="first seen" />}
+          {project && <Stat label="Events" href={`/errors/${slug}`} value={s ? compact(s.total_events) : "–"} sub={s ? `in ${compact(s.unique_issues)} ${s.unique_issues === 1 ? "issue" : "issues"}` : " "} />}
+        </div>
+      </Section>
+      {telemetry && (numbers.q.isError && !numbers.q.data ? <ErrorState error={numbers.q.error} onRetry={() => void numbers.q.refetch()} title="Could not load the charts" /> : <SpanCharts numbers={numbers} w={w} />)}
+      {project && <Section title="Events"><Pad>{stats.isError && !s ? <p className="text-kumo-danger">{stats.error.message}</p> : <EventBars stats={s} w={w} />}</Pad></Section>}
+      <div className="grid shrink-0 items-start gap-4 lg:grid-cols-2">
+        {project ? <NewIssues project={project} w={w} /> : <Section title="Errors"><NoErrors /></Section>}
+        {telemetry ? <WorstOperations w={w} services={services!} /> : <Section title="Telemetry"><NoTelemetry /></Section>}
+      </div>
+    </Page>
+  );
+}
+
+function AllApps() {
+  const { w } = useWindow();
+  const [service] = useParam("service");
+  const refetchInterval = useInterval(5000);
+  const numbers = useSpanNumbers(w, undefined);
+  const { q: spans, secs, pts, count, errors, p95, errorRate } = numbers;
+  const logs = useQuery({ queryKey: ["otel", "log-series", w], queryFn: ({ signal }) => otel.logSeries({ since: w }, signal), refetchInterval, placeholderData: keepPreviousData });
+  const stats = useQuery({ queryKey: ["otel", "stats"], queryFn: ({ signal }) => otel.stats(signal), refetchInterval });
+
+  const logPts = logs.data?.points ?? [];
+  const logTotal = logPts.reduce((a, p) => a + p.total, 0);
+  const logErrors = logPts.reduce((a, p) => a + p.error, 0);
+  const ingest = stats.data?.ingest;
+  const bufferPct = ingest && ingest.max_buffer_bytes ? ingest.buffered_bytes / ingest.max_buffer_bytes : 0;
 
   return (
     <Page scroll>
@@ -165,12 +310,14 @@ export default function OverviewPage() {
       ) : pts.length === 0 && !spans.isPending ? (
         <Section><EmptyState icon={<ChartLineIcon size={32} />} title={`No data in the last ${w}`} description="Widen the time window, or send telemetry to the server." /></Section>
       ) : (
-        <div className="grid shrink-0 gap-4 lg:grid-cols-[1.2fr_1fr]">
-          <Section title="Throughput" right={<ChartLegend lines={throughput} />}><Pad><TimeChart lines={throughput} height={200} format={compact} spanMs={spanMs} /></Pad></Section>
-          <Section title="Latency" right={<ChartLegend lines={latency} />}><Pad><TimeChart lines={latency} height={200} format={(v) => (v === 0 ? "0" : ms(v))} spanMs={spanMs} /></Pad></Section>
-        </div>
+        <SpanCharts numbers={numbers} w={w} />
       )}
       {service ? <Operations w={w} service={service} /> : <Services w={w} />}
     </Page>
   );
+}
+
+export default function OverviewPage() {
+  const { app } = useScope();
+  return app ? <AppHome /> : <AllApps />;
 }

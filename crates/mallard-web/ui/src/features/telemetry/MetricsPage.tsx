@@ -5,18 +5,19 @@ import { Link, useNavigate } from "react-router-dom";
 import { otel } from "@/api/otel";
 import type { MetricInfo } from "@/api/types";
 import { useInterval } from "@/app/settings";
-import { useParam, useWindow } from "@/app/window";
+import { useParam, useScope, useWindow } from "@/app/window";
 import { useListNav } from "@/components/list";
 import { DataTable, EmptyState, ErrorState, Page, SearchField, Section, StaleNote, TableSkeleton } from "@/components/ui-bits";
 import { compact } from "@/lib/format";
 import { metricTypeLabel } from "@/lib/metrics";
 
 export function MetricsPage() {
-  const { w } = useWindow("telemetry");
+  const { w } = useWindow();
+  const { services } = useScope();
   const [search, setSearch] = useParam("q");
   const navigate = useNavigate();
   const refetchInterval = useInterval(30000);
-  const q = useQuery({ queryKey: ["otel", "metrics", w], queryFn: ({ signal }) => otel.metrics(w, signal), refetchInterval, placeholderData: keepPreviousData });
+  const q = useQuery({ queryKey: ["otel", "metrics", w, services], queryFn: ({ signal }) => otel.metrics(w, services ?? undefined, signal), refetchInterval, placeholderData: keepPreviousData });
   const all = useMemo(() => q.data ?? [], [q.data]);
   const items = useMemo(() => {
     const needle = search.toLowerCase();
