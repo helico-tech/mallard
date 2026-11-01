@@ -17,9 +17,14 @@
 //! - `SHOW`/`DESCRIBE`/`SUMMARIZE` references are refused.
 //!
 //! The connection's default schema must be the side's schema
-//! (`USE lake.<schema>`), so `FROM events` resolves there. Resource use
-//! (memory, CPU) is bounded only by the caller's timeout and DuckDB's memory
-//! limit; treat SQL access as admin access.
+//! (`USE lake.<schema>`), so `FROM events` resolves there.
+//!
+//! Resource limits (ADR 0015): the answer holds at most `limit` rows and
+//! [`MAX_RESULT_BYTES`] of row data (`truncated` says when either cut it
+//! short); each side interrupts the query after its timeout. Memory is
+//! bounded only by DuckDB's global `memory_limit`, which the host owns:
+//! DuckDB has no per-query limit, and a library must not change global
+//! settings on a shared connection. Treat SQL access as admin access.
 
 use std::collections::HashSet;
 
@@ -61,6 +66,11 @@ const DENIED_SCALAR_PREFIXES: &[&str] = &[
     "rpad",
 ];
 
+/// Most row data (JSON text) one answer carries; rows past it are cut and
+/// the answer is `truncated`. Bounds the server's memory for the answer and
+/// the size of the HTTP response, whatever `limit` asks for.
+pub const MAX_RESULT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Why a query did not run.
 #[derive(Debug, thiserror::Error)]
 pub enum SqlError {
@@ -90,7 +100,8 @@ pub struct SqlResult {
     pub columns: Vec<(String, String)>,
     /// Row values as JSON (non-JSON types as DuckDB renders them in JSON).
     pub rows: Vec<Vec<J>>,
-    /// More rows existed than the limit.
+    /// More rows existed than the limit, or the rows reached
+    /// [`MAX_RESULT_BYTES`].
     pub truncated: bool,
     pub elapsed_ms: f64,
 }
@@ -200,8 +211,20 @@ fn check(n: &J, schema: &str, tables: &HashSet<&str>, ctes: &HashSet<String>) ->
     Ok(())
 }
 
-/// [`validate`] and run; returns at most `limit` rows.
+/// [`validate`] and run; returns at most `limit` rows and
+/// [`MAX_RESULT_BYTES`] of row data.
 pub fn run(conn: &Connection, schema: &str, tables: &[&str], query: &str, limit: u32) -> Result<SqlResult, SqlError> {
+    run_capped(conn, schema, tables, query, limit, MAX_RESULT_BYTES)
+}
+
+fn run_capped(
+    conn: &Connection,
+    schema: &str,
+    tables: &[&str],
+    query: &str,
+    limit: u32,
+    max_bytes: usize,
+) -> Result<SqlResult, SqlError> {
     let t0 = std::time::Instant::now();
     let query = query.trim().trim_end_matches(';');
     validate(conn, schema, tables, query)?;
@@ -217,12 +240,18 @@ pub fn run(conn: &Connection, schema: &str, tables: &[&str], query: &str, limit:
     let mut stmt = conn.prepare(&sql).map_err(user_err)?;
     let mut rows = Vec::new();
     let mut truncated = false;
+    let mut bytes = 0usize;
     for r in stmt.query_map([], |r| r.get::<_, String>(0)).map_err(user_err)? {
         if rows.len() == limit as usize {
             truncated = true;
             break;
         }
         let text = r.map_err(user_err)?;
+        bytes += text.len();
+        if bytes > max_bytes {
+            truncated = true;
+            break;
+        }
         let v: J = serde_json::from_str(&text)
             .or_else(|_| serde_json::from_str(&non_finite_to_null(&text)))
             .map_err(|e| rejected(format!("cannot encode row as JSON: {e}")))?;
@@ -351,5 +380,17 @@ mod tests {
         assert_eq!(r.rows[1], [J::from(1), J::from("x1")]);
         assert!(r.truncated);
         assert!(matches!(run(&c, "main", &["events"], "SELECT nope FROM events", 3), Err(SqlError::Rejected(_))));
+    }
+
+    #[test]
+    fn result_size_is_capped() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE events AS SELECT range AS n FROM range(100)").unwrap();
+        // Each row is `[<n>]`: 3 bytes for 0-9, then 4: 12 rows fit in 40 bytes.
+        let r = run_capped(&c, "main", &["events"], "SELECT n FROM events ORDER BY n", 1000, 40).unwrap();
+        assert_eq!(r.rows.len(), 12, "{:?}", r.rows);
+        assert!(r.truncated, "cut by size, not by limit");
+        let r = run_capped(&c, "main", &["events"], "SELECT n FROM events ORDER BY n", 1000, 1 << 20).unwrap();
+        assert_eq!((r.rows.len(), r.truncated), (100, false));
     }
 }

@@ -135,7 +135,9 @@ fn make_event(rng: &mut impl rand::Rng, issues: u32, users: u32, breadcrumbs: us
             })
         })
         .collect();
+    // Oldest first, like real SDKs (checked with @sentry/node 11).
     let crumbs: Vec<Value> = (0..breadcrumbs)
+        .rev()
         .map(|i| {
             json!({"timestamp": chrono::Utc::now().timestamp() as f64 - i as f64, "category": "ui.click",
             "message": format!("button#action-{} clicked", rng.random_range(0..50))})

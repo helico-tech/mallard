@@ -277,6 +277,9 @@ pub struct ServerInfo {
     /// Longest query window (`query.max_window`), in seconds.
     #[serde(default)]
     pub max_window_secs: Option<u64>,
+    /// `POST /v1/sql` is on (`query.enable_sql`).
+    #[serde(default)]
+    pub sql: Option<bool>,
 }
 
 /// Error body of every non-2xx `/v1` response: `error` is a code such as
@@ -380,6 +383,24 @@ pub struct ReleaseQuery {
     pub limit: Option<u32>,
 }
 
+/// `GET /v1/schema`: the tables `POST /v1/sql` can query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct Schema {
+    pub tables: Vec<SchemaTable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SchemaTable {
+    /// Table name; also reachable as `lake.sentry.<name>`.
+    pub name: String,
+    /// The table's time column; filter on it.
+    pub time_column: String,
+    /// Columns in storage order.
+    pub columns: Vec<SqlColumn>,
+}
+
 /// `POST /v1/sql`: one read-only `SELECT` over `events`, `issues` and
 /// `issue_activity` (schema `lake.sentry`, the default, so `FROM events`
 /// works).
@@ -399,7 +420,8 @@ pub struct SqlResponse {
     /// or JSON objects.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<Vec<Object>>))]
     pub rows: Vec<Vec<serde_json::Value>>,
-    /// True when more rows existed than `limit`.
+    /// True when more rows existed than `limit`, or the rows reached the
+    /// server's size cap (32 MiB of row data).
     pub truncated: bool,
     pub elapsed_ms: f64,
 }

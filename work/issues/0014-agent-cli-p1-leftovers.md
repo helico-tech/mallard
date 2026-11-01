@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-01
 ---
@@ -29,3 +29,15 @@ created: 2026-11-01
 ## Notes
 - None of these blocks an agent: each has a workaround (exit 7, `sql`
   errors name the tables, the printers behave the same).
+- Done 2026-11-01:
+  - `/v1/info` has `sql`; `mallard status` shows it as `capabilities.sql_errors`.
+  - New `GET /sentry/v1/schema`; `mallard schema` lists both sides, with a
+    `side` per table (`crates/mallard/src/schema.rs`).
+  - One printer: `mallard_term::table::sql_result`.
+  - Breadcrumbs: captured from `@sentry/node` 11 (SDK order is oldest first),
+    so `events show` ("newest first") is right. `sdl-loadgen` sent newest
+    first; fixed there.
+  - Release endpoints stay stubs, documented: storing them needs a table, a
+    writer command, a schema step with no migrations yet, and a rule for
+    merging with the derived list, and nothing needs it now. See
+    [issue 0060](0060-store-sentry-cli-releases.md).

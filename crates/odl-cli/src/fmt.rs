@@ -12,7 +12,7 @@ use comfy_table::{Cell, CellAlignment, Color};
 use mallard_term::color::{alert, bold, cyan, dim, green, red, yellow};
 pub(crate) use mallard_term::fmt::{bytes, compact, ms};
 pub(crate) use mallard_term::table::table;
-pub(crate) use mallard_term::text::{clean, json_safe};
+pub(crate) use mallard_term::text::clean;
 use odl_client::api::*;
 
 /// Append one formatted line to a `String`.
@@ -363,19 +363,7 @@ pub(crate) fn metric_text(r: &MetricQueryResult) -> String {
 
 pub(crate) fn sql_text(r: &SqlResponse) -> String {
     let headers: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
-    let mut t = table(&headers);
-    for row in &r.rows {
-        t.add_row(row.iter().map(|v| match v {
-            serde_json::Value::String(s) => Cell::new(clean(s)),
-            serde_json::Value::Null => Cell::new("NULL").fg(Color::DarkGrey),
-            serde_json::Value::Number(n) => Cell::new(n).set_alignment(CellAlignment::Right),
-            // Nested values print as JSON: strings in it are escaped.
-            other => Cell::new(json_safe(&other.to_string())),
-        }));
-    }
-    let summary =
-        format!("{} rows{} in {}", r.rows.len(), if r.truncated { " (truncated)" } else { "" }, ms(r.elapsed_ms));
-    format!("{t}\n{}", dim(&summary))
+    mallard_term::table::sql_result(&headers, &r.rows, r.truncated, r.elapsed_ms)
 }
 
 /// Keys (or values of one key) with how many sampled rows have them.

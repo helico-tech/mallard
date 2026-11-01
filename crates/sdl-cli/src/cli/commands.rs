@@ -702,21 +702,8 @@ pub(super) async fn sql(ctx: &Ctx, a: SqlArgs) -> Result<()> {
     if !ctx.output.text() {
         return ctx.print_json(&r);
     }
-    let headers: Vec<String> = r.columns.iter().map(|c| fmt::clean(&c.name).into_owned()).collect();
-    let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
-    let mut t = table(&headers);
-    for row in &r.rows {
-        t.add_row(row.iter().map(|v| match v {
-            serde_json::Value::String(s) => Cell::new(fmt::clean(s)),
-            serde_json::Value::Null => Cell::new("NULL").fg(Color::DarkGrey),
-            serde_json::Value::Number(n) => right(n),
-            // Nested values print as JSON: strings in it are escaped.
-            other => Cell::new(mallard_term::text::json_safe(&other.to_string())),
-        }));
-    }
-    out!(o, "{t}");
-    let more = if r.truncated { " (truncated; raise --limit)" } else { "" };
-    out!(o, "{}", p::dim(&format!("{} rows{more} in {:.1}ms", r.rows.len(), r.elapsed_ms)));
+    let headers: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+    out!(o, "{}", mallard_term::table::sql_result(&headers, &r.rows, r.truncated, r.elapsed_ms));
     Ok(())
 }
 

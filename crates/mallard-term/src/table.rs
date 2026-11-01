@@ -2,9 +2,12 @@
 
 use std::io::IsTerminal;
 
-use comfy_table::{Attribute, Cell, CellAlignment, ContentArrangement, Table, presets};
+use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
+use serde_json::Value;
 
-use crate::text::clean;
+use crate::color::dim;
+use crate::fmt::ms;
+use crate::text::{clean, json_safe};
 
 /// Whether stdout is a terminal: boxed tables, sparklines and multi-line
 /// cells. When piped, output is plain: one row per line, columns two
@@ -40,10 +43,39 @@ pub fn right(s: impl ToString) -> Cell {
     Cell::new(s).set_alignment(CellAlignment::Right)
 }
 
+/// The text of a SQL answer (both sides' `sql` command): a table with the
+/// columns and JSON rows, then a dim summary line. Server text is cleaned.
+pub fn sql_result(columns: &[&str], rows: &[Vec<Value>], truncated: bool, elapsed_ms: f64) -> String {
+    let mut t = table(columns);
+    for row in rows {
+        t.add_row(row.iter().map(|v| match v {
+            Value::String(s) => Cell::new(clean(s)),
+            Value::Null => Cell::new("NULL").fg(Color::DarkGrey),
+            Value::Number(n) => right(n),
+            // Nested values print as JSON: strings in it are escaped.
+            other => Cell::new(json_safe(&other.to_string())),
+        }));
+    }
+    let more = if truncated { " (truncated; raise --limit or select fewer columns)" } else { "" };
+    format!("{t}\n{}", dim(&format!("{} rows{more} in {}", rows.len(), ms(elapsed_ms))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::color::strip_ansi;
+
+    #[test]
+    fn sql_result_prints_each_json_type() {
+        let evil = "x\x1b[2J";
+        let rows = vec![vec![Value::from(1), Value::from(evil), Value::Null, serde_json::json!([evil])]];
+        let s = sql_result(&["n", "s", "none", evil], &rows, true, 2.5);
+        let plain = strip_ansi(&s);
+        assert!(!plain.chars().any(|c| c.is_control() && c != '\n'), "{s:?}");
+        assert!(plain.contains("NULL"), "{plain}");
+        assert!(plain.contains("1 rows (truncated; raise --limit or select fewer columns) in 2.5ms"), "{plain}");
+        assert!(sql_result(&["n"], &[], false, 1.0).contains("0 rows in 1.0ms"));
+    }
 
     #[test]
     fn rounded_with_bold_headers() {

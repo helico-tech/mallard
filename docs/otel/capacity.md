@@ -156,7 +156,10 @@ LOADGEN=./target/release/odl-loadgen bench/otel/capacity/steady-state.sh 2 2g 12
 MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
   ./target/release/mallard-server &
 ./target/release/odl-loadgen --endpoint http://127.0.0.1:4318 --backfill 7d --rate 10 --batch 500 --concurrency 8
-# (the old run then merged all files with `otel-ducklake maintenance --full`;
-#  mallard has no one-shot maintenance command yet: work/issues/0012)
+kill %1; wait   # the DuckDB-file catalog allows one process at a time
+MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
+  ./target/release/mallard-server maintenance --full   # merge all files, as the measured run did
+MALLARD_SERVER__API_TOKENS=dev MALLARD_DUCKDB__THREADS=2 MALLARD_DUCKDB__MEMORY_LIMIT=1GB \
+  ./target/release/mallard-server &
 MALLARD_TOKEN=dev bench/otel/capacity/query-latency.sh http://127.0.0.1:8080/otel <data end, RFC 3339> <a trace id>
 ```

@@ -240,7 +240,8 @@ fn parse_ts(v: &Value) -> Option<DateTime<Utc>> {
     }
 }
 
-/// Breadcrumbs, newest first.
+/// Breadcrumbs, newest first. SDKs send them oldest first (the protocol's
+/// order, checked with @sentry/node 11).
 pub(crate) fn breadcrumbs(payload: &Value) -> Vec<Breadcrumb> {
     let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     let mut out: Vec<Breadcrumb> = values(payload.get("breadcrumbs"))
