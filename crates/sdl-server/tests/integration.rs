@@ -297,8 +297,30 @@ async fn ingest_auth_compression_cors_and_dedupe() {
     assert_eq!(r.status(), 400);
 
     // A cursor that does not parse is an error, not the first page again.
-    let (s, _) = t.api(reqwest::Method::GET, "/v1/projects/web/events?before=garbage", None).await;
-    assert_eq!(s, 400);
+    let (s, v) = t.api(reqwest::Method::GET, "/v1/projects/web/events?before=garbage", None).await;
+    assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{v}");
+    // Bad query parameters get the JSON error body too, like the OTel API.
+    let (s, v) = t.api(reqwest::Method::GET, "/v1/projects/web/events?limit=many", None).await;
+    assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{v}");
+    // Windows: since, from/to and step, bounded by query.max_window.
+    let (s, v) = t.api(reqwest::Method::GET, "/v1/projects/web/issues?since=400d", None).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("max_window"), "{v}");
+    let to = chrono::Utc::now() + chrono::Duration::minutes(1);
+    let from = to - chrono::Duration::hours(2);
+    let range = format!("from={}&to={}", from.format("%Y-%m-%dT%H:%M:%SZ"), to.format("%Y-%m-%dT%H:%M:%SZ"));
+    let stats = t.get(&format!("/v1/projects/web/stats?{range}&step=10m")).await;
+    assert_eq!(stats["interval_seconds"], 600, "{stats}");
+    assert_eq!(stats["buckets"].as_array().unwrap().len(), 12, "{stats}");
+    let issues = t.get(&format!("/v1/projects/web/issues?{range}")).await;
+    assert!(!issues["issues"].as_array().unwrap().is_empty(), "{issues}");
+    let old = format!(
+        "from={}&to={}",
+        (from - chrono::Duration::days(2)).to_rfc3339(),
+        (to - chrono::Duration::days(2)).to_rfc3339()
+    );
+    let none = t.get(&format!("/v1/projects/web/issues?{}", old.replace('+', "%2B"))).await;
+    assert!(none["issues"].as_array().unwrap().is_empty(), "`to` bounds the window: {none}");
 
     // Management API requires the token.
     let r = t.http.get(format!("{}/v1/projects", t.base)).send().await.unwrap();

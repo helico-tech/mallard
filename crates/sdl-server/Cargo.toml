@@ -34,7 +34,6 @@ bytes.workspace = true
 futures.workspace = true
 flate2.workspace = true
 xxhash-rust.workspace = true
-humantime.workspace = true
 metrics.workspace = true
 url.workspace = true
 toml.workspace = true
@@ -42,7 +41,6 @@ axum = { workspace = true, features = ["multipart"] }
 tower = { workspace = true, features = ["limit"] }
 tower-http = { workspace = true, features = ["decompression-full", "limit"] }
 http-body-util = "0.1"
-utoipa-scalar = { version = "0.4", features = ["axum"] }
 object_store = { version = "0.14", features = ["aws", "azure"] }
 crossbeam-channel = "0.5"
 moka = { version = "0.12", features = ["sync", "future"] }

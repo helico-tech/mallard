@@ -142,6 +142,12 @@ impl Server {
         api::openapi()
     }
 
+    /// Ready to serve: the writer runs and the catalog answers. The error
+    /// is a short reason (details are logged).
+    pub async fn ready(&self) -> Result<(), String> {
+        self.state.ready().await
+    }
+
     /// Wait for `shutdown` to resolve, then stop cleanly (see [`Server::shutdown`]).
     /// Same shape as `odl_server::Server::run_background`.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {

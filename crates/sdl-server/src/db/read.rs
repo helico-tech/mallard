@@ -4,7 +4,6 @@
 
 use super::{Ns, us_to_dt};
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use mallard_duck::duckdb::types::ToSql;
 use mallard_duck::duckdb::{Connection, OptionalExt, params, params_from_iter};
 use sdl_types::*;
@@ -21,36 +20,18 @@ pub fn parse_group_id(s: &str) -> Option<u64> {
 
 pub const TREND_BUCKETS: i64 = 24;
 
-pub struct Window {
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
+pub use mallard_common::window::Window;
+
+fn start_us(w: &Window) -> i64 {
+    w.from.timestamp_micros()
 }
 
-/// A `since` value that is not a usable window.
-#[derive(Debug, thiserror::Error)]
-pub enum WindowError {
-    #[error("invalid duration {0:?}: {1}")]
-    Invalid(String, humantime::DurationError),
-    #[error("duration {0:?} is too large")]
-    TooLarge(String),
+fn end_us(w: &Window) -> i64 {
+    w.to.timestamp_micros()
 }
 
-impl Window {
-    pub fn parse(since: Option<&str>, default: &str, now: DateTime<Utc>) -> Result<Window, WindowError> {
-        let s = since.unwrap_or(default);
-        let d = humantime::parse_duration(s).map_err(|e| WindowError::Invalid(s.into(), e))?;
-        let start = chrono::Duration::from_std(d)
-            .ok()
-            .and_then(|d| now.checked_sub_signed(d))
-            .ok_or_else(|| WindowError::TooLarge(s.into()))?;
-        Ok(Window { start, end: now })
-    }
-    fn start_us(&self) -> i64 {
-        self.start.timestamp_micros()
-    }
-    fn span_us(&self) -> i64 {
-        (self.end - self.start).num_microseconds().unwrap_or(i64::MAX).max(1)
-    }
+fn span_us(w: &Window) -> i64 {
+    (w.to - w.from).num_microseconds().unwrap_or(i64::MAX).max(1)
 }
 
 /// Bucket a set of issues' events over the window into `TREND_BUCKETS`.
@@ -59,17 +40,17 @@ fn trends(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, groups: &[u64
     if groups.is_empty() {
         return Ok(out);
     }
-    let bucket = (w.span_us() / TREND_BUCKETS).max(1);
+    let bucket = (span_us(w) / TREND_BUCKETS).max(1);
     // Numbers only, so building the IN list is injection-safe.
     let list = groups.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
     let sql = ns.sql(&format!(
         "SELECT group_hash, CAST(floor((epoch_us(received_at) - ?) / ?) AS BIGINT) AS b, count(*)
          FROM $S.events
-         WHERE project_id = ? AND received_at >= make_timestamp(?) AND group_hash IN ({list})
+         WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?) AND group_hash IN ({list})
          GROUP BY ALL"
     ));
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![w.start_us(), bucket, project_id as i32, w.start_us()], |r| {
+    let rows = stmt.query_map(params![start_us(w), bucket, project_id as i32, start_us(w), end_us(w)], |r| {
         Ok((r.get::<_, u64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
     })?;
     for row in rows {
@@ -158,14 +139,14 @@ pub fn list_issues(
         filters.push_str(" AND release = ?");
         filter_values.push(rel);
     }
-    let (pid, start_us) = (project_id as i32, w.start_us());
+    let (pid, start_us, end_us) = (project_id as i32, start_us(w), end_us(w));
 
     // Phase 1: rank issues with cheap aggregates only (count, max). Distinct
     // users are only computed for all groups when sorting by them, and then
     // approximately.
     let users_expr = if sort == IssueSort::Users { "approx_count_distinct(user_key)" } else { "0" };
     let sort = sort.column();
-    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us];
+    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us, &end_us];
     p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
     p.push(&pid); // st
     p.push(&pid); // issues join
@@ -191,7 +172,7 @@ pub fn list_issues(
         "WITH agg AS (
             SELECT group_hash, count(*) AS cnt, epoch_us(max(received_at)) AS last_us, {users_expr} AS users
             FROM $S.events
-            WHERE project_id = ? AND received_at >= make_timestamp(?){filters}
+            WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?){filters}
             GROUP BY group_hash
          ), st AS (
             SELECT group_hash, arg_max(status, changed_at) AS status
@@ -228,19 +209,19 @@ pub fn list_issues(
     let mut issues: Vec<IssueSummary> = rows.collect::<Result<_, _>>()?;
     let groups: Vec<u64> = issues.iter().filter_map(|i| parse_group_id(&i.id)).collect();
     if groups.is_empty() {
-        return Ok(IssueList { issues, window_start: w.start, window_end: w.end });
+        return Ok(IssueList { issues, window_start: w.from, window_end: w.to });
     }
 
     // Phase 2: exact users and the latest title/culprit/level, only for the
     // issues on this page.
     let list = groups.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us];
+    let mut p: Vec<&dyn ToSql> = vec![&pid, &start_us, &end_us];
     p.extend(filter_values.iter().map(|v| v as &dyn ToSql));
     let sql = ns.sql(&format!(
         "SELECT group_hash, count(DISTINCT user_key), arg_max(title, received_at), arg_max(culprit, received_at),
                 arg_max(level, received_at)
          FROM $S.events
-         WHERE project_id = ? AND received_at >= make_timestamp(?){filters} AND group_hash IN ({list})
+         WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?){filters} AND group_hash IN ({list})
          GROUP BY group_hash"
     ));
     let mut stmt = conn.prepare(&sql)?;
@@ -264,7 +245,7 @@ pub fn list_issues(
             i.trend = v;
         }
     }
-    Ok(IssueList { issues, window_start: w.start, window_end: w.end })
+    Ok(IssueList { issues, window_start: w.from, window_end: w.to })
 }
 
 pub fn issue_detail(
@@ -302,9 +283,9 @@ pub fn issue_detail(
             "SELECT count(*), count(DISTINCT user_key), epoch_us(max(received_at)),
                     arg_max(title, received_at), arg_max(culprit, received_at), arg_max(level, received_at),
                     arg_max(release, received_at), arg_max(event_id::VARCHAR, received_at)
-             FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?)",
+             FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)",
         ),
-        params![project_id as i32, group, w.start_us()],
+        params![project_id as i32, group, start_us(w), end_us(w)],
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -382,7 +363,7 @@ fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Windo
         "WITH kv AS (
             SELECT k, v, count(*) AS c FROM (
                 SELECT unnest(map_keys(tags)) AS k, unnest(map_values(tags)) AS v
-                FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?)
+                FROM $S.events WHERE project_id = ? AND group_hash = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)
             ) GROUP BY k, v
          )
          SELECT k, v, c, count(*) OVER (PARTITION BY k) AS uniq
@@ -391,7 +372,7 @@ fn tag_facets(conn: &Connection, ns: &Ns, project_id: u32, group: u64, w: &Windo
          ORDER BY k, c DESC, v",
     ))?;
     let mut facets: Vec<TagFacet> = Vec::new();
-    for row in stmt.query_map(params![project_id as i32, group, w.start_us()], |r| {
+    for row in stmt.query_map(params![project_id as i32, group, start_us(w), end_us(w)], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
     })? {
         let (k, v, c, uniq) = row?;
@@ -485,9 +466,10 @@ pub fn events_by_trace(
     w: &Window,
     limit: u32,
 ) -> Result<EventList> {
-    let mut sql =
-        format!("SELECT {EVENT_COLUMNS} FROM $S.events WHERE received_at >= make_timestamp(?) AND trace_id = ?::UUID");
-    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(w.start_us()), Box::new(trace_id.to_string())];
+    let mut sql = format!(
+        "SELECT {EVENT_COLUMNS} FROM $S.events WHERE received_at >= make_timestamp(?) AND received_at < make_timestamp(?) AND trace_id = ?::UUID"
+    );
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(start_us(w)), Box::new(end_us(w)), Box::new(trace_id.to_string())];
     if let Some(s) = span_id {
         sql.push_str(" AND span_id = ?");
         p.push(Box::new(s));
@@ -609,10 +591,10 @@ pub fn project_stats(
     w: &Window,
     interval_us: Option<i64>,
 ) -> Result<ProjectStats> {
-    let (interval_us, n) = stats_buckets(w.span_us(), interval_us);
+    let (interval_us, n) = stats_buckets(span_us(w), interval_us);
     let mut buckets: Vec<StatsBucket> = (0..n)
         .map(|i| StatsBucket {
-            start: us_to_dt(w.start_us() + i * interval_us),
+            start: us_to_dt(start_us(w) + i * interval_us),
             events: 0,
             errors: 0,
             warnings: 0,
@@ -623,10 +605,10 @@ pub fn project_stats(
         "SELECT CAST(floor((epoch_us(received_at) - ?) / ?) AS BIGINT) AS b, count(*),
                 count(*) FILTER (WHERE level IN ('error', 'fatal')),
                 count(*) FILTER (WHERE level = 'warning')
-         FROM $S.events WHERE project_id = ? AND received_at >= make_timestamp(?)
+         FROM $S.events WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)
          GROUP BY b",
     ))?;
-    for row in stmt.query_map(params![w.start_us(), interval_us, project_id as i32, w.start_us()], |r| {
+    for row in stmt.query_map(params![start_us(w), interval_us, project_id as i32, start_us(w), end_us(w)], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
     })? {
         let (b, total, errors, warnings) = row?;
@@ -640,20 +622,20 @@ pub fn project_stats(
     let (total, issues, users) = conn.query_row(
         &ns.sql(
             "SELECT count(*), count(DISTINCT group_hash), count(DISTINCT user_key)
-             FROM $S.events WHERE project_id = ? AND received_at >= make_timestamp(?)",
+             FROM $S.events WHERE project_id = ? AND received_at >= make_timestamp(?) AND received_at < make_timestamp(?)",
         ),
-        params![project_id as i32, w.start_us()],
+        params![project_id as i32, start_us(w), end_us(w)],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
     )?;
     let new_issues: i64 = conn.query_row(
-        &ns.sql("SELECT count(*) FROM $S.issues WHERE project_id = ? AND first_seen >= make_timestamp(?)"),
-        params![project_id as i32, w.start_us()],
+        &ns.sql("SELECT count(*) FROM $S.issues WHERE project_id = ? AND first_seen >= make_timestamp(?) AND first_seen < make_timestamp(?)"),
+        params![project_id as i32, start_us(w), end_us(w)],
         |r| r.get(0),
     )?;
     Ok(ProjectStats {
         project_id,
-        window_start: w.start,
-        window_end: w.end,
+        window_start: w.from,
+        window_end: w.to,
         interval_seconds: (interval_us / 1_000_000) as u64,
         total_events: total as u64,
         unique_issues: issues as u64,
@@ -835,16 +817,6 @@ mod tests {
         assert_eq!(parse_group_id("00f067aa0ba902b7"), Some(0x00f067aa0ba902b7));
         assert_eq!(parse_group_id("+00f067aa0ba902b"), None);
         assert_eq!(parse_group_id("00f067aa0ba902b"), None);
-    }
-
-    #[test]
-    fn windows() {
-        let now = Utc::now();
-        let w = Window::parse(None, "14d", now).unwrap();
-        assert_eq!(w.end - w.start, chrono::Duration::days(14));
-        assert_eq!(Window::parse(Some("1h"), "14d", now).unwrap().span_us(), 3_600_000_000);
-        assert!(Window::parse(Some("soon"), "14d", now).is_err());
-        assert!(Window::parse(Some("100000000y"), "14d", now).is_err(), "too large");
     }
 
     #[test]

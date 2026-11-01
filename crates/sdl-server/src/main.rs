@@ -36,6 +36,8 @@ struct ServeArgs {
 enum Command {
     /// Run the server (default when no command is given).
     Serve(Box<ServeArgs>),
+    /// Print the OpenAPI document of the `/v1` API as JSON.
+    Openapi,
     /// Download the DuckDB extensions the server can use (used when
     /// building container images).
     InstallExtensions {
@@ -49,6 +51,10 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let args = match cli.command {
+        Some(Command::Openapi) => {
+            println!("{}", Server::openapi().to_pretty_json()?);
+            return Ok(());
+        }
         Some(Command::InstallExtensions { extension_dir }) => {
             init_tracing(LogFormat::Text);
             let duck = mallard_duck::DuckDbConfig {

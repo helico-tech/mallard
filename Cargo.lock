@@ -2328,7 +2328,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
- "tower",
  "tower-http 0.7.1",
  "tracing",
  "uuid",
@@ -4028,7 +4027,6 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
- "humantime",
  "mallard-common",
  "mallard-duck",
  "metrics",
@@ -4053,7 +4051,6 @@ dependencies = [
  "url",
  "utoipa",
  "utoipa-axum",
- "utoipa-scalar",
  "uuid",
  "xxhash-rust",
  "zip",
@@ -5273,18 +5270,6 @@ dependencies = [
  "regex",
  "syn 3.0.9",
  "uuid",
-]
-
-[[package]]
-name = "utoipa-scalar"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eb5bc76936ceb2bb790a62bec7fb99e22b8ecffca739e3d5a5afec0081ea7f3"
-dependencies = [
- "axum",
- "serde",
- "serde_json",
- "utoipa",
 ]
 
 [[package]]

@@ -1,0 +1,1530 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "sentry-ducklake API",
+    "description": "Query and manage errors stored by sentry-ducklake. Ingest uses the Sentry protocol at /api/{project_id}/envelope/.",
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/events": {
+      "get": {
+        "description": "Events of one trace across all projects (for linking errors to traces).",
+        "operationId": "events_by_trace",
+        "parameters": [
+          {
+            "name": "trace_id",
+            "in": "path",
+            "description": "Trace id (32 hex characters). Required.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "span_id",
+            "in": "path",
+            "description": "Only the event captured in this span (16 hex characters).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window to search, e.g. `24h`, `30d` (default `30d`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "Max events (default 50, max 500).",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/maintenance": {
+      "post": {
+        "description": "Flush inlined data to Parquet, apply retention, compact files and expire snapshots now.",
+        "operationId": "run_maintenance",
+        "responses": {
+          "204": {},
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects": {
+      "get": {
+        "operationId": "list_projects",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Project"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}": {
+      "get": {
+        "operationId": "get_project",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id or slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}/events": {
+      "get": {
+        "operationId": "list_events",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "issue",
+            "in": "path",
+            "description": "Only events of this issue (16 hex characters).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "trace_id",
+            "in": "path",
+            "description": "Only events of this trace (32 hex characters).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "Max events (default 50, max 500).",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "path",
+            "description": "Cursor from a previous page.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}/events/{event_id}": {
+      "get": {
+        "operationId": "get_event",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "32 hex chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "issue",
+            "in": "path",
+            "description": "Issue id; makes the lookup much faster on large projects.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}/issues": {
+      "get": {
+        "operationId": "list_issues",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id or slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "path",
+            "description": "`unresolved` (default), `resolved`, `ignored` or `all`.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "query",
+            "in": "path",
+            "description": "Case-insensitive text search in title and culprit.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window, e.g. `24h`, `14d` (default `14d`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "sort",
+            "in": "path",
+            "description": "`last_seen` (default), `first_seen`, `count`, `users`.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "environment",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "release",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "Max issues (default 50, max 500).",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}/issues/{issue_id}": {
+      "get": {
+        "operationId": "get_issue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "issue_id",
+            "in": "path",
+            "description": "16 hex chars",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window, e.g. `24h`, `14d` (default `24h` for stats, `14d` for issues).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "interval",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (default: window / 24).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "update_issue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateIssue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}/sourcemaps": {
+      "get": {
+        "operationId": "list_sourcemaps",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArtifactBundle"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project}/stats": {
+      "get": {
+        "operationId": "project_stats",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window, e.g. `24h`, `14d` (default `24h` for stats, `14d` for issues).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "interval",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (default: window / 24).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Error body returned with every non-2xx response.",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine readable error code, e.g. `bad_request`, `not_found`, `timeout`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human readable message."
+          }
+        }
+      },
+      "ArtifactBundle": {
+        "type": "object",
+        "required": [
+          "id",
+          "file_count",
+          "size_bytes",
+          "debug_ids",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "debug_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dist": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "SHA-1 of the bundle zip."
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateProject": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL-safe identifier. Derived from `name` when omitted."
+          }
+        }
+      },
+      "EventDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "tags",
+              "payload"
+            ],
+            "properties": {
+              "culprit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "The full normalized (and symbolicated) Sentry event."
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": false,
+                  "prefixItems": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "EventList": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventSummary"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` to fetch the next (older) page."
+          }
+        }
+      },
+      "EventSummary": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "project_id",
+          "issue_id",
+          "timestamp",
+          "received_at",
+          "title",
+          "level",
+          "platform"
+        ],
+        "properties": {
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "platform": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "span_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Span id (16 hex) from `contexts.trace`."
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "title": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Trace id (32 hex) from `contexts.trace`, for linking to traces."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "IssueActivity": {
+        "type": "object",
+        "required": [
+          "at",
+          "status",
+          "reason"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string",
+            "description": "`user`, `regression`, ..."
+          },
+          "status": {
+            "$ref": "#/components/schemas/IssueStatus"
+          }
+        }
+      },
+      "IssueDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/IssueSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "tags",
+              "activity"
+            ],
+            "properties": {
+              "activity": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/IssueActivity"
+                }
+              },
+              "first_release": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_release": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "latest_event_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TagFacet"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "IssueList": {
+        "type": "object",
+        "required": [
+          "issues",
+          "window_start",
+          "window_end"
+        ],
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueSummary"
+            }
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "IssueStatus": {
+        "type": "string",
+        "description": "Issue status. Resolved issues reopen automatically on a new event.",
+        "enum": [
+          "unresolved",
+          "resolved",
+          "ignored"
+        ]
+      },
+      "IssueSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "title",
+          "level",
+          "platform",
+          "status",
+          "first_seen",
+          "last_seen",
+          "count",
+          "user_count",
+          "trend"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events in the queried window.",
+            "minimum": 0
+          },
+          "culprit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exception_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "description": "16 hex characters (the group hash)."
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last event in the queried window."
+          },
+          "level": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/IssueStatus"
+          },
+          "title": {
+            "type": "string"
+          },
+          "trend": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Event counts in equal buckets over the window, oldest first."
+          },
+          "user_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct users in the queried window.",
+            "minimum": 0
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "public_key",
+          "dsn",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dsn": {
+            "type": "string",
+            "description": "DSN to configure in the Sentry SDK."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectStats": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "window_start",
+          "window_end",
+          "interval_seconds",
+          "total_events",
+          "unique_issues",
+          "new_issues",
+          "affected_users",
+          "buckets"
+        ],
+        "properties": {
+          "affected_users": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsBucket"
+            }
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "new_issues": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "project_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total_events": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unique_issues": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ServerInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "duckdb_version",
+          "catalog",
+          "storage",
+          "queue_depth",
+          "queue_capacity"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "duckdb_version": {
+            "type": "string"
+          },
+          "queue_capacity": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "queue_depth": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "storage": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "StatsBucket": {
+        "type": "object",
+        "required": [
+          "start",
+          "events",
+          "errors",
+          "warnings",
+          "other"
+        ],
+        "properties": {
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "other": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "TagFacet": {
+        "type": "object",
+        "required": [
+          "key",
+          "unique",
+          "top"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "top": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TagValueCount"
+            }
+          },
+          "unique": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct values of this key in the window.",
+            "minimum": 0
+          }
+        }
+      },
+      "TagValueCount": {
+        "type": "object",
+        "required": [
+          "value",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateIssue": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/IssueStatus"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ]
+}

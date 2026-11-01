@@ -291,6 +291,20 @@ pub struct TraceQuery {
     pub limit: Option<u32>,
 }
 
+/// Absolute window bounds and the bucket step, accepted next to `since` by
+/// every endpoint with a window (same names as the OTel API). `from` wins
+/// over `since`; `to` defaults to now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct WindowRange {
+    /// Start of the window (inclusive, RFC 3339).
+    pub from: Option<DateTime<Utc>>,
+    /// End of the window (exclusive, RFC 3339). Defaults to now.
+    pub to: Option<DateTime<Utc>>,
+    /// Bucket size for time series, e.g. `1h` (same as `interval`).
+    pub step: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(IntoParams))]
 pub struct WindowQuery {

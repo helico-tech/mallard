@@ -6,7 +6,7 @@ use crate::AppState;
 use crate::db::read::{self, Window, parse_group_id};
 use crate::db::{ProjectRow, WriteCmd, WriteError};
 use crate::sourcemaps::{self, AssembleRequest, AssembleResponse, SourcemapError};
-use axum::extract::{Multipart, Path, Query, Request, State};
+use axum::extract::{Multipart, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -14,61 +14,48 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use flate2::read::GzDecoder;
+use mallard_common::http::{ApiErr, BearerAuth, J, Q, docs_routes, readiness, require_bearer};
 use sdl_protocol::dsn::Dsn;
 use sdl_types::*;
 use serde_json::json;
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 use utoipa::OpenApi;
-use utoipa_scalar::Servable;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 type S = State<Arc<AppState>>;
-
-pub struct ApiErr(StatusCode, String);
-
-impl IntoResponse for ApiErr {
-    fn into_response(self) -> Response {
-        let code = self.0.canonical_reason().unwrap_or("error").to_ascii_lowercase().replace(' ', "_");
-        (self.0, Json(ApiError { error: code, message: self.1 })).into_response()
-    }
-}
-
-impl From<anyhow::Error> for ApiErr {
-    fn from(e: anyhow::Error) -> Self {
-        tracing::error!(error = format!("{e:#}"), "api error");
-        ApiErr(StatusCode::INTERNAL_SERVER_ERROR, "internal error (see server log)".into())
-    }
-}
 
 impl From<WriteError> for ApiErr {
     fn from(e: WriteError) -> Self {
         match e {
-            WriteError::SlugTaken(_) => ApiErr(StatusCode::CONFLICT, e.to_string()),
+            WriteError::SlugTaken(_) => ApiErr::new(StatusCode::CONFLICT, "conflict", e.to_string()),
             WriteError::IssueNotFound => not_found("issue"),
             WriteError::Db(e) => e.into(),
         }
     }
 }
 
-impl From<read::WindowError> for ApiErr {
-    fn from(e: read::WindowError) -> Self {
-        bad(e.to_string())
-    }
+fn bad(msg: impl Into<String>) -> ApiErr {
+    ApiErr::bad_request(msg)
 }
 
-fn bad(msg: impl Into<String>) -> ApiErr {
-    ApiErr(StatusCode::BAD_REQUEST, msg.into())
-}
 fn not_found(what: &str) -> ApiErr {
-    ApiErr(StatusCode::NOT_FOUND, format!("{what} not found"))
+    ApiErr::not_found(format!("{what} not found"))
 }
 
 type ApiResult<T> = Result<Json<T>, ApiErr>;
 
+const DAY: Duration = Duration::from_secs(86_400);
+
+/// Resolve `since`/`from`/`to` against `default` and `query.max_window`.
+fn window(state: &AppState, since: Option<&str>, r: &WindowRange, default: Duration) -> Result<Window, ApiErr> {
+    Ok(Window::resolve(r.from, r.to, since, default, state.cfg.query.max_window)?)
+}
+
 #[derive(OpenApi)]
 #[openapi(
     info(title = "sentry-ducklake API", description = "Query and manage errors stored by sentry-ducklake. Ingest uses the Sentry protocol at /api/{project_id}/envelope/."),
-    paths(info, events_by_trace, list_projects, create_project, get_project, list_issues, get_issue, update_issue, list_events, get_event, project_stats, list_sourcemaps, run_maintenance),
     components(schemas(
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
@@ -79,35 +66,31 @@ type ApiResult<T> = Result<Json<T>, ApiErr>;
 )]
 struct ApiDoc;
 
-struct BearerAuth;
-impl utoipa::Modify for BearerAuth {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
-        let c = openapi.components.get_or_insert_with(Default::default);
-        c.add_security_scheme(
-            "bearer",
-            SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
-        );
-    }
+/// The `/v1` routes. The OpenAPI document is derived from the same list.
+fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(info))
+        .routes(routes!(list_projects, create_project))
+        .routes(routes!(events_by_trace))
+        .routes(routes!(get_project))
+        .routes(routes!(list_issues))
+        .routes(routes!(get_issue, update_issue))
+        .routes(routes!(list_events))
+        .routes(routes!(get_event))
+        .routes(routes!(project_stats))
+        .routes(routes!(list_sourcemaps))
+        .routes(routes!(run_maintenance))
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    v1_routes().split_for_parts().1
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    let v1 = Router::new()
-        .route("/v1/info", get(info))
-        .route("/v1/projects", get(list_projects).post(create_project))
-        .route("/v1/events", get(events_by_trace))
-        .route("/v1/projects/{project}", get(get_project))
-        .route("/v1/projects/{project}/issues", get(list_issues))
-        .route("/v1/projects/{project}/issues/{issue_id}", get(get_issue).patch(update_issue))
-        .route("/v1/projects/{project}/events", get(list_events))
-        .route("/v1/projects/{project}/events/{event_id}", get(get_event))
-        .route("/v1/projects/{project}/stats", get(project_stats))
-        .route("/v1/projects/{project}/sourcemaps", get(list_sourcemaps))
-        .route("/v1/maintenance", post(run_maintenance));
+    let (v1, _) = v1_routes()
+        .layer(middleware::from_fn_with_state(state.tokens.clone(), require_bearer))
+        .with_state(state.clone())
+        .split_for_parts();
     let compat = Router::new()
         .route("/api/0/organizations/{org}/chunk-upload/", get(chunk_options).post(chunk_upload))
         .route("/api/0/organizations/{org}/artifactbundle/assemble/", post(assemble))
@@ -115,41 +98,43 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/0/projects/{org}/{project}/releases/", post(release_upsert))
         .route("/api/0/organizations/{org}/releases/{version}/", get(release_get).put(release_upsert_path))
         .route("/api/0/organizations/{org}/releases/{version}/deploys/", post(release_deploy))
-        .layer(axum::extract::DefaultBodyLimit::max(sourcemaps::MAX_REQUEST_SIZE + 1024 * 1024));
-    v1.merge(compat).layer(middleware::from_fn_with_state(state.clone(), require_token)).with_state(state)
+        .layer(axum::extract::DefaultBodyLimit::max(sourcemaps::MAX_REQUEST_SIZE + 1024 * 1024))
+        .layer(middleware::from_fn_with_state(state.clone(), require_token_sentry))
+        .with_state(state);
+    v1.merge(compat)
 }
 
 pub fn meta_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/openapi.json", get(|| async { Json(openapi()) }))
-        .merge(utoipa_scalar::Scalar::with_url("/docs", openapi()))
+        .merge(docs_routes(&openapi(), "sentry-ducklake API"))
         .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(readyz))
+        .route("/readyz", get(|State(state): S| async move { readiness(state.ready().await) }))
         .with_state(state)
 }
 
-async fn require_token(State(state): S, req: Request, next: Next) -> Response {
+/// Bearer check for the sentry-cli routes, answering in Sentry's shape
+/// (`detail` is what sentry-cli prints).
+async fn require_token_sentry(State(state): S, req: Request, next: Next) -> Response {
     let header = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
     if !state.tokens.allows(header) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "missing or invalid bearer token", "detail": "Invalid token"})),
-        )
-            .into_response();
+        return sentry_err(StatusCode::UNAUTHORIZED, "Invalid token");
     }
     next.run(req).await
 }
 
-async fn readyz(State(state): S) -> Response {
-    if !state.db.writer_alive() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "writer stopped").into_response();
-    }
-    match state.db.read(|c, _| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i32>(0))?)).await {
-        Ok(_) => (StatusCode::OK, "ready").into_response(),
-        Err(e) => {
-            // Details go to the log, not to unauthenticated callers.
-            tracing::warn!(error = format!("{e:#}"), "readiness check failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "database not ready").into_response()
+impl AppState {
+    /// Ready = the writer thread runs and a reader can query the catalog.
+    /// Details go to the log, not to unauthenticated callers.
+    pub(crate) async fn ready(&self) -> Result<(), String> {
+        if !self.db.writer_alive() {
+            return Err("sentry writer stopped".into());
+        }
+        match self.db.read(|c, _| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i32>(0))?)).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "readiness check failed");
+                Err("sentry database not ready".into())
+            }
         }
     }
 }
@@ -207,10 +192,7 @@ fn slugify(name: &str) -> String {
 
 #[utoipa::path(post, path = "/v1/projects", request_body = CreateProject,
     responses((status = 201, body = Project), (status = 400, body = ApiError), (status = 409, body = ApiError)))]
-async fn create_project(
-    State(state): S,
-    Json(req): Json<CreateProject>,
-) -> Result<(StatusCode, Json<Project>), ApiErr> {
+async fn create_project(State(state): S, J(req): J<CreateProject>) -> Result<(StatusCode, Json<Project>), ApiErr> {
     let CreateProject { name, slug, platform } = req;
     let slug = slug.unwrap_or_else(|| slugify(&name));
     if slug.is_empty()
@@ -237,29 +219,35 @@ async fn get_project(State(state): S, Path(p): Path<String>) -> ApiResult<Projec
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues",
-    params(("project" = String, Path, description = "Project id or slug"), IssueQuery),
-    responses((status = 200, body = IssueList), (status = 404, body = ApiError)))]
-async fn list_issues(State(state): S, Path(p): Path<String>, Query(q): Query<IssueQuery>) -> ApiResult<IssueList> {
+    params(("project" = String, Path, description = "Project id or slug"), IssueQuery, WindowRange),
+    responses((status = 200, body = IssueList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
+async fn list_issues(
+    State(state): S,
+    Path(p): Path<String>,
+    Q(q): Q<IssueQuery>,
+    Q(r): Q<WindowRange>,
+) -> ApiResult<IssueList> {
     let pid = project(&state, &p)?.id;
     let status = read::StatusFilter::parse(q.status.as_deref())
         .ok_or_else(|| bad("status must be unresolved, resolved, ignored or all"))?;
     let sort = read::IssueSort::parse(q.sort.as_deref())
         .ok_or_else(|| bad("sort must be last_seen, first_seen, count or users"))?;
-    let w = Window::parse(q.since.as_deref(), "14d", Utc::now())?;
+    let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
     Ok(Json(state.db.read(move |c, ns| read::list_issues(c, ns, pid, &q, &w, status, sort)).await?))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/issues/{issue_id}",
-    params(("project" = String, Path), ("issue_id" = String, Path, description = "16 hex chars"), WindowQuery),
-    responses((status = 200, body = IssueDetail), (status = 404, body = ApiError)))]
+    params(("project" = String, Path), ("issue_id" = String, Path, description = "16 hex chars"), WindowQuery, WindowRange),
+    responses((status = 200, body = IssueDetail), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
 async fn get_issue(
     State(state): S,
     Path((p, id)): Path<(String, String)>,
-    Query(q): Query<WindowQuery>,
+    Q(q): Q<WindowQuery>,
+    Q(r): Q<WindowRange>,
 ) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
-    let w = Window::parse(q.since.as_deref(), "14d", Utc::now())?;
+    let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
@@ -269,7 +257,7 @@ async fn get_issue(
 async fn update_issue(
     State(state): S,
     Path((p, id)): Path<(String, String)>,
-    Json(req): Json<UpdateIssue>,
+    J(req): J<UpdateIssue>,
 ) -> ApiResult<IssueDetail> {
     let pid = project(&state, &p)?.id;
     let g = issue_hash(&id)?;
@@ -277,13 +265,13 @@ async fn update_issue(
         .db
         .call(|reply| WriteCmd::SetStatus { project_id: pid, group_hash: g, status: req.status, reason: "user", reply })
         .await?;
-    let w = Window::parse(None, "14d", Utc::now())?;
+    let w = window(&state, None, &WindowRange::default(), 14 * DAY)?;
     state.db.read(move |c, ns| read::issue_detail(c, ns, pid, g, &w)).await?.map(Json).ok_or_else(|| not_found("issue"))
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/events", params(("project" = String, Path), EventQuery),
     responses((status = 200, body = EventList), (status = 404, body = ApiError)))]
-async fn list_events(State(state): S, Path(p): Path<String>, Query(q): Query<EventQuery>) -> ApiResult<EventList> {
+async fn list_events(State(state): S, Path(p): Path<String>, Q(q): Q<EventQuery>) -> ApiResult<EventList> {
     let pid = project(&state, &p)?.id;
     let g = q.issue.as_deref().map(issue_hash).transpose()?;
     if q.trace_id.as_deref().is_some_and(|t| sdl_protocol::event::parse_trace_id(t).is_none()) {
@@ -294,10 +282,10 @@ async fn list_events(State(state): S, Path(p): Path<String>, Query(q): Query<Eve
     Ok(Json(state.db.read(move |c, ns| read::list_events(c, ns, pid, g, &q, before)).await?))
 }
 
-#[utoipa::path(get, path = "/v1/events", params(TraceQuery),
+#[utoipa::path(get, path = "/v1/events", params(TraceQuery, WindowRange),
     description = "Events of one trace across all projects (for linking errors to traces).",
     responses((status = 200, body = EventList), (status = 400, body = ApiError)))]
-async fn events_by_trace(State(state): S, Query(q): Query<TraceQuery>) -> ApiResult<EventList> {
+async fn events_by_trace(State(state): S, Q(q): Q<TraceQuery>, Q(r): Q<WindowRange>) -> ApiResult<EventList> {
     let t =
         sdl_protocol::event::parse_trace_id(&q.trace_id).ok_or_else(|| bad("trace_id must be 32 hex characters"))?;
     let span = q
@@ -305,7 +293,7 @@ async fn events_by_trace(State(state): S, Query(q): Query<TraceQuery>) -> ApiRes
         .as_deref()
         .map(|s| sdl_protocol::event::parse_span_id(s).ok_or_else(|| bad("span_id must be 16 hex characters")))
         .transpose()?;
-    let w = Window::parse(q.since.as_deref(), "30d", Utc::now())?;
+    let w = window(&state, q.since.as_deref(), &r, 30 * DAY)?;
     let limit = q.limit.unwrap_or(50);
     Ok(Json(state.db.read(move |c, ns| read::events_by_trace(c, ns, t, span, &w, limit)).await?))
 }
@@ -322,7 +310,7 @@ struct EventDetailQuery {
 async fn get_event(
     State(state): S,
     Path((p, id)): Path<(String, String)>,
-    Query(q): Query<EventDetailQuery>,
+    Q(q): Q<EventDetailQuery>,
 ) -> ApiResult<EventDetail> {
     let pid = project(&state, &p)?.id;
     let eid = sdl_protocol::event::parse_uuid(&id).ok_or_else(|| bad("invalid event id"))?;
@@ -335,23 +323,19 @@ async fn get_event(
         .ok_or_else(|| not_found("event"))
 }
 
-#[utoipa::path(get, path = "/v1/projects/{project}/stats", params(("project" = String, Path), WindowQuery),
-    responses((status = 200, body = ProjectStats), (status = 404, body = ApiError)))]
+#[utoipa::path(get, path = "/v1/projects/{project}/stats", params(("project" = String, Path), WindowQuery, WindowRange),
+    responses((status = 200, body = ProjectStats), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
 async fn project_stats(
     State(state): S,
     Path(p): Path<String>,
-    Query(q): Query<WindowQuery>,
+    Q(q): Q<WindowQuery>,
+    Q(r): Q<WindowRange>,
 ) -> ApiResult<ProjectStats> {
     let pid = project(&state, &p)?.id;
-    let w = Window::parse(q.since.as_deref(), "24h", Utc::now())?;
-    let interval_us = q
-        .interval
-        .as_deref()
-        .map(|i| {
-            let d = humantime::parse_duration(i).map_err(|e| bad(format!("invalid interval: {e}")))?;
-            i64::try_from(d.as_micros()).map_err(|_| bad("interval is too large"))
-        })
-        .transpose()?;
+    let w = window(&state, q.since.as_deref(), &r, DAY)?;
+    // Without a step, read.rs picks one (about 24 buckets).
+    let step = q.interval.as_deref().or(r.step.as_deref());
+    let interval_us = step.map(|s| w.step(Some(s)).map(|secs| secs as i64 * 1_000_000)).transpose()?;
     Ok(Json(state.db.read(move |c, ns| read::project_stats(c, ns, pid, &w, interval_us)).await?))
 }
 
@@ -494,7 +478,7 @@ mod tests {
     #[test]
     fn write_errors_map_by_variant_not_text() {
         use super::*;
-        let status = |e: WriteError| ApiErr::from(e).0;
+        let status = |e: WriteError| ApiErr::from(e).status;
         assert_eq!(status(WriteError::SlugTaken("x".into())), StatusCode::CONFLICT);
         assert_eq!(status(WriteError::IssueNotFound), StatusCode::NOT_FOUND);
         // A database error whose text happens to say "not found" is a 500.
