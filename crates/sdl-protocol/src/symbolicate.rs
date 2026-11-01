@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-const CONTEXT_LINES: usize = 5;
+const CONTEXT_LINES: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceMapRef {
@@ -159,14 +159,15 @@ fn resolve_source(source: &str, map_url: &str) -> (String, String) {
     (abs, filename)
 }
 
-fn context(sm: &SourceMap, src_id: u32, line: usize) -> Option<(Vec<Value>, String, Vec<Value>)> {
-    let contents = sm.get_source_contents(src_id)?;
-    let lines: Vec<&str> = contents.lines().collect();
-    let current = *lines.get(line)?;
-    let start = line.saturating_sub(CONTEXT_LINES);
-    let end = (line + 1 + CONTEXT_LINES).min(lines.len());
-    let pre = lines[start..line].iter().map(|l| json!(l)).collect();
-    let post = lines[line + 1..end].iter().map(|l| json!(l)).collect();
+/// Lines around `line` of a map source. The map's `SourceView` keeps a line
+/// index (built once per cached map), so this does not rescan the source for
+/// every frame.
+fn context(sm: &SourceMap, src_id: u32, line: u32) -> Option<(Vec<Value>, String, Vec<Value>)> {
+    let sv = sm.get_source_view(src_id)?;
+    let current = sv.get_line(line)?;
+    let pre = (line.saturating_sub(CONTEXT_LINES)..line).filter_map(|i| sv.get_line(i)).map(|l| json!(l)).collect();
+    let post =
+        (line + 1..=line.saturating_add(CONTEXT_LINES)).map_while(|i| sv.get_line(i)).map(|l| json!(l)).collect();
     Some((pre, current.to_string(), post))
 }
 
@@ -188,9 +189,9 @@ fn rewrite_frame(frame: &mut Value, rm: &ResolvedSourceMap) -> bool {
         Some(if short.len() == f.len() { orig.to_string() } else { format!("{}{}", &f[..f.len() - short.len()], orig) })
     });
     let (abs_path, filename) = resolve_source(source, &rm.map_url);
-    let src_line = token.get_src_line() as usize;
+    let src_line = token.get_src_line();
     let fo = frame.as_object_mut().expect("frame is object");
-    fo.insert("lineno".into(), json!(src_line + 1));
+    fo.insert("lineno".into(), json!(u64::from(src_line) + 1));
     fo.insert("colno".into(), json!(token.get_src_col() + 1));
     let in_app = !(abs_path.contains("/node_modules/") || abs_path.contains("webpack/bootstrap"));
     fo.insert("in_app".into(), json!(in_app));
@@ -333,6 +334,23 @@ mod tests {
         // Unresolved frame untouched; applying twice is a no-op.
         assert_eq!(exc["stacktrace"]["frames"][1]["function"], "z");
         assert_eq!(apply(&mut ev, &maps), 0);
+    }
+
+    #[test]
+    fn context_at_the_edges() {
+        let mut b = SourceMapBuilder::new(None);
+        let src = b.add_source("a.js");
+        b.set_source_contents(src, Some("l0\r\nl1\nl2\nl3\nl4\nl5\nl6\nl7"));
+        let sm = b.into_sourcemap();
+        let (pre, cur, post) = context(&sm, src, 0).unwrap();
+        assert!(pre.is_empty());
+        assert_eq!(cur, "l0");
+        assert_eq!(post, vec![json!("l1"), json!("l2"), json!("l3"), json!("l4"), json!("l5")]);
+        let (pre, cur, post) = context(&sm, src, 7).unwrap();
+        assert_eq!(pre, vec![json!("l2"), json!("l3"), json!("l4"), json!("l5"), json!("l6")]);
+        assert_eq!(cur, "l7");
+        assert!(post.is_empty());
+        assert!(context(&sm, src, 8).is_none());
     }
 
     #[test]
