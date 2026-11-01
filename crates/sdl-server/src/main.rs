@@ -93,7 +93,11 @@ async fn main() -> Result<()> {
                 Some(addr) => {
                     let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
                     tracing::info!(%addr, "metrics listening");
-                    tokio::spawn(async move { axum::serve(l, metrics_route).await });
+                    tokio::spawn(async move {
+                        if let Err(e) = axum::serve(l, metrics_route).await {
+                            tracing::error!(error = %e, "metrics server failed");
+                        }
+                    });
                 }
                 None => app = app.merge(metrics_route),
             }

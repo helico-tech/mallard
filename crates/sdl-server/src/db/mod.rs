@@ -380,7 +380,10 @@ pub fn redact(catalog: &str) -> String {
 }
 
 pub fn us_to_dt(us: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(us).unwrap_or_default()
+    DateTime::from_timestamp_micros(us).unwrap_or_else(|| {
+        tracing::warn!(us, "stored timestamp is out of range");
+        DateTime::default()
+    })
 }
 
 #[cfg(test)]

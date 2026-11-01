@@ -76,8 +76,12 @@ impl Storage {
                     region: "auto".into(),
                     path_style: true,
                 };
-                let keys = (env("GCS_HMAC_KEY_ID"), env("GCS_HMAC_SECRET"));
-                let store = s3_store(bucket, &gcs, Some(keys))?;
+                // Fail now: otherwise DuckDB gets empty keys while object_store
+                // silently falls back to the AWS credentials.
+                let (Some(key_id), Some(secret)) = (env("GCS_HMAC_KEY_ID"), env("GCS_HMAC_SECRET")) else {
+                    bail!("gs:// storage needs GCS_HMAC_KEY_ID and GCS_HMAC_SECRET");
+                };
+                let store = s3_store(bucket, &gcs, Some((key_id, secret)))?;
                 (Kind::Gcs, format!("gs://{bucket}/{}", with_slash(prefix)), store, prefix.to_string())
             } else if let Some(rest) = url.strip_prefix("az://").or_else(|| url.strip_prefix("azure://")) {
                 let (container, prefix) = rest.split_once('/').unwrap_or((rest, ""));
@@ -215,13 +219,9 @@ fn with_slash(p: &str) -> String {
     if p.is_empty() { String::new() } else { format!("{p}/") }
 }
 
-fn s3_store(
-    bucket: &str,
-    s: &S3Settings,
-    keys: Option<(Option<String>, Option<String>)>,
-) -> Result<Arc<dyn ObjectStore>> {
+fn s3_store(bucket: &str, s: &S3Settings, keys: Option<(String, String)>) -> Result<Arc<dyn ObjectStore>> {
     let mut b = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket).with_region(&s.region);
-    if let Some((Some(k), Some(sec))) = keys {
+    if let Some((k, sec)) = keys {
         b = b.with_access_key_id(k).with_secret_access_key(sec);
     }
     if let Some(ep) = &s.endpoint {

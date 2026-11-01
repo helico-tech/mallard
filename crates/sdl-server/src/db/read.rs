@@ -594,7 +594,10 @@ fn event_detail_in(
             summary,
             culprit,
             tags,
-            payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
+            payload: serde_json::from_str(&payload).unwrap_or_else(|e| {
+                tracing::warn!(%event_id, error = %e, "stored event payload is not valid JSON");
+                serde_json::Value::Null
+            }),
         }
     }))
 }

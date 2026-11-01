@@ -60,9 +60,13 @@ impl Server {
     pub async fn new(cfg: Config) -> Result<Server> {
         cfg.validate()?;
         let url = cfg.storage_url.clone().context("storage_url is required (e.g. s3://bucket/prefix or ./data)")?;
-        let storage = Storage::new(&url, &cfg)?;
-        let (c, s) = (cfg.clone(), storage.clone());
-        let db = tokio::task::spawn_blocking(move || Db::open(&c, &s)).await??;
+        let c = cfg.clone();
+        // Both create directories and open files: keep them off async threads.
+        let (db, storage) = tokio::task::spawn_blocking(move || {
+            let storage = Storage::new(&url, &c)?;
+            anyhow::Ok((Db::open(&c, &storage)?, storage))
+        })
+        .await??;
         Ok(Self::assemble(cfg, db, Some(storage)))
     }
 
@@ -81,9 +85,12 @@ impl Server {
         {
             tracing::warn!("duckdb_* settings and extension_dir are ignored with a shared connection");
         }
-        let storage = cfg.storage_url.as_deref().map(|u| Storage::new(u, &cfg)).transpose()?;
         let c = cfg.clone();
-        let db = tokio::task::spawn_blocking(move || Db::with_connection(conn, &c, "external".into())).await??;
+        let (db, storage) = tokio::task::spawn_blocking(move || {
+            let storage = c.storage_url.as_deref().map(|u| Storage::new(u, &c)).transpose()?;
+            anyhow::Ok((Db::with_connection(conn, &c, "external".into())?, storage))
+        })
+        .await??;
         Ok(Self::assemble(cfg, db, storage))
     }
 
@@ -120,9 +127,11 @@ impl Server {
     }
 
     /// Wait for `shutdown` to resolve, then stop cleanly (see [`Server::shutdown`]).
-    pub async fn run_background(&self, shutdown: impl Future<Output = ()> + Send + 'static) {
+    /// Same shape as `odl_server::Server::run_background`.
+    pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
         shutdown.await;
         self.shutdown().await;
+        Ok(())
     }
 
     /// Commit queued events, flush inlined data and stop the writer thread.
