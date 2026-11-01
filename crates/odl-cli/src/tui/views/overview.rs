@@ -136,6 +136,8 @@ impl Embedded {
         self.traces.detail = None;
         self.traces.list.clear();
         self.traces.refreshed = None;
+        // A pending list for the old filter must not be applied.
+        self.loader.cancel(Kind::Traces);
         self.view = View::Traces;
     }
 

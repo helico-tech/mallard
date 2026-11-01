@@ -52,6 +52,8 @@ pub struct Detail {
     pub retry_at: Option<Instant>,
     /// Use a 24 h window: the server rejected 7 days (query.max_window).
     pub short_window: bool,
+    /// Failed lookups in a row, for the retry back-off.
+    pub failures: u32,
 }
 
 impl Detail {
@@ -69,19 +71,22 @@ impl Detail {
             error: None,
             retry_at: None,
             short_window: false,
+            failures: 0,
         }
     }
 
     /// A lookup failed: show it and retry later (a trace may not be flushed
     /// yet), with a shorter window if the server refused the default one.
-    pub fn on_error(&mut self, e: &str) {
-        self.error = Some(e.to_string());
+    /// Retries back off from 3 s to about a minute.
+    pub fn on_error(&mut self, e: &odl_client::Error) {
+        self.error = Some(crate::tui::loader::short_error(e));
         self.requested = false;
-        if e.contains("max_window") && !self.short_window {
+        if e.is_window_too_large() && !self.short_window {
             self.short_window = true;
             self.retry_at = Some(Instant::now());
         } else {
-            self.retry_at = Some(Instant::now() + crate::tui::RETRY);
+            self.retry_at = Some(Instant::now() + retry_delay(self.failures));
+            self.failures = self.failures.saturating_add(1);
         }
     }
 
@@ -90,6 +95,11 @@ impl Detail {
         let r = self.rows.get(self.sel.selected()?)?;
         t.spans.get(r.span)
     }
+}
+
+/// Pause before retry number `failures + 1`: 3 s, 6 s, 12 s, … up to 48 s.
+fn retry_delay(failures: u32) -> Duration {
+    crate::tui::RETRY * 2u32.pow(failures.min(4))
 }
 
 impl State {
@@ -114,6 +124,7 @@ impl State {
             d.trace = Some(t);
             d.error = None;
             d.retry_at = None;
+            d.failures = 0;
             let i = keep.and_then(|id| {
                 let t = d.trace.as_ref()?;
                 d.rows.iter().position(|r| t.spans.get(r.span).is_some_and(|s| s.span_id == id))

@@ -240,6 +240,7 @@ impl Embedded {
     }
 
     pub(crate) fn logs_tail_loaded(&mut self, v: Vec<LogRecord>, gap: bool) {
+        self.logs.error = None;
         if self.logs.loaded {
             self.logs.append(v, gap);
         }

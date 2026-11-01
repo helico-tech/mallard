@@ -26,7 +26,10 @@ mod regress;
 #[cfg(test)]
 mod tests;
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -111,6 +114,8 @@ pub struct Embedded {
     flash: Option<(String, bool, Instant)>,
     spin: usize,
     errors_enabled: bool,
+    /// Kinds whose last load failed: only the first failure flashes.
+    failing: HashSet<Kind>,
 }
 
 /// Pause before retrying a failed load.
@@ -167,6 +172,7 @@ impl Embedded {
             flash: None,
             spin: 0,
             errors_enabled: false,
+            failing: HashSet::new(),
         }
     }
 
@@ -234,22 +240,7 @@ impl Embedded {
     /// Force all views to reload on the next tick. In-flight requests are
     /// aborted so results for the old window are never applied.
     fn invalidate(&mut self) {
-        for k in [
-            Kind::Services,
-            Kind::Operations,
-            Kind::SpanSeries,
-            Kind::LogSeries,
-            Kind::LogVolume,
-            Kind::Traces,
-            Kind::Trace,
-            Kind::TraceLogs,
-            Kind::Logs,
-            Kind::LogTail,
-            Kind::MetricList,
-            Kind::MetricQuery,
-        ] {
-            self.loader.cancel(k);
-        }
+        self.loader.cancel_all_except(Kind::Stats);
         self.overview.refreshed = None;
         self.traces.refreshed = None;
         if let Some(d) = &mut self.traces.detail {
@@ -272,7 +263,7 @@ impl Embedded {
                     self.last_ok = Some(Instant::now());
                     self.apply(l.kind, data);
                 }
-                Err(e) => self.apply_error(l.kind, e),
+                Err(e) => self.apply_error(l.kind, &e),
             }
         }
         if let Some((_, _, at)) = &self.flash
@@ -299,6 +290,7 @@ impl Embedded {
     }
 
     fn apply(&mut self, kind: Kind, data: Data) {
+        self.failing.remove(&kind);
         match data {
             Data::Stats(s) => {
                 let accepted: u64 = s.ingest.signals.iter().map(|x| x.accepted).sum();
@@ -331,11 +323,13 @@ impl Embedded {
         }
     }
 
-    fn apply_error(&mut self, kind: Kind, e: String) {
+    fn apply_error(&mut self, kind: Kind, err: &odl_client::Error) {
+        let e = loader::short_error(err);
         match kind {
             Kind::Stats => self.stats_error = Some(e.clone()),
-            Kind::Services | Kind::Operations | Kind::SpanSeries => self.overview.error = Some(e.clone()),
-            Kind::LogSeries => self.overview.error = Some(e.clone()),
+            Kind::Services | Kind::Operations | Kind::SpanSeries | Kind::LogSeries => {
+                self.overview.error = Some(e.clone())
+            }
             Kind::LogVolume | Kind::LogTail => self.logs.error = Some(e.clone()),
             Kind::Logs => {
                 // Retry the initial load after a short pause.
@@ -346,7 +340,7 @@ impl Embedded {
             Kind::Traces => self.traces.error = Some(e.clone()),
             Kind::Trace => {
                 if let Some(d) = &mut self.traces.detail {
-                    d.on_error(&e);
+                    d.on_error(err);
                 }
             }
             Kind::TraceLogs => {
@@ -361,7 +355,9 @@ impl Embedded {
                 }
             }
         }
-        if kind != Kind::Stats || self.stats.is_none() {
+        // Flash when a kind starts failing, not on every retry.
+        let first = self.failing.insert(kind);
+        if first && (kind != Kind::Stats || self.stats.is_none()) {
             self.flash_error(e);
         }
     }

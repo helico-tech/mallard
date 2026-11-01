@@ -77,8 +77,10 @@ impl State {
     }
 
     pub fn set_result(&mut self, r: MetricQueryResult) {
+        // A result for another metric or aggregation is a stale one.
         if let Some(c) = &mut self.chart
             && c.info.name == r.name
+            && c.aggs[c.agg] == r.agg
         {
             c.result = Some(r);
             c.error = None;
@@ -160,11 +162,15 @@ impl Embedded {
                 }
                 KeyCode::Char('a') | KeyCode::Right => {
                     c.agg = (c.agg + 1) % c.aggs.len();
+                    c.result = None;
                     c.refreshed = None;
+                    self.loader.cancel(Kind::MetricQuery);
                 }
                 KeyCode::Char('A') => {
                     c.agg = (c.agg + c.aggs.len() - 1) % c.aggs.len();
+                    c.result = None;
                     c.refreshed = None;
+                    self.loader.cancel(Kind::MetricQuery);
                 }
                 KeyCode::Char('b') => {
                     let v = c.group_by.clone();

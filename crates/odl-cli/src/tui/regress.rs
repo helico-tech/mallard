@@ -354,3 +354,134 @@ fn errors_hint_only_when_enabled() {
     e.set_errors_enabled(true);
     assert_eq!(n(&mut e), without + 1, "the e/errors hint appears only when enabled");
 }
+
+fn metric_result_json(agg: &str) -> String {
+    serde_json::to_string(&MetricQueryResult {
+        name: "m".into(),
+        metric_type: "sum".into(),
+        unit: String::new(),
+        agg: agg.into(),
+        step_secs: 60,
+        series: vec![],
+    })
+    .unwrap()
+}
+
+// Review finding 2: changing the aggregation while a query is pending sends
+// the new query at once, and the old aggregation's result is never shown
+// under the new label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregation_change_supersedes_pending_query() {
+    let (url, hits) = fake(Arc::new(|path, _| match path {
+        "/api/v1/metrics/query" => (200, metric_result_json("rate"), 600),
+        _ => (503, "{}".into(), 0),
+    }))
+    .await;
+    let mut e = Embedded::new(Client::new(&url, None).unwrap());
+    e.view = View::Metrics;
+    let info = MetricInfo {
+        name: "m".into(),
+        metric_type: "sum".into(),
+        unit: String::new(),
+        description: String::new(),
+        temporality: "cumulative".into(),
+        series_count: 1,
+        point_count: 1,
+        services: vec![],
+        last_seen: Utc::now(),
+    };
+    let aggs = crate::tui::views::metrics::aggs_for(&info);
+    assert_eq!(aggs[..2], ["rate", "increase"]);
+    e.metrics.chart = Some(crate::tui::views::metrics::ChartState {
+        info,
+        aggs,
+        agg: 0,
+        group_by: String::new(),
+        result: None,
+        error: None,
+        refreshed: None,
+    });
+    e.tick();
+    assert!(settle(&mut e, |_| count(&hits, "/api/v1/metrics/query") == 1, Duration::from_secs(1)).await);
+    e.handle_event(&ev(KeyCode::Char('a'), KeyModifiers::NONE));
+    let sent = |_: &Embedded| hits.lock().unwrap().iter().any(|q| q.contains("agg=increase"));
+    assert!(settle(&mut e, sent, Duration::from_millis(400)).await, "new aggregation not sent while the old one ran");
+    // Both answers say "rate": neither may be shown as "increase".
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    e.tick();
+    assert!(e.metrics.chart.as_ref().unwrap().result.is_none(), "stale aggregation applied");
+}
+
+// Review finding 2: drilling from an operation into traces replaces a
+// pending trace list for the old filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drill_down_supersedes_pending_traces() {
+    let (url, hits) = fake(Arc::new(|path, _| match path {
+        "/api/v1/traces" => (200, "[]".into(), 600),
+        _ => (503, "{}".into(), 0),
+    }))
+    .await;
+    let mut e = Embedded::new(Client::new(&url, None).unwrap());
+    e.view = View::Traces;
+    e.tick();
+    assert!(settle(&mut e, |_| count(&hits, "/api/v1/traces") == 1, Duration::from_secs(1)).await);
+    e.view = View::Overview;
+    let red = RedStats {
+        span_count: 1,
+        error_count: 0,
+        error_rate: 0.0,
+        rate_per_sec: 1.0,
+        p50_ms: 1.0,
+        p95_ms: 1.0,
+        p99_ms: 1.0,
+        max_ms: 1.0,
+    };
+    let op = OperationSummary { service: "checkout".into(), name: "GET /cart".into(), kind: "SERVER".into(), red };
+    e.overview.ops = Some(("checkout".into(), vec![op]));
+    e.overview.ops_sel.select(Some(0));
+    e.handle_event(&ev(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(e.view, View::Traces);
+    let sent = |_: &Embedded| hits.lock().unwrap().iter().any(|q| q.contains("service=checkout"));
+    assert!(settle(&mut e, sent, Duration::from_millis(400)).await, "filtered list not requested");
+}
+
+// Review finding 17: a failing kind flashes once, not on every retry, and a
+// successful tail poll clears the old logs error.
+#[test]
+fn errors_flash_once_and_clear() {
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    let err = odl_client::Error::Api { status: 503, error: "busy".into(), message: "busy".into() };
+    e.apply_error(Kind::LogTail, &err);
+    assert!(e.flash.take().is_some());
+    e.apply_error(Kind::LogTail, &err);
+    assert!(e.flash.is_none(), "a retry that fails again must not flash");
+    assert!(e.logs.error.is_some());
+    e.apply(Kind::LogTail, Data::Tail((vec![], false)));
+    assert!(e.logs.error.is_none(), "recovered tail still shows the old error");
+    e.apply_error(Kind::LogTail, &err);
+    assert!(e.flash.is_some(), "failing again after a success flashes");
+}
+
+// Review finding 19: a trace that is not found is retried with a growing pause.
+#[test]
+fn trace_lookup_backs_off() {
+    let mut d = crate::tui::views::traces::Detail::new(TID.into(), None);
+    let err = odl_client::Error::Api { status: 404, error: "not_found".into(), message: "trace not found".into() };
+    let mut last = Duration::ZERO;
+    for _ in 0..6 {
+        d.on_error(&err);
+        let wait = d.retry_at.unwrap() - Instant::now();
+        assert!(wait + Duration::from_millis(50) >= last, "{wait:?} < {last:?}");
+        last = wait;
+    }
+    assert!(last > Duration::from_secs(40) && last <= Duration::from_secs(60), "{last:?}");
+    // A window the server refuses is retried at once with 24h.
+    let mut d = crate::tui::views::traces::Detail::new(TID.into(), None);
+    let too_large = odl_client::Error::Api {
+        status: 400,
+        error: "bad_request".into(),
+        message: "larger than query.max_window".into(),
+    };
+    d.on_error(&too_large);
+    assert!(d.short_window);
+}

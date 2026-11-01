@@ -258,9 +258,8 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
             let t = match get(since.clone()).await {
                 // The server's query.max_window is smaller than the window
                 // asked for: fall back to one day.
-                Err(odl_client::Error::Api { status: 400, message, .. })
-                    if message.contains("max_window") && since != "24h" =>
-                {
+                Err(e) if e.is_window_too_large() && since != "24h" => {
+                    eprintln!("note: --since {since} is larger than the server allows; searching the last 24h");
                     get("24h".into()).await?
                 }
                 r => r?,
