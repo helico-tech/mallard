@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use duckdb::Connection;
 use tracing::{info, warn};
 
-use crate::config::{CatalogKind, Config, is_identifier, parse_bytes};
+use crate::config::{CatalogKind, Config, is_identifier};
 use schema::{TABLES, TableDef};
 
 /// Name under which the lake is attached in DuckDB.
@@ -182,8 +182,8 @@ fn configure_duckdb(conn: &Connection, cfg: &Config) -> Result<()> {
     if d.threads > 0 {
         sql += &format!("SET threads = {};", d.threads);
     }
-    if !d.memory_limit.is_empty() {
-        sql += &format!("SET memory_limit = {};", sql_str(&format!("{}B", parse_bytes(&d.memory_limit)?)));
+    if let Some(limit) = d.memory_limit {
+        sql += &format!("SET memory_limit = '{}B';", limit.0);
     }
     if !d.temp_directory.is_empty() {
         sql += &format!("SET temp_directory = {};", sql_str(&d.temp_directory));
@@ -342,7 +342,7 @@ fn attach(conn: &Connection, cfg: &Config) -> Result<()> {
     let opts = [
         ("parquet_compression", sql_str("zstd")),
         ("parquet_row_group_size", st.row_group_size.to_string()),
-        ("target_file_size", sql_str(&format!("{}B", parse_bytes(&st.target_file_size)?))),
+        ("target_file_size", format!("'{}B'", st.target_file_size.0)),
         ("data_inlining_row_limit", st.data_inlining_row_limit.to_string()),
     ];
     for (k, v) in opts {

@@ -6,10 +6,12 @@
 //! Values of the form `${NAME}` are replaced by the environment variable NAME,
 //! so secrets can stay out of the file.
 
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{collections::BTreeMap, fmt, path::Path, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+use crate::store::schema::Signal;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -34,7 +36,16 @@ pub struct ServerConfig {
     /// Query API (OpenAPI) listen address.
     pub api_addr: String,
     /// Log format: `text` or `json`.
-    pub log_format: String,
+    pub log_format: LogFormat,
+}
+
+/// Log output format of the binary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +70,7 @@ pub struct StorageConfig {
     /// database instead of writing a tiny Parquet file. 0 disables inlining.
     pub data_inlining_row_limit: u64,
     /// Target Parquet file size for compaction, e.g. `128MB`.
-    pub target_file_size: String,
+    pub target_file_size: ByteSize,
     /// Parquet row group size in rows.
     pub row_group_size: u64,
 }
@@ -79,22 +90,26 @@ pub struct SecretConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
     /// Flush buffered rows to DuckLake at least this often, e.g. `5s`.
-    pub flush_interval: String,
+    #[serde(with = "duration")]
+    pub flush_interval: Duration,
     /// Flush early when this many rows are buffered.
     pub flush_rows: u64,
     /// Reject new requests (back-pressure) when the buffer holds more than this, e.g. `512MB`.
-    pub max_buffer_bytes: String,
+    pub max_buffer_bytes: ByteSize,
     /// Max size of one OTLP request body (after decompression), e.g. `32MB`.
-    pub max_request_bytes: String,
+    pub max_request_bytes: ByteSize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RetentionConfig {
     /// Keep spans this long (`0` = forever), e.g. `7d`.
-    pub traces: String,
-    pub logs: String,
-    pub metrics: String,
+    #[serde(with = "duration")]
+    pub traces: Duration,
+    #[serde(with = "duration")]
+    pub logs: Duration,
+    #[serde(with = "duration")]
+    pub metrics: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,17 +119,22 @@ pub struct MaintenanceConfig {
     /// prefer a single maintainer (concurrent runs are safe but wasteful).
     pub enabled: bool,
     /// Flush inlined rows and merge small files this often.
-    pub compact_interval: String,
+    #[serde(with = "duration")]
+    pub compact_interval: Duration,
     /// Files below this size are merged by the frequent compaction.
-    pub small_file_size: String,
+    pub small_file_size: ByteSize,
     /// Merge everything below `target_file_size` this often.
-    pub full_compact_interval: String,
+    #[serde(with = "duration")]
+    pub full_compact_interval: Duration,
     /// Retention deletes, snapshot expiry and file cleanup this often.
-    pub retention_interval: String,
+    #[serde(with = "duration")]
+    pub retention_interval: Duration,
     /// Keep old snapshots (time travel) this long.
-    pub snapshot_retention: String,
+    #[serde(with = "duration")]
+    pub snapshot_retention: Duration,
     /// Delete files no longer referenced after this grace period.
-    pub file_cleanup_delay: String,
+    #[serde(with = "duration")]
+    pub file_cleanup_delay: Duration,
     /// Run catalog-wide tasks (snapshot expiry, old file cleanup). These cannot
     /// be scoped to one schema; when several applications share a catalog, let
     /// exactly one of them run these.
@@ -127,11 +147,13 @@ pub struct QueryConfig {
     /// Number of concurrent query connections.
     pub max_concurrent: usize,
     /// Abort queries running longer than this.
-    pub timeout: String,
+    #[serde(with = "duration")]
+    pub timeout: Duration,
     /// Enable `POST /api/v1/sql` (read-only ad-hoc SQL). Requires `auth.api_tokens`.
     pub enable_sql: bool,
     /// Max time span a single query may cover, e.g. `31d`.
-    pub max_window: String,
+    #[serde(with = "duration")]
+    pub max_window: Duration,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -146,8 +168,9 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DuckDbConfig {
-    /// DuckDB memory limit, e.g. `2GB`. Empty = DuckDB default (80% of RAM).
-    pub memory_limit: String,
+    /// DuckDB memory limit, e.g. `2GB`. Empty or unset = DuckDB default (80% of RAM).
+    #[serde(with = "optional_bytes", skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<ByteSize>,
     /// Worker threads. 0 = number of cores.
     pub threads: usize,
     /// Spill directory for large queries. Empty = DuckDB default.
@@ -165,7 +188,7 @@ impl Default for ServerConfig {
             otlp_grpc_addr: "0.0.0.0:4317".into(),
             otlp_http_addr: "0.0.0.0:4318".into(),
             api_addr: "0.0.0.0:8080".into(),
-            log_format: "text".into(),
+            log_format: LogFormat::Text,
         }
     }
 }
@@ -179,7 +202,7 @@ impl Default for StorageConfig {
             secrets: vec![],
             extensions: vec![],
             data_inlining_row_limit: 1000,
-            target_file_size: "128MB".into(),
+            target_file_size: ByteSize::mb(128),
             row_group_size: 122_880,
         }
     }
@@ -188,17 +211,32 @@ impl Default for StorageConfig {
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
-            flush_interval: "5s".into(),
+            flush_interval: Duration::from_secs(5),
             flush_rows: 200_000,
-            max_buffer_bytes: "512MB".into(),
-            max_request_bytes: "32MB".into(),
+            max_buffer_bytes: ByteSize::mb(512),
+            max_request_bytes: ByteSize::mb(32),
+        }
+    }
+}
+
+const fn days(n: u64) -> Duration {
+    Duration::from_secs(n * 86_400)
+}
+
+impl RetentionConfig {
+    /// Retention of one signal; zero keeps data forever.
+    pub(crate) fn of(&self, s: Signal) -> Duration {
+        match s {
+            Signal::Traces => self.traces,
+            Signal::Logs => self.logs,
+            Signal::Metrics => self.metrics,
         }
     }
 }
 
 impl Default for RetentionConfig {
     fn default() -> Self {
-        Self { traces: "7d".into(), logs: "7d".into(), metrics: "30d".into() }
+        Self { traces: days(7), logs: days(7), metrics: days(30) }
     }
 }
 
@@ -206,12 +244,12 @@ impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            compact_interval: "10m".into(),
-            small_file_size: "16MB".into(),
-            full_compact_interval: "6h".into(),
-            retention_interval: "1h".into(),
-            snapshot_retention: "1h".into(),
-            file_cleanup_delay: "15m".into(),
+            compact_interval: Duration::from_secs(10 * 60),
+            small_file_size: ByteSize::mb(16),
+            full_compact_interval: Duration::from_secs(6 * 3600),
+            retention_interval: Duration::from_secs(3600),
+            snapshot_retention: Duration::from_secs(3600),
+            file_cleanup_delay: Duration::from_secs(15 * 60),
             catalog_wide: true,
         }
     }
@@ -219,14 +257,14 @@ impl Default for MaintenanceConfig {
 
 impl Default for QueryConfig {
     fn default() -> Self {
-        Self { max_concurrent: 4, timeout: "30s".into(), enable_sql: false, max_window: "31d".into() }
+        Self { max_concurrent: 4, timeout: Duration::from_secs(30), enable_sql: false, max_window: days(31) }
     }
 }
 
 impl Default for DuckDbConfig {
     fn default() -> Self {
         Self {
-            memory_limit: String::new(),
+            memory_limit: None,
             threads: 0,
             temp_directory: String::new(),
             extension_directory: String::new(),
@@ -292,47 +330,39 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Check ranges and combinations. Units are checked while parsing.
     pub fn validate(&self) -> Result<()> {
-        for (name, v) in [
-            ("ingest.flush_interval", &self.ingest.flush_interval),
-            ("maintenance.compact_interval", &self.maintenance.compact_interval),
-            ("maintenance.full_compact_interval", &self.maintenance.full_compact_interval),
-            ("maintenance.retention_interval", &self.maintenance.retention_interval),
-            ("maintenance.snapshot_retention", &self.maintenance.snapshot_retention),
-            ("maintenance.file_cleanup_delay", &self.maintenance.file_cleanup_delay),
-            ("query.timeout", &self.query.timeout),
-            ("query.max_window", &self.query.max_window),
-            ("retention.traces", &self.retention.traces),
-            ("retention.logs", &self.retention.logs),
-            ("retention.metrics", &self.retention.metrics),
+        let (i, m, q, r) = (&self.ingest, &self.maintenance, &self.query, &self.retention);
+        for (name, d) in [
+            ("ingest.flush_interval", i.flush_interval),
+            ("maintenance.compact_interval", m.compact_interval),
+            ("maintenance.full_compact_interval", m.full_compact_interval),
+            ("maintenance.retention_interval", m.retention_interval),
+            ("maintenance.snapshot_retention", m.snapshot_retention),
+            ("maintenance.file_cleanup_delay", m.file_cleanup_delay),
+            ("query.timeout", q.timeout),
+            ("query.max_window", q.max_window),
+            ("retention.traces", r.traces),
+            ("retention.logs", r.logs),
+            ("retention.metrics", r.metrics),
         ] {
-            let d = parse_duration(v).with_context(|| format!("{name} = {v:?}"))?;
             if d > MAX_DURATION {
-                bail!("{name} = {v:?} is longer than 100 years");
+                bail!("{name} is longer than 100 years");
             }
         }
-        for (name, v) in [
-            ("ingest.max_buffer_bytes", &self.ingest.max_buffer_bytes),
-            ("ingest.max_request_bytes", &self.ingest.max_request_bytes),
-            ("storage.target_file_size", &self.storage.target_file_size),
-            ("maintenance.small_file_size", &self.maintenance.small_file_size),
+        for (name, d) in [
+            ("ingest.flush_interval", i.flush_interval),
+            ("maintenance.compact_interval", m.compact_interval),
+            ("maintenance.full_compact_interval", m.full_compact_interval),
+            ("maintenance.retention_interval", m.retention_interval),
+            ("query.timeout", q.timeout),
+            ("query.max_window", q.max_window),
         ] {
-            parse_bytes(v).with_context(|| format!("{name} = {v:?}"))?;
-        }
-        // Empty strings are ignored as tokens, so they do not count.
-        for (name, v) in [
-            ("ingest.flush_interval", &self.ingest.flush_interval),
-            ("maintenance.compact_interval", &self.maintenance.compact_interval),
-            ("maintenance.full_compact_interval", &self.maintenance.full_compact_interval),
-            ("maintenance.retention_interval", &self.maintenance.retention_interval),
-            ("query.timeout", &self.query.timeout),
-            ("query.max_window", &self.query.max_window),
-        ] {
-            if parse_duration(v)?.is_zero() {
+            if d.is_zero() {
                 bail!("{name} must be greater than 0");
             }
         }
-        if self.ingest.flush_rows == 0 {
+        if i.flush_rows == 0 {
             bail!("ingest.flush_rows must be greater than 0");
         }
         // An empty token is almost always a missing secret; refuse it instead
@@ -344,36 +374,18 @@ impl Config {
                 bail!("{name} contains an empty token (is the secret/env var set?); remove it or set a value");
             }
         }
-        if self.query.enable_sql && self.auth.api_tokens.iter().all(|t| t.trim().is_empty()) {
+        if q.enable_sql && self.auth.api_tokens.iter().all(|t| t.trim().is_empty()) {
             bail!("query.enable_sql requires auth.api_tokens to be set");
         }
         if !is_identifier(&self.storage.schema) {
             bail!("storage.schema must be a plain identifier (letters, digits, _)");
         }
-        if self.query.max_concurrent == 0 {
+        if q.max_concurrent == 0 {
             bail!("query.max_concurrent must be at least 1");
-        }
-        if !self.duckdb.memory_limit.is_empty() {
-            parse_bytes(&self.duckdb.memory_limit).context("duckdb.memory_limit")?;
         }
         Ok(())
     }
 
-    pub fn flush_interval(&self) -> Duration {
-        parse_duration(&self.ingest.flush_interval).expect("validated")
-    }
-    pub fn max_buffer_bytes(&self) -> u64 {
-        parse_bytes(&self.ingest.max_buffer_bytes).expect("validated")
-    }
-    pub fn max_request_bytes(&self) -> usize {
-        parse_bytes(&self.ingest.max_request_bytes).expect("validated") as usize
-    }
-    pub fn query_timeout(&self) -> Duration {
-        parse_duration(&self.query.timeout).expect("validated")
-    }
-    pub fn max_window(&self) -> Duration {
-        parse_duration(&self.query.max_window).expect("validated")
-    }
     /// Example config with comments, printed by `otel-ducklake config`.
     pub fn example_toml() -> &'static str {
         include_str!("../../../config/otel-ducklake.example.toml")
@@ -390,34 +402,156 @@ pub fn is_identifier(s: &str) -> bool {
 }
 
 /// Parse `5s`, `10m`, `7d`, `1h30m`. `0` means zero.
-pub fn parse_duration(s: &str) -> Result<Duration> {
+pub(crate) fn parse_duration(s: &str) -> Result<Duration, humantime::DurationError> {
     let s = s.trim();
     if s == "0" {
         return Ok(Duration::ZERO);
     }
-    Ok(humantime::parse_duration(s)?)
+    humantime::parse_duration(s)
 }
 
-/// Parse `512MB`, `2GiB`, `1024` (bytes). Decimal units are powers of 1000,
-/// binary units (`KiB`, `MiB`, `GiB`) powers of 1024.
-pub fn parse_bytes(s: &str) -> Result<u64> {
-    let s = s.trim();
-    let idx = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
-    let (num, unit) = s.split_at(idx);
-    let num: f64 = num.parse().with_context(|| format!("invalid size {s:?}"))?;
-    let mult: f64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "kb" | "k" => 1e3,
-        "mb" | "m" => 1e6,
-        "gb" | "g" => 1e9,
-        "tb" | "t" => 1e12,
-        "kib" => 1024.0,
-        "mib" => 1024.0 * 1024.0,
-        "gib" => 1024.0 * 1024.0 * 1024.0,
-        "tib" => 1024f64.powi(4),
-        other => bail!("unknown size unit {other:?} in {s:?}"),
-    };
-    Ok((num * mult) as u64)
+/// A size in bytes. Parsed from `512MB`, `2GiB` or `1024` (bytes): decimal
+/// units are powers of 1000, binary units (`KiB`, `MiB`, `GiB`) powers of 1024.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ByteSize(pub u64);
+
+impl ByteSize {
+    pub const fn mb(n: u64) -> Self {
+        Self(n * 1_000_000)
+    }
+}
+
+/// Error parsing a [`ByteSize`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid size {0:?}: expected a number with an optional unit, e.g. 512MB or 2GiB")]
+pub struct ByteSizeError(String);
+
+impl FromStr for ByteSize {
+    type Err = ByteSizeError;
+
+    fn from_str(s: &str) -> Result<Self, ByteSizeError> {
+        let s = s.trim();
+        let err = || ByteSizeError(s.to_string());
+        let idx = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+        let (num, unit) = s.split_at(idx);
+        let num: f64 = num.parse().map_err(|_| err())?;
+        let mult: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+            "" | "b" => 1.0,
+            "kb" | "k" => 1e3,
+            "mb" | "m" => 1e6,
+            "gb" | "g" => 1e9,
+            "tb" | "t" => 1e12,
+            "kib" => 1024.0,
+            "mib" => 1024.0 * 1024.0,
+            "gib" => 1024.0 * 1024.0 * 1024.0,
+            "tib" => 1024f64.powi(4),
+            _ => return Err(err()),
+        };
+        Ok(Self((num * mult) as u64))
+    }
+}
+
+impl fmt::Display for ByteSize {
+    /// The largest decimal unit that divides the value exactly.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = self.0;
+        for (unit, m) in [("TB", 1_000_000_000_000), ("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)] {
+            if n != 0 && n.is_multiple_of(m) {
+                return write!(f, "{}{unit}", n / m);
+            }
+        }
+        write!(f, "{n}")
+    }
+}
+
+impl Serialize for ByteSize {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    /// A string with a unit, or a plain number of bytes.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl de::Visitor<'_> for V {
+            type Value = ByteSize;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a size such as \"512MB\" or a number of bytes")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ByteSize, E> {
+                v.parse().map_err(E::custom)
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<ByteSize, E> {
+                Ok(ByteSize(v))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<ByteSize, E> {
+                u64::try_from(v).map(ByteSize).map_err(|_| E::custom("a size cannot be negative"))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// `Option<ByteSize>` where an empty string means `None`.
+mod optional_bytes {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &Option<ByteSize>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(b) => b.serialize(s),
+            None => s.serialize_str(""),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ByteSize>, D::Error> {
+        struct V;
+        impl de::Visitor<'_> for V {
+            type Value = Option<ByteSize>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a size such as \"2GB\", a number of bytes, or \"\"")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v.trim().is_empty() { Ok(None) } else { v.parse().map(Some).map_err(E::custom) }
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(Some(ByteSize(v)))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                u64::try_from(v).map(|v| Some(ByteSize(v))).map_err(|_| E::custom("a size cannot be negative"))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A [`Duration`] written as `5s`, `10m`, `7d`, `1h30m`; `"0"` (or `0`) means zero.
+mod duration {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        if d.is_zero() { s.serialize_str("0") } else { s.collect_str(&humantime::format_duration(*d)) }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        struct V;
+        impl de::Visitor<'_> for V {
+            type Value = Duration;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a duration such as \"30s\", \"10m\" or \"7d\"")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Duration, E> {
+                parse_duration(v).map_err(|e| E::custom(format!("invalid duration {v:?}: {e}")))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Duration, E> {
+                if v == 0 { Ok(Duration::ZERO) } else { Err(E::custom("a duration needs a unit, e.g. \"30s\"")) }
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Duration, E> {
+                self.visit_u64(u64::try_from(v).map_err(|_| E::custom("a duration cannot be negative"))?)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 fn merge(base: &mut toml::Value, over: toml::Value) {
@@ -503,12 +637,51 @@ mod tests {
 
     #[test]
     fn sizes_and_durations() {
-        assert_eq!(parse_bytes("512MB").unwrap(), 512_000_000);
-        assert_eq!(parse_bytes("1GiB").unwrap(), 1 << 30);
-        assert_eq!(parse_bytes("100").unwrap(), 100);
-        assert!(parse_bytes("5XB").is_err());
+        assert_eq!("512MB".parse(), Ok(ByteSize(512_000_000)));
+        assert_eq!("1GiB".parse(), Ok(ByteSize(1 << 30)));
+        assert_eq!("100".parse(), Ok(ByteSize(100)));
+        assert!("5XB".parse::<ByteSize>().is_err());
+        assert_eq!(ByteSize::mb(128).to_string(), "128MB");
+        assert_eq!(ByteSize(1 << 30).to_string(), (1u64 << 30).to_string());
         assert_eq!(parse_duration("0").unwrap(), Duration::ZERO);
-        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(7 * 86400));
+        assert_eq!(parse_duration("7d").unwrap(), days(7));
+    }
+
+    fn from_toml(text: &str) -> Result<Config, toml::de::Error> {
+        let mut root = toml::Value::try_from(Config::default()).unwrap();
+        merge(&mut root, toml::from_str(text).unwrap());
+        root.try_into()
+    }
+
+    #[test]
+    fn typed_values_parse_at_load_time() {
+        let cfg = from_toml(
+            r#"
+            server.log_format = "json"
+            ingest = { flush_interval = "250ms", max_buffer_bytes = "1GiB", max_request_bytes = 1024 }
+            retention = { traces = "0", logs = "3d" }
+            duckdb.memory_limit = "2GB"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.server.log_format, LogFormat::Json);
+        assert_eq!(cfg.ingest.flush_interval, Duration::from_millis(250));
+        assert_eq!(cfg.ingest.max_buffer_bytes, ByteSize(1 << 30));
+        assert_eq!(cfg.ingest.max_request_bytes, ByteSize(1024));
+        assert_eq!(cfg.retention.traces, Duration::ZERO);
+        assert_eq!(cfg.retention.logs, days(3));
+        assert_eq!(cfg.duckdb.memory_limit, Some(ByteSize(2_000_000_000)));
+        assert_eq!(from_toml("duckdb.memory_limit = \"\"").unwrap().duckdb.memory_limit, None);
+        // Defaults survive the round trip through TOML.
+        assert_eq!(from_toml("").unwrap().retention.metrics, days(30));
+        for bad in [
+            "server.log_format = \"xml\"",
+            "ingest.flush_interval = \"5 parsecs\"",
+            "ingest.flush_interval = 5",
+            "ingest.max_buffer_bytes = \"5XB\"",
+        ] {
+            assert!(from_toml(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -532,7 +705,7 @@ mod tests {
         assert_eq!(cfg.storage.data_path, "s3://b/p/");
         assert_eq!(cfg.query.max_concurrent, 8);
         assert_eq!(cfg.auth.api_tokens, vec!["secret".to_string()]);
-        assert_eq!(cfg.retention.traces, "0");
+        assert_eq!(cfg.retention.traces, Duration::ZERO);
     }
 
     #[test]
@@ -555,13 +728,13 @@ mod tests {
     #[test]
     fn zero_intervals_and_empty_tokens_are_rejected() {
         let mut cfg = Config::default();
-        cfg.ingest.flush_interval = "0".into();
+        cfg.ingest.flush_interval = Duration::ZERO;
         assert!(cfg.validate().is_err());
         let mut cfg = Config::default();
-        cfg.retention.traces = "300000y".into();
+        cfg.retention.traces = humantime::parse_duration("300000y").unwrap();
         assert!(cfg.validate().is_err(), "durations are bounded");
         let mut cfg = Config::default();
-        cfg.query.max_window = "0".into();
+        cfg.query.max_window = Duration::ZERO;
         assert!(cfg.validate().is_err(), "a zero max_window makes every query fail");
         let mut cfg = Config::default();
         cfg.ingest.flush_rows = 0;

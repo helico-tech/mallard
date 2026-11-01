@@ -212,7 +212,7 @@ mod tests {
         let o = cfg.otel_config();
         assert_eq!(o.storage.data_path, "s3://bucket/lake/");
         assert_eq!(o.storage.schema, "otel");
-        assert_eq!(o.retention.traces, "3d");
+        assert_eq!(o.retention.traces, std::time::Duration::from_secs(3 * 86_400));
         assert_eq!(o.auth.api_tokens, vec!["a", "b"]);
         let s = cfg.sentry_config();
         assert_eq!(s.schema, "sentry");
@@ -232,9 +232,14 @@ mod tests {
             jail.set_env("MALLARD_API_TOKEN", "t");
             jail.set_env("MALLARD_SERVER__PUBLIC_URL", "https://x.example");
             jail.set_env("MALLARD_OTEL__RETENTION__TRACES", "3d");
+            // Figment reads these as numbers; typed values must accept them.
+            jail.set_env("MALLARD_OTEL__RETENTION__LOGS", "0");
+            jail.set_env("MALLARD_DUCKDB__MEMORY_LIMIT", "2000000");
             let cfg: Config = Figment::new().merge(env_overrides()).extract()?;
             assert_eq!(cfg.server.public_url, "https://x.example");
-            assert_eq!(cfg.otel.retention.traces, "3d");
+            assert_eq!(cfg.otel.retention.traces, std::time::Duration::from_secs(3 * 86_400));
+            assert!(cfg.otel.retention.logs.is_zero());
+            assert_eq!(cfg.duckdb.memory_limit, Some(odl_server::config::ByteSize::mb(2)));
             Ok(())
         });
     }

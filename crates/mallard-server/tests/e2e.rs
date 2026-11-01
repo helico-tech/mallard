@@ -27,7 +27,7 @@ fn config(dir: &std::path::Path) -> Config {
     c.server.api_tokens = vec![TOKEN.into()];
     c.storage.catalog = dir.join("catalog.ducklake").display().to_string();
     c.storage.data_path = format!("{}/lake/", dir.display());
-    c.otel.ingest.flush_interval = "200ms".into();
+    c.otel.ingest.flush_interval = std::time::Duration::from_millis(200);
     c
 }
 

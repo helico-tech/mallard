@@ -43,7 +43,7 @@ use crate::{
     stats::Stats,
     store::{
         Lake,
-        maintenance::{Maintenance, Settings},
+        maintenance::Maintenance,
         writer::{Flusher, WriteBuffer},
     },
 };
@@ -79,15 +79,16 @@ impl Server {
 
     fn build(cfg: Config, lake: Lake) -> Result<Self> {
         let stats = Arc::new(Stats::default());
-        let buffer = Arc::new(WriteBuffer::new(cfg.max_buffer_bytes(), cfg.ingest.flush_rows, stats.clone()));
+        let max_buffer_bytes = cfg.ingest.max_buffer_bytes.0;
+        let buffer = Arc::new(WriteBuffer::new(max_buffer_bytes, cfg.ingest.flush_rows, stats.clone()));
         let ingest = Arc::new(Ingest {
             buffer: buffer.clone(),
             stats: stats.clone(),
             tokens: Tokens::new(&cfg.auth.ingest_tokens),
-            max_request_bytes: cfg.max_request_bytes(),
+            max_request_bytes: usize::try_from(cfg.ingest.max_request_bytes.0).unwrap_or(usize::MAX),
         });
         let conns = (0..cfg.query.max_concurrent).map(|_| lake.connect()).collect::<Result<Vec<_>>>()?;
-        let reader = Arc::new(Reader::new(conns, cfg.query_timeout(), cfg.max_window()));
+        let reader = Arc::new(Reader::new(conns, cfg.query.timeout, cfg.query.max_window));
         let api_state = Arc::new(ApiState {
             reader,
             stats: stats.clone(),
@@ -95,7 +96,7 @@ impl Server {
             schema: lake.schema.clone(),
             catalog_type: lake.catalog_kind.as_str().to_string(),
             data_path: lake.data_path.clone(),
-            max_buffer_bytes: cfg.max_buffer_bytes(),
+            max_buffer_bytes,
             enable_sql: cfg.query.enable_sql,
             started: Instant::now(),
         });
@@ -130,9 +131,10 @@ impl Server {
     /// completes, then flush remaining buffered data. Stop the receivers
     /// before the shutdown future resolves so nothing arrives afterwards.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        let flusher = Flusher::start(&self.lake, self.buffer.clone(), self.cfg.flush_interval(), self.stats.clone())?;
-        let maintenance = if self.cfg.maintenance.enabled {
-            Some(Maintenance::start(&self.lake, Settings::from_config(&self.cfg)?, self.stats.clone())?)
+        let cfg = &self.cfg;
+        let flusher = Flusher::start(&self.lake, self.buffer.clone(), cfg.ingest.flush_interval, self.stats.clone())?;
+        let maintenance = if cfg.maintenance.enabled {
+            Some(Maintenance::start(&self.lake, cfg.maintenance.clone(), cfg.retention.clone(), self.stats.clone())?)
         } else {
             None
         };

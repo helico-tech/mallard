@@ -213,7 +213,7 @@ async fn harness(token: Option<&str>) -> Harness {
     cfg.storage.catalog = dir.path().join("catalog.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
     cfg.storage.data_inlining_row_limit = 0;
-    cfg.ingest.flush_interval = "100ms".into();
+    cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     if let Some(t) = token {
         cfg.auth.api_tokens = vec![t.into()];
@@ -552,8 +552,7 @@ async fn compaction_and_retention() {
     let detail = store::maintenance::compact(&conn, "otel", Some(16_000_000)).unwrap();
     assert!(detail.contains("merged"), "{detail}");
     assert_eq!(files(&conn), 2, "one file per day partition after merge");
-    let settings = store::maintenance::Settings::from_config(&cfg).unwrap();
-    let detail = store::maintenance::retention(&conn, "otel", &settings).unwrap();
+    let detail = store::maintenance::retention(&conn, "otel", &cfg.maintenance, &cfg.retention).unwrap();
     assert!(detail.contains("deleted 6 expired rows"), "{detail}");
     let n: i64 = conn.query_row("SELECT count(*) FROM spans", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 12);
@@ -570,7 +569,7 @@ async fn tolerates_columns_added_by_newer_version() {
     let mut cfg = Config::default();
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
-    cfg.ingest.flush_interval = "100ms".into();
+    cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     {
         let lake = store::Lake::open(&cfg).unwrap();

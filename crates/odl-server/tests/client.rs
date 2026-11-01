@@ -45,7 +45,7 @@ async fn client_against_server() {
     let mut cfg = Config::default();
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
-    cfg.ingest.flush_interval = "100ms".into();
+    cfg.ingest.flush_interval = Duration::from_millis(100);
     cfg.maintenance.enabled = false;
     cfg.auth.api_tokens = vec!["tok".into()];
     // Pick free ports.

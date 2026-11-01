@@ -32,7 +32,7 @@ use tracing::{info, warn};
 
 use super::{CATALOG, Lake, schema::TABLES, sql_str};
 use crate::{
-    config::{Config, parse_bytes, parse_duration},
+    config::{MaintenanceConfig, RetentionConfig},
     stats::Stats,
 };
 
@@ -41,47 +41,15 @@ pub struct Maintenance {
     handle: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-pub struct Settings {
-    pub compact_interval: Duration,
-    pub small_file_size: u64,
-    pub full_compact_interval: Duration,
-    pub retention_interval: Duration,
-    pub snapshot_retention: Duration,
-    pub file_cleanup_delay: Duration,
-    pub catalog_wide: bool,
-    pub retention: [(&'static str, Duration); 3],
-}
-
-impl Settings {
-    pub fn from_config(cfg: &Config) -> Result<Self> {
-        let m = &cfg.maintenance;
-        Ok(Self {
-            compact_interval: parse_duration(&m.compact_interval)?,
-            small_file_size: parse_bytes(&m.small_file_size)?,
-            full_compact_interval: parse_duration(&m.full_compact_interval)?,
-            retention_interval: parse_duration(&m.retention_interval)?,
-            snapshot_retention: parse_duration(&m.snapshot_retention)?,
-            file_cleanup_delay: parse_duration(&m.file_cleanup_delay)?,
-            catalog_wide: m.catalog_wide,
-            retention: [
-                ("traces", parse_duration(&cfg.retention.traces)?),
-                ("logs", parse_duration(&cfg.retention.logs)?),
-                ("metrics", parse_duration(&cfg.retention.metrics)?),
-            ],
-        })
-    }
-}
-
 impl Maintenance {
-    pub fn start(lake: &Lake, settings: Settings, stats: Arc<Stats>) -> Result<Self> {
+    pub fn start(lake: &Lake, m: MaintenanceConfig, r: RetentionConfig, stats: Arc<Stats>) -> Result<Self> {
         let conn = lake.connect()?;
         let schema = lake.schema.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::Builder::new()
             .name("odl-maintenance".into())
-            .spawn(move || run(conn, schema, settings, stats, stop2))?;
+            .spawn(move || run(conn, schema, m, r, stats, stop2))?;
         Ok(Self { stop, handle: Some(handle) })
     }
 
@@ -102,7 +70,14 @@ impl Drop for Maintenance {
     }
 }
 
-fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: Arc<AtomicBool>) {
+fn run(
+    conn: Connection,
+    schema: String,
+    s: MaintenanceConfig,
+    r: RetentionConfig,
+    stats: Arc<Stats>,
+    stop: Arc<AtomicBool>,
+) {
     let start = Instant::now();
     // Stagger the first runs a little so start-up stays fast.
     // Random offset so replicas sharing a catalog don't compact in lock-step
@@ -114,14 +89,14 @@ fn run(conn: Connection, schema: String, s: Settings, stats: Arc<Stats>, stop: A
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now >= next_retention {
-            task(&stats, "retention", || retention(&conn, &schema, &s));
+            task(&stats, "retention", || retention(&conn, &schema, &s, &r));
             next_retention = Instant::now() + s.retention_interval;
         } else if now >= next_full {
             task(&stats, "full_compaction", || compact(&conn, &schema, None));
             next_full = Instant::now() + s.full_compact_interval;
             next_compact = Instant::now() + s.compact_interval;
         } else if now >= next_compact {
-            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size)));
+            task(&stats, "compaction", || compact(&conn, &schema, Some(s.small_file_size.0)));
             next_compact = Instant::now() + s.compact_interval;
         } else {
             std::thread::sleep(Duration::from_millis(500));
@@ -214,17 +189,15 @@ pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> Option<DateT
     })
 }
 
-pub fn retention(conn: &Connection, schema: &str, s: &Settings) -> Result<String> {
+pub fn retention(conn: &Connection, schema: &str, s: &MaintenanceConfig, r: &RetentionConfig) -> Result<String> {
     let now = Utc::now();
     let mut deleted = 0usize;
     for t in TABLES {
-        let Some((_, keep)) = s.retention.iter().find(|(sig, _)| *sig == t.signal.as_str()) else {
-            continue;
-        };
+        let keep = r.of(t.signal);
         if keep.is_zero() {
             continue;
         }
-        let Some(cutoff) = retention_cutoff(now, *keep) else {
+        let Some(cutoff) = retention_cutoff(now, keep) else {
             continue;
         };
         let cutoff = cutoff.naive_utc();
