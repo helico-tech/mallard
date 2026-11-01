@@ -121,7 +121,7 @@ At normal traffic the data never gets that fragmented.
 | bigger, or error storms | 1M+ | 2 CPU, 4-8 GB | 2-4GB | ~24 GB per 1M/day |
 
 Error volume depends far more on code quality than on visitors; the
-`sdl_events_stored_total` metric tells you the real rate.
+`mallard_sentry_events_stored_total` metric tells you the real rate.
 
 ## Not measured
 

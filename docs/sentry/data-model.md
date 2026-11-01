@@ -115,7 +115,7 @@ after a commit succeeds.
 (`MAX_NEW_ISSUES_PER_HOUR`, per process; not configurable). Events of further
 new groups go into one issue per project, "Too many new issues"
 (`OVERFLOW_GROUP`, `6d616c6c61726421`), and are counted in
-`sdl_issue_overflow_events_total`. Each event keeps its own title and payload,
+`mallard_sentry_issue_overflow_events_total`. Each event keeps its own title and payload,
 so nothing is lost but the grouping; the next hour those groups get their own
 issue from their next event on. Known groups are never affected.
 `issues` and `issue_activity` rows stay after their events are past retention;

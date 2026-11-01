@@ -333,9 +333,9 @@ about half the container memory (DuckDB uses some memory outside its limit).
 | ~100k visitors/day | 10k-200k | 1 | 4 GiB | 2GB |
 | bigger / error storms | 1M+ | 2 | 4-8 GiB | 2-4GB |
 
-Watch `/metrics` (`sdl_write_batch_seconds`, `sdl_ingest_rejected_total`,
-`sdl_write_errors_total`, `sdl_maintenance_errors_total`,
-`sdl_issue_overflow_events_total`) and `/v1/info`
+Watch `/metrics` (`mallard_sentry_write_batch_seconds`, `mallard_sentry_ingest_rejected_total`,
+`mallard_sentry_write_errors_total`, `mallard_sentry_maintenance_errors_total`,
+`mallard_sentry_issue_overflow_events_total`) and `/v1/info`
 (queue depth). Do not set a CPU limit below 1 core or compaction throttles.
 
 ## Health and monitoring

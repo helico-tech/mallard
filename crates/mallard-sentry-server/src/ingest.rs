@@ -49,7 +49,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Error response in Sentry's shape: `{"detail": "..."}` + `X-Sentry-Error`.
 fn sentry_error(status: StatusCode, detail: &str) -> Response {
-    metrics::counter!("sdl_ingest_rejected_total", "status" => status.as_u16().to_string()).increment(1);
+    metrics::counter!("mallard_sentry_ingest_rejected_total", "status" => status.as_u16().to_string()).increment(1);
     let mut r = (status, axum::Json(json!({ "detail": detail }))).into_response();
     if let Ok(v) = HeaderValue::from_str(detail) {
         r.headers_mut().insert("x-sentry-error", v);
@@ -91,7 +91,7 @@ fn forward_transaction(state: &AppState, project_id: u32, payload: Bytes) {
     let slug = state.db.caches.project(project_id).map(|p| p.slug);
     match (sink, slug) {
         (Some(sink), Some(project_slug)) => sink.transaction(Transaction { project_id, project_slug, payload }),
-        _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => "transaction").increment(1),
+        _ => metrics::counter!("mallard_sentry_ingest_items_dropped_total", "type" => "transaction").increment(1),
     }
 }
 
@@ -107,7 +107,7 @@ fn forward_spans(state: &AppState, project_id: u32, envelope: &Envelope, item: &
             envelope_headers: &envelope.headers,
             payload: &item.payload,
         }),
-        _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => "span").increment(1),
+        _ => metrics::counter!("mallard_sentry_ingest_items_dropped_total", "type" => "span").increment(1),
     }
 }
 
@@ -257,7 +257,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
     let mut stored_id: Option<String> = None;
     for item in &env.items {
         let ty = item.ty();
-        metrics::counter!("sdl_ingest_items_total", "type" => item_type_label(ty)).increment(1);
+        metrics::counter!("mallard_sentry_ingest_items_total", "type" => item_type_label(ty)).increment(1);
         match ty {
             "event" | "error" => {
                 if item.payload.len() > state.cfg.ingest.max_event_bytes.as_usize() {
@@ -279,10 +279,12 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
             // Accepted and dropped: sessions, client reports, attachments,
             // replays, profiles, check-ins, logs, feedback...
             // This server stores errors only (see docs/compatibility.md).
-            _ => metrics::counter!("sdl_ingest_items_dropped_total", "type" => item_type_label(ty)).increment(1),
+            _ => metrics::counter!("mallard_sentry_ingest_items_dropped_total", "type" => item_type_label(ty))
+                .increment(1),
         }
     }
-    metrics::histogram!("sdl_ingest_request_seconds", "endpoint" => "envelope").record(started.elapsed().as_secs_f64());
+    metrics::histogram!("mallard_sentry_ingest_request_seconds", "endpoint" => "envelope")
+        .record(started.elapsed().as_secs_f64());
     let id = stored_id.or_else(|| env.event_id().map(str::to_string));
     axum::Json(match id {
         Some(id) => json!({ "id": id }),
@@ -321,7 +323,8 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
         Ok(id) => axum::Json(json!({ "id": id })).into_response(),
         Err(e) => ingest_error(e),
     };
-    metrics::histogram!("sdl_ingest_request_seconds", "endpoint" => "store").record(started.elapsed().as_secs_f64());
+    metrics::histogram!("mallard_sentry_ingest_request_seconds", "endpoint" => "store")
+        .record(started.elapsed().as_secs_f64());
     r
 }
 
@@ -335,7 +338,7 @@ pub(crate) async fn process_event(
     if raw.get("type").and_then(Value::as_str).is_some_and(|t| t != "error" && t != "default") {
         // e.g. "transaction" or "feedback" sent as an event item.
         let id = raw.get("event_id").and_then(Value::as_str).unwrap_or_default().to_string();
-        metrics::counter!("sdl_ingest_items_dropped_total", "type" => "non_error_event").increment(1);
+        metrics::counter!("mallard_sentry_ingest_items_dropped_total", "type" => "non_error_event").increment(1);
         return Ok(id);
     }
     // Claim the event id before the expensive work, so SDK retries (also
@@ -347,7 +350,7 @@ pub(crate) async fn process_event(
         Some(id) => match Claim::new(&state.recent_events, (src.project_id, id)) {
             Some(c) => Some(c),
             None => {
-                metrics::counter!("sdl_ingest_duplicates_total").increment(1);
+                metrics::counter!("mallard_sentry_ingest_duplicates_total").increment(1);
                 return Ok(id.simple().to_string());
             }
         },
@@ -378,7 +381,7 @@ pub(crate) async fn process_event(
         let mut ev = ev;
         if !maps.is_empty() {
             let n = symbolicate::apply(&mut ev, &maps);
-            metrics::counter!("sdl_frames_symbolicated_total").increment(n as u64);
+            metrics::counter!("mallard_sentry_frames_symbolicated_total").increment(n as u64);
         }
         // Only the JSON text is queued; the Value tree is dropped here.
         (ProcessedEvent::from_normalized(&ev, received_at), ev.to_string())
@@ -407,7 +410,7 @@ pub(crate) async fn process_event(
     set_keep(&mut claim, true);
     match rx.await {
         Ok(Ok(())) => {
-            metrics::counter!("sdl_ingest_events_total").increment(1);
+            metrics::counter!("mallard_sentry_ingest_events_total").increment(1);
             if let Some((o, t, s)) = observed {
                 o.event_stored(src.project_id, t, s);
             }

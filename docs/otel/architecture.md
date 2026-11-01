@@ -84,7 +84,7 @@ that talks HTTP only.
     hand, a missing table, a type mismatch, a panic in the conversion).
     That table's batches are then written one by one: those that still fail
     permanently are dropped, logged at `error` with the table and counted
-    in `dropped_rows` (`odl_dropped_rows_total{table}`). The other tables
+    in `dropped_rows` (`mallard_otel_dropped_rows_total{table}`). The other tables
     are flushed right away, so one broken table does not block the others
     or fill the buffer.
   Appender errors often carry no DuckDB error type ("the column must exist

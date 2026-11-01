@@ -52,7 +52,7 @@ envelope protocol and are expected to work; they are not in the test suite.
 | `attachment`, `replay_event`, `replay_recording`, `replay_video` | accepted, dropped |
 | `client_report`, `check_in`, `log`, `otel_log`, `statsd`, `feedback`, `user_report` | accepted, dropped |
 
-Dropped items are counted in `sdl_ingest_items_dropped_total{type=...}`. You
+Dropped items are counted in `mallard_sentry_ingest_items_dropped_total{type=...}`. You
 can keep `tracesSampleRate` and replays enabled; set them to 0 to save
 bandwidth.
 

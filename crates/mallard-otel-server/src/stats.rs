@@ -1,5 +1,5 @@
 //! Process-local counters exposed by `GET /api/v1/stats`, mirrored as
-//! Prometheus metrics (`odl_*`, through the `metrics` facade; the binary
+//! Prometheus metrics (`mallard_otel_*`, through the `metrics` facade; the binary
 //! installs the recorder).
 
 use std::sync::{
@@ -54,11 +54,11 @@ impl Stats {
         c.throttled.fetch_add(throttled, Relaxed);
         c.invalid.fetch_add(invalid, Relaxed);
         let signal = s.as_str();
-        metrics::counter!("odl_ingest_requests_total", "signal" => signal).increment(1);
-        metrics::counter!("odl_ingest_items_total", "signal" => signal).increment(accepted);
-        metrics::counter!("odl_ingest_rejected_items_total", "signal" => signal, "reason" => "throttled")
+        metrics::counter!("mallard_otel_ingest_requests_total", "signal" => signal).increment(1);
+        metrics::counter!("mallard_otel_ingest_items_total", "signal" => signal).increment(accepted);
+        metrics::counter!("mallard_otel_ingest_rejected_items_total", "signal" => signal, "reason" => "throttled")
             .increment(throttled);
-        metrics::counter!("odl_ingest_rejected_items_total", "signal" => signal, "reason" => "invalid")
+        metrics::counter!("mallard_otel_ingest_rejected_items_total", "signal" => signal, "reason" => "invalid")
             .increment(invalid);
     }
 
@@ -66,21 +66,21 @@ impl Stats {
     /// UNAVAILABLE), in addition to [`Stats::record_request`].
     pub fn throttled_request(&self, s: Signal) {
         self.signal(s).throttled_requests.fetch_add(1, Relaxed);
-        metrics::counter!("odl_ingest_throttled_requests_total", "signal" => s.as_str()).increment(1);
+        metrics::counter!("mallard_otel_ingest_throttled_requests_total", "signal" => s.as_str()).increment(1);
     }
 
     pub fn set_buffered(&self, rows: u64, bytes: u64) {
         self.buffered_rows.store(rows, Relaxed);
         self.buffered_bytes.store(bytes, Relaxed);
-        metrics::gauge!("odl_buffered_rows").set(rows as f64);
-        metrics::gauge!("odl_buffered_bytes").set(bytes as f64);
+        metrics::gauge!("mallard_otel_buffered_rows").set(rows as f64);
+        metrics::gauge!("mallard_otel_buffered_bytes").set(bytes as f64);
     }
 
     pub fn flush_ok(&self, rows: u64, duration_ms: f64) {
         self.flushes.fetch_add(1, Relaxed);
-        metrics::counter!("odl_flushes_total").increment(1);
-        metrics::histogram!("odl_flush_seconds").record(duration_ms / 1000.0);
-        metrics::histogram!("odl_flush_rows").record(rows as f64);
+        metrics::counter!("mallard_otel_flushes_total").increment(1);
+        metrics::histogram!("mallard_otel_flush_seconds").record(duration_ms / 1000.0);
+        metrics::histogram!("mallard_otel_flush_rows").record(rows as f64);
         // A success clears the alarm; `flush_errors` keeps the count.
         *self.last_flush_error.lock().unwrap() = None;
         *self.last_flush.lock().unwrap() = Some(FlushInfo { at: Utc::now(), rows, duration_ms });
@@ -88,21 +88,22 @@ impl Stats {
 
     pub fn flush_err(&self, msg: String) {
         self.flush_errors.fetch_add(1, Relaxed);
-        metrics::counter!("odl_flush_errors_total").increment(1);
+        metrics::counter!("mallard_otel_flush_errors_total").increment(1);
         *self.last_flush_error.lock().unwrap() = Some(msg);
     }
 
     /// Rows of `table` that could not be written and were dropped.
     pub fn dropped(&self, table: &'static str, rows: u64) {
         self.dropped_rows.fetch_add(rows, Relaxed);
-        metrics::counter!("odl_dropped_rows_total", "table" => table).increment(rows);
+        metrics::counter!("mallard_otel_dropped_rows_total", "table" => table).increment(rows);
     }
 
     pub fn maintenance(&self, info: MaintenanceInfo) {
         let task = info.task.clone();
-        metrics::histogram!("odl_maintenance_seconds", "task" => task.clone()).record(info.duration_ms / 1000.0);
+        metrics::histogram!("mallard_otel_maintenance_seconds", "task" => task.clone())
+            .record(info.duration_ms / 1000.0);
         if !info.ok {
-            metrics::counter!("odl_maintenance_errors_total", "task" => task).increment(1);
+            metrics::counter!("mallard_otel_maintenance_errors_total", "task" => task).increment(1);
         }
         *self.last_maintenance.lock().unwrap() = Some(info);
     }
@@ -160,16 +161,16 @@ mod tests {
         });
         let text = handle.render();
         for line in [
-            "odl_ingest_requests_total{signal=\"logs\"} 1",
-            "odl_ingest_items_total{signal=\"logs\"} 3",
-            "odl_ingest_rejected_items_total{signal=\"logs\",reason=\"throttled\"} 2",
-            "odl_ingest_rejected_items_total{signal=\"logs\",reason=\"invalid\"} 1",
-            "odl_ingest_throttled_requests_total{signal=\"logs\"} 1",
-            "odl_flush_errors_total 1",
-            "odl_buffered_rows 5",
+            "mallard_otel_ingest_requests_total{signal=\"logs\"} 1",
+            "mallard_otel_ingest_items_total{signal=\"logs\"} 3",
+            "mallard_otel_ingest_rejected_items_total{signal=\"logs\",reason=\"throttled\"} 2",
+            "mallard_otel_ingest_rejected_items_total{signal=\"logs\",reason=\"invalid\"} 1",
+            "mallard_otel_ingest_throttled_requests_total{signal=\"logs\"} 1",
+            "mallard_otel_flush_errors_total 1",
+            "mallard_otel_buffered_rows 5",
         ] {
             assert!(text.contains(line), "{line} missing in\n{text}");
         }
-        assert!(text.contains("odl_flush_seconds"), "{text}");
+        assert!(text.contains("mallard_otel_flush_seconds"), "{text}");
     }
 }

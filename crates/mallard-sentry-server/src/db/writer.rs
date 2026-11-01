@@ -444,7 +444,7 @@ impl Writer {
         loop {
             match self.try_tx(&f) {
                 Err(e) if attempt < MAX_COMMIT_RETRIES && mallard_duck::is_conflict(&e) => {
-                    metrics::counter!("sdl_write_conflicts_total").increment(1);
+                    metrics::counter!("mallard_sentry_write_conflicts_total").increment(1);
                     tracing::debug!(attempt, error = format!("{e:#}"), "commit conflict, trying again");
                     std::thread::sleep(Duration::from_millis(20 << attempt));
                     attempt += 1;
@@ -476,18 +476,18 @@ impl Writer {
         let n = batch.len();
         let result = self.try_write_events(&mut batch);
         let elapsed = started.elapsed();
-        metrics::histogram!("sdl_write_batch_seconds").record(elapsed.as_secs_f64());
-        metrics::histogram!("sdl_write_batch_events").record(n as f64);
+        metrics::histogram!("mallard_sentry_write_batch_seconds").record(elapsed.as_secs_f64());
+        metrics::histogram!("mallard_sentry_write_batch_events").record(n as f64);
         match &result {
             Ok(()) => {
                 if n <= super::schema::EVENTS_INLINE_ROWS {
                     self.inlined.fetch_add(n, Ordering::Relaxed);
                 }
-                metrics::counter!("sdl_events_stored_total").increment(n as u64);
+                metrics::counter!("mallard_sentry_events_stored_total").increment(n as u64);
                 tracing::debug!(events = n, ms = elapsed.as_millis() as u64, "batch committed");
             }
             Err(e) => {
-                metrics::counter!("sdl_write_errors_total").increment(1);
+                metrics::counter!("mallard_sentry_write_errors_total").increment(1);
                 tracing::error!(events = n, error = format!("{e:#}"), "batch failed");
             }
         }
@@ -552,7 +552,7 @@ impl Writer {
                 over.insert(key);
             }
             w.event.group_hash = OVERFLOW_GROUP;
-            metrics::counter!("sdl_issue_overflow_events_total").increment(1);
+            metrics::counter!("mallard_sentry_issue_overflow_events_total").increment(1);
         }
         if !over.is_empty() {
             let projects: HashSet<u32> = over.iter().map(|k| k.0).collect();

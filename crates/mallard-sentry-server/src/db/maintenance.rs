@@ -113,7 +113,7 @@ impl Maintainer {
                 Err(RecvTimeoutError::Timeout) => {
                     // A panic must not end maintenance for good.
                     if catch_unwind(AssertUnwindSafe(|| self.periodic())).is_err() {
-                        metrics::counter!("sdl_maintenance_errors_total").increment(1);
+                        metrics::counter!("mallard_sentry_maintenance_errors_total").increment(1);
                         tracing::error!("a maintenance run panicked");
                     }
                 }
@@ -160,7 +160,7 @@ impl Maintainer {
         match mallard_duck::try_lease(&self.conn, &self.ns.sql("$S.meta"), &self.holder, self.lease_for) {
             Ok(leader) => leader,
             Err(e) => {
-                metrics::counter!("sdl_maintenance_errors_total").increment(1);
+                metrics::counter!("mallard_sentry_maintenance_errors_total").increment(1);
                 tracing::warn!(error = format!("{e:#}"), "maintenance lease failed");
                 false
             }
@@ -242,7 +242,7 @@ impl Maintainer {
                 }
             }
         }
-        metrics::histogram!("sdl_compact_seconds").record(started.elapsed().as_secs_f64());
+        metrics::histogram!("mallard_sentry_compact_seconds").record(started.elapsed().as_secs_f64());
         if self.stopping.load(Ordering::Relaxed) {
             // Cut short on purpose; a caller must not take this for done.
             return Err(anyhow!("maintenance stopped by shutdown"));
@@ -251,7 +251,7 @@ impl Maintainer {
             tracing::info!(ms = started.elapsed().as_millis() as u64, "compaction and snapshot expiry done");
             Ok(())
         } else {
-            metrics::counter!("sdl_maintenance_errors_total").increment(errors.len() as u64);
+            metrics::counter!("mallard_sentry_maintenance_errors_total").increment(errors.len() as u64);
             Err(anyhow!(errors.join("; ")))
         }
     }
@@ -262,7 +262,7 @@ pub fn flush_inlined(conn: &Connection, ns: &Ns) -> Result<()> {
     let started = Instant::now();
     let sql = ns.sql("CALL ducklake_flush_inlined_data($C, schema_name => $N)");
     conn.execute_batch(&sql).context("ducklake_flush_inlined_data")?;
-    metrics::histogram!("sdl_flush_seconds").record(started.elapsed().as_secs_f64());
+    metrics::histogram!("mallard_sentry_flush_seconds").record(started.elapsed().as_secs_f64());
     tracing::debug!(ms = started.elapsed().as_millis() as u64, "flushed inlined data");
     Ok(())
 }

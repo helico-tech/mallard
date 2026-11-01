@@ -130,7 +130,7 @@ fn holds_lease(conn: &Connection, schema: &str, holder: &str, lease_for: Duratio
     match mallard_duck::try_lease(conn, &format!("{CATALOG}.{schema}.meta"), holder, lease_for) {
         Ok(leader) => leader,
         Err(e) => {
-            metrics::counter!("odl_maintenance_errors_total", "task" => "lease").increment(1);
+            metrics::counter!("mallard_otel_maintenance_errors_total", "task" => "lease").increment(1);
             warn!(error = %super::redact(&format!("{e:#}")), "maintenance lease failed");
             false
         }
