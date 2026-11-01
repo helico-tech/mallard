@@ -181,10 +181,14 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
             Resp::Issue { id, result }
         }
         Req::Events { project, issue, before } => {
-            let append = before.is_some();
-            let q = EventQuery { issue: Some(issue.clone()), limit: Some(50), before, ..Default::default() };
+            let q = EventQuery {
+                issue: Some(issue.clone()),
+                limit: Some(50),
+                before: before.clone(),
+                ..Default::default()
+            };
             let result = c.events(&project, &q).await.map_err(e);
-            Resp::Events { issue, append, result }
+            Resp::Events { issue, before, result }
         }
         Req::Event { project, issue, event_id } => {
             let result = c.event(&project, &event_id, Some(&issue)).await.map_err(e);

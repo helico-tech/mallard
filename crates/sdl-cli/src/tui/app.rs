@@ -135,7 +135,8 @@ pub enum Resp {
     },
     Events {
         issue: String,
-        append: bool,
+        /// The cursor of the request: `None` is the first page.
+        before: Option<String>,
         result: Res<EventList>,
     },
     Event {
@@ -505,11 +506,24 @@ impl App {
         self.track(reqs)
     }
 
+    /// `R`: reload everything, including the loads of the open view that
+    /// failed (they say "R retry").
     fn refresh_all(&mut self) -> Vec<Req> {
         self.last_refresh = Instant::now();
         let mut r = vec![Req::Info, Req::Projects];
         r.extend(self.list_requests());
         r.extend(self.detail_requests());
+        if let (Some(d), Some(project)) = (&self.detail, &self.project) {
+            if !d.events_loaded || d.events_error.is_some() {
+                r.push(Req::Events { project: project.clone(), issue: d.id.clone(), before: None });
+            }
+            if let Some(event_id) = d.event_id.clone().filter(|_| d.event.is_none() || d.event_error.is_some()) {
+                r.push(Req::Event { project: project.clone(), issue: d.id.clone(), event_id });
+            }
+        }
+        if let Some(t) = self.trace.as_ref().filter(|t| self.view == View::Trace && (!t.loaded || t.error.is_some())) {
+            r.push(Req::Trace { trace_id: t.trace_id.clone() });
+        }
         r
     }
 
@@ -581,6 +595,7 @@ impl App {
         self.trace = Some(TraceView { trace_id: trace_id.to_string(), back, ..Default::default() });
         self.view = View::Trace;
         self.overlay = Overlay::None;
+        self.input = None;
         self.track(vec![Req::Trace { trace_id: trace_id.to_string() }])
     }
 
@@ -1080,14 +1095,20 @@ impl App {
                     }
                 }
             }
-            Resp::Events { issue, append, result } => {
+            Resp::Events { issue, before: cursor, result } => {
                 if let Err(e) = &result {
                     self.note(e);
                 }
                 let project = self.project.clone();
-                let Some(d) = self.detail.as_mut().filter(|d| d.id == issue) else {
+                // A first page always fits; an older page only when it is
+                // the page this detail asked for (not one of an earlier
+                // detail of the same issue).
+                let Some(d) =
+                    self.detail.as_mut().filter(|d| d.id == issue && (cursor.is_none() || cursor == d.next_cursor))
+                else {
                     return vec![];
                 };
+                let append = cursor.is_some();
                 match result {
                     Ok(list) => {
                         let list = sanitize(list, false);
@@ -1239,7 +1260,7 @@ mod tests {
         let r = app.on_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(app.view, View::Detail);
         assert!(matches!(&r[0], Req::Issue { id, .. } if id == "b2"));
-        let r = app.on_response(Resp::Events { issue: "b2".into(), append: false, result: Ok(event_list()) });
+        let r = app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
         assert!(matches!(&r[0], Req::Event { event_id, .. } if event_id == "e1"));
         app.on_response(Resp::Event { event_id: "e1".into(), result: Ok(event_detail()) });
         let d = app.detail.as_ref().unwrap();
@@ -1387,6 +1408,64 @@ mod tests {
         app.on_response(Resp::Issues(app.issues_key().unwrap(), Ok(list)));
         app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
         assert!(!app.loading());
+    }
+
+    #[test]
+    fn r_retries_failed_trace_events_and_event_loads() {
+        let mut app = detail_app();
+        app.on_response(Resp::Event { event_id: "e1".into(), result: Err(FetchError::api("boom")) });
+        let r = app.on_key(key('R'));
+        assert!(r.iter().any(|r| matches!(r, Req::Event { event_id, .. } if event_id == "e1")), "{r:?}");
+        assert!(!r.iter().any(|r| matches!(r, Req::Events { .. })), "events are loaded: {r:?}");
+
+        let mut app = loaded_app();
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        app.on_response(Resp::Events { issue: "a1".into(), before: None, result: Err(FetchError::api("boom")) });
+        let r = app.on_key(key('R'));
+        assert!(r.iter().any(|r| matches!(r, Req::Events { issue, before: None, .. } if issue == "a1")), "{r:?}");
+
+        let mut app = loaded_app();
+        let t = "b7644661850f40e69380d8c9ea253e84";
+        app.show_trace(t);
+        app.on_response(Resp::Trace { trace_id: t.into(), result: Err(FetchError::offline("down")) });
+        let r = app.on_key(key('R'));
+        assert!(r.contains(&Req::Trace { trace_id: t.into() }), "{r:?}");
+    }
+
+    #[test]
+    fn an_older_page_of_an_earlier_detail_is_dropped() {
+        let mut app = detail_app();
+        app.detail.as_mut().unwrap().next_cursor = Some("c1".into());
+        app.on_key(key('4'));
+        // Moving to the last event loads the next (older) page.
+        let r = app.on_key(key('G'));
+        assert!(matches!(&r[..], [Req::Events { before: Some(c), .. }] if c == "c1"), "{r:?}");
+        // Esc and open the same issue again while the older page is on its way.
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let older = EventList { events: event_list().events[1..].to_vec(), next_cursor: None };
+        app.on_response(Resp::Events { issue: "b2".into(), before: Some("c1".into()), result: Ok(older) });
+        let d = app.detail.as_ref().unwrap();
+        assert!(!d.events_loaded && d.events.is_empty(), "stale page appended: {:?}", d.events);
+        // The first page arrives and is shown from its first event.
+        let r = app.on_response(Resp::Events { issue: "b2".into(), before: None, result: Ok(event_list()) });
+        assert!(matches!(&r[..], [Req::Event { event_id, .. }] if event_id == "e1"), "{r:?}");
+        let d = app.detail.as_ref().unwrap();
+        assert_eq!((d.events.len(), d.event_idx), (2, 0));
+    }
+
+    #[test]
+    fn show_trace_closes_the_search_box() {
+        let mut app = loaded_app();
+        app.on_key(key('/'));
+        app.on_key(key('x'));
+        let t = "b7644661850f40e69380d8c9ea253e84";
+        app.show_trace(t);
+        assert_eq!(app.input, None);
+        app.on_response(Resp::Trace { trace_id: t.into(), result: Ok(event_list()) });
+        let r = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.view, View::Detail, "Enter opens the event, not a search");
+        assert!(!r.iter().any(|r| matches!(r, Req::Issues(_))), "{r:?}");
     }
 
     #[test]
