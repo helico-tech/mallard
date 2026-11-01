@@ -104,6 +104,14 @@ impl Embedded {
         self.dispatch(reqs);
     }
 
+    /// A background load panicked: the message, once. The panic hook has
+    /// already run (a ratatui hook restores the terminal), so the host
+    /// should stop drawing, restore the terminal and exit with this error.
+    /// Check it after [`Embedded::tick`].
+    pub fn take_fatal(&mut self) -> Option<String> {
+        self.app.fatal.take()
+    }
+
     /// Show the error events of this trace (all projects).
     pub fn show_trace_errors(&mut self, trace_id: &str) {
         self.ensure_started();
@@ -228,7 +236,7 @@ pub async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
                 },
                 _ = ticker.tick() => ui.tick(),
             }
-            if let Some(msg) = ui.app.fatal.take() {
+            if let Some(msg) = ui.take_fatal() {
                 // The panic hook has already restored the terminal; stop
                 // drawing on the normal screen and exit with the message.
                 anyhow::bail!("internal error in a background load: {msg}");
@@ -313,6 +321,17 @@ mod tests {
         ui.show_trace_errors("b7644661850f40e69380d8c9ea253e84");
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| ui.draw(f, f.area())).unwrap();
+    }
+
+    /// The host learns about a panicked load through `take_fatal`.
+    #[tokio::test]
+    async fn a_panicked_load_reaches_the_host() {
+        let mut ui = Embedded::new(Client::new("http://127.0.0.1:9", "t").unwrap(), Some("web".into()));
+        assert_eq!(ui.take_fatal(), None);
+        ui.tx.send(Resp::Panicked { kind: Kind::Info, msg: "boom".into() }).unwrap();
+        ui.tick();
+        assert_eq!(ui.take_fatal().as_deref(), Some("boom"));
+        assert_eq!(ui.take_fatal(), None, "reported once");
     }
 
     #[tokio::test]

@@ -33,6 +33,10 @@ trait Pane {
     fn handle(&mut self, ev: &Event) -> Option<Ask>; // None = ignored
     fn tick(&mut self);
     fn open(&mut self, trace_id: &str);
+    /// An internal error (a panicked background load) after `tick`.
+    fn take_fatal(&mut self) -> Option<String> {
+        None
+    }
 }
 
 struct Errors(sdl_cli::Embedded);
@@ -57,6 +61,9 @@ impl Pane for Errors {
     }
     fn open(&mut self, trace_id: &str) {
         self.0.show_trace_errors(trace_id)
+    }
+    fn take_fatal(&mut self) -> Option<String> {
+        self.0.take_fatal()
     }
 }
 
@@ -132,6 +139,18 @@ impl Host {
         }
     }
 
+    /// Tick every tab (hidden ones keep loading). An internal error in a
+    /// tab ends the TUI: its panic hook has already restored the terminal.
+    fn tick(&mut self) -> Result<()> {
+        for t in &mut self.tabs {
+            t.tick();
+            if let Some(msg) = t.take_fatal() {
+                anyhow::bail!("internal error in the {} tab: {msg}", t.title());
+            }
+        }
+        Ok(())
+    }
+
     fn jump(&mut self, tab: usize, trace_id: &str) -> bool {
         if let Some(p) = self.tabs.get_mut(tab) {
             p.open(trace_id);
@@ -175,7 +194,7 @@ async fn event_loop(term: &mut ratatui::DefaultTerminal, host: &mut Host) -> Res
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()),
             },
-            _ = tick.tick() => for t in host.tabs.iter_mut() { t.tick() },
+            _ = tick.tick() => host.tick()?,
         }
     }
 }
@@ -190,6 +209,7 @@ mod tests {
         opened: Vec<String>,
         title: &'static str,
         ask_on_x: fn() -> Ask,
+        fatal: Option<String>,
     }
     impl Pane for Fake {
         fn title(&self) -> &'static str {
@@ -209,6 +229,9 @@ mod tests {
         fn open(&mut self, trace_id: &str) {
             self.opened.push(trace_id.into())
         }
+        fn take_fatal(&mut self) -> Option<String> {
+            self.fatal.take()
+        }
     }
 
     fn key(c: KeyCode) -> Event {
@@ -218,8 +241,13 @@ mod tests {
     fn host() -> Host {
         Host {
             tabs: vec![
-                Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Trace("t1".into()) }),
-                Box::new(Fake { opened: vec![], title: "Telemetry", ask_on_x: || Ask::Errors("t2".into()) }),
+                Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Trace("t1".into()), fatal: None }),
+                Box::new(Fake {
+                    opened: vec![],
+                    title: "Telemetry",
+                    ask_on_x: || Ask::Errors("t2".into()),
+                    fatal: None,
+                }),
             ],
             active: ERRORS,
             base_url: "http://x".into(),
@@ -251,6 +279,16 @@ mod tests {
         h.on_event(&key(KeyCode::Char('x')));
         assert_eq!(h.active, ERRORS);
         assert!(!h.on_event(&key(KeyCode::Char('q'))), "q quits");
+    }
+
+    #[test]
+    fn an_internal_error_in_a_tab_ends_the_tui() {
+        let mut h = host();
+        assert!(h.tick().is_ok());
+        h.tabs[ERRORS] =
+            Box::new(Fake { opened: vec![], title: "Errors", ask_on_x: || Ask::Nothing, fatal: Some("boom".into()) });
+        let err = h.tick().unwrap_err().to_string();
+        assert_eq!(err, "internal error in the Errors tab: boom");
     }
 
     #[tokio::test]
