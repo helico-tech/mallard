@@ -159,6 +159,8 @@ enum Kind {
     Transaction,
     /// A v2 `span` item and what its envelope's headers say.
     Spans(span::Defaults),
+    /// A standalone `span` item of an SDK before 11, same.
+    Standalone(span::Defaults),
 }
 
 impl Kind {
@@ -166,7 +168,7 @@ impl Kind {
     fn metric(&self) -> &'static str {
         match self {
             Kind::Transaction => "mallard_bridge_transactions_total",
-            Kind::Spans(_) => "mallard_bridge_span_items_total",
+            Kind::Spans(_) | Kind::Standalone(_) => "mallard_bridge_span_items_total",
         }
     }
 
@@ -200,12 +202,15 @@ impl sdl_server::TransactionSink for Transactions {
 
 impl sdl_server::SpanSink for Transactions {
     fn spans(&self, s: sdl_server::Spans<'_>) {
-        if s.content_type != Some(span::V2_CONTENT_TYPE) {
-            // A standalone span of older SDKs (issue 0040).
-            count("mallard_bridge_span_items_total", "unsupported");
-            return;
-        }
-        self.queue(Kind::Spans(span::Defaults::from_headers(s.envelope_headers)), s.project_slug, s.payload);
+        let kind: fn(span::Defaults) -> Kind = match s.content_type {
+            Some(span::V2_CONTENT_TYPE) => Kind::Spans,
+            None => Kind::Standalone,
+            Some(_) => {
+                count("mallard_bridge_span_items_total", "unsupported");
+                return;
+            }
+        };
+        self.queue(kind(span::Defaults::from_headers(s.envelope_headers)), s.project_slug, s.payload);
     }
 }
 
@@ -254,6 +259,7 @@ impl SpanStore {
         let req = match &t.kind {
             Kind::Transaction => transaction::to_otlp(&payload, &t.project_slug),
             Kind::Spans(defaults) => span::to_otlp(&payload, defaults, &t.project_slug),
+            Kind::Standalone(defaults) => span::standalone_to_otlp(&payload, defaults, &t.project_slug),
         };
         let Some(mut req) = req else { return "invalid" };
         if req.resource_spans.is_empty() {

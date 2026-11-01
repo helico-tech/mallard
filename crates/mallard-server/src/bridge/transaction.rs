@@ -46,28 +46,8 @@ pub fn to_otlp(tx: &Value, project_slug: &str) -> Option<ExportTraceServiceReque
         ..Default::default()
     }];
 
-    for s in tx.get("spans").and_then(Value::as_array).into_iter().flatten() {
-        let Some(span_id) = span_id_bytes(s.get("span_id")) else { continue };
-        let Some(end) = nanos(s.get("timestamp")) else { continue };
-        let start = nanos(s.get("start_timestamp")).unwrap_or(end);
-        let op = str_of(s, "op").unwrap_or_default();
-        let mut a = Attrs::default();
-        a.object(s.get("tags"));
-        a.object(s.get("data"));
-        a.sentry(s);
-        spans.push(Span {
-            trace_id: trace_id_bytes(s.get("trace_id")).unwrap_or_else(|| trace_id.clone()),
-            span_id,
-            parent_span_id: span_id_bytes(s.get("parent_span_id")).unwrap_or_else(|| root_id.clone()),
-            name: str_of(s, "description").or(Some(op).filter(|o| !o.is_empty())).unwrap_or("span").to_string(),
-            kind: kind(s.get("data"), op) as i32,
-            start_time_unix_nano: start,
-            end_time_unix_nano: end.max(start),
-            status: status(str_of(s, "status")),
-            attributes: a.finish(),
-            ..Default::default()
-        });
-    }
+    let child_spans = tx.get("spans").and_then(Value::as_array).into_iter().flatten();
+    spans.extend(child_spans.filter_map(|s| sentry_span(s, Some(&trace_id), &root_id)));
 
     let tags = tx.get("tags");
     let service = tags.and_then(|t| str_of(t, "service.name")).unwrap_or(project_slug);
@@ -89,6 +69,32 @@ pub fn to_otlp(tx: &Value, project_slug: &str) -> Option<ExportTraceServiceReque
             scope_spans: vec![ScopeSpans { scope: Some(scope), spans, ..Default::default() }],
             ..Default::default()
         }],
+    })
+}
+
+/// A span in Sentry's own format (`spans[]` of a transaction, or a standalone
+/// span). `trace_id` and `parent` fill in when the span has none. `None`
+/// without a valid trace id, span id or end time.
+pub(super) fn sentry_span(s: &Value, trace_id: Option<&[u8]>, parent: &[u8]) -> Option<Span> {
+    let span_id = span_id_bytes(s.get("span_id"))?;
+    let end = nanos(s.get("timestamp"))?;
+    let start = nanos(s.get("start_timestamp")).unwrap_or(end);
+    let op = str_of(s, "op").unwrap_or_default();
+    let mut a = Attrs::default();
+    a.object(s.get("tags"));
+    a.object(s.get("data"));
+    a.sentry(s);
+    Some(Span {
+        trace_id: trace_id_bytes(s.get("trace_id")).or_else(|| trace_id.map(<[u8]>::to_vec))?,
+        span_id,
+        parent_span_id: span_id_bytes(s.get("parent_span_id")).unwrap_or_else(|| parent.to_vec()),
+        name: str_of(s, "description").or(Some(op).filter(|o| !o.is_empty())).unwrap_or("span").to_string(),
+        kind: kind(s.get("data"), op) as i32,
+        start_time_unix_nano: start,
+        end_time_unix_nano: end.max(start),
+        status: status(str_of(s, "status")),
+        attributes: a.finish(),
+        ..Default::default()
     })
 }
 

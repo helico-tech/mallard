@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: idea
 created: 2026-11-01
 ---
@@ -20,3 +20,8 @@ they do not show up in the trace views.
 - Not checked against a real SDK capture yet: e2e installs only SDK 11.
 - Worth doing when someone runs an older SDK with standalone spans on and
   misses them.
+
+Done 2026-11-01: not an edge case. `@sentry/browser` 8, 9 and 10 (10.78 is
+current on the v10 line) send INP spans this way by default whenever tracing is
+on. Converted, see ADR 0021. Checked by reading the SDK's source; the test
+payload is not a capture from a browser.
