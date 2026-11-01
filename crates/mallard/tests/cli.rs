@@ -137,3 +137,50 @@ fn check_validates_the_config() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.starts_with("error: ") && err.trim_end().lines().count() == 1, "{err}");
 }
+
+/// `check --connect` builds the sourcemap store, so a config start-up would
+/// refuse does not pass. These fail before any extension is loaded.
+#[cfg(feature = "server")]
+#[test]
+fn check_connect_fails_on_a_bad_sourcemap_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let check = |name: &str, storage: &str| {
+        let file = dir.path().join(format!("{name}.toml"));
+        let text = format!(
+            "[server]\napi_tokens = [\"t\"]\n[storage]\ncatalog = \"{0}/{name}.ducklake\"\ndata_path = \"{0}/{name}/\"\n{storage}",
+            dir.path().display()
+        );
+        std::fs::write(&file, text).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_mallard"))
+            .args(["check", "--connect", "--json", "-c", file.to_str().unwrap()])
+            .env_remove("MALLARD_FORMAT")
+            .env_remove("AZURE_STORAGE_ACCOUNT_NAME")
+            .env_remove("AZURE_STORAGE_CONNECTION_STRING")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let usage = |o: &Output| {
+        assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(o.stdout.is_empty());
+        let e = stderr_json(o);
+        assert_eq!(e["error"]["code"], "usage", "{e}");
+        e["error"]["message"].as_str().unwrap().to_string()
+    };
+
+    let m = usage(&check("r2", "artifacts_path = \"r2://b/artifacts\""));
+    assert!(m.contains("storage.artifacts_path") && m.contains("use s3://, gs://, az://"), "{m}");
+    let m = usage(&check("noaccount", "artifacts_path = \"az://c/artifacts\""));
+    assert!(m.contains("AZURE_STORAGE_ACCOUNT_NAME") && m.contains("connection_string"), "{m}");
+    let bad_key = "artifacts_path = \"az://c/artifacts\"\n[[storage.secrets]]\ntype = \"azure\"\n\
+                   connection_string = \"AccountName=a;AccountKey=not-base64!!\"";
+    let m = usage(&check("badkey", bad_key));
+    assert!(m.contains("Azure") && !m.contains("not-base64"), "{m}");
+
+    // A good one still connects (local store, DuckDB file).
+    let o = check("local", &format!("artifacts_path = \"{}/artifacts\"", dir.path().display()));
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["connected"], true, "{v}");
+    assert!(dir.path().join("artifacts").is_dir());
+}

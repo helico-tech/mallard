@@ -9,6 +9,5 @@
 7. [issue 0070 Web UI in compose and Helm](issues/0070-web-deploy-and-mallard-web-command.md)
 8. [issue 0123 chart memory defaults below the rule](issues/0123-chart-memory-defaults-below-the-rule.md)
 9. [issue 0124 no published image or chart](issues/0124-no-published-image-or-chart.md)
-10. [issue 0125 Azure sourcemaps ignore the connection string](issues/0125-azure-artifacts-ignore-connection-string.md)
-11. [issue 0126 move the deployment page out of docs/sentry](issues/0126-move-deployment-page-out-of-sentry.md)
-12. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)
+10. [issue 0126 move the deployment page out of docs/sentry](issues/0126-move-deployment-page-out-of-sentry.md)
+11. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)

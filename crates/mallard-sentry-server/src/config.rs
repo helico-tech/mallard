@@ -204,6 +204,14 @@ pub struct Artifacts {
     pub options: mallard_duck::ObjectStoreOptions,
 }
 
+impl Artifacts {
+    /// Build the store, as start-up does: an unknown scheme or missing
+    /// credentials fail here. It does not contact the store.
+    pub fn check(&self) -> anyhow::Result<()> {
+        crate::storage::Storage::new(&self.url, &self.options).map(|_| ())
+    }
+}
+
 impl Host {
     pub fn validate(&self) -> anyhow::Result<()> {
         let public_url = url::Url::parse(&self.public_url).ok();

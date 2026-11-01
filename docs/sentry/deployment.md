@@ -189,7 +189,11 @@ Prefer a dedicated bucket (or prefix) per deployment. The server needs list,
 read, write and delete on `<prefix>/*`. These examples show both locations, with
 what sourcemap storage needs; [otel/storage-backends.md](../otel/storage-backends.md)
 has more on the data path. `artifacts_path` takes a local path, `s3://`, `gs://` or
-`az://`, and must not be inside `data_path`.
+`az://`, and must not be inside `data_path`. It does not take `r2://` or `abfss://`, which
+work for `data_path` only; for R2, use `s3://` as shown below. `mallard check --connect`
+fails with exit 2 on a location the server could not start with. It builds the store from
+the config and does not contact it, so a wrong key or a missing bucket shows up at the
+first upload.
 
 ### AWS S3
 
@@ -258,10 +262,16 @@ type = "azure"
 connection_string = "${AZURE_STORAGE_CONNECTION_STRING}"   # DefaultEndpointsProtocol=https;AccountName=...
 ```
 
-The secret covers the lake. Sourcemap storage does not use it, and does not read a
-connection string: with an `az://` `artifacts_path` it reads `AZURE_STORAGE_ACCOUNT_NAME`
-and `AZURE_STORAGE_ACCOUNT_KEY` from the environment, and fails at start-up without
-them ([issue 0125](../../work/issues/0125-azure-artifacts-ignore-connection-string.md)).
+The one secret covers the lake and the sourcemap store, if its `scope` covers both
+(or it has none). The store reads `AccountName`, `AccountKey` and `BlobEndpoint` from the
+connection string and ignores the rest. So on a cloud other than the public one, set
+`BlobEndpoint`, because `EndpointSuffix` has no effect there. A connection string with
+only a SAS token (`SharedAccessSignature`) does not work for sourcemaps.
+`AZURE_STORAGE_CONNECTION_STRING` alone, without a secret, is not read. Without a
+connection string the store uses `AZURE_STORAGE_ACCOUNT_NAME` and
+`AZURE_STORAGE_ACCOUNT_KEY`, and fails at start-up and in `check --connect` without an
+account name. Tested against the Azurite emulator, not against real Azure.
+
 With `provider = "credential_chain"` the lake uses the Azure credential chain, with
 `AZURE_STORAGE_ACCOUNT_NAME` set (managed identity, AKS workload identity via
 `serviceAccount.annotations: azure.workload.identity/client-id: ...` plus the pod
