@@ -13,7 +13,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
-use crate::tui::waterfall::tests::span;
+use crate::waterfall::tests::span;
 
 const TID: &str = "0af7651916cd43dd8448eb211c80319c";
 
@@ -328,7 +328,7 @@ fn huge_durations_saturate() {
     let mut b = span("0000000000000002", Some("0000000000000001"), 5, 1);
     b.duration_ns = i64::MAX;
     a.duration_ns = i64::MAX;
-    let (rows, total) = crate::tui::waterfall::layout(&[a.clone(), b.clone()]);
+    let (rows, total) = crate::waterfall::layout(&[a.clone(), b.clone()]);
     assert_eq!(rows.len(), 2);
     assert_eq!(total, i64::MAX);
     let t = Trace { trace_id: TID.into(), spans: vec![a, b] };

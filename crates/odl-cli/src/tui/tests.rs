@@ -6,7 +6,7 @@ use odl_client::{Client, api::*};
 use ratatui::{Terminal, backend::TestBackend};
 
 use super::*;
-use crate::tui::{views::metrics::ChartState, waterfall::tests::span};
+use crate::{tui::views::metrics::ChartState, waterfall::tests::span};
 
 fn key(c: KeyCode) -> Event {
     Event::Key(KeyEvent::new(c, KeyModifiers::NONE))
@@ -600,7 +600,7 @@ fn long_lists_scroll() {
     assert!(s.contains("▌") && s.lines().any(|l| l.contains("▌") && l.contains("record-2500")), "{s}");
     // Waterfall: the selected span is drawn when scrolled.
     let spans: Vec<odl_client::api::Span> =
-        (0..3000).map(|i| crate::tui::waterfall::tests::span(&format!("{i:016}"), None, i, 1)).collect();
+        (0..3000).map(|i| crate::waterfall::tests::span(&format!("{i:016}"), None, i, 1)).collect();
     e.handle_event(&ch('2'));
     e.traces.detail = Some(crate::tui::views::traces::Detail::new(TID.into(), None));
     e.traces.detail.as_mut().unwrap().requested = true;

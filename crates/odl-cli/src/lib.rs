@@ -6,6 +6,7 @@
 mod fmt;
 mod severity;
 pub mod tui;
+mod waterfall;
 
 /// For the `odl` binary.
 #[doc(hidden)]

@@ -130,12 +130,7 @@ impl Embedded {
     }
 
     fn show_traces_for(&mut self, service: Option<String>, operation: Option<String>) {
-        let mut f = crate::tui::query::TraceFilter { service, operation, ..Default::default() };
-        f.errors_only = false;
-        self.traces.filter = f;
-        self.traces.detail = None;
-        self.traces.list.clear();
-        self.traces.refreshed = None;
+        self.traces.show_for(crate::tui::query::TraceFilter { service, operation, ..Default::default() });
         // A pending list for the old filter must not be applied.
         self.loader.cancel(Kind::Traces);
         self.view = View::Traces;

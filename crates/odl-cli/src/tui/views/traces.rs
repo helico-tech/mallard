@@ -20,10 +20,9 @@ use crate::{
         loader::{Data, Kind},
         nav,
         query::{TraceFilter, parse_trace_filter},
-        theme,
-        waterfall::{self, Row},
-        widgets,
+        theme, widgets,
     },
+    waterfall::{self, Row},
 };
 
 #[derive(Default)]
@@ -103,6 +102,14 @@ fn retry_delay(failures: u32) -> Duration {
 }
 
 impl State {
+    /// Show the list for `filter` (the caller cancels a pending list).
+    pub fn show_for(&mut self, filter: TraceFilter) {
+        self.filter = filter;
+        self.detail = None;
+        self.list.clear();
+        self.refreshed = None;
+    }
+
     pub fn set_list(&mut self, v: Vec<TraceSummary>) {
         let keep = self.sel.selected().and_then(|i| self.list.get(i)).map(|t| t.trace_id.clone());
         self.list = v;

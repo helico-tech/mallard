@@ -340,7 +340,7 @@ pub(crate) fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
         out.push(format!("{} {}  (no spans)", "trace".bold(), clean(&t.trace_id)));
         return out;
     };
-    let (rows, end_ns) = crate::tui::waterfall::layout(&t.spans);
+    let (rows, end_ns) = crate::waterfall::layout(&t.spans);
     out.push(format!(
         "{} {}  {}  {} spans  {}",
         "trace".bold(),
@@ -352,7 +352,7 @@ pub(crate) fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
     let width = 40usize;
     for row in &rows {
         let s = &t.spans[row.span];
-        let (a, len) = crate::tui::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
+        let (a, len) = crate::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
         let (a, len) = (a as usize, len as usize);
         let bar = format!("{}{}{}", " ".repeat(a), "█".repeat(len), " ".repeat(width.saturating_sub(a + len)));
         let bar = if s.status_code == "ERROR" { bar.red().to_string() } else { bar.cyan().to_string() };
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn output_is_cleaned() {
         assert!(only_sgr(&log_line(&record(EVIL))), "{:?}", log_line(&record(EVIL)));
-        let mut span = crate::tui::waterfall::tests::span("1", None, 0, 1);
+        let mut span = crate::waterfall::tests::span("1", None, 0, 1);
         span.name = EVIL.into();
         span.service_name = EVIL.into();
         span.attributes.insert(EVIL.into(), EVIL.into());
