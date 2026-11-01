@@ -7,11 +7,12 @@ created: 2026-11-01
 ## Goal
 A person thinks in programs, not in "projects" and "services". Show one list of
 apps, scope everything to one app and one time range, and suggest values while
-typing a filter. The owner agreed this on 2026-11-01. ADR 0027 has the decision.
+typing a filter. The owner agreed this on 2026-11-01. ADR 0027 and ADR 0028 have
+the decisions.
 
 ## Scope
 - Server: list of apps, tag suggestions for the errors side, one find endpoint.
-- TUI and CLI: `--app`, `app=`, suggestions in the filter bar.
+- TUI and CLI: `--app`, suggestions in the filter bar.
 - Web UI: global app and time range, suggestions, Cmd-K, app home page.
 - Not in scope, from the same brainstorm (later epics if wanted): click to
   filter, errors and traces inline, release markers, better empty states, copy

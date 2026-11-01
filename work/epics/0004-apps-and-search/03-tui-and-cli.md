@@ -9,10 +9,10 @@ The TUI gets the same app scope and suggestions as the web UI, and the CLI can
 say `--app`.
 
 ## Acceptance criteria
-- `--app <slug>` on commands that take `-p` or `-S`, and `app=` in the filter
-  language (`crates/mallard-otel-cli/src/tui/query.rs` and its TS copy). Old
-  flags and filters behave as before.
-- One app picker in `mallard tui`; it scopes F1 and F2.
+- `--app <slug>` on commands that take `-p` or `-S`. Old flags behave as before. No
+  `app=` in the filter language (ADR 0028).
+- One app picker in `mallard tui`; it scopes F1 and F2. "All apps" is the default:
+  telemetry shows everything, and the errors tab asks for an app.
 - One time window across F1 and F2 (story 04 has the rule).
 - The filter bar shows suggestions; Tab accepts. Typing never waits on the network.
 - Text in suggestions passes `mallard_term` cleaning, like all untrusted text.

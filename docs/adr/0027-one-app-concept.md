@@ -1,7 +1,7 @@
 # 0027. One word for project and service: app
 
 ## Status
-accepted
+accepted; partly superseded by 0028 (`app=` filter)
 
 ## Context
 Sentry data belongs to a project, named by the DSN. OTel data belongs to a
