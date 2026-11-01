@@ -1,8 +1,9 @@
 # Architecture
 
-mallard is one process that receives OpenTelemetry data, stores it in
-DuckLake, and answers questions about it over an HTTP API. A CLI and a TUI use
-that API.
+The telemetry side of mallard receives OpenTelemetry data, stores it in DuckLake
+(schema `otel`), and answers questions about it over an HTTP API. The `mallard` CLI
+and TUI use that API. It runs in one process with the Sentry side; the
+[main architecture page](../architecture.md) shows how they fit.
 
 ```mermaid
 flowchart LR
@@ -10,12 +11,12 @@ flowchart LR
     A[OTel SDKs / Collector]
   end
   A -- OTLP/gRPC :4317 --> R
-  A -- OTLP/HTTP :4318<br/>protobuf or JSON --> R
+  A -- OTLP/HTTP :4318, :8080/v1/*<br/>protobuf or JSON --> R
   subgraph srv[mallard]
     R[Receivers<br/>decode + convert to Arrow] --> B[(Write buffer<br/>bounded, in memory)]
     B -- every 5 s / 200k rows<br/>one transaction --> F[Flusher]
     M[Maintenance<br/>compaction, retention,<br/>snapshot expiry, cleanup]
-    Q[Query API :8080<br/>OpenAPI 3.1] --> P[Reader pool<br/>N DuckDB connections]
+    Q[Query API :8080/otel<br/>OpenAPI 3.1] --> P[Reader pool<br/>N DuckDB connections]
   end
   F --> D
   M --> D
@@ -38,8 +39,9 @@ flowchart LR
 | `mallard-otel-cli` | lib | CLI commands and the TUI; both embeddable. |
 | `mallard-otel-loadgen` | bin | Realistic OTLP traffic for benchmarks and demos. |
 
-The client side (`mallard --no-default-features`) does not link DuckDB. It is a small static binary
-that talks HTTP only.
+`mallard-server` runs the server library. A `mallard` build with
+`--no-default-features` has the CLI and TUI, talks HTTP only and does not link DuckDB
+(ADR 0023).
 
 ## Inside the server
 
@@ -59,12 +61,14 @@ that talks HTTP only.
 - Both convert the request to Arrow record batches (`otlp/convert.rs`) on a
   blocking thread, then push them into the write buffer. Invalid spans are
   reported as OTLP *partial success*.
-- Optional bearer-token auth (`auth.ingest_tokens`).
+- Optional bearer-token auth (`server.ingest_tokens`).
+- The HTTP routes are on `server.otlp_http_addr` and also on `server.http_addr`
+  (root `/v1/*`). An ingest hook gives the bridge what it needs from each request.
 
 ### Write buffer and flusher (`store/writer.rs`)
 
 - A mutex-protected list of record batches per table, with row and byte
-  counters. When it holds more than `ingest.max_buffer_bytes`, new requests
+  counters. When it holds more than `otel.ingest.max_buffer_bytes`, new requests
   get **HTTP 429 / gRPC `UNAVAILABLE`**. OTLP exporters retry those
   with back-off, so a slow or unavailable object store slows senders down
   instead of losing data or running out of memory.
@@ -100,12 +104,13 @@ that talks HTTP only.
 
 ### Storage (`store/`)
 
-- One in-process DuckDB instance with the DuckLake catalog attached as
-  `lake`. All connections are clones of one root connection.
-- At start-up: load extensions (`ducklake`, plus `postgres`/`sqlite`/
+- One in-process DuckDB instance with the DuckLake catalog attached as `lake`,
+  shared with the Sentry side. All connections are clones of one root connection,
+  which `mallard_duck::open_connection` opens.
+- At start-up: load extensions (`ducklake`, plus `postgres`/`sqlite`/`mysql`/
   `httpfs`/`azure`/`aws` as needed), create secrets, attach, set DuckLake
   options (zstd, row group size, target file size, inlining limit), create
-  or migrate tables.
+  or migrate this schema's tables.
 - Data model: [data-model.md](data-model.md).
 
 ### Maintenance (`store/maintenance.rs`)
@@ -120,20 +125,20 @@ One thread runs these tasks, on the replica that holds the lease in `otel.meta`
 | retention | 1 h | delete expired days; expire snapshots older than 1 h; delete unreferenced files after 15 min |
 
 Merges and deletes only touch this schema's tables. Snapshot expiry and file
-cleanup are catalog-wide; in mallard the otel side owns them (ADR 0001).
+cleanup are catalog-wide; this side owns them (ADR 0001).
 
 ### Query API (`api/`, `query/`)
 
 - `axum` routes generated together with an OpenAPI document (`utoipa`).
-  `/openapi.json` serves the document and `/docs` an API reference page. All
-  paths are relative, so the router can be nested under a prefix.
-- A fixed pool of `query.max_concurrent` DuckDB connections. Each query runs
-  on a blocking thread with `query.timeout`; on timeout the query is
+  `/otel/openapi.json` serves the document and `/otel/docs` an API reference page.
+  Paths in the code are relative; `mallard-server` nests the router under `/otel`.
+- A fixed pool of `otel.query.max_concurrent` DuckDB connections. Each query runs
+  on a blocking thread with `otel.query.timeout`; on timeout the query is
   interrupted (`duckdb_interrupt`) and the connection reused.
-- All user input reaches SQL as bound parameters. The optional `/api/v1/sql`
+- All user input reaches SQL as bound parameters. The optional `/otel/api/v1/sql`
   endpoint (off by default) validates queries with DuckDB's own parser; see
   [ADR 0005](adr/0005-sql-endpoint.md). The checks live in `mallard_duck::sql`,
-  shared with the Sentry side's `/v1/sql` (mallard ADR 0011).
+  shared with the Sentry side's `/sentry/v1/sql` (ADR 0011).
 - Metric math (counter rates with reset detection, histogram percentiles)
   runs partly in SQL and partly in Rust; semantics are in [api.md](api.md).
 
@@ -155,7 +160,7 @@ cleanup are catalog-wide; in mallard the otel side owns them (ADR 0001).
 | object store / catalog unavailable | flushes fail and are retried; buffer fills; receivers return 429/`UNAVAILABLE`; exporters retry. Queries fail with 500. |
 | one table no longer accepts our rows (schema edited by hand) | that table's batches are dropped (`dropped_rows`, `error` log); other tables keep flushing. |
 | process killed (SIGKILL, OOM) | up to `flush_interval` of acknowledged data in memory is lost. To avoid that: a [Collector with a persistent queue](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss) in front. |
-| SIGTERM / Ctrl-C | receivers stop accepting, buffer is flushed, maintenance stops, exit. |
-| query too slow | interrupted after `query.timeout` → 504. |
-| too many queries | waits for a free connection up to `query.timeout` → 503. |
+| SIGTERM / Ctrl-C | receivers stop accepting, the bridge stores what it holds, maintenance stops, buffer is flushed, exit. |
+| query too slow | interrupted after `otel.query.timeout` → 504. |
+| too many queries | waits for a free connection up to `otel.query.timeout` → 503. |
 | maintenance conflict with another writer | the task fails and is logged; the next run retries. |

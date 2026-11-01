@@ -1,9 +1,9 @@
 # Data model
 
-All data lives in one DuckLake schema (default `lake.sentry`). DuckLake keeps
-metadata (snapshots, file lists, statistics, and small "inlined" batches) in
-the **catalog** database (a DuckDB file or PostgreSQL) and table data as
-**Parquet files** in object storage.
+All data lives in one DuckLake schema, `lake.sentry`, next to the telemetry
+side's `lake.otel`. DuckLake keeps metadata (snapshots, file lists, statistics,
+and small "inlined" batches) in the **catalog** database (a DuckDB file, SQLite or
+PostgreSQL) and table data as **Parquet files** on disk or in object storage.
 
 Design rules:
 
@@ -123,8 +123,8 @@ an issue that comes back keeps its history.
 
 ### Sourcemap tables
 
-`artifact_bundles` points at the zip in object storage
-(`<storage>/artifacts/bundles/<sha1>.zip`). `artifact_files` indexes every file
+`artifact_bundles` points at the zip
+(`<storage.artifacts_path>/artifacts/bundles/<sha1>.zip`). `artifact_files` indexes every file
 in it by `debug_id` (sorted on `(project_id, debug_id)`) and by
 `(release, dist, url)` for the release-based fallback. Bundles are uploaded
 per project; lookups are always scoped to the event's project.
@@ -145,35 +145,35 @@ writer thread: take everything queued (group commit)
 ```
 
 - **Group commit.** After the first event the writer collects for up to
-  `MALLARD_SENTRY__INGEST__BATCH_WINDOW` (500 ms), so a quiet server makes at most two commits
+  `sentry.ingest.batch_window` (500 ms), so a quiet server makes at most two commits
   (snapshots) per second. When 200+ events are queued it commits at once, so
   under load latency is the commit time and throughput is not capped by the
   window.
 - **Data inlining.** Batches of up to 1000 rows are stored inside the catalog
-  (no Parquet file). A flush (every `MALLARD_SENTRY__MAINTENANCE__FLUSH_INTERVAL`, or after
-  `MALLARD_SENTRY__MAINTENANCE__FLUSH_ROWS` inlined rows) writes them out as one sorted file per day.
+  (no Parquet file). A flush (every `sentry.maintenance.flush_interval`, or after
+  `sentry.maintenance.flush_rows` inlined rows) writes them out as one sorted file per day.
   This avoids thousands of tiny Parquet files. Bigger batches (only under
   heavy load) go straight to Parquet.
-- **Backpressure.** The queue is bounded (`MALLARD_SENTRY__INGEST__QUEUE_CAPACITY`). When full,
+- **Backpressure.** The queue is bounded (`sentry.ingest.queue_capacity`). When full,
   ingest answers `429` with `Retry-After`, which Sentry SDKs respect.
 
 ## Maintenance
 
 The maintenance thread flushes inlined data (see above) and, every
-`MALLARD_SENTRY__MAINTENANCE__COMPACT_INTERVAL` (1 h), runs, scoped to its schema:
+`sentry.maintenance.compact_interval` (1 h), runs, scoped to its schema:
 
 1. retention, on the writer thread because a `DELETE` conflicts with concurrent
    inserts ([ADR 0014](../adr/0014-sentry-maintenance-thread.md)):
-   `DELETE FROM events WHERE received_at < midnight - retention` (`[sentry.retention] events`, rounded up to days)
-   (day-aligned, so whole daily files are dropped without delete files)
+   `DELETE FROM events WHERE received_at < midnight - retention`
+   (`sentry.retention.events`, rounded up to days; day-aligned, so whole daily
+   files are dropped without delete files)
 2. `ducklake_merge_adjacent_files` and `ducklake_rewrite_data_files` per table
    (target file size 64 MB for `events`)
-3. only if the host asks (`Host::catalog_maintenance`; in mallard the telemetry
-   side does this instead): `ducklake_expire_snapshots` and
-   `ducklake_cleanup_old_files` older than
-   `MALLARD_OTEL__MAINTENANCE__SNAPSHOT_RETENTION` (1 h)
 
-`POST /v1/maintenance` runs a flush plus all of the above immediately.
+Snapshot expiry and file cleanup are catalog-wide. The telemetry side runs them
+(`otel.maintenance.snapshot_retention`, ADR 0001).
+
+`POST /sentry/v1/maintenance` runs a flush plus all of the above immediately.
 
 ## Queries (what each API call reads)
 

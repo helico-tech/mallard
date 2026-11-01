@@ -1,37 +1,22 @@
-# Embedding the telemetry side in your own Rust application
+# Library use
 
-The server, client, CLI and TUI are libraries. The `mallard`
-binary is a thin wrapper around them. The libraries install no global state
-(no tracing subscriber, no metrics recorder).
+The server, client, CLI and TUI of this side are libraries. The `mallard` binary and
+`mallard-server` are the code that uses them; read those for a full example. The
+libraries install no global state (no tracing subscriber, no metrics recorder).
 
 ## Server
 
+`mallard_server::Platform::new` in `crates/mallard-server/src/lib.rs` does this:
+
 ```rust
-use mallard_otel_server::{Server, config::Config};
+let conn = mallard_duck::open_connection(&storage, &duckdb)?; // settings, extensions, secrets, ATTACH ... AS lake
+let otel = mallard_otel_server::Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // schema "otel"
+let sentry = mallard_sentry_server::Server::with_connection(sentry_cfg, host, conn).await?;    // schema "sentry"
 
-// Config: build in code, deserialize it as a section of your own TOML,
-// or load file + env with your own prefix.
-let cfg = Config::load_with_prefix(Some("app.toml".as_ref()), "MYAPP_OTEL_")?;
-
-let server = Server::new(cfg).await?;            // opens DuckDB, attaches the lake
-let api = server.api_router();                    // /api/v1/..., /openapi.json, /docs (relative)
-let otlp_http = server.otlp_http_router();        // POST /v1/traces|logs|metrics
-let grpc = server.grpc_routes();                  // tonic::service::Routes (3 OTLP services)
-
-let app = axum::Router::new().nest("/otel", api).merge(otlp_http);
+let app = axum::Router::new().nest("/otel", otel.api_router()).merge(otel.otlp_http_router());
+let grpc = otel.grpc_routes();                    // tonic::service::Routes (3 OTLP services)
 // serve `app` and `grpc` on your own listeners, then:
-server.run_background(async { shutdown_signal().await }).await?; // flusher + maintenance; drains on shutdown
-```
-
-`Server::serve(cancel_token)` does all of this with the configured listen
-addresses; that is what the binary uses.
-
-### Sharing one DuckDB / DuckLake with other components
-
-```rust
-let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb)?; // settings, extensions, secrets, ATTACH ... AS lake
-let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // schema "otel"
-// another component uses conn.try_clone()? with schema "sentry", etc.
+otel.run_background(async { shutdown_signal().await }).await?; // flusher + maintenance; drains on shutdown
 ```
 
 - `with_connection` expects the catalog attached as `lake`. It only creates
@@ -39,28 +24,32 @@ let otel = Server::with_connection(otel_cfg, conn.try_clone()?).await?;   // sch
   changes global DuckDB settings.
 - Merges and retention are scoped to this schema. Snapshot expiry and file
   cleanup are catalog-wide and always run with `maintenance.enabled` (on the
-  replica holding the maintenance lease, a row in `otel.meta`): the
-  otel side owns them on a shared catalog; the other components must not
-  run them (sentry: `Host::catalog_maintenance = None`).
+  replica holding the maintenance lease, a row in `otel.meta`): the otel side owns
+  them on a shared catalog, and the Sentry side leaves them alone
+  (`Host::catalog_maintenance = None`).
+- `set_ingest_hook` and `ingest_traces` are the bridge's way in (ADR 0009).
+- `Server::new` and `Server::serve` (own connection and listeners) are left over from
+  the old binary; only tests use them
+  ([issue 0121](../../work/issues/0121-standalone-paths-left-in-side-crates.md)).
 - Use DuckDB only through `mallard_duck::duckdb` (one version for the whole
-  workspace), and build `libduckdb-sys` without debug assertions:
-
-  ```toml
-  [profile.dev.package.libduckdb-sys]
-  opt-level = 3
-  debug = false
-  ```
+  workspace), and build `libduckdb-sys` without debug assertions (the profile in the
+  root `Cargo.toml`).
 
 ## Client
 
 ```rust
-let c = mallard_otel_client::Client::new("http://localhost:8080", Some(token))?;
+let c = mallard_otel_client::Client::new("http://localhost:8080/otel", Some(token))?;
 let svcs = c.services(&mallard_otel_client::api::ServiceQuery { since: Some("1h".into()), ..Default::default() }).await?;
 let mut tail = mallard_otel_client::LogTail::new(c.clone(), Default::default(), chrono::Utc::now());
 let new_records = tail.poll().await?;
 ```
 
+The base URL includes `/otel`. `mallard-client` wraps this client and the Sentry one
+behind one server URL.
+
 ## CLI and TUI
+
+`crates/mallard/src/main.rs` mounts the commands and the component:
 
 ```rust
 // Mount the telemetry commands under your own CLI:
@@ -83,15 +72,14 @@ Requirements and hooks:
   `EventStream` or a separate thread.
 - `Embedded::set_errors_enabled(true)` shows the `x errors` hint when your
   host handles `Outcome::Jump` (off by default).
-- An error tracker of your own: implement `mallard_otel_cli::ErrorLookup` (error
-  events of many trace ids in one call) and pass it to
-  `Embedded::set_error_lookup` and `Ctx::with_error_lookup`. Trace lists then
-  show an error count per trace (`sentry` column, JSON `sentry_errors`),
-  waterfalls mark spans with `⚠`, and `x` on such a span returns
-  `Outcome::JumpEvent { trace_id, event_id }`. Without one nothing changes.
+- An error tracker: implement `mallard_otel_cli::ErrorLookup` (error events of many
+  trace ids in one call) and pass it to `Embedded::set_error_lookup` and
+  `Ctx::with_error_lookup`. Trace lists then show an error count per trace (`sentry`
+  column, JSON `sentry_errors`), waterfalls mark spans with `⚠`, and `x` on such a
+  span returns `Outcome::JumpEvent { trace_id, event_id }`. Without one nothing
+  changes.
 - Keys with Ctrl/Alt modifiers (except Ctrl-C) and F1/F2 return `Ignored`.
 
 F1 and F2 are left to the host. `Outcome::Jump(trace_id)` (the shared
-`mallard_term::tui::Outcome`) signals that
-the user asked for errors linked to a trace (for example in an error
-tracker); `Embedded::open_trace(id)` jumps to a trace.
+`mallard_term::tui::Outcome`) signals that the user asked for errors linked to a
+trace; `Embedded::open_trace(id)` jumps to a trace.

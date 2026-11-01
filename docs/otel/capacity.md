@@ -1,5 +1,9 @@
 # Capacity and sizing
 
+These numbers were measured on the old standalone `otel-ducklake` binary, which is
+gone. They were not measured again on `mallard serve`, where the same code shares its
+DuckDB with the Sentry side.
+
 **Short answer:** a single instance with **1-2 vCPU and 2 GB RAM** handles
 small and mid-sized companies (thousands to tens of thousands of visitors a
 day) with a large margin. Ingest is not the bottleneck: a 2-CPU container
@@ -10,10 +14,10 @@ in the tens of milliseconds.
 All numbers below were measured on 2026-11-01 with otel-ducklake 0.1.0,
 DuckDB 2.0.0, DuckLake 1.1. Hardware: an Apple M-series laptop (local NVMe
 SSD; Docker Desktop VM for container tests). Data came from
-[`mallard-otel-loadgen`](../crates/mallard-otel-loadgen): a simulated web shop, 9 services,
+[`mallard-otel-loadgen`](../../crates/mallard-otel-loadgen): a simulated web shop, 9 services,
 4-18 spans per trace, about 0.3 log records per span, metrics every 15 s,
 and high-cardinality attributes (`url.full` with ids, `user.id`, request
-ids). Scripts: [`bench/capacity`](../bench/capacity). Cloud VMs with network
+ids). Scripts: [`bench/otel/capacity`](../../bench/otel/capacity). Cloud VMs with network
 storage will be slower in absolute terms; the ratios hold.
 
 ## What "small/mid" means in spans
@@ -31,7 +35,7 @@ storage will be slower in absolute terms; the ratios hold.
 
 ### Steady state, 2 CPU / 2 GB container
 
-`bench/capacity/steady-state.sh 2 2g 1200MB ...`: 60 s per rate, the load
+`bench/otel/capacity/steady-state.sh 2 2g 1200MB ...`: 60 s per rate, the load
 generator on the host, compaction every 2 min. CPU is in % of one core,
 sampled every 5 s.
 
@@ -47,7 +51,8 @@ sampled every 5 s.
 At saturation the receivers answer 429. The load generator, like any OTLP
 exporter, retries, and nothing was lost (0 failed). Memory at saturation =
 DuckDB buffer (1.2 GB) + the full ingest buffer (512 MB) + overhead. That is
-why the Helm chart defaults to 768 MB + 256 MB for a 2 GiB pod.
+why a 2 GiB pod should run 768 MB + 256 MB. The Helm chart's defaults are higher
+([issue 0123](../../work/issues/0123-chart-memory-defaults-below-the-rule.md)).
 
 The "upper mid" peak of ~2,500 spans/s uses **about 2-5% of one core**.
 
@@ -83,7 +88,7 @@ more varied than synthetic ones: plan for 2-3×.
 
 The 7-day lake above (68 M spans, 19.4 M logs, compacted), queried over HTTP
 with DuckDB limited to **2 threads and 1 GB**. Median of 5 runs;
-`bench/capacity/query-latency.sh`.
+`bench/otel/capacity/query-latency.sh`.
 
 | endpoint | last 15 min | last 1 h | last 24 h | 7 days |
 |---|---|---|---|---|
@@ -110,13 +115,13 @@ How to read it:
   scale almost linearly.
 - 7 days at the "mid" size (≈50 M spans) is ~3 s for the heaviest view. At
   the "upper mid" size, keep heavy dashboards at ≤ 24 h, give DuckDB 4
-  threads, or lower `query.max_window`.
+  threads, or lower `otel.query.max_window`.
 
 ## Maintenance cost
 
 - Compaction of one day (9.7 M spans in hundreds of small files) with 2
   threads and a 1 GB DuckDB limit: **29 s**, peak RSS 1.84 GB (DuckDB spills
-  to `temp_directory` instead of failing). In normal operation compaction
+  to `duckdb.temp_directory` instead of failing). In normal operation compaction
   runs every 10 min over small files and takes well under a second at these
   volumes.
 - Retention drops whole days without rewriting anything.
@@ -128,11 +133,11 @@ How to read it:
 | CPU | 0.5 vCPU | 1 vCPU | 2 vCPU |
 | memory (container) | 1.5 GiB | 2 GiB | 3-4 GiB |
 | `duckdb.memory_limit` | 256MB | 768MB | 1-2.5GB |
-| `ingest.max_buffer_bytes` | 128MB | 256MB | 256-512MB |
+| `otel.ingest.max_buffer_bytes` | 128MB | 256MB | 256-512MB |
 | disk, 7 days (spans + logs) | < 1 GB | 3-6 GB | 15-30 GB |
 | catalog | DuckDB file | DuckDB file | DuckDB file, or PostgreSQL for HA |
 
-Memory rule: **container ≥ `duckdb.memory_limit` + `ingest.max_buffer_bytes`
+Memory rule: **container ≥ `duckdb.memory_limit` + `otel.ingest.max_buffer_bytes`
 + 1 GB.** The 1 GB covers Parquet writers and allocator overhead; the worst
 measured case was compaction of a whole unmerged day (0.84 GB above DuckDB's
 limit).
@@ -144,8 +149,7 @@ cores. Every replica can serve queries over all data.
 
 ## Reproducing
 
-The numbers above were measured with the standalone `otel-ducklake`
-binary, which is retired; this runs the same load against `mallard serve`:
+This runs the same load against `mallard serve`:
 
 ```sh
 cargo build --release -p mallard -p mallard-otel-loadgen

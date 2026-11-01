@@ -1,7 +1,7 @@
 # Data model
 
 How mallard stores OpenTelemetry data in DuckLake, and why. The table
-definitions live in [`crates/mallard-otel-server/src/store/schema.rs`](../crates/mallard-otel-server/src/store/schema.rs);
+definitions live in [`crates/mallard-otel-server/src/store/schema.rs`](../../crates/mallard-otel-server/src/store/schema.rs);
 this document explains them.
 
 ## Goals
@@ -19,7 +19,8 @@ this document explains them.
 
 ## Overview
 
-All tables live in one DuckLake schema (default `otel`):
+All tables live in one DuckLake schema, `lake.otel`, next to the Sentry side's
+`lake.sentry`:
 
 | table | one row per | time column |
 |---|---|---|
@@ -132,7 +133,7 @@ WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR
   supports it and dotted keys work (`variant_extract(attributes, 'http.route')`),
   but it is measured about 2-8× slower than the map on attribute queries, shredded
   and all, at the same size. The Rust `duckdb` crate cannot decode the type
-  either ([bench/typed-attributes](../../bench/otel/typed-attributes/README.md)).
+  either ([bench/otel/typed-attributes](../../bench/otel/typed-attributes/README.md)).
 - `JSON` text: larger, and needs parsing on every read.
 - Promoting semantic-convention attributes to columns: faster filters, but a
   large and ever-changing schema. Today only `service_name` is promoted.
@@ -157,7 +158,7 @@ reads.
 | `metric_*` | `metric_name, series_id, time` |
 
 For spans and logs we measured three layouts on 4 M spans
-([bench/sort-order](../bench/sort-order/README.md)):
+([bench/otel/sort-order](../../bench/otel/sort-order/README.md)):
 
 | query | time only | service, time | **hour, service, time** |
 |---|---|---|---|
@@ -184,7 +185,7 @@ same as Iceberg).
 - **Retention is free.** Retention cut-offs are aligned to whole UTC days, so
   `DELETE ... WHERE time < cutoff` covers whole partitions. DuckLake then only
   marks files as removed and writes **no delete files**. (Verified in
-  `tests/e2e.rs::compaction_and_retention`.)
+  `crates/mallard-otel-server/tests/e2e.rs`, `compaction_and_retention`.)
 - **Pruning:** queries with a time window skip other days via partition
   values, and skip files within a day via per-file min/max in the catalog.
 - **Compaction never crosses days**, so merged files stay time-local.
@@ -272,7 +273,7 @@ read in ad-hoc SQL.
 With `storage.data_inlining_row_limit` (default 1000), DuckLake stores
 inserts below that many rows inside the catalog database instead of writing a
 tiny Parquet file. Quiet periods therefore don't create thousands of
-kilobyte-sized files. The `compact_interval` maintenance task flushes inlined
+kilobyte-sized files. The `otel.maintenance.compact_interval` task flushes inlined
 rows into Parquet. Queries read inlined and Parquet data together
 transparently.
 
@@ -291,7 +292,7 @@ during a rolling upgrade.
    batches (one per table touched), off the async runtime.
 2. The batches go into an in-memory buffer (bounded; full → HTTP 429 / gRPC
    `UNAVAILABLE`).
-3. Every `ingest.flush_interval` (5 s) or `flush_rows` (200k), one flusher
+3. Every `otel.ingest.flush_interval` (5 s) or `flush_rows` (200k), one flusher
    appends all buffered batches through DuckDB's Arrow appender in **one
    transaction**. That gives one DuckLake snapshot, with at most one new file
    (or one inlined insert) per table and day.
@@ -337,6 +338,10 @@ FROM p WHERE d IS NOT NULL GROUP BY 1 ORDER BY 1;
 ```
 
 ## Opening the lake without the server
+
+Use DuckDB 2.0, the version mallard is built with: an older CLI refuses the catalog
+file. The lake holds both schemas, `lake.otel` and `lake.sentry`, so errors and spans
+join on `trace_id`.
 
 ```sql
 INSTALL ducklake; LOAD ducklake;

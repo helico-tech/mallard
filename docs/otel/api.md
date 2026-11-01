@@ -1,19 +1,24 @@
 # Query API
 
-Base URL: `http://<host>:8080`. The OpenAPI 3.1 document is served at
-`/openapi.json` (also committed as [openapi.json](openapi.json)). An
-interactive reference is at `/docs` (its script loads from a CDN, so the
-browser needs internet access; `/openapi.json` works offline).
+Base URL: `http://<host>:8080/otel`; the paths below are relative to it. The OpenAPI
+3.1 document is served at `/otel/openapi.json` (also committed as
+[openapi.json](openapi.json)). An interactive reference is at `/otel/docs` (its script
+loads from a CDN, so the browser needs internet access; `/otel/openapi.json` works
+offline).
 
 All endpoints except `/api/v1/health`, `/openapi.json` and `/docs` need
-`Authorization: Bearer <token>` when `auth.api_tokens` is set.
+`Authorization: Bearer <token>`, with a token from `server.api_tokens`.
+
+The Sentry side has its own API under `/sentry/v1`
+([docs/sentry/openapi.json](../sentry/openapi.json)). OTLP ingest is not part of this
+API: it is `POST /v1/traces`, `/v1/logs` and `/v1/metrics` on the server root.
 
 ## Conventions
 
 - **Time window** (every query endpoint): `since=15m` (relative to now or to
   `to`), or `from=` / `to=` in RFC 3339 (`2026-11-01T10:00:00Z`). The default
   is the last hour; for `GET /traces/{id}` it is the last 7 days. The window
-  may not exceed `query.max_window` (31 days).
+  may not exceed `otel.query.max_window` (31 days).
 - **Buckets**: `step=30s`/`5m`. Default: about 60 buckets on a round
   boundary. At most 5000 buckets; a step larger than the window is reduced
   to the window.
@@ -143,7 +148,7 @@ the catalog. It needs no SQL access, so it works when SQL is off.
 
 ### SQL (`/sql`)
 
-Off by default (`query.enable_sql`, requires API tokens). Accepts one
+Off by default (`otel.query.enable_sql`). Accepts one
 `SELECT`/`WITH` query over the lake tables (`spans`, `logs`, `metric_points`,
 `metric_histograms`, `metric_exp_histograms`, `metric_summaries`, optionally
 qualified as `lake.otel.`). Rows come back as JSON arrays; types without a
@@ -153,23 +158,24 @@ must be plain identifiers; `SHOW`/`DESCRIBE`/`SUMMARIZE` and a few functions
 (`repeat`, `lpad`, `rpad`, file/settings/env access) are refused. See
 [ADR 0005](adr/0005-sql-endpoint.md). An answer holds at most `limit` rows
 (default 1000, max 100000) and 32 MiB of row data; `truncated` is true when
-either cut it short ([mallard ADR 0015](../adr/0015-sql-resource-limits.md)).
+either cut it short ([ADR 0015](../adr/0015-sql-resource-limits.md)).
 
 ## Examples
 
 ```sh
-API=http://localhost:8080/api/v1
-curl -s "$API/services?since=15m" | jq '.[] | {name, error_rate, p95_ms}'
-curl -s "$API/traces?since=1h&service=checkout&errors_only=true&limit=5" | jq
-curl -s "$API/traces/0af7651916cd43dd8448eb211c80319c" | jq '.spans | length'
-curl -s "$API/logs?since=10m&min_severity=17&q=timeout" | jq -r '.[].body'
-curl -s "$API/spans/00f067aa0ba902b7" | jq -r .trace_id
-curl -s "$API/attributes?signal=spans&service=checkout&key=http.route" | jq -r '.items[] | "\(.value) \(.count)"'
-curl -s "$API/metrics/query?name=http.server.request.duration&agg=p99&group_by=http.route&since=6h&step=5m" | jq
-curl -s "$API/metrics/query?name=http.server.request.duration&agg=p99&since=1h&exemplars=true" | jq '.exemplars[] | {time, value, trace_id}'
-curl -s -X POST "$API/sql" -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+API=http://localhost:8080/otel/api/v1
+AUTH="Authorization: Bearer $MALLARD_TOKEN"
+curl -s -H "$AUTH" "$API/services?since=15m" | jq '.[] | {name, error_rate, p95_ms}'
+curl -s -H "$AUTH" "$API/traces?since=1h&service=checkout&errors_only=true&limit=5" | jq
+curl -s -H "$AUTH" "$API/traces/0af7651916cd43dd8448eb211c80319c" | jq '.spans | length'
+curl -s -H "$AUTH" "$API/logs?since=10m&min_severity=17&q=timeout" | jq -r '.[].body'
+curl -s -H "$AUTH" "$API/spans/00f067aa0ba902b7" | jq -r .trace_id
+curl -s -H "$AUTH" "$API/attributes?signal=spans&service=checkout&key=http.route" | jq -r '.items[] | "\(.value) \(.count)"'
+curl -s -H "$AUTH" "$API/metrics/query?name=http.server.request.duration&agg=p99&group_by=http.route&since=6h&step=5m" | jq
+curl -s -H "$AUTH" "$API/metrics/query?name=http.server.request.duration&agg=p99&since=1h&exemplars=true" | jq '.exemplars[] | {time, value, trace_id}'
+curl -s -X POST "$API/sql" -H "$AUTH" -H 'content-type: application/json' \
   -d '{"query":"SELECT service_name, count(*) FROM spans GROUP BY 1"}' | jq
 ```
 
-Typed clients: Rust [`mallard-otel-client`](../crates/mallard-otel-client). For other
+Typed clients: Rust [`mallard-otel-client`](../../crates/mallard-otel-client). For other
 languages, generate one from `openapi.json` (e.g. `openapi-generator`).

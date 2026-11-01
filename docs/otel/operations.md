@@ -2,11 +2,13 @@
 
 ## Health and monitoring
 
-- `GET /api/v1/health`: liveness/readiness (no auth).
-- `mallard telemetry status` / `GET /api/v1/stats`: requests, accepted, throttled and
+- `GET /otel/api/v1/health`: this side's liveness (no auth). `/healthz` and `/readyz`
+  cover the server.
+- `mallard status`: both sides in short.
+- `mallard telemetry status` / `GET /otel/api/v1/stats`: requests, accepted, throttled and
   invalid items per signal, and `throttled_requests` (requests refused before their body was read); buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
-- Prometheus (mallard's `/metrics`): `mallard_otel_ingest_requests_total`,
+- Prometheus (`/metrics`): `mallard_otel_ingest_requests_total`,
   `mallard_otel_ingest_items_total` (label `signal`),
   `mallard_otel_ingest_rejected_items_total` (labels `signal`, `reason` =
   `throttled` | `invalid`), `mallard_otel_ingest_throttled_requests_total` (label
@@ -14,7 +16,7 @@
   `mallard_otel_flush_seconds`, `mallard_otel_flush_rows`, `mallard_otel_flush_errors_total`,
   `mallard_otel_dropped_rows_total` (label `table`), `mallard_otel_maintenance_seconds` and
   `mallard_otel_maintenance_errors_total` (label `task`).
-- mallard's `/readyz` fails while the last flush failed or the catalog does
+- `/readyz` fails while the last flush failed or the catalog does
   not answer.
 - Logs: `RUST_LOG=info` (default). Flush failures are logged at `error`,
   maintenance failures at `warn`. Use `server.log_format = "json"` in
@@ -24,14 +26,14 @@ What to watch:
 
 | signal | meaning | action |
 |---|---|---|
-| `throttled` grows, 429s at exporters | buffer full: storage slower than ingest, or a burst. Exporters retry, so data arrives late, not lost | check `last_flush_error`; raise `max_buffer_bytes`; check object store / catalog latency |
-| `throttled_requests` grows, `throttled` does not | requests refused before their body was read: too many bytes in flight (see `max_buffer_bytes` in [configuration](configuration.md)). Their items are unknown, so only the request is counted; it is also in `requests`. Exporters retry | many large or slow concurrent requests (gRPC and compressed HTTP reserve `max_request_bytes` each): raise `max_buffer_bytes`, or lower exporter concurrency / batch size |
+| `throttled` grows, 429s at exporters | buffer full: storage slower than ingest, or a burst. Exporters retry, so data arrives late, not lost | check `last_flush_error`; raise `otel.ingest.max_buffer_bytes`; check object store / catalog latency |
+| `throttled_requests` grows, `throttled` does not | requests refused before their body was read: too many bytes in flight (see `otel.ingest.max_buffer_bytes` in [configuration](configuration.md)). Their items are unknown, so only the request is counted; it is also in `requests`. Exporters retry | many large or slow concurrent requests (gRPC and compressed HTTP reserve `max_request_bytes` each): raise `otel.ingest.max_buffer_bytes`, or lower exporter concurrency / batch size |
 | `invalid` grows | items refused for good: spans without a valid trace/span id (OTLP partial success), or a request too large for `max_buffer_bytes` | fix the sender; see the partial-success message it gets back |
 | `flush_errors` grows | catalog or object store unreachable / credentials | see logs; data is retried, not dropped |
 | `dropped_rows` grows | a table refuses our rows (permanent error, e.g. a column changed by hand); other tables are still written | see the `error` log line "dropping a batch" and `mallard_otel_dropped_rows_total{table}`; restore the table's columns (the server adds missing ones at start-up), or report it as a bug |
-| many `files` per table | compaction not keeping up or disabled | check `last_maintenance`; lower `compact_interval` |
-| `inlined_rows` keeps growing | compaction not running | `maintenance.enabled` |
-| queries return 503 | all `query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |
+| many `files` per table | compaction not keeping up or disabled | check `last_maintenance`; lower `otel.maintenance.compact_interval` |
+| `inlined_rows` keeps growing | compaction not running | `otel.maintenance.enabled` |
+| queries return 503 | all `otel.query.max_concurrent` connections busy | raise it, or reduce dashboard refresh rates |
 
 ## One-shot maintenance
 
@@ -58,7 +60,7 @@ until its next interval.
   default). After a holder stops, or restarts under a new identity, maintenance
   pauses until the lease runs out and the next task of another replica (or of the
   restarted process) takes it.
-- `last_maintenance` in `/api/v1/stats` is per process: it stays empty on a replica
+- `last_maintenance` in `/otel/api/v1/stats` is per process: it stays empty on a replica
   that never held the lease. Check all replicas before you conclude nothing runs.
 - A task that outlives the lease can overlap with the next holder. That is safe:
   the loser logs a failed task and the next run tries again.
@@ -67,7 +69,7 @@ until its next interval.
 
 See [capacity.md](capacity.md). Short version: 1-2 vCPU and 2 GiB RAM
 handle small/mid traffic with large headroom. Keep container memory ≥
-`duckdb.memory_limit` + `ingest.max_buffer_bytes` + 1 GB.
+`duckdb.memory_limit` + `otel.ingest.max_buffer_bytes` + 1 GB.
 
 ## Retention and disk usage
 
@@ -76,7 +78,7 @@ span and per log record with varied synthetic attributes
 ([capacity.md](capacity.md)); plan for 2-3× with real data. Example:
 10 M spans/day × 60 B × 7 days ≈ 4 GB.
 
-Configuration is read at start-up: after changing `[retention]`, restart;
+Configuration is read at start-up: after changing `[otel.retention]`, restart;
 the next retention run (hourly) applies it.
 
 ## Backups
@@ -88,7 +90,7 @@ never modified in place, only added and (after expiry) deleted.
   the catalog file and the data directory.
 - **PostgreSQL catalog**: `pg_dump` the catalog database, and use bucket
   versioning or replication for the data path. Restore the dump, then make
-  sure the files it references still exist. Keep `file_cleanup_delay` longer
+  sure the files it references still exist. Keep `otel.maintenance.file_cleanup_delay` longer
   than your backup window if you copy files after the dump.
 
 ## Upgrades
@@ -117,9 +119,9 @@ copy the catalog file and open the copy read-only.
 | symptom | cause / fix |
 |---|---|
 | `DATA_PATH parameter ... does not match existing data path` | `storage.data_path` differs from the path stored when the catalog was created. Fix the config, or move data and attach once with `OVERRIDE_DATA_PATH`. |
-| `extension ... is not installed and duckdb.autoinstall_extensions = false` | image built without that extension: `mallard install-extensions --dir <dir>` at build time. |
+| `extension ... is not installed and duckdb.autoinstall_extensions = false` | that extension is not in `duckdb.extension_directory`: run `mallard install-extensions --dir <dir>` while you have internet (the image does this at build time). |
 | `Could not set lock on file` | a DuckDB-file catalog is open in another process. Only one process may use it; switch to PostgreSQL for several. |
 | HTTP 415 from `/v1/...` | send `Content-Type: application/x-protobuf` or `application/json`. |
-| 401 | missing or wrong bearer token (`auth.*_tokens`). |
-| empty results right after sending | data is visible after the next flush (`ingest.flush_interval`, 5 s). |
-| `query exceeded the 30s time limit` | narrow the window or filters; raise `query.timeout`. |
+| 401 | missing or wrong bearer token (`server.api_tokens`, `server.ingest_tokens`). |
+| empty results right after sending | data is visible after the next flush (`otel.ingest.flush_interval`, 5 s). |
+| `query exceeded the 30s time limit` | narrow the window or filters; raise `otel.query.timeout`. |

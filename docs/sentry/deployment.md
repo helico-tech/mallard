@@ -1,22 +1,21 @@
 # Deployment
 
-> **Retired binary.** This page was written for the old standalone binary; its
-> flags and chart are gone (story 0002/06). Names are updated, the rest waits for
-> [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md). Deploy mallard: `deploy/` and the
-> [repo README](../../README.md). The storage and multi-replica notes below
-> still apply to the Sentry side.
+How to run mallard: Docker, compose, Helm, storage, catalog and backups. This page
+covers the whole server; it sits here because the chart's notes point at it.
+Telemetry extras (pointing SDKs at it, a Collector in front, TLS) are in
+[otel/deployment.md](../otel/deployment.md).
 
-mallard is one binary (`mallard`) with two moving parts around it:
+mallard is one binary, `mallard`, with two moving parts around it:
 
-- **Storage**: a bucket (or local folder) for Parquet data files and
-  sourcemap bundles: `storage.data_path` (DuckLake data) and
-  `storage.artifacts_path` (sourcemaps, in `<path>/artifacts/`).
-- **Catalog**: the DuckLake metadata database, `storage.catalog`. Either a DuckDB
-  file (one process only) or PostgreSQL. It also holds recent small batches
-  of events until they are flushed into Parquet (every `MALLARD_SENTRY__MAINTENANCE__FLUSH_INTERVAL`).
+- **Storage**: a bucket (or local folder) for Parquet data files and sourcemap
+  bundles: `storage.data_path` (DuckLake data) and `storage.artifacts_path`
+  (sourcemaps, in `<path>/artifacts/`).
+- **Catalog**: the DuckLake metadata database, `storage.catalog`: a DuckDB file or
+  SQLite (one process), or PostgreSQL. It also holds recent small batches of data
+  until they are flushed into Parquet.
 
-The catalog and the bucket belong together: the catalog says which files
-exist; without it the Parquet files cannot be read as tables.
+The catalog and the bucket belong together: the catalog says which files exist;
+without it the Parquet files cannot be read as tables.
 
 Assets in this repo:
 
@@ -26,151 +25,171 @@ Assets in this repo:
 | `deploy/compose/docker-compose.yml` | Local stack: server + RustFS (S3) + PostgreSQL catalog. |
 | `deploy/helm/mallard/` | Helm chart. |
 
+Ports: 8080 (Sentry ingest, both APIs, OTLP/HTTP on `/v1/*`, `/metrics`), 4318
+(OTLP/HTTP), 4317 (OTLP/gRPC).
+
+CI builds and smoke-tests the image but does not publish it, so build it yourself
+([issue 0124](../../work/issues/0124-no-published-image-or-chart.md)).
+
 ## Docker
 
 ```sh
 docker build -f deploy/docker/Dockerfile -t mallard .
 
 # Everything on a local volume (DuckDB catalog + local storage):
-docker run -d --name mallard -p 8080:8080 -v mallard-data:/data \
+docker run -d --name mallard -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
   -e MALLARD_SERVER__API_TOKENS=change-me \
   -e MALLARD_SERVER__PUBLIC_URL=http://localhost:8080 \
   -e MALLARD_STORAGE__ARTIFACTS_PATH=/data/artifacts \
   mallard
+docker exec mallard mallard --token change-me status
 ```
 
 Image facts:
 
+- The default command is `mallard serve`. There is no config file in the image: use
+  `MALLARD_<SECTION>__<KEY>` variables, or mount a file and set `MALLARD_CONFIG`
+  (or pass `serve -c <file>`).
 - Working directory and `HOME` is `/data`; the default catalog is
-  `/data/data/catalog.ducklake`. DuckDB writes spill files to `/data/.tmp`.
-  Mount a volume on `/data`.
+  `/data/data/catalog.ducklake` and the lake `/data/data/lake/`. DuckDB writes spill
+  files to `/data/.tmp`. Mount a volume on `/data`.
 - Works with `--read-only` (needs a writable `/data`; add `--tmpfs /tmp`).
-- `MALLARD_DUCKDB__EXTENSION_DIRECTORY=/opt/duckdb/extensions` is set; the extensions there
-  match the image's platform. Do not override it.
-- Logs are text; `MALLARD_SERVER__LOG_FORMAT=json` makes them JSON. Set `RUST_LOG` to change the level.
+- `MALLARD_DUCKDB__EXTENSION_DIRECTORY=/opt/duckdb/extensions` is set and
+  auto-install is off; the extensions there match the image's platform. Do not
+  override them.
+- Logs go to stderr, as text; `MALLARD_SERVER__LOG_FORMAT=json` makes them JSON. Set
+  `RUST_LOG` to change the level.
 - Built-in `HEALTHCHECK` calls `/healthz`.
-- On `SIGTERM` the server commits queued events and flushes inlined data.
+- On `SIGTERM` the server stops the receivers, stores what it holds and flushes.
   Give it time: `docker stop -t 60`.
 
 ## Docker Compose
 
+Local use only: the defaults in the compose file are development credentials.
+
 ```sh
 docker compose -f deploy/compose/docker-compose.yml up -d --build
-TOKEN=dev-token
-curl -s -XPOST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  localhost:8080/sentry/v1/projects -d '{"name":"web"}'   # -> {"dsn": "http://<key>@localhost:8080/sentry/1", ...}
+export MALLARD_URL=http://localhost:8080 MALLARD_TOKEN=dev-token
+mallard status
+curl -s -XPOST -H "Authorization: Bearer $MALLARD_TOKEN" -H 'content-type: application/json' \
+  $MALLARD_URL/sentry/v1/projects -d '{"name":"web"}'   # -> {"dsn": "http://<key>@localhost:8080/sentry/1", ...}
+docker compose -f deploy/compose/docker-compose.yml exec mallard mallard --token dev-token status
 ```
 
-The stack: RustFS (S3-compatible store; why RustFS is explained at the top
-of the compose file), a one-shot bucket creation step, PostgreSQL as the
-catalog, and the server with data under `s3://sentry/errors`.
+The stack: RustFS (S3-compatible store), a one-shot bucket creation step,
+PostgreSQL as the catalog, and the server with data under `s3://mallard/lake/` and
+sourcemaps under `s3://mallard/artifacts`. Its config is
+`deploy/compose/mallard.toml`.
 
-Simpler mode (DuckDB-file catalog on the `mallard-data` volume, data still on S3):
+Simpler mode (DuckDB-file catalog on the `mallard-data` volume, data still on S3;
+one server process only):
 
 ```sh
 MALLARD_CATALOG=/data/catalog.ducklake docker compose -f deploy/compose/docker-compose.yml up -d
 ```
 
-Override `MALLARD_PORT`, `MALLARD_API_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`,
-`POSTGRES_PASSWORD` (in the shell or a `.env` file next to the compose file)
-before you expose it anywhere. `docker compose ... down -v` deletes all data.
+Override `MALLARD_PORT`, `MALLARD_OTLP_HTTP_PORT`, `MALLARD_OTLP_GRPC_PORT`,
+`MALLARD_API_TOKEN`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `POSTGRES_PASSWORD` and
+`MALLARD_IMAGE` in the shell or a `.env` file next to the compose file, and change
+every secret before you expose it anywhere. `docker compose ... down -v` deletes all
+data.
 
 ## Helm
 
 ```sh
-helm install errors deploy/helm/mallard \
-  --set publicUrl=https://sentry.example.com \
+helm install mallard deploy/helm/mallard \
+  --set image.repository=<your registry>/mallard --set image.tag=<tag> \
+  --set publicUrl=https://mallard.example.com \
   --set apiToken=$(openssl rand -hex 24) \
-  --set storage.url=s3://my-bucket/sentry \
-  --set storage.credentials.existingSecret=sentry-s3   # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  --set storage.dataPath=s3://my-bucket/mallard/lake/ \
+  --set storage.artifactsUrl=s3://my-bucket/mallard/artifacts \
+  --set storage.credentials.existingSecret=mallard-s3   # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 ```
 
-`NOTES.txt` (printed after install) shows how to read the token and create a
-project to get a DSN. Key values (see `values.yaml` for all):
+`NOTES.txt` (printed after install) shows how to read the token, create a project
+to get a DSN, and point OTel SDKs at the service. Key values (see
+[values.yaml](../../deploy/helm/mallard/values.yaml) for all):
 
 | Value | Meaning |
 |---|---|
-| `publicUrl` | Required. Base URL SDKs use; it ends up in every DSN. |
-| `apiToken` / `existingSecret` + `existingSecretKey` | Required. API token(s). |
-| `storage.url` | `s3://`, `gs://`, `az://` or a local path. |
+| `image.repository`, `.tag` | The image. The defaults name `ghcr.io/helico-tech/mallard`, which nothing here publishes yet. |
+| `publicUrl` | Required. Base URL SDKs use; DSNs are `<publicUrl>/sentry/<project>`. |
+| `apiToken` / `existingSecret` + `existingSecretKey` | Required. API token(s), comma separated. |
+| `ingestToken` / `existingSecretIngestKey` | Tokens OTLP senders must present. Empty = open. |
+| `storage.dataPath` | `s3://...` or, with `catalog.type=duckdb`, a local path on the PVC. |
+| `storage.artifactsUrl` | Sourcemap bundles, not inside `dataPath`. Empty disables upload. |
 | `storage.s3.endpoint`, `.region`, `.pathStyle` | For non-AWS S3. |
-| `storage.credentials.existingSecret` | Secret exported as env vars (`AWS_*`, `GCS_HMAC_*`, `AZURE_STORAGE_CONNECTION_STRING`). |
+| `storage.credentials.existingSecret` | Secret exported as env vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`). |
 | `storage.credentials.env` | Same, but the chart creates the Secret. |
-| `serviceAccount.annotations` | IRSA / workload identity instead of keys. |
-| `catalog.type` | `duckdb` (PVC, 1 pod, `Recreate`) or `postgres` (stateless pods). |
+| `storage.extraSecrets` | Other DuckDB secrets as TOML tables (GCS, Azure). |
+| `serviceAccount.annotations` | IRSA or workload identity instead of keys: with no credentials the chart uses `provider = "credential_chain"`. |
+| `catalog.type` | `duckdb` (PVC, 1 pod, `Recreate`) or `postgres` (stateless pods, `replicaCount`). |
 | `catalog.postgres.connectionString` / `.existingSecret` | libpq string, e.g. `host=pg port=5432 dbname=ducklake user=mallard password=... sslmode=require`. |
-| `retentionDays` | Delete events older than this (0 = keep). |
-| `duckdb.memoryLimit` | DuckDB memory cap; keep it about half of the memory limit. |
-| `extraEnv` | Any other `MALLARD_*` setting. |
+| `retention.errors`, `.traces`, `.logs`, `.metrics` | Durations; `0` keeps data forever. |
+| `bridge.*` | The `[bridge]` settings. |
+| `duckdb.memoryLimit`, `.threads` | DuckDB limits; keep the memory limit about half of the pod's. |
+| `extraConfig` | TOML appended to the config, starting with a table header such as `[otel.ingest]`. |
+| `extraEnv`, `extraEnvFrom` | Any other `MALLARD_*` setting. |
+| `logJson`, `logLevel` | Log format (JSON by default) and `RUST_LOG`. |
 | `ingress.*`, `service.*`, `serviceMonitor.*`, `podDisruptionBudget.*` | As usual. |
 
-Built in: non-root pod, read-only root filesystem (an `emptyDir` or the PVC
-on `/data`, an `emptyDir` on `/tmp`), all capabilities dropped, startup probe
-on `/healthz` (catalog attach can take a while), liveness on `/healthz`,
-readiness on `/readyz`, `terminationGracePeriodSeconds: 90` for the flush on
-stop. The chart refuses to render without `publicUrl` and a token, and
-refuses a local storage path with the Postgres catalog.
+Built in: non-root pod, read-only root filesystem (an `emptyDir` or the PVC on
+`/data`, an `emptyDir` on `/tmp`), all capabilities dropped, startup probe on
+`/healthz` (catalog attach can take a while), liveness on `/healthz`, readiness on
+`/readyz`, `terminationGracePeriodSeconds: 90` for the flush on stop. The chart
+refuses to render without `publicUrl` and a token, and refuses a local storage path
+with the Postgres catalog.
+
+CI installs the chart on kind with both catalogs: `deploy/helm/kind/test.sh`.
 
 Ingress notes:
 
-- Browser SDKs post cross-origin. The server sends the CORS headers itself;
-  do not add CORS annotations (duplicate headers make browsers reject the
-  response).
-- Sourcemap uploads send up to 33 MiB per request and envelopes up to
-  `MALLARD_SENTRY__INGEST__MAX_BODY_BYTES` (50 MiB). Raise the proxy body limit, e.g.
+- The ingress routes the HTTP port: Sentry ingest, both APIs and OTLP/HTTP on `/v1/*`.
+  OTLP/gRPC needs the service port 4317.
+- Browser SDKs post cross-origin. The server sends the CORS headers itself; do not
+  add CORS annotations (duplicate headers make browsers reject the response).
+- Sourcemap uploads send up to 32 MiB per request and envelopes up to
+  `sentry.ingest.max_body_bytes` (20 MiB). Raise the proxy body limit, e.g.
   `nginx.ingress.kubernetes.io/proxy-body-size: 64m`.
-- `/metrics`, `/docs` and `/openapi.json` are on the same port and need no
-  token. Block `/metrics` at the ingress if it must not be public, or serve
-  it elsewhere (`MALLARD_SERVER__METRICS_ADDR`, which the Helm chart sets to port
-  9090).
-- If the ingress sets `X-Forwarded-For`, set `MALLARD_SENTRY__INGEST__TRUST_FORWARDED_FOR=true`
-  (via `extraEnv`) so client IPs are recorded correctly. The server uses the
-  last address in the header (the one the ingress adds), so this is right
-  for exactly one proxy hop.
-- When the server is mounted below a path, put that path in `publicUrl`
-  (`https://host/sentry`) and route the prefix with a rewrite.
+- The chart serves `/metrics` on port 9090, which the ingress does not route. Without
+  the chart, `/metrics` is on the main port with no token, unless you set
+  `server.metrics_addr`. `/sentry/docs`, `/otel/docs` and their `openapi.json` also
+  need no token.
+- If the ingress sets `X-Forwarded-For`, set
+  `MALLARD_SENTRY__INGEST__TRUST_FORWARDED_FOR=true` (via `extraEnv`) so client IPs
+  are recorded correctly. The server uses the last address in the header (the one
+  the ingress adds), so this is right for exactly one proxy hop.
 
-## Configuration reference
+## Configuration
 
-Every setting has an environment variable. The most used:
+One TOML file plus `MALLARD_<SECTION>__<KEY>` variables.
+[config/mallard.example.toml](../../config/mallard.example.toml) lists the keys with
+their defaults; check a config with `mallard check -c <file> [--connect]`.
+The only required one is `server.api_tokens`. The Sentry settings are the
+`[sentry.*]` sections. What the example does not say:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `MALLARD_SERVER__API_TOKENS` | (none, required) | Bearer token(s) for `/v1` and sourcemap uploads, comma separated. |
-| `MALLARD_SERVER__PUBLIC_URL` | `http://localhost:8080` | Base URL; DSNs use `<url>/sentry`. |
-| `MALLARD_STORAGE__DATA_PATH` | `data/lake/` | Parquet data: `s3://bucket/prefix/`, `gs://...`, `az://...`, local path. |
-| `MALLARD_STORAGE__ARTIFACTS_PATH` | (off) | Sourcemap bundles, outside the data path. Empty: upload answers 501. |
-| `MALLARD_STORAGE__CATALOG` | `data/catalog.ducklake` | DuckDB file path, `postgres:<libpq>`, `sqlite:<path>`, `mysql:<string>`. |
-| `[[storage.secrets]]` | | Object storage credentials, endpoint and region (file only, see [Storage](#storage)). |
-| `MALLARD_SENTRY__RETENTION__EVENTS` | `90d` | 0 = keep forever. |
-| `MALLARD_SENTRY__MAINTENANCE__FLUSH_INTERVAL` | `5m` | How often inlined data becomes Parquet. |
-| `MALLARD_SENTRY__MAINTENANCE__COMPACT_INTERVAL` | `1h` | Compaction, retention, snapshot expiry. |
-| `MALLARD_DUCKDB__MEMORY_LIMIT` | 80% of RAM | e.g. `1GB` (`1GiB` = powers of 1024). |
-| `MALLARD_DUCKDB__THREADS` | CPUs | DuckDB threads. |
-| `MALLARD_SENTRY__QUERY__READERS` | `4` | Read connections for the query API. |
-| `MALLARD_SENTRY__QUERY__ENABLE_SQL` | `false` | `POST /v1/sql`: read-only SQL over `events`, `issues`, `issue_activity` (ADR 0011). Tokens become admin access. `MALLARD_SENTRY__QUERY__SQL_TIMEOUT` limits a query (`30s`). |
-| `MALLARD_SENTRY__INGEST__BATCH_MAX` / `MALLARD_SENTRY__INGEST__BATCH_WINDOW` | `2000` / `500ms` | Max events per commit / how long a quiet server collects before committing (200+ queued events commit at once). |
-| `MALLARD_SENTRY__INGEST__CONCURRENCY` | `256` | Ingest requests processed at once (bounds request memory). |
-| `MALLARD_SENTRY__MAINTENANCE__FLUSH_ROWS` | `50000` | Also flush inlined rows to Parquet after this many (bounds catalog size). |
-| `MALLARD_OTEL__MAINTENANCE__SNAPSHOT_RETENTION` | `1h` | Keep snapshots and replaced files this long; set above your catalog backup age. |
-| `MALLARD_DUCKDB__TEMP_DIRECTORY` | DuckDB default | DuckDB spill directory. |
-| `MALLARD_SERVER__METRICS_ADDR` | (main port) | Serve `/metrics` on a separate address, e.g. `0.0.0.0:9090`. |
-| `MALLARD_SENTRY__INGEST__QUEUE_CAPACITY` | `20000` | Queued events before ingest answers 429. |
-| `MALLARD_SENTRY__INGEST__MAX_EVENT_BYTES` / `MALLARD_SENTRY__INGEST__MAX_BODY_BYTES` | 1 MiB / 20 MiB | Size limits (after decompression), e.g. `2MiB` or a number of bytes. Requests with the key only inside the envelope are limited to 2 MiB. |
-| `MALLARD_SENTRY__SOURCEMAPS__CACHE_SIZE` | `256MiB` | Sourcemap cache. |
-| `MALLARD_SENTRY__INGEST__TRUST_FORWARDED_FOR` | `false` | Use the last `X-Forwarded-For` address as client IP. |
-| `MALLARD_SERVER__HTTP_ADDR` | `0.0.0.0:8080` | Listen address. |
-| `MALLARD_SERVER__LOG_FORMAT`, `RUST_LOG` | `text` | Logging. |
+- `sentry.ingest.max_event_bytes` and `.max_body_bytes` are sizes after
+  decompression, e.g. `2MiB` or a number of bytes. A request with its key only inside
+  the envelope is limited to 2 MiB.
+- `sentry.ingest.batch_window` is how long a quiet server collects before it commits;
+  200 or more queued events commit at once.
+- `sentry.query.enable_sql` turns on `POST /sentry/v1/sql` (ADR 0011). API tokens
+  then become admin access.
+- `duckdb.memory_limit` defaults to DuckDB's own, 80% of RAM. Accepts `1GB`, or `1GiB`
+  for powers of 1024.
+- Snapshot expiry is catalog-wide and telemetry's:
+  `otel.maintenance.snapshot_retention` ([otel/configuration.md](../otel/configuration.md)).
 
-`config/mallard.example.toml` lists all of them. The tables live in the
-DuckLake schema `sentry` of the catalog attached as `lake` (both fixed). The
-library settings are the `[sentry.*]` sections; the host settings (URL, tokens,
-storage, DuckDB) come from `[server]`, `[storage]` and `[duckdb]`.
+The tables live in the DuckLake schema `sentry` of the catalog attached as `lake`
+(both fixed).
 
 ## Storage
 
 Prefer a dedicated bucket (or prefix) per deployment. The server needs list,
-read, write and delete on `<prefix>/*`.
+read, write and delete on `<prefix>/*`. These examples show both locations, with
+what sourcemap storage needs; [otel/storage-backends.md](../otel/storage-backends.md)
+has more on the data path. `artifacts_path` takes a local path, `s3://`, `gs://` or
+`az://`, and must not be inside `data_path`.
 
 ### AWS S3
 
@@ -239,18 +258,22 @@ type = "azure"
 connection_string = "${AZURE_STORAGE_CONNECTION_STRING}"   # DefaultEndpointsProtocol=https;AccountName=...
 ```
 
-Sourcemaps read `AZURE_STORAGE_CONNECTION_STRING` from the environment. With
-`provider = "credential_chain"` the server uses the Azure credential chain with
+The secret covers the lake. Sourcemap storage does not use it, and does not read a
+connection string: with an `az://` `artifacts_path` it reads `AZURE_STORAGE_ACCOUNT_NAME`
+and `AZURE_STORAGE_ACCOUNT_KEY` from the environment, and fails at start-up without
+them ([issue 0125](../../work/issues/0125-azure-artifacts-ignore-connection-string.md)).
+With `provider = "credential_chain"` the lake uses the Azure credential chain, with
 `AZURE_STORAGE_ACCOUNT_NAME` set (managed identity, AKS workload identity via
-`serviceAccount.annotations: azure.workload.identity/client-id: ...` plus the
-pod label `azure.workload.identity/use: "true"` in `podLabels`).
+`serviceAccount.annotations: azure.workload.identity/client-id: ...` plus the pod
+label `azure.workload.identity/use: "true"` in `podLabels`). In the chart, add the
+secret with `storage.extraSecrets`.
 
 ### Self-hosted S3 (RustFS, Garage, SeaweedFS, MinIO, Ceph RGW, ...)
 
 ```toml
 [storage]
-data_path = "s3://sentry/lake/"
-artifacts_path = "s3://sentry/artifacts"
+data_path = "s3://mallard/lake/"
+artifacts_path = "s3://mallard/artifacts"
 [[storage.secrets]]
 type = "s3"
 endpoint = "rustfs:9000"
@@ -278,7 +301,9 @@ example the same PVC as the DuckDB catalog). Not usable with several pods.
 
 ## Catalog: DuckDB file or PostgreSQL
 
-| | DuckDB file (`MALLARD_STORAGE__CATALOG=/data/catalog.ducklake`) | PostgreSQL (`MALLARD_STORAGE__CATALOG=postgres:host=... dbname=...`) |
+SQLite is also possible; see [otel/storage-backends.md](../otel/storage-backends.md).
+
+| | DuckDB file (`MALLARD_STORAGE__CATALOG=/data/catalog.ducklake`) | PostgreSQL (`MALLARD_STORAGE__CATALOG='postgres:host=... dbname=...'`) |
 |---|---|---|
 | Moving parts | None extra. | A PostgreSQL database (managed: RDS, Cloud SQL, Azure DB, CloudNativePG, ...). |
 | Processes | Exactly one. The file is locked by the process. | Several (see "Running more than one pod"). |
@@ -286,42 +311,42 @@ example the same PVC as the DuckDB catalog). Not usable with several pods.
 | Backups | Stop the server (or snapshot the volume) and copy the file. | `pg_dump` or the provider's point-in-time recovery. |
 | Good for | Small teams, single VM, compose. | Production on Kubernetes, HA databases you already run. |
 
-The catalog stays small (metadata plus not yet flushed events: a few MB to a
-few hundred MB). Give the PVC 5-10 GiB; most of it is DuckDB spill space.
+The catalog stays small (metadata plus not yet flushed data: a few MB to a few
+hundred MB). Give the PVC 5-10 GiB; most of it is DuckDB spill space.
 
 ### Running more than one pod
 
 With the PostgreSQL catalog several pods can share one catalog
-([ADR 0021](../adr/0021-sentry-several-processes.md)). Ingest and API work on
-every pod. Maintenance runs on one of them: the holder of a lease in the catalog
-(valid for 3 flush intervals, so a replacement takes over within about 15
-minutes by default).
+([ADR 0021](../adr/0021-sentry-several-processes.md)). Ingest and API work on every
+pod. Sentry maintenance runs on one of them: the holder of a lease in the catalog
+(valid for 3 flush intervals, so a replacement takes over within about 15 minutes by
+default).
 
 What to expect:
 
-- A project created through one pod works on all pods at once: an unknown
-  project makes a pod read the catalog (at most once a second).
+- A project created through one pod works on all pods at once: an unknown project
+  makes a pod read the catalog (at most once a second).
 - A status change (resolve, ignore) or a sourcemap bundle reaches the other pods
-  within 30 s. In that time an event on another pod does not reopen a
-  just-resolved issue, and may be stored without symbolication.
+  within 30 s. In that time an event on another pod does not reopen a just-resolved
+  issue, and may be stored without symbolication.
 - Both pods can write the first event of one new group at the same moment. Then
   `issues` has two rows for it; the API shows one issue. Raw SQL
-  (`POST /v1/sql`) sees both rows.
-- The limit on new issues (1000 per project and hour) and the dedupe of SDK
-  retries are per pod.
+  (`POST /sentry/v1/sql`) sees both rows.
+- The limit on new issues (1000 per project and hour) and the dedupe of SDK retries
+  are per pod.
 - Clocks must agree within 5 minutes.
 
-Storage must be object storage, not a local path. Tested with two processes on
-one Postgres catalog and on one SQLite file (`db::tests::two_processes_*`).
-OTel maintenance uses the same kind of lease, with its own row in `otel.meta`
+Storage must be object storage, not a local path. Tested with two processes on one
+Postgres catalog and on one SQLite file (`db::tests::two_processes_*`). OTel
+maintenance uses the same kind of lease, with its own row in `otel.meta`
 ([operations](../otel/operations.md#several-replicas)).
 
 ## Upgrades
 
-- Read the release notes. The server records its schema version in the
-  catalog and creates new tables/columns at start; there is no separate
-  migration step.
-- Back up the catalog first (see below).
+- Read the release notes. The server records its schema version in the catalog and
+  creates new tables and columns at start; there is no separate migration step.
+- Back up the catalog first (see below). Telemetry details:
+  [otel/operations.md](../otel/operations.md#upgrades).
 - DuckDB file catalog: the pod is replaced (`Recreate`); expect a short gap.
 - Postgres catalog: a rolling update starts the new pod before stopping the
   old one; both write for a moment, as any two pods do.
@@ -336,40 +361,35 @@ What to back up: the **catalog** and the **bucket**, together.
 - Catalog: PostgreSQL with point-in-time recovery or regular `pg_dump`;
   DuckDB file: volume snapshots or a copy taken while the server is stopped.
 - Bucket: turn on object versioning (or soft delete) with a retention of a
-  few days. Compaction rewrites Parquet files and the server deletes files
-  that are no longer referenced `MALLARD_OTEL__MAINTENANCE__SNAPSHOT_RETENTION` (default 1 hour)
-  after they stop being used. Raise it above your backup interval, or rely
-  on versioning. A
-  catalog backup older than that points at deleted files; versioning lets you
-  restore them.
+  few days. Compaction rewrites Parquet files, and the server deletes files that
+  are no longer used after `otel.maintenance.snapshot_retention` (default 1 hour).
+  Raise it above your backup interval, or rely on versioning. A catalog backup older
+  than that points at deleted files; versioning lets you restore them.
 - Restoring: restore the catalog, restore missing objects from versions,
   start the server.
 
 ## Sizing
 
-Measured numbers are in [capacity.md](capacity.md). In short: one process
-handles thousands of events per second; set `MALLARD_DUCKDB__MEMORY_LIMIT` to
-about half the container memory (DuckDB uses some memory outside its limit).
-
-| Traffic | Events/day | CPU | Memory | `MALLARD_DUCKDB__MEMORY_LIMIT` |
-|---|---|---|---|---|
-| ~10k visitors/day | 1k-20k | 0.5 | 1-2 GiB | 512MB-1GB |
-| ~100k visitors/day | 10k-200k | 1 | 4 GiB | 2GB |
-| bigger / error storms | 1M+ | 2 | 4-8 GiB | 2-4GB |
-
-Watch `/metrics` (`mallard_sentry_write_batch_seconds`, `mallard_sentry_ingest_rejected_total`,
-`mallard_sentry_write_errors_total`, `mallard_sentry_maintenance_errors_total`,
-`mallard_sentry_issue_overflow_events_total`) and `/v1/info`
-(queue depth). Do not set a CPU limit below 1 core or compaction throttles.
+Measured numbers are in [capacity.md](capacity.md) and
+[otel/capacity.md](../otel/capacity.md). Set `duckdb.memory_limit` to about half the
+container memory: DuckDB uses some memory outside its limit, and the telemetry write
+buffer needs room too. Do not set a CPU limit below 1 core, or compaction throttles.
 
 ## Health and monitoring
 
 - `GET /healthz`: liveness, answers `ok` while the process runs.
-- `GET /readyz`: readiness, runs a query through the reader pool.
-- `GET /metrics`: Prometheus metrics (no token).
-- `POST /v1/maintenance` (token): flush inlined data and compact now.
-- `mallard maintenance [--full]` (no server running with a DuckDB-file
-  or SQLite catalog): both sides' maintenance once, then exit. `--full` only
-  changes the telemetry tables. Next to running pods on Postgres it can lose a
-  conflict against their maintenance; it then exits with an error and is safe
-  to run again.
+- `GET /readyz`: readiness of both sides: a query through the Sentry reader pool, the
+  telemetry flush state and the catalog.
+- `GET /metrics`: Prometheus metrics (no token). For this side watch
+  `mallard_sentry_write_batch_seconds`, `mallard_sentry_ingest_rejected_total`,
+  `mallard_sentry_write_errors_total`, `mallard_sentry_maintenance_errors_total` and
+  `mallard_sentry_issue_overflow_events_total`. Telemetry:
+  [otel/operations.md](../otel/operations.md).
+- `mallard status`: both sides. `mallard errors info` or `GET /sentry/v1/info`: queue
+  depth.
+- `POST /sentry/v1/maintenance` (token) or `mallard errors maintenance`: flush inlined
+  data and compact now.
+- `mallard maintenance [--full]` (no server running with a DuckDB-file or SQLite
+  catalog): both sides' maintenance once, then exit. `--full` only changes the
+  telemetry tables. Next to running pods on Postgres it can lose a conflict against
+  their maintenance; it then exits with an error and is safe to run again.
