@@ -82,6 +82,12 @@ Requirements and hooks:
   `EventStream` or a separate thread.
 - `Embedded::set_errors_enabled(true)` shows the `x errors` hint when your
   host handles `Outcome::Jump` (off by default).
+- An error tracker of your own: implement `odl_cli::ErrorLookup` (error
+  events of many trace ids in one call) and pass it to
+  `Embedded::set_error_lookup` and `Ctx::with_error_lookup`. Trace lists then
+  show an error count per trace (`sentry` column, JSON `sentry_errors`),
+  waterfalls mark spans with `⚠`, and `x` on such a span returns
+  `Outcome::JumpEvent { trace_id, event_id }`. Without one nothing changes.
 - Keys with Ctrl/Alt modifiers (except Ctrl-C) and F1/F2 return `Ignored`.
 
 F1 and F2 are left to the host. `Outcome::Jump(trace_id)` (the shared

@@ -91,6 +91,15 @@ mallard services --since 1h
 mallard ops -S checkout --since 1h
 mallard traces list -S checkout --errors --since 15m -n 10
 ```
+In `traces list`, `error_count` counts spans with error status and `sentry_errors`
+counts Sentry error events of the trace (`null` when the Sentry side could not be
+read; the reason goes to stderr). In `trace --json` every span has `sentry_errors`;
+`errors[].span_id` says which span an error was captured in.
+
+**Traces with Sentry errors:**
+```sh
+mallard traces list --since 1h --format ndjson --fields trace_id,root_name,sentry_errors
+```
 
 **Logs:**
 ```sh

@@ -137,8 +137,10 @@ The crate is also a library (`sdl_cli`) so other programs can mount it:
   `new(client, project)` (optionally `.with_hints(h)`), `draw(frame, area)`
   (draws only inside `area`), `handle_event(&Event) -> Outcome`
   (the shared `mallard_term::tui::Outcome`: `Consumed`, `Ignored`, `Quit`,
-  `Jump(trace_id)`), `tick()` (call a few times per second; applies finished
-  loads, never blocks), `take_fatal()` and `open_trace(trace_id)`.
+  `Jump(trace_id)`, `JumpEvent { trace_id, event_id }`), `tick()` (call a few
+  times per second; applies finished loads, never blocks), `take_fatal()`,
+  `open_trace(trace_id)` and `open_trace_event(trace_id, event_id)` (the
+  trace's events, then that event's issue).
   F1 and F2 and ctrl/alt keys (other than `ctrl-c`/`ctrl-q`, which return
   `Quit`) are `Ignored`.
   **Runtime requirement:** call `Embedded::new` inside a tokio runtime

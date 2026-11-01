@@ -135,7 +135,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum TracesCmd {
-    /// Search traces (default window 1h).
+    /// Search traces (default window 1h), with the Sentry error count of each.
     List(odl_cli::TraceListArgs),
     /// Spans, Sentry errors and logs of one trace.
     Show(TraceShowArgs),
