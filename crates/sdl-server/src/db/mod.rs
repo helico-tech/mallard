@@ -357,14 +357,15 @@ impl Db {
 }
 
 impl Drop for Db {
-    /// Safety net for embedders that forget `shutdown()`: stop and join the
-    /// writer so DuckDB is not torn down under a running thread.
+    /// Call `shutdown().await` before dropping. Without it, dropping `tx`
+    /// disconnects the queue: the writer writes what is queued, flushes and
+    /// stops on its own thread (it owns its connection, so DuckDB stays up
+    /// until then). Drop does not wait for that: it may run on an async
+    /// worker thread.
     fn drop(&mut self) {
-        if let Some(handle) = self.writer_thread.lock().expect("lock").take() {
-            let (tx, _rx) = oneshot::channel();
-            if self.tx.send(WriteCmd::Shutdown { reply: tx }).is_ok() {
-                let _ = handle.join();
-            }
+        let running = self.writer_thread.get_mut().map(|h| h.is_some()).unwrap_or(false);
+        if running {
+            tracing::warn!("Db dropped without shutdown(); the writer finishes in the background");
         }
     }
 }
