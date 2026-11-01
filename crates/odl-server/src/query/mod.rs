@@ -312,7 +312,7 @@ impl Filter {
     /// `key=value` filters on span/log/metric attributes or resource attributes.
     pub fn attributes(&mut self, spec: Option<&str>) -> QResult<()> {
         if let Some(spec) = spec {
-            for (k, v) in odl_api::parse_attribute_filter(spec).map_err(bad)? {
+            for (k, v) in odl_api::parse_attribute_filter(spec).map_err(|e| bad(e.to_string()))? {
                 self.add(
                     "(attributes[?] = ? OR resource_attributes[?] = ?)",
                     [Value::Text(k.clone()), Value::Text(v.clone()), Value::Text(k), Value::Text(v)],
