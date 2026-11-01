@@ -1,4 +1,5 @@
-//! `mallard`: the CLI and TUI. Talks to a `mallard-server` over HTTP.
+//! `mallard`: the one binary. `mallard serve` runs the server (feature
+//! `server`, ADR 0023); the CLI and TUI talk to a server over HTTP.
 //!
 //! One flat command tree (ADR 0008): `issues`, `events`, `traces`, `logs`,
 //! … The commands come from the two libraries (`sdl-cli`, `odl-cli`);
@@ -11,6 +12,7 @@ mod find;
 mod help;
 mod schema;
 mod series;
+mod server;
 mod setup;
 mod status;
 mod trace;
@@ -131,6 +133,8 @@ enum Cmd {
     },
     /// Terminal UI: F1 errors, F2 telemetry.
     Tui,
+    #[command(flatten)]
+    Server(server::ServerCmd),
     /// Help for a command, or `mallard help agents`: the guide for AI agents.
     Help {
         /// A command (e.g. `issues list`) or `agents`.
@@ -281,13 +285,19 @@ fn wants_json(args: &[std::ffi::OsString]) -> bool {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
     let output = Output::new(Format::pick(cli.format, cli.json), cli.color)
         .with_fields(cli.fields.as_deref())
         .with_raw(cli.raw)
         .with_quiet(cli.quiet);
+    // These are the server, not a client of one: `--url` does not apply.
+    let cmd = match cli.cmd {
+        Cmd::Server(c) => return server::run(c, &output).await,
+        cmd => cmd,
+    };
+    let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
     let r = Run { client, project: cli.project, output };
-    match cli.cmd {
+    match cmd {
+        Cmd::Server(_) => unreachable!("handled above"),
         Cmd::Status => status::run(&r).await,
         Cmd::Setup(a) => setup::run(&r, a).await,
         Cmd::Find { id, window, wait } => find::run(&r, &id, &window, &wait).await,
@@ -414,6 +424,11 @@ mod tests {
             &["series", "errors", "--since", "1d", "--step", "1h"],
             &["setup", "checkout", "--sentry-cli"],
             &["--quiet", "issues", "list"],
+            &["serve"],
+            &["serve", "-c", "mallard.toml"],
+            &["check", "--config", "mallard.toml", "--connect"],
+            &["maintenance", "-c", "mallard.toml", "--full"],
+            &["install-extensions", "--dir", "/tmp/ext"],
         ] {
             if let Err(e) = try_parse(args) {
                 panic!("{args:?}: {e}");

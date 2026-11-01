@@ -1,6 +1,6 @@
 [package]
 name = "mallard-server"
-description = "The mallard server: Sentry-compatible errors plus OpenTelemetry traces, logs and metrics on one DuckLake"
+description = "The mallard server as a library (run by `mallard serve`): Sentry-compatible errors plus OpenTelemetry traces, logs and metrics on one DuckLake"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,12 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
-[[bin]]
-name = "mallard-server"
-path = "src/main.rs"
-
 [dependencies]
-clap.workspace = true
 sdl-server.workspace = true
 odl-server.workspace = true
 mallard-common = { workspace = true, features = ["server"] }

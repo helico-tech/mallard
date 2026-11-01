@@ -1,6 +1,7 @@
-//! `mallard-server maintenance [--full]`: the real binary on a temp lake with
+//! `mallard maintenance [--full]`: the real binary on a temp lake with
 //! data from both sides.
 
+#[path = "../../mallard-server/tests/common/mod.rs"]
 mod common;
 
 use std::path::Path;
@@ -12,7 +13,7 @@ use mallard_client::{Client, sdl_client::types::CreateProject};
 async fn maintenance(config: &Path, extra: &[&str]) -> Output {
     let (config, extra) = (config.to_path_buf(), extra.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     tokio::task::spawn_blocking(move || {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_mallard-server"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_mallard"));
         c.arg("maintenance").arg("-c").arg(&config).args(&extra).stdin(Stdio::null());
         for (k, _) in std::env::vars_os() {
             if k.to_string_lossy().starts_with("MALLARD_") {
