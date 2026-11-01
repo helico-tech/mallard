@@ -27,3 +27,6 @@ and telemetry now live in one app to build features neither side had alone.
 4. [04-otel-exceptions-as-issues](04-otel-exceptions-as-issues.md)
 5. [05-errors-in-trace-views](05-errors-in-trace-views.md)
 6. [06-retire-standalone-binaries](06-retire-standalone-binaries.md)
+7. [07-split-server-and-cli](07-split-server-and-cli.md)
+8. [08-agent-cli](08-agent-cli.md)
+9. [09-readme-screenshots](09-readme-screenshots.md)
