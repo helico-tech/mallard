@@ -1,6 +1,6 @@
 # Web UI and TUI parity
 
-State on 2026-11-01.
+State on 2026-11-01. Epic 0004 changed the app scope and the window; rows below say so, and since story 0004/03 the TUI follows the same rules (`mallard tui`; the errors and telemetry tabs on their own keep their earlier keys and windows).
 
 The TUI source is the reference (`crates/mallard/src/tui.rs`, `crates/sdl-cli/src/tui/`,
 `crates/odl-cli/src/tui/`, `crates/mallard-term/`). The web UI was driven with the
@@ -38,12 +38,12 @@ changed in the browser, because the seeded data has no such case.
 | Footer hints per screen | Always shown | Help and tooltips instead | intended |
 | `r` refresh | Reloads the current screen, also log records | Same | ok |
 | `r` flash | "refreshing…" on telemetry | None (toast on a trace only) | intended |
-| `t` `T` presets | Errors 1h 24h 7d 14d 30d; telemetry 5m 15m 1h 6h 24h 7d; wrap around | Same, same `interval` per window | ok |
-| Default windows | Errors 24h, telemetry 1h | Same | ok |
-| Window kept per side | One window per side | Kept across F1/F2 | ok |
+| `t` `T` presets | The union, 5m to 30d, cut to the smaller `max_window_secs` of the two sides; wrap around | Same (story 0004/04) | ok |
+| Default windows | 1h; an empty issue list offers `d`: show last 24h | 1h; an empty issue list offers "Show last 24h" (story 0004/04) | ok |
+| Window across F1/F2 | One window for both sides (ADR 0028) | Same | ok |
 | Window across `1`-`5` | One window for all views | One window for all views | ok |
-| `t` flash | "time window: last X" on telemetry | None | intended |
-| `t` on issue detail | Ignored | Changes the window | intended |
+| `t` flash | None; the top bar shows the window | None | ok |
+| `t` on issue detail | Changes the window | Changes the window | ok |
 | `t` on trace detail and Status | Cycles the window | Does nothing, no window control there | intended |
 | UTC everywhere | Yes | Yes in Tokyo: tables, facts, tooltips, title attributes, hover labels, chart axes | ok |
 | Text cleaning | `clean` / `clean_text` | Same output on 6 hostile strings | ok |
@@ -87,7 +87,12 @@ changed in the browser, because the seeded data has no such case.
 | R when already that status | Sends PATCH, toast | Toast "Already resolved", sends nothing | intended |
 | Empty state | "✓ No unresolved issues matching "x" in the last 7d" + hint | Same words, with buttons | ok |
 | No projects, unknown project | Hint with the command; error | Same idea | ok |
-| `p` project picker | Overlay: j k ↑↓ Enter; Esc q p close | Kumo menu: arrows, Enter, Esc | intended |
+| `p` picker | One app picker, on every screen, scoping both sides (ADR 0028): j k ↑↓ Enter; Esc q p close | One app picker in the top bar, on every screen, scoping both sides (ADR 0028): Kumo menu, arrows, Enter, Esc | intended |
+| Errors with All apps | Asks to pick an app: issues are per project (ADR 0028) | Same | ok |
+| A side the app lacks | Says so, with `mallard setup <app>` | Same | ok |
+| Filter suggestions | The list shows while typing; Tab takes the selected row, the first unless you moved; ↑↓ choose; ↵ applies what is typed | The list opens while typing or on ↓; nothing is taken until you move to it, then Enter or Tab takes it. Otherwise Tab moves the focus, as in a browser | intended |
+| Issue search | Text, and `tag=value` | Same | ok |
+| Cmd-K, app home page | None | Web only (stories 0004/04, 05) | intended |
 | Project picker reloads projects | Yes | Only with `r` (code) | **differs** |
 | Project switch | Toast "switched to X", keeps filters | Same | ok |
 
