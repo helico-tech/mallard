@@ -18,9 +18,9 @@
  └──────┼─────────────────────────────────────────┼──────────┼──────────────────────┘
         v                                         v          v
    DuckDB 2.0 + DuckLake ──── catalog: DuckDB file | PostgreSQL | SQLite
-        │                     data:    Parquet under <storage>/lake/
+        │                     data:    Parquet under storage.data_path
         └──────────── object storage (S3 default, GCS, Azure, local) ────────────┐
-                      sourcemap bundles under <storage>/artifacts/ (object_store) │
+                      sourcemap bundles under <artifacts_path>/artifacts/       │
                                                                                  ┘
    mallard CLI / TUI  ──(mallard-sentry-client, /v1)──>  api.rs
 ```

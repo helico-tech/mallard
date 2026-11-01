@@ -32,7 +32,7 @@ are the same as on the errors side: [../cli.md](../cli.md).
 | `mallard sql "<select>"` | read-only SQL (server must enable it) |
 | `mallard telemetry schema` | the tables and columns SQL can query |
 | `mallard schema attrs [--signal spans\|logs\|metrics] [-S svc] [-k key] [--metric m] [-n 50]` | attribute keys with counts, or the top values of one key (sampled) |
-| `mallard tui [-s 1h]` | interactive UI |
+| `mallard tui` (`mallard telemetry tui [-s 1h]`: this side only) | interactive UI |
 
 Examples:
 

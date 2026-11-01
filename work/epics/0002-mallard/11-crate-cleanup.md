@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 created: 2026-11-01
 ---
 # 11 — Crate cleanup: one naming scheme, no standalone leftovers
@@ -48,5 +48,10 @@ wire names that SDKs or sentry-cli rely on.
 ## Progress log
 - 2026-11-01: baseline binary and test count taken from `d9218d6` before any edit: 499 passed, 4 ignored.
 - 2026-11-01: steps 1 to 6 done, one commit each. No `SDL_*` variable was read in production: only `Standalone` read them, and mallard never built it. All settings that matter have a `[sentry.*]`, `[server]`, `[storage]` or `[duckdb]` key (mapping in ADR 0024). `SDL_CATALOG_WIDE_MAINTENANCE` and `SDL_MAINTENANCE_THREADS` have no equal, and never had one in mallard.
+- 2026-11-01: checked. Workspace 499 passed and 4 ignored, as before (two `Standalone` tests went, two config tests came). Slim build 41 passed, no DuckDB in its tree. e2e 28 of 28. Helm lint and template on all CI values. Docker image serves `/readyz`. `kind` is not installed, so `deploy/helm/kind/test.sh` did not run.
+- 2026-11-01: upgrade check: lakes made by the build from `d9218d6` (inlined and Parquet, with a lease in `otel.meta` and a sourcemap bundle) read fine with the new build; same file layout, no errors in the log. Both `MALLARD_TEST_POSTGRES` tests pass, each on its own empty database.
 
 ## Follow-ups
+- [0120](../../issues/0120-sentry-compaction-threads-in-mallard.md): Sentry compaction uses all DuckDB threads inside mallard.
+- [0121](../../issues/0121-standalone-paths-left-in-side-crates.md): standalone paths left in the side crates.
+- [0016](../../issues/0016-per-side-docs-for-mallard.md) stays open: the per-side docs now have the right names, but some of their content (Helm values, ports) still describes the old binaries.
