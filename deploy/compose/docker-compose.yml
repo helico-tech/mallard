@@ -83,8 +83,9 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       additional_contexts:
-        sentry-ducklake: ../../../sentry-ducklake
-        otel-ducklake: ../../../otel-ducklake
+        # The pinned library checkouts (scripts/pin-libs.sh).
+        sentry-ducklake: ../../../sentry-ducklake/.claude/worktrees/obs-pin
+        otel-ducklake: ../../../otel-ducklake/.claude/worktrees/obs-pin
     depends_on:
       create-bucket:
         condition: service_completed_successfully

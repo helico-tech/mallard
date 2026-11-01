@@ -26,8 +26,9 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
 
 The stack runs obs-ducklake with a Postgres catalog and an S3 bucket
-(RustFS). Build the image from this repo's root with the two library repos
-next to it (`../sentry-ducklake`, `../otel-ducklake`).
+(RustFS). Run `scripts/pin-libs.sh` first: the image builds from the pinned
+library checkouts in the two library repos
+(`../sentry-ducklake`, `../otel-ducklake`, see ADR 0003).
 
 ## Quick start (local)
 

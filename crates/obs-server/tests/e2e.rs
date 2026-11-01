@@ -150,6 +150,9 @@ async fn errors_and_telemetry_share_one_lake() {
     assert_eq!(t.errors[0].span_id.as_deref(), Some(ids(7).1.as_str()));
     assert_eq!(t.logs[0].body, "payment 7 failed");
 
+    let ready = reqwest::get(format!("{}/readyz", srv.url)).await.unwrap();
+    assert_eq!(ready.status(), 200);
+
     // Unknown trace: empty, not an error.
     let none = client.trace_overview(&"f".repeat(32)).await.unwrap();
     assert!(none.spans.is_empty() && none.errors.is_empty() && none.logs.is_empty());

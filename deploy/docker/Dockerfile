@@ -2,12 +2,13 @@
 #
 # obs-ducklake container image.
 #
-# The server depends on the sentry-ducklake and otel-ducklake repos by path,
-# so the build needs them as extra build contexts. From this repo's root:
+# The server depends on the pinned sentry-ducklake and otel-ducklake
+# checkouts (scripts/pin-libs.sh), so the build needs them as extra build
+# contexts. From this repo's root:
 #
 #   docker build -f deploy/docker/Dockerfile \
-#     --build-context sentry-ducklake=../sentry-ducklake \
-#     --build-context otel-ducklake=../otel-ducklake \
+#     --build-context sentry-ducklake=../sentry-ducklake/.claude/worktrees/obs-pin \
+#     --build-context otel-ducklake=../otel-ducklake/.claude/worktrees/obs-pin \
 #     -t obs-ducklake .
 #
 # (docker compose passes them for you, see deploy/compose.)
@@ -27,10 +28,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential cmake pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
-# Same layout as on disk: path deps are ../sentry-ducklake and ../otel-ducklake.
+# Same layout as on disk, so the path deps in Cargo.toml resolve.
 WORKDIR /src/obs-ducklake
-COPY --from=sentry-ducklake --exclude=target --exclude=.git . /src/sentry-ducklake
-COPY --from=otel-ducklake --exclude=target --exclude=.git . /src/otel-ducklake
+COPY --from=sentry-ducklake --exclude=target --exclude=.git . /src/sentry-ducklake/.claude/worktrees/obs-pin
+COPY --from=otel-ducklake --exclude=target --exclude=.git . /src/otel-ducklake/.claude/worktrees/obs-pin
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \

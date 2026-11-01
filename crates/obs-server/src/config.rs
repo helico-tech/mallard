@@ -121,6 +121,9 @@ impl Config {
         c.public_url = format!("{}{SENTRY_PREFIX}", self.server.public_url.trim_end_matches('/'));
         c.api_token = (!self.server.api_tokens.is_empty()).then(|| self.server.api_tokens.join(","));
         c.catalog_wide_maintenance = false;
+        // Global DuckDB settings belong to the platform ([duckdb]); a per-
+        // library `SET threads` would also throttle otel on the shared DB.
+        c.maintenance_threads = 0;
         c
     }
 }
@@ -195,6 +198,7 @@ mod tests {
         assert_eq!(s.api_tokens(), vec!["a", "b"]);
         assert_eq!(s.retention_days, 30);
         assert!(!s.catalog_wide_maintenance);
+        assert_eq!(s.maintenance_threads, 0);
     }
 
     #[test]

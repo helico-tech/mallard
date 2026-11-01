@@ -14,7 +14,7 @@ pub mod config;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::{Router, routing::get};
+use axum::{Router, response::IntoResponse, routing::get};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -57,12 +57,14 @@ impl Platform {
 
     /// Everything served on `server.http_addr`.
     pub fn http_router(&self) -> Router {
+        // Ready = sentry's writer thread is alive (otel's health is static).
+        let sentry_ready = self.sentry.router();
         let mut r = Router::new()
             .nest(SENTRY_PREFIX, self.sentry.router())
             .nest(OTEL_PREFIX, self.otel.api_router())
             .merge(self.otel.otlp_http_router())
             .route("/healthz", get(|| async { "ok" }))
-            .route("/readyz", get(|| async { "ok" }));
+            .route("/readyz", get(move || readyz(sentry_ready.clone())));
         if let Some(h) = self.metrics.clone() {
             r = r.route("/metrics", get(move || std::future::ready(h.render())));
         }
@@ -107,6 +109,15 @@ impl Platform {
         r?;
         o?;
         Ok(())
+    }
+}
+
+async fn readyz(sentry: Router) -> axum::response::Response {
+    use tower::ServiceExt;
+    let req = axum::http::Request::get("/readyz").body(axum::body::Body::empty()).expect("static request");
+    match sentry.oneshot(req).await {
+        Ok(r) => r.into_response(),
+        Err(e) => match e {},
     }
 }
 

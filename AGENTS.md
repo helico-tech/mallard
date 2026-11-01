@@ -9,7 +9,8 @@ DuckLake catalog. Built on two libraries from sibling repos:
 
 This repo only glues them together and adds what spans both: one server
 binary, one CLI, one TUI, error ↔ trace correlation, Docker and Helm.
-Bugs or missing API in the libraries are fixed in their own repo, not
+The libraries are pinned to commits in `libs.lock` (`scripts/pin-libs.sh`,
+ADR 0003). Bugs or missing API in the libraries are fixed in their own repo, not
 worked around here.
 
 ## Build and test

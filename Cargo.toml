@@ -10,15 +10,16 @@ repository = "https://github.com/helico-tech/obs-ducklake"
 rust-version = "1.90"
 
 [workspace.dependencies]
-# Sibling libraries. Path deps until they have a git remote.
-sdl-server = { path = "../sentry-ducklake/crates/sdl-server" }
-sdl-client = { path = "../sentry-ducklake/crates/sdl-client" }
-sdl-types = { path = "../sentry-ducklake/crates/sdl-types" }
-sdl-cli = { path = "../sentry-ducklake/crates/sdl-cli" }
-odl-server = { path = "../otel-ducklake/crates/odl-server" }
-odl-api = { path = "../otel-ducklake/crates/odl-api" }
-odl-client = { path = "../otel-ducklake/crates/odl-client" }
-odl-cli = { path = "../otel-ducklake/crates/odl-cli" }
+# Sibling libraries, pinned: detached worktrees at a known commit (ADR 0003,
+# scripts/pin-libs.sh). Switch to git deps with `rev` once the repos are pushed.
+sdl-server = { path = "../sentry-ducklake/.claude/worktrees/obs-pin/crates/sdl-server" }
+sdl-client = { path = "../sentry-ducklake/.claude/worktrees/obs-pin/crates/sdl-client" }
+sdl-types = { path = "../sentry-ducklake/.claude/worktrees/obs-pin/crates/sdl-types" }
+sdl-cli = { path = "../sentry-ducklake/.claude/worktrees/obs-pin/crates/sdl-cli" }
+odl-server = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-server" }
+odl-api = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-api" }
+odl-client = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-client" }
+odl-cli = { path = "../otel-ducklake/.claude/worktrees/obs-pin/crates/odl-cli" }
 obs-client = { path = "crates/obs-client" }
 # Must stay identical to both libraries (ADR 0001).
 duckdb = { version = "=1.20000.1", features = ["bundled", "appender-arrow", "chrono", "json", "parquet"] }

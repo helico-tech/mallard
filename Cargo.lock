@@ -2610,6 +2610,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
@@ -3688,6 +3689,7 @@ dependencies = [
 name = "sdl-client"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "reqwest",
  "sdl-types",
  "serde",
