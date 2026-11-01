@@ -134,4 +134,4 @@ if you need zero loss ([ADR 0003](docs/adr/0003-ingest-durability.md)).
 
 ## License
 
-Apache-2.0.
+MIT OR Apache-2.0 (see the repository root).

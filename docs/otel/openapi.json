@@ -4,7 +4,7 @@
     "title": "otel-ducklake query API",
     "description": "Query traces, logs and metrics stored in DuckLake by otel-ducklake.",
     "license": {
-      "name": "Apache-2.0"
+      "name": "MIT OR Apache-2.0"
     },
     "version": "0.1.0"
   },

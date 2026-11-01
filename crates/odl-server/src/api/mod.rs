@@ -50,7 +50,7 @@ const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
     info(
         title = "otel-ducklake query API",
         description = "Query traces, logs and metrics stored in DuckLake by otel-ducklake.",
-        license(name = "Apache-2.0")
+        license(name = "MIT OR Apache-2.0")
     ),
     modifiers(&BearerAuth),
     tags(

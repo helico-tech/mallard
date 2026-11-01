@@ -91,4 +91,4 @@ not out; see [work/issues/0001](work/issues/0001-multi-replica-caches.md)).
 Errors only: transactions, sessions, replays and attachments are accepted
 and dropped. No alerting, no user accounts (one API token), no PII scrubbing.
 
-License: Apache-2.0 is set in the crate metadata as a placeholder; confirm before publishing.
+License: MIT OR Apache-2.0 (see the repository root).
