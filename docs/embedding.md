@@ -73,6 +73,16 @@ let mut otel = odl_cli::tui::Embedded::new(client);
 // in your loop: otel.tick(); terminal.draw(|f| otel.draw(f, area)); match otel.handle_event(&ev) { .. }
 ```
 
+Requirements and hooks:
+
+- Call `tick()` and `handle_event()` from inside a tokio runtime (loads run
+  as tokio tasks); without one the TUI shows "no tokio runtime". Don't block
+  the runtime thread waiting for terminal events: use crossterm's
+  `EventStream` or a separate thread.
+- `Embedded::set_errors_enabled(true)` shows the `e errors` hint when your
+  host handles `Outcome::OpenErrors` (off by default).
+- Keys with Ctrl/Alt modifiers (except Ctrl-C) and F1/F2 return `Ignored`.
+
 F1 and F2 are left to the host. `Outcome::OpenErrors(trace_id)` signals that
 the user asked for errors linked to a trace (for example in an error
 tracker); `Embedded::open_trace(id)` jumps to a trace.

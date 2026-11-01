@@ -160,11 +160,14 @@ fn fixture() -> Embedded {
     e.logs.loaded = true;
     e.logs.requested = true;
     e.logs.refreshed = Some(Instant::now());
-    e.logs_tail_loaded(vec![
-        log(1, 9, "order accepted", Some(TID)),
-        log(2, 13, "slow request took 900ms", None),
-        log(3, 17, "payment declined: card expired", Some(TID)),
-    ]);
+    e.logs_tail_loaded(
+        vec![
+            log(1, 9, "order accepted", Some(TID)),
+            log(2, 13, "slow request took 900ms", None),
+            log(3, 17, "payment declined: card expired", Some(TID)),
+        ],
+        false,
+    );
     e.metrics.set_list(vec![MetricInfo {
         name: "app.request.duration".into(),
         metric_type: "histogram".into(),
@@ -401,16 +404,24 @@ fn logs_render_and_keys() {
     }
     // follow stays at the end when new records arrive
     assert_eq!(e.logs.sel.selected(), Some(2));
-    e.logs_tail_loaded(vec![
-        log(4, 9, "new one", None),
-        log(3, 17, "payment declined: card expired", Some(TID)),
-    ]);
-    assert_eq!(e.logs.records.len(), 4, "duplicate dropped");
+    // (duplicates are removed by LogTail; see odl-client tests)
+    e.logs_tail_loaded(vec![log(4, 9, "new one", None)], false);
+    assert_eq!(e.logs.records.len(), 4);
     assert_eq!(e.logs.sel.selected(), Some(3));
+    // a truncated poll inserts a visible gap marker before the new records
+    e.logs_tail_loaded(vec![log(9, 9, "after a burst", None)], true);
+    assert_eq!(e.logs.records.len(), 6);
+    assert!(crate::tui::views::logs::is_gap(&e.logs.records[4]));
+    assert!(render(&mut e, 160, 40).contains("older records skipped"));
+    assert_eq!(e.logs.sel.selected(), Some(5));
     // pause
     e.handle_event(&ch(' '));
     assert!(!e.logs.follow);
-    // details popup
+    // details popup (up past the new record and the gap marker)
+    e.handle_event(&ch('k'));
+    e.handle_event(&key(KeyCode::Enter));
+    assert!(e.logs.detail.is_none(), "no details for the gap marker");
+    e.handle_event(&ch('k'));
     e.handle_event(&ch('k'));
     e.handle_event(&key(KeyCode::Enter));
     let s = render(&mut e, 160, 40);

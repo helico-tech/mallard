@@ -108,6 +108,21 @@ fn unit_fmt(unit: &str) -> fn(f64) -> String {
     }
 }
 
+/// Value formatter for a chart: counts and rates are plain numbers whatever
+/// the metric unit; unit "1" is a percentage only when all values are <= 1.
+pub(crate) fn chart_fmt(unit: &str, agg: &str, max_abs: f64) -> Box<dyn Fn(f64) -> String> {
+    match agg {
+        "count" | "increase" => return Box::new(compact),
+        "rate" => return Box::new(|v| format!("{}/s", compact(v))),
+        _ => {}
+    }
+    match unit {
+        "1" if max_abs <= 1.0 => Box::new(|v| format!("{:.1}%", v * 100.0)),
+        "1" => Box::new(compact),
+        other => Box::new(unit_fmt(other)),
+    }
+}
+
 impl Embedded {
     pub(crate) fn refresh_metrics(&mut self, force: bool) {
         if let Some(c) = &mut self.metrics.chart {
@@ -122,8 +137,9 @@ impl Embedded {
                 ..Default::default()
             };
             let cl = self.client.clone();
-            if self.loader.spawn(
+            if self.loader.load(
                 Kind::MetricQuery,
+                force,
                 async move { cl.metric_query(&q).await },
                 Data::MetricQuery,
             ) {
@@ -139,8 +155,9 @@ impl Embedded {
             ..Default::default()
         };
         let c = self.client.clone();
-        if self.loader.spawn(
+        if self.loader.load(
             Kind::MetricList,
+            force,
             async move { c.metrics(&q).await },
             Data::MetricList,
         ) {
@@ -392,7 +409,15 @@ impl Embedded {
             widgets::placeholder(f, chart_area, &msg, style);
             return;
         }
-        let fmt = unit_fmt(&unit);
+        let max_abs = c
+            .result
+            .iter()
+            .flat_map(|r| &r.series)
+            .flat_map(|s| &s.points)
+            .map(|p| p.value.abs())
+            .filter(|v| v.is_finite())
+            .fold(0.0, f64::max);
+        let fmt = chart_fmt(&unit, c.aggs[c.agg], max_abs);
         let label = |s: &MetricSeries| -> String {
             if s.labels.is_empty() {
                 c.aggs[c.agg].to_string()
@@ -423,7 +448,7 @@ impl Embedded {
         let chart_block = ratatui::widgets::Block::default();
         let now = chrono::Utc::now().timestamp() as f64;
         let bounds = Some([now - window_secs, now]);
-        widgets::time_chart(f, chart_area, chart_block, &shown, bounds, fmt);
+        widgets::time_chart(f, chart_area, chart_block, &shown, bounds, &fmt);
         if legend_h > 0 {
             let rows: Vec<Row> = series
                 .iter()

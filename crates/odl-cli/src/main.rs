@@ -3,7 +3,6 @@
 use clap::Parser;
 use odl_cli::{Cmd, Ctx, Output, run};
 use odl_client::Client;
-use owo_colors::OwoColorize;
 
 #[derive(Parser)]
 #[command(
@@ -43,7 +42,7 @@ async fn main() {
     }
     .await;
     if let Err(e) = result {
-        eprintln!("{} {e:#}", "error:".red().bold());
+        eprintln!("{} {e:#}", odl_cli::fmt::paint_err("error:"));
         std::process::exit(1);
     }
 }

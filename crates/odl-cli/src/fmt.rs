@@ -1,12 +1,69 @@
 //! Human-friendly output for the CLI.
 
-use std::collections::HashMap;
+use std::{
+    io::{IsTerminal, Write},
+    sync::OnceLock,
+};
 
 use comfy_table::{
     Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED,
 };
 use odl_client::api::*;
 use owo_colors::OwoColorize;
+
+/// Whether stdout gets ANSI colors: only on a terminal, without `NO_COLOR`,
+/// and not for `TERM=dumb`.
+pub fn color() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| {
+        std::io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+            && std::env::var("TERM").map_or(true, |t| t != "dumb")
+    })
+}
+
+/// Remove ANSI escape sequences (CSI `ESC [ ... final`).
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' && it.peek() == Some(&'[') {
+            it.next();
+            for d in it.by_ref() {
+                if ('@'..='~').contains(&d) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Write one line to stdout (used by `outln!`).
+pub fn emit(line: &str) {
+    let text = if color() {
+        line.to_string()
+    } else {
+        strip_ansi(line)
+    };
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = writeln!(out, "{text}")
+        && e.kind() == std::io::ErrorKind::BrokenPipe
+    {
+        std::process::exit(0);
+    }
+}
+
+/// A red, bold label for stderr messages (plain when stderr is no terminal).
+pub fn paint_err(s: &str) -> String {
+    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        s.red().bold().to_string()
+    } else {
+        s.to_string()
+    }
+}
 
 fn table(headers: &[&str]) -> Table {
     let mut t = Table::new();
@@ -87,13 +144,13 @@ fn red_cells(r: &RedStats) -> Vec<Cell> {
 }
 
 pub fn print_stats(s: &Stats, url: &str) {
-    println!(
+    outln!(
         "{} {} {}",
         "otel-ducklake".bold(),
         s.version,
         format!("({url})").dimmed()
     );
-    println!(
+    outln!(
         "uptime {}   catalog {}   data {}   snapshot {}",
         humanize_secs(s.uptime_secs),
         s.storage.catalog_type.cyan(),
@@ -110,9 +167,9 @@ pub fn print_stats(s: &Stats, url: &str) {
             num(sig.rejected as f64),
         ]);
     }
-    println!("\n{}\n{t}", "Ingest".bold());
+    outln!("\n{}\n{t}", "Ingest".bold());
     let fill = i.buffered_bytes as f64 / i.max_buffer_bytes.max(1) as f64;
-    println!(
+    outln!(
         "buffer {} rows / {} of {} ({:.0}%)   flushes {}   flush errors {}",
         i.buffered_rows,
         bytes(i.buffered_bytes as f64),
@@ -126,7 +183,7 @@ pub fn print_stats(s: &Stats, url: &str) {
         }
     );
     if let Some(f) = &i.last_flush {
-        println!(
+        outln!(
             "last flush {} rows in {} at {}",
             f.rows,
             ms(f.duration_ms),
@@ -134,7 +191,7 @@ pub fn print_stats(s: &Stats, url: &str) {
         );
     }
     if let Some(e) = &i.last_flush_error {
-        println!("{} {e}", "last flush error:".red());
+        outln!("{} {e}", "last flush error:".red());
     }
     let mut t = table(&["table", "rows", "inlined", "files", "size"]);
     for tb in &s.storage.tables {
@@ -146,14 +203,14 @@ pub fn print_stats(s: &Stats, url: &str) {
             Cell::new(bytes(tb.bytes as f64)).set_alignment(CellAlignment::Right),
         ]);
     }
-    println!("\n{}\n{t}", "Storage".bold());
+    outln!("\n{}\n{t}", "Storage".bold());
     if let Some(m) = &s.storage.last_maintenance {
         let status = if m.ok {
             "ok".green().to_string()
         } else {
             "failed".red().to_string()
         };
-        println!(
+        outln!(
             "last maintenance: {} {status} at {} — {}",
             m.task,
             m.at.format("%H:%M:%S"),
@@ -173,7 +230,7 @@ fn humanize_secs(s: u64) -> String {
 
 pub fn print_services(v: &[ServiceSummary]) {
     if v.is_empty() {
-        println!("no spans in this window");
+        outln!("no spans in this window");
         return;
     }
     let mut t = table(&["service", "spans", "rate", "errors", "p50", "p95", "p99"]);
@@ -182,12 +239,12 @@ pub fn print_services(v: &[ServiceSummary]) {
         row.extend(red_cells(&s.red));
         t.add_row(row);
     }
-    println!("{t}");
+    outln!("{t}");
 }
 
 pub fn print_operations(v: &[OperationSummary]) {
     if v.is_empty() {
-        println!("no spans in this window");
+        outln!("no spans in this window");
         return;
     }
     let mut t = table(&[
@@ -210,12 +267,12 @@ pub fn print_operations(v: &[OperationSummary]) {
         row.extend(red_cells(&s.red));
         t.add_row(row);
     }
-    println!("{t}");
+    outln!("{t}");
 }
 
 pub fn print_traces(v: &[TraceSummary]) {
     if v.is_empty() {
-        println!("no matching traces");
+        outln!("no matching traces");
         return;
     }
     let mut t = table(&[
@@ -241,20 +298,29 @@ pub fn print_traces(v: &[TraceSummary]) {
             Cell::new(tr.services.join(", ")),
         ]);
     }
-    println!("{t}");
+    outln!("{t}");
 }
 
-/// Waterfall: indented span tree with a timeline bar.
+/// Waterfall: indented span tree with a timeline bar. Uses the TUI's layout,
+/// so spans with missing parents or parent loops are shown too.
 pub fn print_trace(t: &Trace, show_attrs: bool) {
-    let start = t.spans.iter().map(|s| s.start_time).min().unwrap();
-    let end_ns = t
-        .spans
-        .iter()
-        .map(|s| (s.start_time - start).num_nanoseconds().unwrap_or(0) + s.duration_ns)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    println!(
+    for l in trace_lines(t, show_attrs) {
+        emit(&l);
+    }
+}
+
+/// The lines `print_trace` prints.
+pub fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    macro_rules! outln {
+        ($($arg:tt)*) => { out.push(format!($($arg)*)) };
+    }
+    let Some(start) = t.spans.iter().map(|s| s.start_time).min() else {
+        outln!("{} {}  (no spans)", "trace".bold(), t.trace_id);
+        return out;
+    };
+    let (rows, end_ns) = crate::tui::waterfall::layout(&t.spans);
+    outln!(
         "{} {}  {}  {} spans  {}",
         "trace".bold(),
         t.trace_id,
@@ -262,30 +328,15 @@ pub fn print_trace(t: &Trace, show_attrs: bool) {
         t.spans.len(),
         ms(end_ns as f64 / 1e6)
     );
-    let ids: std::collections::HashSet<&str> = t.spans.iter().map(|s| s.span_id.as_str()).collect();
-    let mut children: HashMap<Option<&str>, Vec<&Span>> = HashMap::new();
-    for s in &t.spans {
-        // Spans whose parent is missing are shown as roots.
-        let parent = s.parent_span_id.as_deref().filter(|p| ids.contains(p));
-        children.entry(parent).or_default().push(s);
-    }
     let width = 40usize;
-    fn walk(
-        s: &Span,
-        depth: usize,
-        children: &HashMap<Option<&str>, Vec<&Span>>,
-        start: chrono::DateTime<chrono::Utc>,
-        end_ns: i64,
-        width: usize,
-        show_attrs: bool,
-    ) {
-        let off = (s.start_time - start).num_nanoseconds().unwrap_or(0);
-        let a = (off as f64 / end_ns as f64 * width as f64) as usize;
-        let len = ((s.duration_ns as f64 / end_ns as f64 * width as f64).ceil() as usize)
-            .clamp(1, width - a.min(width - 1));
+    for row in &rows {
+        let s = &t.spans[row.span];
+        let (a, len) =
+            crate::tui::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
+        let (a, len) = (a as usize, len as usize);
         let bar = format!(
             "{}{}{}",
-            " ".repeat(a.min(width - 1)),
+            " ".repeat(a),
             "█".repeat(len),
             " ".repeat(width.saturating_sub(a + len))
         );
@@ -294,42 +345,29 @@ pub fn print_trace(t: &Trace, show_attrs: bool) {
         } else {
             bar.cyan().to_string()
         };
-        let label = format!("{}{} {}", "  ".repeat(depth), s.service_name.bold(), s.name);
+        let label = format!("{}{} {}", row.prefix, s.service_name.bold(), s.name);
         let err = if s.status_code == "ERROR" {
             format!(" {}", "✗".red())
         } else {
             String::new()
         };
-        println!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6));
+        outln!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6));
         if show_attrs {
+            let indent = " ".repeat(row.depth * 2 + 2);
             for (k, v) in &s.attributes {
-                println!(
-                    "{}  {}{} = {}",
-                    " ".repeat(width + 10),
-                    "  ".repeat(depth + 1),
-                    k.dimmed(),
-                    v
-                );
+                outln!("{}  {indent}{} = {}", " ".repeat(width + 10), k.dimmed(), v);
             }
             for e in &s.events {
-                println!(
-                    "{}  {}• {} {}",
+                outln!(
+                    "{}  {indent}• {} {}",
                     " ".repeat(width + 10),
-                    "  ".repeat(depth + 1),
                     e.name.yellow(),
                     fmt_attrs(&e.attributes).dimmed()
                 );
             }
         }
-        if let Some(kids) = children.get(&Some(s.span_id.as_str())) {
-            for k in kids {
-                walk(k, depth + 1, children, start, end_ns, width, show_attrs);
-            }
-        }
     }
-    for root in children.get(&None).into_iter().flatten() {
-        walk(root, 0, &children, start, end_ns, width, show_attrs);
-    }
+    out
 }
 
 fn fmt_attrs(a: &Attributes) -> String {
@@ -370,7 +408,7 @@ pub fn print_log(r: &LogRecord) {
         .as_deref()
         .map(|t| format!(" trace={}", &t[..8.min(t.len())]))
         .unwrap_or_default();
-    println!(
+    outln!(
         "{} {} {} {}{}",
         r.time.format("%m-%d %H:%M:%S%.3f").dimmed(),
         severity_label(r.severity_number, &r.severity_text),
@@ -382,7 +420,7 @@ pub fn print_log(r: &LogRecord) {
 
 pub fn print_metrics(v: &[MetricInfo]) {
     if v.is_empty() {
-        println!("no metrics in this window");
+        outln!("no metrics in this window");
         return;
     }
     let mut t = table(&[
@@ -413,7 +451,7 @@ pub fn print_metrics(v: &[MetricInfo]) {
             Cell::new(m.last_seen.format("%H:%M:%S")),
         ]);
     }
-    println!("{t}");
+    outln!("{t}");
 }
 
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -434,7 +472,7 @@ pub fn sparkline(vals: &[f64]) -> String {
 }
 
 pub fn print_metric(r: &MetricQueryResult) {
-    println!(
+    outln!(
         "{} {}  agg={}  step={}s  unit={}",
         r.name.bold(),
         r.metric_type.dimmed(),
@@ -443,7 +481,7 @@ pub fn print_metric(r: &MetricQueryResult) {
         if r.unit.is_empty() { "-" } else { &r.unit }
     );
     if r.series.is_empty() {
-        println!("no data");
+        outln!("no data");
         return;
     }
     let mut t = table(&["series", "last", "min", "avg", "max", "trend"]);
@@ -470,7 +508,7 @@ pub fn print_metric(r: &MetricQueryResult) {
             Cell::new(sparkline(&vals[vals.len().saturating_sub(60)..])).fg(Color::Cyan),
         ]);
     }
-    println!("{t}");
+    outln!("{t}");
 }
 
 pub fn print_sql(r: &SqlResponse) {
@@ -484,8 +522,8 @@ pub fn print_sql(r: &SqlResponse) {
             other => Cell::new(other.to_string()),
         }));
     }
-    println!("{t}");
-    println!(
+    outln!("{t}");
+    outln!(
         "{}",
         format!(
             "{} rows{} in {}",

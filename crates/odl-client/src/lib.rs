@@ -7,7 +7,7 @@
 //! # Ok(()) }
 //! ```
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
 pub use odl_api as api;
@@ -157,18 +157,29 @@ impl Client {
 
 /// Follows new log records ("tail -f") by polling.
 ///
-/// Each poll asks for the newest records since the last one seen (minus a
-/// look-back, because records become visible only after the server's flush
-/// interval and may arrive late) and returns those not returned before,
-/// oldest first. When more than `limit` records arrive between two polls,
-/// only the newest `limit` are returned: a tail shows what is happening now.
+/// Records become visible only after the server's flush interval and may
+/// arrive late, so each poll looks back a little (`lookback`, default 30 s)
+/// and drops what it returned before. The window of each poll is relative to
+/// the server's clock (`since`), so client clock skew does not matter and the
+/// window stays small even when nothing matches for a long time.
+///
+/// When more than `limit` records arrive between two polls only the newest
+/// `limit` are returned (a tail shows what is happening now);
+/// [`LogTail::last_poll_truncated`] then reports that some may be missing.
 pub struct LogTail {
     client: Client,
     query: LogQuery,
     lookback: TimeDelta,
-    cursor: DateTime<Utc>,
-    seen: HashSet<(i64, u64)>,
+    /// Start of the first poll's window.
+    start: DateTime<Utc>,
+    /// When the last successful poll started (client clock, monotonic).
+    last_poll: Option<std::time::Instant>,
+    /// Records returned so far, counted per identity, for recent times.
+    seen: HashMap<(i64, u64), usize>,
+    truncated: bool,
 }
+
+const MAX_SEEN: usize = 200_000;
 
 impl LogTail {
     /// Start tailing from `start` (e.g. now minus a few minutes). Filters in
@@ -179,8 +190,10 @@ impl LogTail {
             client,
             query,
             lookback: TimeDelta::seconds(30),
-            cursor: start,
-            seen: HashSet::new(),
+            start,
+            last_poll: None,
+            seen: HashMap::new(),
+            truncated: false,
         }
     }
 
@@ -190,41 +203,104 @@ impl LogTail {
         self
     }
 
+    /// Treat these records as already returned (e.g. an initial page the
+    /// caller loaded itself), so `poll` does not repeat them.
+    pub fn mark_seen(&mut self, records: &[LogRecord]) {
+        let mut counts: HashMap<(i64, u64), usize> = HashMap::new();
+        for r in records {
+            *counts.entry(key(r)).or_default() += 1;
+        }
+        for (k, n) in counts {
+            let e = self.seen.entry(k).or_default();
+            *e = (*e).max(n);
+        }
+    }
+
+    /// True when the last poll returned a full page: older new records may
+    /// have been skipped.
+    pub fn last_poll_truncated(&self) -> bool {
+        self.truncated
+    }
+
     /// Fetch records not returned before, oldest first.
     pub async fn poll(&mut self) -> Result<Vec<LogRecord>> {
+        let started = std::time::Instant::now();
         let mut q = self.query.clone();
-        q.from = Some(self.cursor - self.lookback);
         q.to = None;
-        q.since = None;
+        match self.last_poll {
+            // Relative to the server's now: everything since the previous
+            // poll, plus the look-back for late records.
+            Some(prev) => {
+                let back = prev.elapsed()
+                    + self.lookback.to_std().unwrap_or_default()
+                    + Duration::from_secs(1);
+                q.from = None;
+                q.since = Some(format!("{}ms", back.as_millis()));
+            }
+            None => {
+                q.from = Some(self.start - self.lookback);
+                q.since = None;
+            }
+        }
         q.order = Some("desc".into());
-        q.limit = Some(q.limit.unwrap_or(500).clamp(1, 5000));
-        let records = self.client.logs(&q).await?;
+        let limit = q.limit.unwrap_or(500).clamp(1, 5000);
+        q.limit = Some(limit);
+        let mut records = self.client.logs(&q).await?;
+        self.truncated = records.len() as u32 >= limit;
+        records.reverse();
+        // Multiset difference: a record identical to one seen before is new
+        // when it occurs more often in this response than seen so far.
+        let mut in_response: HashMap<(i64, u64), usize> = HashMap::new();
         let mut out = Vec::new();
         for r in records {
-            let key = (r.time.timestamp_micros(), fingerprint(&r));
-            if self.seen.insert(key) {
-                if r.time > self.cursor {
-                    self.cursor = r.time;
-                }
+            let k = key(&r);
+            let n = in_response.entry(k).or_default();
+            *n += 1;
+            if *n > self.seen.get(&k).copied().unwrap_or(0) {
                 out.push(r);
             }
         }
-        out.reverse();
-        // Forget keys older than the look-back window.
-        let horizon = (self.cursor - self.lookback - TimeDelta::seconds(1)).timestamp_micros();
-        self.seen.retain(|(t, _)| *t >= horizon);
+        for (k, n) in in_response {
+            let e = self.seen.entry(k).or_default();
+            *e = (*e).max(n);
+        }
+        self.last_poll = Some(started);
+        // Forget identities far older than any future poll window.
+        if let Some(newest) = self.seen.keys().map(|k| k.0).max() {
+            let horizon = newest
+                - (self.lookback * 2 + TimeDelta::minutes(5))
+                    .num_microseconds()
+                    .unwrap_or(i64::MAX);
+            self.seen.retain(|k, _| k.0 >= horizon);
+        }
+        if self.seen.len() > MAX_SEEN {
+            let mut times: Vec<i64> = self.seen.keys().map(|k| k.0).collect();
+            times.sort_unstable();
+            let cut = times[times.len() - MAX_SEEN / 2];
+            self.seen.retain(|k, _| k.0 >= cut);
+        }
         Ok(out)
     }
+}
+
+/// Identity of a log record: time plus a hash of its content.
+fn key(r: &LogRecord) -> (i64, u64) {
+    (r.time.timestamp_micros(), fingerprint(r))
 }
 
 fn fingerprint(r: &LogRecord) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    r.observed_time.timestamp_micros().hash(&mut h);
     r.service_name.hash(&mut h);
     r.body.hash(&mut h);
+    r.trace_id.hash(&mut h);
     r.span_id.hash(&mut h);
     r.severity_number.hash(&mut h);
+    r.severity_text.hash(&mut h);
+    r.event_name.hash(&mut h);
     r.attributes.hash(&mut h);
+    r.resource_attributes.hash(&mut h);
     h.finish()
 }
 

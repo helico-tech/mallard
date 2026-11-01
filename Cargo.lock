@@ -2121,12 +2121,14 @@ dependencies = [
  "clap",
  "comfy-table",
  "crossterm",
+ "futures-util",
  "odl-client",
  "owo-colors",
  "ratatui",
  "serde",
  "serde_json",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]
