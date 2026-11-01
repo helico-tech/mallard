@@ -7,13 +7,13 @@
 //! string value is replaced by environment variable NAME
 //! (see [`mallard_common::config`]). Unknown keys are errors.
 //!
-//! `[server]`, `[storage]` and `[duckdb]` are mallard's. `[otel]` and
-//! `[sentry]` hold only the settings each side owns.
+//! `[server]`, `[storage]`, `[duckdb]` and `[bridge]` are mallard's.
+//! `[otel]` and `[sentry]` hold only the settings each side owns.
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result};
-use mallard_common::LogFormat;
+use mallard_common::{LogFormat, duration};
 use mallard_duck::{DuckDbConfig, StorageConfig};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,54 @@ pub struct Config {
     pub duckdb: DuckDbConfig,
     pub otel: OtelConfig,
     pub sentry: sdl_server::Config,
+    pub bridge: BridgeConfig,
+}
+
+/// `[bridge]`: what crosses between the two sides (docs/adr/0009-bridge.md).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BridgeConfig {
+    /// Store Sentry transactions and their spans as OTel traces.
+    pub transactions: bool,
+    /// Turn exceptions recorded by OTel SDKs (span events, logs) into
+    /// Sentry events and issues.
+    pub exceptions: bool,
+    /// Project slug for OTel exceptions whose `service.name` matches no
+    /// project (created when missing). Empty: one new project per service.
+    pub default_project: String,
+    /// How long an OTel exception waits for a Sentry SDK event of the same
+    /// trace + span before it becomes an event itself (dedupe).
+    #[serde(with = "duration")]
+    pub dedupe_window: Duration,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        BridgeConfig {
+            transactions: true,
+            exceptions: true,
+            default_project: String::new(),
+            dedupe_window: Duration::from_secs(10),
+        }
+    }
+}
+
+impl BridgeConfig {
+    pub fn validate(&self) -> Result<()> {
+        let p = &self.default_project;
+        anyhow::ensure!(
+            p.is_empty()
+                || (p.len() <= 64
+                    && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+                    && !p.bytes().all(|b| b.is_ascii_digit())),
+            "bridge.default_project ({p:?}) must be a project slug: 1-64 chars of a-z, 0-9, - or _, not only digits"
+        );
+        anyhow::ensure!(
+            self.dedupe_window <= Duration::from_secs(600),
+            "bridge.dedupe_window must be at most 10m (exceptions wait in memory)"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +164,7 @@ impl Config {
         self.otel_config().validate().context("otel")?;
         self.sentry.validate().context("sentry")?;
         self.sentry_host().validate().context("server.public_url")?;
+        self.bridge.validate()?;
         let artifacts = &self.storage.artifacts_path;
         anyhow::ensure!(
             artifacts.is_empty() || !is_inside(artifacts, &self.storage.data_path),
@@ -304,6 +353,31 @@ mod tests {
         assert!(with("s3://bucket/lake").is_err());
         with("s3://bucket/lake-artifacts").unwrap();
         with("s3://bucket/artifacts").unwrap();
+    }
+
+    #[test]
+    fn bridge_is_on_by_default_and_checked() {
+        let cfg = load("", TOKEN).unwrap();
+        assert!(cfg.bridge.transactions && cfg.bridge.exceptions);
+        assert_eq!(cfg.bridge.dedupe_window, Duration::from_secs(10));
+        let cfg = load(
+            "[bridge]\ntransactions = false\nexceptions = false\ndefault_project = \"otel\"\ndedupe_window = \"30s\"",
+            TOKEN,
+        )
+        .unwrap();
+        assert!(!cfg.bridge.transactions && !cfg.bridge.exceptions);
+        assert_eq!(cfg.bridge.default_project, "otel");
+        assert_eq!(cfg.bridge.dedupe_window, Duration::from_secs(30));
+        let cfg = load("", &[TOKEN[0], ("MALLARD_BRIDGE__EXCEPTIONS", "false")]).unwrap();
+        assert!(!cfg.bridge.exceptions, "env override");
+        for bad in [
+            "[bridge]\ntypo = 1",
+            "[bridge]\ndefault_project = \"My Project\"",
+            "[bridge]\ndefault_project = \"123\"",
+            "[bridge]\ndedupe_window = \"1h\"",
+        ] {
+            assert!(load(bad, TOKEN).is_err(), "{bad}");
+        }
     }
 
     #[test]
