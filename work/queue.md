@@ -5,9 +5,9 @@
 3. [0002/07 split server and CLI/TUI](epics/0002-mallard/07-split-server-and-cli.md)
 4. [issue 0004 agent CLI: the P1 list](issues/0004-agent-cli-p1.md)
 
-5. [0002/03 Sentry transactions as traces](epics/0002-mallard/03-sentry-transactions-as-traces.md)
-6. [0002/04 OTel exceptions as issues](epics/0002-mallard/04-otel-exceptions-as-issues.md)
-7. [0002/05 errors in trace views](epics/0002-mallard/05-errors-in-trace-views.md)
+5. [0002/05 errors in trace views](epics/0002-mallard/05-errors-in-trace-views.md)
+6. [issue 0005 spans stored twice with Sentry tracing + OTLP](issues/0005-duplicate-spans-sentry-and-otlp.md)
+7. [issue 0006 JS e2e: @sentry/node tracing through mallard](issues/0006-e2e-sentry-node-tracing.md)
 8. [issue 0002 Helm on a cluster](issues/0002-helm-on-a-cluster.md)
 9. [sentry issue 0003 maintenance blocks writer](sentry/issues/0003-maintenance-blocks-writer.md)
 10. [sentry issue 0002 issue cardinality limits](sentry/issues/0002-issue-cardinality-limits.md)

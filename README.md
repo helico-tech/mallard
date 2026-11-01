@@ -12,6 +12,11 @@ CLI and terminal UI that talks to it over HTTP (no DuckDB inside).
 - **Together**: errors and spans share the trace id. `mallard trace <id>`
   shows the span tree with each error and log under the span it happened
   in; in the TUI, `x` jumps from an error to its trace and back.
+- **Either SDK is enough**: Sentry transactions are stored as traces, and
+  exceptions recorded by OpenTelemetry SDKs become Sentry issues (with
+  parsed stack traces for Python, Java, JS, Go, .NET and Rust). An error
+  sent through both SDKs is stored once. Switches: `[bridge]` in the
+  config ([ADR 0009](docs/adr/0009-bridge.md)).
 - **Cheap to run**: one process, Parquet on S3 (or local disk), catalog in
   a DuckDB file or Postgres. No Kafka, ClickHouse or Elasticsearch.
 

@@ -45,7 +45,8 @@ envelope protocol and are expected to work; they are not in the test suite.
 | Item type | Handling |
 |---|---|
 | `event` | stored (errors and messages) |
-| `transaction`, `span`, `profile`, `profile_chunk` | accepted, dropped |
+| `transaction` | standalone: accepted, dropped; in mallard: stored as OTel spans (ADR 0009) |
+| `span`, `profile`, `profile_chunk` | accepted, dropped |
 | `session`, `sessions` | accepted, dropped (no release health) |
 | `attachment`, `replay_event`, `replay_recording`, `replay_video` | accepted, dropped |
 | `client_report`, `check_in`, `log`, `otel_log`, `statsd`, `feedback`, `user_report` | accepted, dropped |

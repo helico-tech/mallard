@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 created: 2026-11-01
 ---
 # 03 — Sentry transactions and spans become traces
@@ -28,5 +28,23 @@ Sentry SDK performance data (transaction events with spans) is stored as OTel sp
   `crates/mallard-server/tests/bridge.rs`.
 
 ## Progress log
+- 2026-11-01: sdl-server `TransactionSink` (+ `/store/` transactions);
+  odl-server `Server::ingest_traces`; `mallard-server/src/bridge/
+  transaction.rs` with unit tests on a @sentry/node 8 transaction;
+  `tests/bridge.rs::sentry_transactions_become_traces` (spans via the otel
+  API, the error under the db span) and the off switch.
+- Choices: service = `service.name` tag, else project slug. Not
+  `server_name` (Sentry SDKs set it to the host name; it becomes
+  `host.name`) and not `contexts.otel.resource` (@sentry/node always says
+  `node`). `data["otel.kind"]` wins over the `op` mapping. Float
+  timestamps are rounded to µs.
+- Back-pressure: at most 1024 conversions in flight; busy / OTel buffer
+  full / invalid → dropped, `mallard_bridge_transactions_total{result}`.
+- Docs: ADR 0009 (mapping table), architecture, AGENTS, README,
+  compatibility, example config, Helm values/configmap.
 
 ## Follow-ups
+- [issue 0005](../../issues/0005-duplicate-spans-sentry-and-otlp.md):
+  spans stored twice when an app sends Sentry tracing and OTLP.
+- [issue 0006](../../issues/0006-e2e-sentry-node-tracing.md): a real
+  @sentry/node tracing test in the JS e2e suite (needs a mallard harness).
