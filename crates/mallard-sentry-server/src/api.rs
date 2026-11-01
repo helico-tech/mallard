@@ -158,7 +158,7 @@ impl AppState {
     /// All projects, read now. Unlike the list behind `/v1/projects`, this fails
     /// when the catalog cannot be read.
     pub(crate) async fn all_projects(&self) -> Result<Vec<Project>, ApiErr> {
-        self.db.load_projects().await?;
+        self.db.load_projects(LOOKUP_TIMEOUT).await?.ok_or_else(|| timeout(LOOKUP_TIMEOUT))?;
         self.db.caches.projects().into_iter().map(|p| to_project(self, p)).collect()
     }
 
