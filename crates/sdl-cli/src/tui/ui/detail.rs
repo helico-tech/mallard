@@ -162,7 +162,7 @@ fn render_overview(f: &mut Frame, area: Rect, d: &mut Detail, now: chrono::DateT
             }
         }
         if let Some(t) = &e.summary.trace_id {
-            left.push(kv_line("Trace", Span::styled(format!("{t}  (t: open)"), Style::new().fg(th::ACCENT2))));
+            left.push(kv_line("Trace", Span::styled(format!("{t}  (x: open trace)"), Style::new().fg(th::ACCENT2))));
         }
         for (k, v) in &d.contexts {
             left.push(kv_line(k, txt(v.clone())));

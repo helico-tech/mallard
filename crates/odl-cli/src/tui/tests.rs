@@ -225,7 +225,7 @@ fn overview_renders() {
     all_sizes(&mut e);
     let s = render(&mut e, 160, 48);
     for needle in [
-        "otel-ducklake",
+        "◆ telemetry",
         "Overview",
         "REQUESTS",
         "ERRORS",

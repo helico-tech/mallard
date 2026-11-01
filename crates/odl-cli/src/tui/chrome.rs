@@ -44,7 +44,7 @@ impl Embedded {
         let right = Line::from(right);
         let rw = right.width() as u16;
         let left = Line::from(vec![
-            Span::styled(" ◆ otel-ducklake ", theme::accent()),
+            Span::styled(" ◆ telemetry ", theme::accent()),
             Span::styled("│ ", theme::faint()),
             Span::styled(
                 widgets::trunc(self.client.base_url(), area.width.saturating_sub(rw + 22) as usize),

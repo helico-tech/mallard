@@ -10,10 +10,36 @@ or object storage). One binary: server, CLI and terminal UI.
   OpenTelemetry SDK or Collector.
 - **Together**: errors and spans share the trace id. `mallard trace <id>`
   shows the span tree with each error and log under the span it happened
-  in; in the TUI, `t` on an error opens its trace and `e` on a trace shows
-  its errors.
+  in; in the TUI, `x` jumps from an error to its trace and back.
 - **Cheap to run**: one process, Parquet on S3 (or local disk), catalog in
   a DuckDB file or Postgres. No Kafka, ClickHouse or Elasticsearch.
+
+## The terminal UI
+
+`mallard tui`: errors on F1, telemetry on F2, and `x` jumps between them by
+trace id.
+
+**An issue, with the trace of the request that failed** — open an issue,
+press `x`, and the telemetry tab shows that request's spans with the failing
+one in red:
+
+<p>
+  <img src="docs/screenshots/errors-issue.png" alt="Issue detail: PaymentDeclinedError with tags, releases and the trace id" width="49%">
+  <img src="docs/screenshots/telemetry-trace.png" alt="Waterfall of the trace: web, checkout-api, inventory, postgres, payments; the payments span failed" width="49%">
+</p>
+
+**Errors and telemetry at a glance**:
+
+<p>
+  <img src="docs/screenshots/errors-issues.png" alt="Errors tab: unresolved issues with event and user counts" width="49%">
+  <img src="docs/screenshots/telemetry-overview.png" alt="Telemetry tab: request rate, error rate, p95 latency and per-service RED metrics" width="49%">
+</p>
+
+**Logs of the same request** (`l` on the trace):
+
+<img src="docs/screenshots/telemetry-logs.png" alt="Logs filtered to the trace: placing order, card declined" width="49%">
+
+Screenshots come from the real TUI and demo data (`scripts/screenshots.sh`).
 
 ## Quick start (Docker)
 

@@ -181,6 +181,10 @@ async fn event_loop(term: &mut ratatui::DefaultTerminal, host: &mut Host) -> Res
 }
 
 #[cfg(test)]
+#[path = "tui_screenshots.rs"]
+mod screenshots;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};

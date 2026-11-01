@@ -101,7 +101,7 @@ fn spinner(app: &App) -> &'static str {
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Block::new().style(Style::new().bg(th::PANEL)), area);
-    let mut left = vec![Span::styled(" ◆ sentry-ducklake ", th::tab_active()), Span::raw(" ")];
+    let mut left = vec![Span::styled(" ◆ errors ", th::tab_active()), Span::raw(" ")];
     match app.current_project() {
         Some(p) => {
             left.push(Span::styled(p.name.clone(), th::bold()));
@@ -262,7 +262,7 @@ mod tests {
         let mut app = loaded_app();
         let s = draw(&mut app, 140, 40);
         for want in [
-            "sentry-ducklake",
+            "◆ errors",
             "Web App",
             "queue",
             "12/20k",

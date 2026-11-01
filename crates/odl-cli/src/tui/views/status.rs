@@ -124,7 +124,7 @@ fn draw_storage(f: &mut Frame, area: Rect, s: &Stats) {
     let st = &s.storage;
     let block = widgets::panel_with(
         "Storage",
-        Line::from(format!(" otel-ducklake {} · up {} ", s.version, uptime(s.uptime_secs))).style(theme::dim()),
+        Line::from(format!(" telemetry {} · up {} ", s.version, uptime(s.uptime_secs))).style(theme::dim()),
         true,
     );
     let inner = block.inner(area);
