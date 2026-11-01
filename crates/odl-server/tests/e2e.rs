@@ -725,3 +725,34 @@ async fn grpc_roundtrip_and_auth_before_decoding() {
     grpc_task.await.unwrap().unwrap();
     bg.await.unwrap();
 }
+
+/// Every path in the OpenAPI document is served by the router.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_documented_route_is_served() {
+    let h = harness(None).await;
+    let spec = h.get_raw("/openapi.json", None).await.1;
+    let spec: serde_json::Value = serde_json::from_str(&spec).unwrap();
+    let paths = spec["paths"].as_object().unwrap();
+    assert!(paths.len() >= 12);
+    for (path, ops) in paths {
+        let uri = path.replace("{trace_id}", TRACE_HEX);
+        for method in ops.as_object().unwrap().keys() {
+            let req = Request::builder()
+                .method(method.to_uppercase().as_str())
+                .uri(&uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = h.api.clone().oneshot(req).await.unwrap();
+            let status = resp.status();
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            // A handler's 404 (e.g. unknown trace) has an error body; a missing route has none.
+            assert!(
+                status != StatusCode::NOT_FOUND || serde_json::from_slice::<ApiError>(&body).is_ok(),
+                "{method} {path} is documented but not served"
+            );
+            assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+        }
+    }
+    h.stop().await;
+}

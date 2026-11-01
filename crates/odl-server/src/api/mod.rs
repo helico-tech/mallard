@@ -146,9 +146,9 @@ fn window<Q: HasWindow>(st: &ApiState, q: &Q) -> Result<Window, ApiErr> {
     Ok(Window::resolve(&q.window(), HOUR, st.reader.max_window)?)
 }
 
-/// Build the API router and its OpenAPI document.
-pub fn router(state: Arc<ApiState>) -> (Router, utoipa::openapi::OpenApi) {
-    let (api, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+/// Routes behind the bearer-token check.
+fn protected_routes() -> OpenApiRouter<Arc<ApiState>> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(stats))
         .routes(routes!(services))
         .routes(routes!(operations))
@@ -160,35 +160,30 @@ pub fn router(state: Arc<ApiState>) -> (Router, utoipa::openapi::OpenApi) {
         .routes(routes!(list_metrics))
         .routes(routes!(query_metric))
         .routes(routes!(run_sql))
+}
+
+/// Routes without authentication.
+fn public_routes() -> OpenApiRouter<Arc<ApiState>> {
+    OpenApiRouter::new().routes(routes!(health))
+}
+
+/// Build the API router. The OpenAPI document is derived from the same
+/// route list, so the two cannot drift apart.
+pub fn router(state: Arc<ApiState>) -> Router {
+    let (api, openapi) = protected_routes()
         .layer(middleware::from_fn_with_state(state.clone(), auth))
-        .routes(routes!(health))
+        .merge(public_routes())
         .with_state(state)
         .split_for_parts();
     let spec_json = openapi.to_json().unwrap_or_default();
     let docs_html = scalar_html();
-    let router = api
-        .route("/openapi.json", get(move || async move { ([(header::CONTENT_TYPE, "application/json")], spec_json) }))
-        .route("/docs", get(move || async move { Html(docs_html) }));
-    (router, openapi)
+    api.route("/openapi.json", get(move || async move { ([(header::CONTENT_TYPE, "application/json")], spec_json) }))
+        .route("/docs", get(move || async move { Html(docs_html) }))
 }
 
 /// The OpenAPI document without building a server (for `otel-ducklake openapi`).
 pub fn openapi() -> utoipa::openapi::OpenApi {
-    OpenApiRouter::<Arc<ApiState>>::with_openapi(ApiDoc::openapi())
-        .routes(routes!(health))
-        .routes(routes!(stats))
-        .routes(routes!(services))
-        .routes(routes!(operations))
-        .routes(routes!(span_series))
-        .routes(routes!(search_traces))
-        .routes(routes!(get_trace))
-        .routes(routes!(search_logs))
-        .routes(routes!(log_series))
-        .routes(routes!(list_metrics))
-        .routes(routes!(query_metric))
-        .routes(routes!(run_sql))
-        .split_for_parts()
-        .1
+    protected_routes().merge(public_routes()).split_for_parts().1
 }
 
 /// API reference page. Loads the spec from a relative URL so it works when

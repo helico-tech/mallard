@@ -121,7 +121,7 @@ impl Server {
     /// Query API: `/api/v1/...`, `/openapi.json`, `/docs`. Paths are relative,
     /// so the router can be nested under a prefix.
     pub fn api_router(&self) -> Router {
-        api::router(self.api_state.clone()).0
+        api::router(self.api_state.clone())
     }
 
     pub fn openapi(&self) -> utoipa::openapi::OpenApi {
