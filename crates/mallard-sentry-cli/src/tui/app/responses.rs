@@ -18,7 +18,8 @@ impl Resp {
             Resp::Events { issue, before, result } => Resp::Events { issue, before, result: result.and_then(cleaned) },
             Resp::SetStatus { id, status, result } => Resp::SetStatus { id, status, result: result.and_then(cleaned) },
             Resp::Trace { trace_id, result } => Resp::Trace { trace_id, result: result.and_then(cleaned) },
-            r @ (Resp::Event { .. } | Resp::Panicked { .. }) => r,
+            // The list cleans what it keeps.
+            r @ (Resp::Event { .. } | Resp::Suggest { .. } | Resp::Panicked { .. }) => r,
         }
     }
 }
@@ -43,7 +44,7 @@ impl Resp {
             Resp::Event { result, .. } => result.as_ref().err(),
             Resp::SetStatus { result, .. } => result.as_ref().err(),
             Resp::Trace { result, .. } => result.as_ref().err(),
-            Resp::Panicked { .. } => None,
+            Resp::Suggest { .. } | Resp::Panicked { .. } => None,
         }
     }
 }
@@ -61,8 +62,9 @@ impl App {
         match resp.error() {
             Some(e) if e.offline => self.offline = Some(e.message.clone()),
             Some(_) => {}
-            // Any answer from the server means it is reachable again.
-            None if !matches!(resp, Resp::Panicked { .. }) => self.offline = None,
+            // Any answer from the server means it is reachable again. A suggestion says
+            // nothing: it fails quietly.
+            None if !matches!(resp, Resp::Panicked { .. } | Resp::Suggest { .. }) => self.offline = None,
             None => {}
         }
         let out = match resp.sanitized() {
@@ -76,6 +78,10 @@ impl App {
             Resp::Event { event_id, result } => self.on_event(&event_id, result),
             Resp::Trace { trace_id, result } => self.on_trace(&trace_id, result),
             Resp::SetStatus { id, status, result } => self.on_set_status(&id, status, result),
+            Resp::Suggest { scope, want, items } => {
+                self.suggest.answer(&scope, &want, items, Instant::now());
+                vec![]
+            }
         };
         self.track(out)
     }
@@ -119,6 +125,8 @@ impl App {
                 let p = clean(before.as_deref().unwrap_or_default());
                 self.issues_error = Some(format!("project {p:?} not found (press p to pick one)"));
             }
+            // In a host the app picker decides; no choice means no project.
+            None if self.hosted => {}
             None => self.project = self.projects.first().map(|p| p.slug.clone()),
         }
         // Also when an id (`-p 1`) became its slug: loads made with the old

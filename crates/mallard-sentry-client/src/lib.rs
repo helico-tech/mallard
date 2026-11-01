@@ -306,6 +306,11 @@ impl Client {
         self.get2(&format!("/v1/projects/{}/releases", segment(project)?), q, w).await
     }
 
+    /// Tag keys with counts, or the top values of `q.key`, for a filter bar.
+    pub async fn tags(&self, project: &str, q: &TagQuery) -> Result<TagStats, Error> {
+        self.get(&format!("/v1/projects/{}/tags", segment(project)?), q).await
+    }
+
     /// Read-only SQL over the error tables (the server must enable it).
     pub async fn sql(&self, query: &str, limit: Option<u32>) -> Result<SqlResponse, Error> {
         let req = SqlRequest { query: query.to_string(), limit };

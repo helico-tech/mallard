@@ -30,6 +30,8 @@ pub enum Outcome {
     /// [`keys::JUMP`] on a span with an error event: show this event of
     /// this trace on the errors side.
     JumpEvent { trace_id: String, event_id: String },
+    /// A host with one window for its tabs should set it to about this (`24h`).
+    SetWindow(&'static str),
 }
 
 /// What the host's app picker has chosen; each tab scopes itself to its side of it.
