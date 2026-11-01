@@ -44,6 +44,8 @@ Totals: bug 4, high 7, medium 17, low 15 (job 1: bug 4, high 2, medium 4, low 12
 **Fix:** replace figment with odl's loader (`merge` + `apply_env` + `interpolate`), made generic and
 moved to the shared crate (see 2.A). Add tests for `=0` and for a single token.
 
+**Status:** fixed in 732bffc (shared loader keeps text settings as text; tests for `=0`, a single and a numeric token in mallard-common and mallard-server).
+
 ### B3 (bug): `${VAR}` is expanded as raw text before the TOML is parsed
 `crates/mallard-server/src/config.rs:162-182`
 - A value that contains `"`, `\` or a newline breaks the file or changes its structure. Examples: a
@@ -55,6 +57,8 @@ moved to the shared crate (see 2.A). Add tests for `=0` and for a single token.
 
 **Fix:** parse first, then replace `${…}` inside string values only. odl already does this
 (`crates/odl-server/src/config.rs:469-491`).
+
+**Status:** fixed in 732bffc (`${VAR}` replaced inside parsed string values; tests with a quote, backslash, newline and a `${X}` in a trailing comment).
 
 ### B4 (bug): Sentry events get no client IP in mallard
 `crates/mallard-server/src/lib.rs:88-89`
@@ -96,6 +100,8 @@ same on the OTLP listener. Add an e2e assertion on `user.ip_address`.
   duckdb, public_url) and a library part (retention, batching, limits, sourcemaps). mallard embeds
   only the library part.
 
+**Status:** fixed in 732bffc (`[otel]` = ingest/retention/maintenance/query; `[sentry]` = `sdl_server::Config` with only library settings; all `deny_unknown_fields`; `catalog_wide`, `storage.schema`, `lake_alias` removed).
+
 ### 1.M1 (medium): `mallard trace` prints untrusted text without cleaning it
 `crates/mallard/src/trace.rs:50-101` (also `status`, `crates/mallard/src/main.rs:131-153`)
 - Span names, service names, error titles and log bodies come from SDKs. OTLP ingest is open by
@@ -115,6 +121,8 @@ same on the OTLP listener. Add an e2e assertion on `user.ip_address`.
 **Fix:** add an optional `server.metrics_addr`. Put the recorder setup, with the buckets, in one
 shared function.
 
+**Status:** fixed in 732bffc (optional `server.metrics_addr`; `install_prometheus` with buckets in ab49b29), 16ef42a (Helm serves /metrics on port 9090, not behind the ingress), e1a6ca4 (e2e test).
+
 ### 1.M3 (medium): the Helm docs say OTLP/HTTP works from browsers, but the server sends no CORS headers for it
 `deploy/helm/mallard/values.yaml:176-177`, `crates/odl-server/src/otlp/http.rs:31-40`
 - The values file says "Sentry browser SDKs and OTLP/HTTP both work through it. The server answers
@@ -123,6 +131,8 @@ shared function.
   fail the preflight request.
 
 **Fix:** add the same CORS layer to the OTLP router (shared helper), or correct the text.
+
+**Status:** fixed in e1a6ca4 (shared `ingest_cors` on the OTLP/HTTP router; tests in odl-server and mallard-server e2e).
 
 ### 1.M4 (medium): the three parts of a trace overview use different time windows, and one failure hides the rest
 `crates/mallard-client/src/lib.rs:68-95`
@@ -150,6 +160,8 @@ dropped (`abc-xyz` becomes `abc`) and the length is never checked. odl-client al
 router and does not check otel at all.
 **Fix:** add `ready()` on both `Server` types and combine them (2.L).
 
+**Status:** fixed in e1a6ca4 (`ready()` on both `Server` types; mallard `/readyz` combines them).
+
 ### 1.L4 (low): logging setup
 `crates/mallard/src/server_cmd.rs:21-26`.
 - `log_format` is a free string: any value other than `"json"` silently means text.
@@ -158,17 +170,23 @@ router and does not check otel at all.
 
 **Fix:** a `LogFormat` enum and one `init_tracing` (2.K).
 
+**Status:** fixed in 732bffc (`LogFormat` enum, one `init_tracing` with ANSI check and quiet tower_http/h2/tonic).
+
 ### 1.L5 (low): a third copy of the extension install code
 `crates/mallard/src/server_cmd.rs:10-11`, `:40-50`. The list differs from both libraries: it adds
 `json` and `parquet`, which are compiled in, and `mysql`, which sdl skips. odl's list has `icu`. The
 quoting is done by hand.
 **Fix:** one constant and one `install_extensions` in `mallard-duck` (2.D).
 
+**Status:** fixed in 732bffc (`mallard_duck::ALL_EXTENSIONS` + `install_extensions`, used by all three binaries).
+
 ### 1.L6 (low): `mallard check` validates less than `otel-ducklake check`, and the example config is untested
 `crates/mallard/src/server_cmd.rs:13-17`. It only parses the config; odl's `check` also attaches the
 storage (`crates/odl-server/src/main.rs:92-98`). No test parses `config/mallard.example.toml`; odl has
 `example_config_parses` (`crates/odl-server/src/config.rs:571`).
 **Fix:** add `check --connect` and the test.
+
+**Status:** fixed in 732bffc (`mallard check --connect`; `example_config_loads` test now uses the real loader).
 
 ### 1.L7 (low): the e2e test picks ports with a race
 `crates/mallard-server/tests/e2e.rs:16-25`. `free_port()` binds, drops the socket, then reuses the
@@ -200,6 +218,8 @@ Defaults (`:24-28`) point at standalone port 8000. Against mallard you need
 **Fix:** document that `extraConfig` must start with a table header, or render it after a comment
 line and validate it.
 
+**Status:** fixed in 16ef42a (rendered after a comment line; Helm fails unless it starts with a table header; unknown keys now fail at load).
+
 ### 1.L12 (low): workspace hygiene and stale docs
 - Workspace `Cargo.toml`: no `[workspace.lints]`; crates do not inherit `rust-version` or
   `repository`; `mallard*` lack `publish = false`.
@@ -210,6 +230,8 @@ line and validate it.
 - mallard drops the layers the standalone binaries add: `CatchPanicLayer`
   (`crates/sdl-server/src/main.rs:102`) and `CompressionLayer` (`crates/odl-server/src/lib.rs:168`).
   This is probably accidental.
+
+**Status:** fixed in 550f050 (`[workspace.lints]`, inherited `repository`/`rust-version`, `publish = false`) and fbe7c9a (note on ADR 0001/0002 names in ADR 0005, architecture.md). CatchPanic/Compression layers were already back. deferred: `sdl-cli` and `odl-cli` do not inherit lints/metadata yet (being reworked in parallel for mallard-term).
 
 ---
 
@@ -236,6 +258,8 @@ The shared-crate plan is at the end.
   structs.
 - Remove `figment`, `envy`, `from_env_prefix` and `load_with_prefix`.
 - The standalone binaries keep their clap flags only until story 0002/06 retires them.
+
+**Status:** fixed in 732bffc (`mallard_common::config::load`; figment, envy, `from_env_prefix`, `load_with_prefix` removed).
 
 ### 2.B (medium): six ways to parse durations, plus two different units for byte sizes
 **Durations:**
@@ -264,6 +288,8 @@ not in `[sentry]").
 
 The CLIs and loadgens use the same parser.
 
+**Status:** fixed in 732bffc (`mallard_common::duration` and `ByteSize`; typed fields in both configs, no `expect("validated")`) and 6dc2eef (sdl-loadgen). deferred: the CLIs (`sdl-cli` `fmt::parse_duration`, `odl-cli` `humantime_secs`) move with the mallard-term work; odl-loadgen keeps humantime (1.L9).
+
 ### 2.C (high): two bearer-token checks with opposite defaults
 - **sdl** `require_token` (`crates/sdl-server/src/api.rs:115-131`, `constant_time_eq` in
   `crates/sdl-server/src/ingest.rs:164`):
@@ -286,6 +312,8 @@ The CLIs and loadgens use the same parser.
 - An axum `require_bearer` middleware and one 401 body, behind the `http` feature.
 - sdl's config becomes `api_tokens: Vec<String>`, with `#[serde(alias = "api_token")]` and comma
   splitting for env vars.
+
+**Status:** fixed in 732bffc and 308edcc (`mallard_common::auth::Tokens` with explicit `AuthPolicy`, `require_bearer`; mallard requires API tokens on both sides; Host takes `api_tokens: Vec<String>`). The standalone otel-ducklake API stays open without tokens, as documented.
 
 ### 2.D (high): DuckDB/DuckLake setup is written twice, and the shared copy lives inside the OTel crate
 - **sdl** (`crates/sdl-server/src/db/mod.rs:93-195`, `crates/sdl-server/src/storage.rs:53`, `:109-140`):
@@ -321,6 +349,8 @@ out of odl.
 - Not worth sharing: `Ns` versus `format!("{CATALOG}.{schema}")`, and the writers and maintenance
   code (see 2.S).
 
+**Status:** fixed in 732bffc (`mallard-duck`, the only duckdb dependency; sdl's configure/catalog_extensions/install_all_extensions/redact/sql_str and odl's store set-up deleted).
+
 ### 2.E (medium): object-storage credentials are configured twice, in two formats
 - The lake uses DuckDB secrets: `[[storage.secrets]]` with `endpoint = "host:9000"`, `use_ssl` and
   `url_style`.
@@ -336,6 +366,8 @@ endpoint syntax.
 `[[storage.secrets]]` entry of type s3/gcs/azure whose scope covers that path, or from the
 credential chain. Do this once in `mallard-duck` or `mallard-server`, and remove `[sentry] s3_*`
 from the mallard config.
+
+**Status:** fixed in 732bffc and 16ef42a (`[storage] artifacts_path`; endpoint/region/keys from the matching `[[storage.secrets]]` via `mallard_duck::object_store_options`; `[sentry] s3_*` gone).
 
 ### 2.F (medium): the JSON error bodies use the same field name for different things
 - **sdl:** `ApiError { error: <message> }` (`crates/sdl-types/src/lib.rs:229`).
@@ -354,6 +386,8 @@ from the mallard config.
 - `ApiErr`, `Q` and `J` move to `mallard-common` behind the `http` feature.
 - Keep `detail` only on the sentry-cli `/api/0` compatibility routes.
 
+**Status:** fixed in 732bffc and 308edcc (`ApiError { error, message }` in mallard-common, re-exported by sdl-types and odl-api; shared `ApiErr`, `Q`, `J`; sdl-client reads old and new shape; `detail` only on `/api/0`).
+
 ### 2.G (high): only the Sentry side exports Prometheus metrics
 - **sdl** emits `metrics` counters and histograms (`sdl_*`, e.g. `crates/sdl-server/src/db/writer.rs:366-377`).
 - **odl** keeps process-local atomics that are only visible through `/api/v1/stats`
@@ -366,6 +400,8 @@ from the mallard config.
 **Plan:** odl emits `metrics::counter!` and `histogram!` next to `Stats`, with the same naming
 (`odl_ingest_items_total{signal}`, `odl_flush_seconds`, …). Keep the `sdl_`/`odl_` prefixes.
 One `install_recorder()` with the buckets (1.M2) in `mallard-common`.
+
+**Status:** fixed in 87d4bc4 (`odl_*` counters, gauges and histograms next to `Stats`). deferred: the standalone `otel-ducklake` binary still has no `/metrics` route.
 
 ### 2.H (medium): two `Window` types with different query parameters
 - **sdl** `Window::parse(since, default)`: only `since`, no upper limit, a different default per
@@ -380,6 +416,8 @@ One `install_recorder()` with the buckets (1.M2) in `mallard-common`.
 - `mallard-common::window::{TimeWindow, Window::resolve, step}` (pure chrono).
 - sdl's API accepts `from`, `to` and `step`, with `interval` kept as an alias, and gains a maximum
   window.
+
+**Status:** server part fixed in 308edcc (`mallard_common::window::Window`; sdl accepts `from`/`to`/`step` (`interval` kept), bounded by `[sentry.query] max_window`, and filters on the window end). deferred: `from`/`to` live in a separate `sdl_types::WindowRange` so sdl-cli keeps compiling; fold them into the query types with the CLI work (2.M2).
 
 ### 2.I (medium): the two client crates have different constructors, errors and timeouts
 - **sdl-client** (`crates/sdl-client/src/lib.rs:17-63`):
@@ -424,6 +462,8 @@ of plumbing.
 - Drop the `utoipa-scalar` dependency and add an sdl OpenAPI snapshot test.
 - Optional: mallard serves a merged spec at `/openapi.json`, with `/sentry` and `/otel` prefixes.
 
+**Status:** fixed in 308edcc (sdl on utoipa-axum `routes!`, shared `BearerAuth` and SRI-pinned `docs_routes`, utoipa-scalar dropped, snapshot test `docs/sentry/openapi.json`). deferred: a merged spec at mallard `/openapi.json` (optional).
+
 ### 2.K (medium): logging, signals and the background-task API are written three times
 - **Signal handling:** `crates/sdl-server/src/main.rs:49`, `crates/odl-server/src/main.rs:118`,
   `crates/mallard/src/server_cmd.rs:52` (this one uses `expect`).
@@ -437,6 +477,8 @@ of plumbing.
 - `mallard-common::{shutdown_signal, LogFormat, init_tracing}`.
 - Both `run_background` functions return `anyhow::Result<()>`, so writer errors reach mallard.
 
+**Status:** fixed in 732bffc (`shutdown_signal`, `LogFormat`, `init_tracing` in mallard-common, used by all three binaries).
+
 ### 2.L (medium): health and readiness are not aligned
 - **sdl:** `/healthz` and `/readyz` as plain text, with a writer and database check
   (`crates/sdl-server/src/api.rs:106-145`).
@@ -448,6 +490,8 @@ of plumbing.
   checks the flusher, the last flush error and a reader `SELECT 1`.
 - mallard owns `/healthz` and `/readyz` and combines both.
 - The per-side routes stay for the standalone binaries only.
+
+**Status:** fixed in 308edcc and e1a6ca4 (`Server::ready` on both sides; mallard owns `/healthz` and `/readyz`).
 
 ### 2.M (medium): `mallard errors` and `mallard telemetry` behave like two different CLIs
 Checked with `target/debug/mallard`:
@@ -529,6 +573,8 @@ Checked with `target/debug/mallard`:
 - **Percentiles in loadgens:** `hdrhistogram` in sdl-loadgen versus sort-then-index in odl-loadgen.
   Low impact; fine to leave.
 
+**Status:** server deps fixed in 732bffc and 550f050 (duckdb only in mallard-duck; sdl-server uses workspace axum/tower/tower-http/url/rand; odl-server tokio-util and odl-client from the workspace; base64 0.23 and rand 0.10 in the workspace; toml only, no figment/envy/humantime-serde). deferred: ratatui/crossterm/comfy-table/unicode-width pins, odl-cli's path dep and an `openapi` feature on odl-api belong to the CLI work.
+
 ### 2.Q (medium): the same kind of setting has different units and names
 - **Retention:** `[sentry] retention_days = 90` (an integer, 0 = forever) versus
   `[otel.retention] traces = "7d"` (a string, "0" = forever). Helm has `retention.errorsDays` next
@@ -540,6 +586,8 @@ Checked with `target/debug/mallard`:
 **Plan:** group sentry's library settings like otel's (`[sentry.retention] events = "90d"`,
 `[sentry.ingest]`, `[sentry.maintenance]`), with serde aliases for the old keys. Use the shared
 `ByteSize` and duration types (2.B). In Helm: `retention.errors: 90d`.
+
+**Status:** fixed in 732bffc and 16ef42a (`[sentry.retention] events = "90d"`, `[sentry.ingest]`, `[sentry.maintenance]`, `[sentry.query]`, `[sentry.sourcemaps] cache_size` with ByteSize; Helm `retention.errors`). Old keys are not aliased: they fail with an unknown-key error that names them (Helm fails on `retention.errorsDays`).
 
 ### 2.R (low): the two CLI libraries name the same things differently
 - `sdl_cli::Command` versus `odl_cli::Cmd`.
@@ -603,6 +651,8 @@ When correlated load is needed, merge both tools into one `mallard-loadgen` with
 Already covered by 2.D and 1.L5: three `install-extensions` commands and lists
 (`crates/sdl-server/src/db/mod.rs:127-137`, `crates/odl-server/src/main.rs:40-45`,
 `crates/mallard/src/server_cmd.rs:10-11`). One constant, one function.
+
+**Status:** fixed in 732bffc (one constant, one function; see 1.L5).
 
 ### 2.S (note, not counted): what should stay separate
 - Write paths: sdl's writer thread on a crossbeam channel versus odl's `WriteBuffer`/`Flusher`.
