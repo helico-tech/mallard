@@ -7,5 +7,5 @@
 5. [issue 0120 Sentry compaction threads in mallard](issues/0120-sentry-compaction-threads-in-mallard.md)
 6. [issue 0070 Web UI in compose and Helm](issues/0070-web-deploy-and-mallard-web-command.md)
 7. [issue 0123 chart memory defaults below the rule](issues/0123-chart-memory-defaults-below-the-rule.md)
-8. [issue 0124 no published image or chart](issues/0124-no-published-image-or-chart.md)
+8. [issue 0124 no published image](issues/0124-no-published-image-or-chart.md)
 9. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)

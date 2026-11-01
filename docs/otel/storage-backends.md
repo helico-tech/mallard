@@ -14,7 +14,7 @@ parts, configured independently (`[storage]`):
 |---|---|---|---|
 | DuckDB file | `data/catalog.ducklake` (any path) | **one** | default; tested |
 | SQLite file | `sqlite:data/catalog.sqlite` | **one** | tested |
-| PostgreSQL | `postgres:host=pg port=5432 dbname=ducklake user=mallard` (password from `PGPASSWORD`) | many | tested with two processes (lease and writer tests) and one pod on kind |
+| PostgreSQL | `postgres:host=pg port=5432 dbname=ducklake user=mallard` (password from `PGPASSWORD`) | many | tested with two processes (lease and writer tests) and the compose stack |
 | MySQL | `mysql:host=... database=... user=...` | many | supported by DuckLake, not tested here |
 
 - Use a DuckDB or SQLite file for a single node. With PostgreSQL, several
@@ -35,7 +35,7 @@ parts, configured independently (`[storage]`):
 |---|---|---|---|
 | local disk / volume / NFS | `/data/lake/` | – | tested |
 | AWS S3 | `s3://bucket/prefix/` | `s3` | `provider = "credential_chain"` uses env vars, `~/.aws`, IRSA, instance roles |
-| S3-compatible (RustFS, MinIO, SeaweedFS, Ceph, Garage, Wasabi, Hetzner, ...) | `s3://bucket/prefix/` | `s3` | set `endpoint`, `url_style = "path"`, `use_ssl`; tested with RustFS (compose, kind) |
+| S3-compatible (RustFS, MinIO, SeaweedFS, Ceph, Garage, Wasabi, Hetzner, ...) | `s3://bucket/prefix/` | `s3` | set `endpoint`, `url_style = "path"`, `use_ssl`; tested with RustFS (compose) |
 | Cloudflare R2 | `r2://bucket/prefix/` | `r2` | `key_id`, `secret`, `account_id` |
 | Google Cloud Storage | `gs://bucket/prefix/` | `gcs` | HMAC `key_id`/`secret` |
 | Azure Blob / ADLS Gen2 | `az://container/prefix/` or `abfss://container@account.dfs.core.windows.net/prefix/` | `azure` | `connection_string`, or `provider = "credential_chain"` / `service_principal` |
@@ -99,7 +99,7 @@ account_id = "${R2_ACCOUNT_ID}"
 |---|---|---|
 | one VM, simplest | DuckDB file | local disk |
 | one VM, cheap long retention | DuckDB file | object storage |
-| Kubernetes, one pod | DuckDB file on a PVC | PVC or object storage |
+| one container with a volume | DuckDB file on the volume | the volume or object storage |
 | HA / several replicas / other tools writing | PostgreSQL | object storage |
 
 ## Things to know
