@@ -48,22 +48,34 @@ fn segment(s: &str) -> Result<String, Error> {
     Ok(utf8_percent_encode(s, SEGMENT).to_string())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base: String,
-    token: String,
+    token: Option<String>,
+}
+
+/// The token is never printed.
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base", &self.base)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
     /// `base_url` may include a path prefix (e.g. `https://host/sentry`).
+    /// An empty `token` means no token: no `Authorization` header is sent.
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
         url::Url::parse(base_url).map_err(|e| Error::Url(e.to_string()))?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("sdl-client/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        Ok(Client { http, base: base_url.trim_end_matches('/').to_string(), token: token.to_string() })
+        let token = (!token.is_empty()).then(|| token.to_string());
+        Ok(Client { http, base: base_url.trim_end_matches('/').to_string(), token })
     }
 
     pub fn base_url(&self) -> &str {
@@ -74,8 +86,15 @@ impl Client {
         format!("{}{path}", self.base)
     }
 
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    }
+
     async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> Result<T, Error> {
-        let resp = req.bearer_auth(&self.token).send().await?;
+        let resp = self.auth(req).send().await?;
         if !resp.status().is_success() {
             return Err(Self::api_error(resp).await);
         }
@@ -172,7 +191,7 @@ impl Client {
 
     /// Flush, compact and expire now.
     pub async fn maintenance(&self) -> Result<(), Error> {
-        let resp = self.http.post(self.url("/v1/maintenance")).bearer_auth(&self.token).send().await?;
+        let resp = self.auth(self.http.post(self.url("/v1/maintenance"))).send().await?;
         if resp.status().is_success() { Ok(()) } else { Err(Self::api_error(resp).await) }
     }
 }
@@ -180,6 +199,60 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    #[test]
+    fn debug_never_shows_the_token() {
+        let c = Client::new("http://127.0.0.1:9", "s3cret-token").unwrap();
+        let s = format!("{c:?}");
+        assert!(!s.contains("s3cret") && s.contains("<redacted>"), "{s}");
+    }
+
+    /// Answer one request with `status`, `content_type` and `body`; the
+    /// request head (request line + headers) comes back on the channel.
+    fn serve_once(status: u16, content_type: &'static str, body: String) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut head, mut len) = (String::new(), 0usize);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let _ = reader.read_exact(&mut vec![0; len]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tx.send(head);
+        });
+        (url, rx)
+    }
+
+    #[tokio::test]
+    async fn empty_token_sends_no_authorization_header() {
+        let info = r#"{"version":"1","duckdb_version":"v","catalog":"c","storage":"s","queue_depth":0,"queue_capacity":1}"#;
+        let (url, head) = serve_once(200, "application/json", info.into());
+        Client::new(&url, "").unwrap().info().await.unwrap();
+        let head = head.recv().unwrap().to_ascii_lowercase();
+        assert!(!head.contains("authorization"), "{head}");
+
+        let (url, head) = serve_once(200, "application/json", info.into());
+        Client::new(&url, "tok").unwrap().info().await.unwrap();
+        assert!(head.recv().unwrap().to_ascii_lowercase().contains("authorization: bearer tok"));
+    }
 
     #[test]
     fn path_segments_are_percent_encoded() {
