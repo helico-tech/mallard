@@ -499,6 +499,42 @@ pub fn events_by_trace(
     Ok(EventList { events, next_cursor: None })
 }
 
+/// Error events of many traces at once (for trace lists): per trace the
+/// count and the newest [`MAX_EVENTS_PER_TRACE`] events. One query on the
+/// UUID/UBIGINT columns, never the payload.
+pub fn events_by_traces(conn: &Connection, ns: &Ns, trace_ids: &[uuid::Uuid], w: &Window) -> Result<EventsByTrace> {
+    let mut out = EventsByTrace::default();
+    if trace_ids.is_empty() {
+        return Ok(out);
+    }
+    let ids = vec!["?::UUID"; trace_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT trace_id::VARCHAR, event_id::VARCHAR, group_hash, project_id, span_id, title,
+                count(*) OVER (PARTITION BY trace_id)
+         FROM $S.events
+         WHERE received_at >= make_timestamp(?) AND received_at < make_timestamp(?) AND trace_id IN ({ids})
+         QUALIFY row_number() OVER (PARTITION BY trace_id ORDER BY received_at DESC, event_id) <= ?
+         ORDER BY trace_id, received_at DESC, event_id"
+    );
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(start_us(w)), Box::new(end_us(w))];
+    p.extend(trace_ids.iter().map(|t| Box::new(t.to_string()) as Box<dyn ToSql>));
+    p.push(Box::new(MAX_EVENTS_PER_TRACE as i64));
+    let mut stmt = conn.prepare(&ns.sql(&sql))?;
+    let mut rows = stmt.query(params_from_iter(p.iter().map(|b| b.as_ref())))?;
+    while let Some(r) = rows.next()? {
+        let trace = out.traces.entry(r.get::<_, String>(0)?.replace('-', "")).or_default();
+        trace.count = r.get::<_, i64>(6)? as u64;
+        trace.events.push(TraceEvent {
+            event_id: r.get::<_, String>(1)?.replace('-', ""),
+            issue_id: group_id(r.get(2)?),
+            project_id: r.get::<_, i32>(3)? as u32,
+            span_id: r.get::<_, Option<u64>>(4)?.map(|s| format!("{s:016x}")),
+            title: r.get(5)?,
+        });
+    }
+    Ok(out)
+}
+
 /// Days searched by trace id lookups.
 pub const TRACE_WINDOW_DAYS: i64 = 30;
 

@@ -660,3 +660,50 @@ async fn embedded_with_shared_connection_and_clean_shutdown() {
         .unwrap();
     assert_eq!(r.status(), 503, "writes after shutdown are refused");
 }
+
+/// Trace lists mark traces with errors: one request for many trace ids.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_by_many_traces() {
+    let t = TestServer::start().await;
+    let project = t.create_project("web").await;
+    let key = project["public_key"].as_str().unwrap();
+    let (a, b, none) =
+        ("0af7651916cd43dd8448eb211c80319c", "4bf92f3577b34da6a3ce929d0e0e4736", "11111111111111111111111111111111");
+    for (msg, trace, span) in
+        [("boom", a, "00f067aa0ba902b7"), ("boom", a, "00f067aa0ba902b8"), ("bang", b, "0000000000000001")]
+    {
+        let body =
+            json!({"message": msg, "level": "error", "contexts": {"trace": {"trace_id": trace, "span_id": span}}});
+        let url = format!("{}/api/1/store/?sentry_key={key}&sentry_version=7", t.base);
+        assert_eq!(t.http.post(url).body(body.to_string()).send().await.unwrap().status(), 200);
+    }
+
+    let v = t.get(&format!("/v1/events/by-trace?trace_id={a},{b},{none},{a}&since=1h")).await;
+    let traces = v["traces"].as_object().unwrap();
+    assert_eq!(traces.len(), 2, "traces without events are left out: {v}");
+    assert_eq!(v["traces"][a]["count"], 2);
+    let spans: Vec<&str> =
+        v["traces"][a]["events"].as_array().unwrap().iter().map(|e| e["span_id"].as_str().unwrap()).collect();
+    assert_eq!(spans.len(), 2);
+    assert!(spans.contains(&"00f067aa0ba902b7") && spans.contains(&"00f067aa0ba902b8"), "{spans:?}");
+    let e = &v["traces"][b]["events"][0];
+    assert_eq!((e["title"].as_str(), e["project_id"].as_u64()), (Some("bang"), Some(1)));
+    assert_eq!(e["issue_id"].as_str().unwrap().len(), 16);
+    assert_eq!(e["event_id"].as_str().unwrap().len(), 32);
+
+    // An absolute window before the events finds nothing.
+    let old =
+        t.get(&format!("/v1/events/by-trace?trace_id={a}&from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z")).await;
+    assert_eq!(old["traces"], json!({}));
+
+    // Bad ids and too many ids are 400s with the shared error body.
+    for q in ["trace_id=nope".to_string(), format!("trace_id={a},"), "trace_id=".into()] {
+        let (s, v) = t.api(reqwest::Method::GET, &format!("/v1/events/by-trace?{q}"), None).await;
+        assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{q}: {v}");
+    }
+    let many: Vec<String> = (1..=201).map(|i| format!("{i:032x}")).collect();
+    let (s, v) = t.api(reqwest::Method::GET, &format!("/v1/events/by-trace?trace_id={}", many.join(",")), None).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("at most 200"), "{v}");
+    t.stop().await;
+}

@@ -255,6 +255,19 @@ impl Client {
         self.get2("/v1/events", q, w).await
     }
 
+    /// Error events of many traces (all projects): per trace id the count and
+    /// the newest events. One request per [`MAX_TRACES_PER_LOOKUP`] ids;
+    /// no ids, no request.
+    pub async fn errors_by_trace(&self, trace_ids: &[String], w: &WindowRange) -> Result<EventsByTrace, Error> {
+        let mut out = EventsByTrace::default();
+        for ids in trace_ids.chunks(MAX_TRACES_PER_LOOKUP) {
+            let q = TracesQuery { trace_id: ids.join(","), since: None };
+            let part: EventsByTrace = self.get2("/v1/events/by-trace", &q, w).await?;
+            out.traces.extend(part.traces);
+        }
+        Ok(out)
+    }
+
     /// One event by id in any project.
     pub async fn find_event(&self, event_id: &str) -> Result<EventDetail, Error> {
         self.get(&format!("/v1/events/{}", segment(event_id)?), &()).await
@@ -394,6 +407,31 @@ mod tests {
         let (url, head) = serve_once(200, "application/json", info.into());
         Client::new(&url, Some("tok")).unwrap().info().await.unwrap();
         assert!(head.recv().unwrap().to_ascii_lowercase().contains("authorization: bearer tok"));
+    }
+
+    #[tokio::test]
+    async fn errors_by_trace_sends_one_batch() {
+        let (a, b) = ("0af7651916cd43dd8448eb211c80319c".to_string(), "4bf92f3577b34da6a3ce929d0e0e4736".to_string());
+        let body = format!(
+            r#"{{"traces":{{"{a}":{{"count":3,"events":[{{"event_id":"e1","issue_id":"85fede14250ec6be","project_id":1,"span_id":"00f067aa0ba902b7","title":"boom"}}]}}}}}}"#
+        );
+        let (url, head) = serve_once(200, "application/json", body);
+        let from = "2026-11-01T10:00:00Z".parse().unwrap();
+        let w = WindowRange { from: Some(from), to: None, step: None };
+        let r = Client::new(&url, None).unwrap().errors_by_trace(&[a.clone(), b.clone()], &w).await.unwrap();
+        let head = head.recv().unwrap();
+        let line = head.lines().next().unwrap();
+        assert!(
+            line.starts_with(&format!("GET /v1/events/by-trace?trace_id={a}%2C{b}&from=2026-11-01T10%3A00%3A00Z ")),
+            "{line}"
+        );
+        let t = &r.traces[&a];
+        assert_eq!((t.count, t.events[0].span_id.as_deref()), (3, Some("00f067aa0ba902b7")));
+        assert!(!r.traces.contains_key(&b), "traces without events are left out");
+
+        // No ids: no request (this client could not reach anything).
+        let c = Client::new("http://127.0.0.1:9", None).unwrap();
+        assert_eq!(block_on(c.errors_by_trace(&[], &w)).unwrap(), EventsByTrace::default());
     }
 
     #[test]

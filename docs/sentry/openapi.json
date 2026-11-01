@@ -123,6 +123,93 @@
         }
       }
     },
+    "/v1/events/by-trace": {
+      "get": {
+        "description": "Error events of up to 200 traces at once, across all projects (for marking trace lists): per trace the event count and the newest 50 events. Traces without events are left out.",
+        "operationId": "events_by_traces",
+        "parameters": [
+          {
+            "name": "trace_id",
+            "in": "path",
+            "description": "Trace ids (32 hex characters), comma separated; at most 200. Required.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window to search, e.g. `1h`, `30d` (default `30d`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsByTrace"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/events/{event_id}": {
       "get": {
         "description": "One event by id, in any project (for looking up an id without knowing its project).",
@@ -1247,6 +1334,24 @@
           }
         }
       },
+      "EventsByTrace": {
+        "type": "object",
+        "description": "Error events per trace id. Traces without events are left out.",
+        "required": [
+          "traces"
+        ],
+        "properties": {
+          "traces": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TraceEvents"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "IssueActivity": {
         "type": "object",
         "required": [
@@ -1671,6 +1776,62 @@
           },
           "value": {
             "type": "string"
+          }
+        }
+      },
+      "TraceEvent": {
+        "type": "object",
+        "description": "One error event of a trace, as `GET /v1/events/by-trace` lists it.",
+        "required": [
+          "event_id",
+          "issue_id",
+          "project_id",
+          "title"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "span_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Span id (16 hex) the event was captured in."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "TraceEvents": {
+        "type": "object",
+        "description": "The error events of one trace.",
+        "required": [
+          "count",
+          "events"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "All events of the trace in the window.",
+            "minimum": 0
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TraceEvent"
+            },
+            "description": "The newest events, at most 50."
           }
         }
       },

@@ -59,7 +59,7 @@ fn window(state: &AppState, since: Option<&str>, r: &WindowRange, default: Durat
     components(schemas(
         ServerInfo, Project, CreateProject, IssueStatus, IssueSummary, IssueList, IssueDetail, IssueActivity,
         TagFacet, TagValueCount, UpdateIssue, EventSummary, EventList, EventDetail, ProjectStats, StatsBucket,
-        ArtifactBundle, ApiError
+        ArtifactBundle, ApiError, EventsByTrace, TraceEvents, TraceEvent
     )),
     modifiers(&BearerAuth),
     security(("bearer" = []))
@@ -72,6 +72,7 @@ fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(info))
         .routes(routes!(list_projects, create_project))
         .routes(routes!(events_by_trace))
+        .routes(routes!(events_by_traces))
         .routes(routes!(find_event))
         .routes(routes!(get_project))
         .routes(routes!(list_issues))
@@ -313,6 +314,26 @@ async fn events_by_trace(State(state): S, Q(q): Q<TraceQuery>, Q(r): Q<WindowRan
     let w = window(&state, q.since.as_deref(), &r, 30 * DAY)?;
     let limit = q.limit.unwrap_or(50);
     Ok(Json(state.db.read(move |c, ns| read::events_by_trace(c, ns, t, span, &w, limit)).await?))
+}
+
+#[utoipa::path(get, path = "/v1/events/by-trace", params(TracesQuery, WindowRange),
+    description = "Error events of up to 200 traces at once, across all projects (for marking trace lists): \
+        per trace the event count and the newest 50 events. Traces without events are left out.",
+    responses((status = 200, body = EventsByTrace), (status = 400, body = ApiError)))]
+async fn events_by_traces(State(state): S, Q(q): Q<TracesQuery>, Q(r): Q<WindowRange>) -> ApiResult<EventsByTrace> {
+    let mut ids = q
+        .trace_id
+        .split(',')
+        .map(|t| sdl_protocol::event::parse_trace_id(t.trim()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| bad("trace_id must be comma separated ids of 32 hex characters"))?;
+    ids.sort();
+    ids.dedup();
+    if ids.len() > MAX_TRACES_PER_LOOKUP {
+        return Err(bad(format!("at most {MAX_TRACES_PER_LOOKUP} trace ids per request")));
+    }
+    let w = window(&state, q.since.as_deref(), &r, 30 * DAY)?;
+    Ok(Json(state.db.read(move |c, ns| read::events_by_traces(c, ns, &ids, &w)).await?))
 }
 
 #[derive(serde::Deserialize, utoipa::IntoParams)]
