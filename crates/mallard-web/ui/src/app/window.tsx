@@ -47,12 +47,10 @@ export function useWindow(side: Side): { w: string; setW: (w: string) => void; c
       );
   }, [valid, side, set, setParams, w]);
 
-  // Two quick presses must not both start from the same value.
-  const latest = useRef(w);
-  latest.current = w;
+  const rendered = useRef(w);
+  rendered.current = w;
   const setW = useCallback(
     (next: string) => {
-      latest.current = next;
       set(side, next);
       setParams((p) => {
         p.set("w", next);
@@ -63,7 +61,11 @@ export function useWindow(side: Side): { w: string; setW: (w: string) => void; c
   );
   const cycle = useCallback(
     (dir: 1 | -1) => {
-      const i = options.indexOf(latest.current);
+      // Two quick presses must not start from a stale value: the address bar
+      // changes at once, while `w` waits for the next render.
+      const inUrl = new URLSearchParams(window.location.search).get("w");
+      const from = inUrl && options.includes(inUrl) ? inUrl : rendered.current;
+      const i = options.indexOf(from);
       setW(options[(i + dir + options.length) % options.length]!);
     },
     [options, setW],

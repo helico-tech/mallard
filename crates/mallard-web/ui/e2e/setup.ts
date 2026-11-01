@@ -48,8 +48,17 @@ export default async function setup() {
   if (seed.status !== 0) throw new Error(`seeding failed: ${seed.stderr}`);
   await new Promise((r) => setTimeout(r, 3000));
 
-  return () => {
-    for (const p of procs) p.kill();
+  return async () => {
+    // The server flushes on SIGTERM and writes into `dir` until it has exited.
+    await Promise.all(procs.map((p) => new Promise<void>((done) => {
+      if (p.exitCode !== null || p.signalCode !== null) return done();
+      const force = setTimeout(() => p.kill("SIGKILL"), 30_000);
+      p.once("exit", () => {
+        clearTimeout(force);
+        done();
+      });
+      p.kill();
+    })));
     rmSync(dir, { recursive: true, force: true });
   };
 }
