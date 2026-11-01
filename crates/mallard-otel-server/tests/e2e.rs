@@ -1011,24 +1011,41 @@ async fn refuses_expansion_bombs() {
     h.stop().await;
 }
 
-/// If the background jobs cannot start, `serve` must stop the receivers and
-/// return the error instead of accepting data that is never flushed.
+/// With SQL off, the 403 names the key as it is written in the mallard config.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn serve_stops_when_background_fails_to_start() {
+async fn sql_off_names_the_mallard_key() {
+    let h = harness(None).await;
+    let req = Request::post("/api/v1/sql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"query":"SELECT 1"}"#))
+        .unwrap();
+    let resp = h.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "disabled", "{v}");
+    let message = v["message"].as_str().unwrap();
+    assert!(message.contains("otel.query.enable_sql"), "{message}");
+    assert!(!message.contains("auth.api_tokens"), "{message}");
+    h.stop().await;
+}
+
+/// If the background jobs cannot start, `run_background` must return the error at
+/// once, so the host can stop the receivers (`mallard-server` has that test) instead
+/// of accepting data that is never flushed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_background_returns_when_it_cannot_start() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = Config::default();
     cfg.storage.catalog = dir.path().join("c.ducklake").to_string_lossy().into();
     cfg.storage.data_path = format!("{}/", dir.path().join("lake").to_string_lossy());
-    cfg.server.otlp_grpc_addr = "127.0.0.1:0".into();
-    cfg.server.otlp_http_addr = "127.0.0.1:0".into();
-    cfg.server.api_addr = "127.0.0.1:0".into();
     let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
     let server = Server::with_connection(cfg, conn.try_clone().unwrap()).await.unwrap();
     // New connections can no longer select the lake schema, so the flusher fails to start.
     conn.execute_batch("DETACH lake").unwrap();
-    let r = tokio::time::timeout(Duration::from_secs(20), server.serve(CancellationToken::new()))
+    let r = tokio::time::timeout(Duration::from_secs(20), server.run_background(std::future::pending()))
         .await
-        .expect("serve must return when the background jobs fail");
+        .expect("run_background must return when the background jobs fail");
     assert!(r.is_err());
 }
 

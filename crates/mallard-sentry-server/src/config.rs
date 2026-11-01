@@ -144,29 +144,29 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         let (i, m, q) = (&self.ingest, &self.maintenance, &self.query);
         for (name, d) in [
-            ("retention.events", self.retention.events),
-            ("ingest.batch_window", i.batch_window),
-            ("maintenance.flush_interval", m.flush_interval),
-            ("maintenance.compact_interval", m.compact_interval),
-            ("query.max_window", q.max_window),
-            ("query.sql_timeout", q.sql_timeout),
+            ("sentry.retention.events", self.retention.events),
+            ("sentry.ingest.batch_window", i.batch_window),
+            ("sentry.maintenance.flush_interval", m.flush_interval),
+            ("sentry.maintenance.compact_interval", m.compact_interval),
+            ("sentry.query.max_window", q.max_window),
+            ("sentry.query.sql_timeout", q.sql_timeout),
         ] {
             anyhow::ensure!(d <= MAX_DURATION, "{name} is longer than 100 years");
         }
         for (name, d) in [
-            ("maintenance.flush_interval", m.flush_interval),
-            ("maintenance.compact_interval", m.compact_interval),
-            ("query.max_window", q.max_window),
-            ("query.sql_timeout", q.sql_timeout),
+            ("sentry.maintenance.flush_interval", m.flush_interval),
+            ("sentry.maintenance.compact_interval", m.compact_interval),
+            ("sentry.query.max_window", q.max_window),
+            ("sentry.query.sql_timeout", q.sql_timeout),
         ] {
             anyhow::ensure!(!d.is_zero(), "{name} must be greater than 0");
         }
         for (name, n) in [
-            ("ingest.batch_max", i.batch_max),
-            ("ingest.queue_capacity", i.queue_capacity),
-            ("ingest.concurrency", i.concurrency),
-            ("maintenance.flush_rows", m.flush_rows),
-            ("query.readers", q.readers),
+            ("sentry.ingest.batch_max", i.batch_max),
+            ("sentry.ingest.queue_capacity", i.queue_capacity),
+            ("sentry.ingest.concurrency", i.concurrency),
+            ("sentry.maintenance.flush_rows", m.flush_rows),
+            ("sentry.query.readers", q.readers),
         ] {
             anyhow::ensure!(n > 0, "{name} must be greater than 0");
         }
@@ -202,6 +202,14 @@ pub struct Artifacts {
     /// Endpoint, region and credentials; unset values come from the
     /// environment (`AWS_*`, `GCS_HMAC_*`, `AZURE_*`).
     pub options: mallard_duck::ObjectStoreOptions,
+}
+
+impl Artifacts {
+    /// Build the store, as start-up does: an unknown scheme or missing
+    /// credentials fail here. It does not contact the store.
+    pub fn check(&self) -> anyhow::Result<()> {
+        crate::storage::Storage::new(&self.url, &self.options).map(|_| ())
+    }
 }
 
 impl Host {

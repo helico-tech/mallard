@@ -46,13 +46,14 @@ pub fn is_identifier(s: &str) -> bool {
 
 /// Remove credentials from text (errors, catalog strings for logs). DuckDB's
 /// postgres/mysql extensions echo the full connection string, including
-/// `password=...`, in their errors.
+/// `password=...`, in their errors. An Azure connection string has `AccountKey=`
+/// or `SharedAccessSignature=`.
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let lower = text.to_ascii_lowercase();
     let mut i = 0;
     while i < text.len() {
-        let hit = ["password=", "passwd=", "secret=", "key_id="]
+        let hit = ["password=", "passwd=", "secret=", "key_id=", "accountkey=", "sharedaccesssignature="]
             .iter()
             .filter_map(|k| lower[i..].find(k).map(|p| (i + p, k.len())))
             .min_by_key(|(p, _)| *p);
@@ -302,7 +303,9 @@ pub struct ObjectStoreOptions {
     pub region: Option<String>,
     /// Path-style URLs (`url_style = "path"`).
     pub path_style: bool,
+    /// Access key id; for Azure, the account name.
     pub key_id: Option<String>,
+    /// Secret access key; for Azure, the account key.
     pub secret: Option<String>,
     pub session_token: Option<String>,
 }
@@ -319,8 +322,8 @@ impl std::fmt::Debug for ObjectStoreOptions {
     }
 }
 
-/// [`ObjectStoreOptions`] for `url` (`s3://`, `gs://`, `r2://`): the secret
-/// of the matching type with the longest `scope` that is a prefix of `url`
+/// [`ObjectStoreOptions`] for `url` (`s3://`, `gs://`, `r2://`, `az://`): the
+/// secret of the matching type with the longest `scope` that is a prefix of `url`
 /// (a secret without scope matches everything), as DuckDB chooses it.
 pub fn object_store_options(st: &StorageConfig, url: &str) -> ObjectStoreOptions {
     let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase()).unwrap_or_default();
@@ -328,6 +331,7 @@ pub fn object_store_options(st: &StorageConfig, url: &str) -> ObjectStoreOptions
         "s3" | "s3a" | "s3n" => "s3",
         "gs" | "gcs" => "gcs",
         "r2" => "r2",
+        "az" | "azure" => "azure",
         _ => return ObjectStoreOptions::default(),
     };
     let scope_len = |s: &SecretConfig| -> Option<usize> {
@@ -347,6 +351,9 @@ pub fn object_store_options(st: &StorageConfig, url: &str) -> ObjectStoreOptions
         .max_by_key(|(n, _)| *n)
         .map(|(_, s)| s);
     let Some(s) = best else { return ObjectStoreOptions::default() };
+    if ty == "azure" {
+        return s.get("connection_string").map(azure_options).unwrap_or_default();
+    }
     let text = |k: &str| s.get(k).filter(|v| !v.is_empty()).map(str::to_string);
     let use_ssl = match s.options.get("use_ssl") {
         Some(toml::Value::Boolean(b)) => *b,
@@ -362,6 +369,23 @@ pub fn object_store_options(st: &StorageConfig, url: &str) -> ObjectStoreOptions
         secret: text("secret"),
         session_token: text("session_token"),
     }
+}
+
+/// What the sourcemap store needs from an Azure connection string. Other parts
+/// (`DefaultEndpointsProtocol`, `EndpointSuffix`, ...) are ignored. Names are not
+/// case-sensitive, and the key's base64 padding stays with its value.
+fn azure_options(connection_string: &str) -> ObjectStoreOptions {
+    let mut o = ObjectStoreOptions::default();
+    for (name, value) in connection_string.split(';').filter_map(|part| part.split_once('=')) {
+        let value = Some(value.trim()).filter(|v| !v.is_empty()).map(str::to_string);
+        match name.trim().to_ascii_lowercase().as_str() {
+            "accountname" => o.key_id = value,
+            "accountkey" => o.secret = value,
+            "blobendpoint" => o.endpoint = value.map(|e| e.trim_end_matches('/').to_string()),
+            _ => {}
+        }
+    }
+    o
 }
 
 #[cfg(test)]
@@ -398,6 +422,12 @@ mod tests {
         assert_eq!(redact("postgres:host=db PASSWORD=x"), "postgres:host=db PASSWORD=***");
         assert_eq!(redact("KEY_ID=abc SECRET=\"d e\""), "KEY_ID=*** SECRET=***");
         assert_eq!(redact("no secrets here"), "no secrets here");
+        assert_eq!(
+            redact("AccountName=a;AccountKey=aGVsbG8=;EndpointSuffix=x"),
+            "AccountName=a;AccountKey=***;EndpointSuffix=x"
+        );
+        assert_eq!(redact("accountkey=aGVsbG8="), "accountkey=***");
+        assert_eq!(redact("SharedAccessSignature=sv=1&sig=x;B=c"), "SharedAccessSignature=***;B=c");
     }
 
     #[test]
@@ -439,6 +469,40 @@ mod tests {
         assert_eq!(o.endpoint, None);
         assert_eq!(object_store_options(&st, "gs://b/x"), ObjectStoreOptions::default());
         assert_eq!(object_store_options(&st, "/local/dir"), ObjectStoreOptions::default());
+    }
+
+    /// One `azure` secret serves the lake and the sourcemap store.
+    #[test]
+    fn object_store_options_from_an_azure_connection_string() {
+        let st = storage(
+            r#"
+            [[secrets]]
+            type = "azure"
+            connection_string = "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=aGVsbG8=;EndpointSuffix=core.windows.net"
+            [[secrets]]
+            type = "azure"
+            scope = "az://local"
+            connection_string = "accountname=dev; ACCOUNTKEY=a2V5;BlobEndpoint=http://127.0.0.1:10000/dev/;;junk"
+            [[secrets]]
+            type = "azure"
+            scope = "az://chain"
+            provider = "credential_chain"
+            "#,
+        );
+        for url in ["az://c/artifacts", "azure://c/artifacts"] {
+            let o = object_store_options(&st, url);
+            assert_eq!((o.key_id.as_deref(), o.secret.as_deref()), (Some("acct"), Some("aGVsbG8=")), "{url}");
+            assert_eq!(o.endpoint, None, "{url}");
+        }
+        let o = object_store_options(&st, "az://local/artifacts");
+        assert_eq!((o.key_id.as_deref(), o.secret.as_deref()), (Some("dev"), Some("a2V5")));
+        assert_eq!(o.endpoint.as_deref(), Some("http://127.0.0.1:10000/dev"), "no trailing slash");
+        let debug = format!("{o:?}");
+        assert!(!debug.contains("a2V5") && !debug.contains("\"dev\""), "{debug}");
+        // No connection string: the store falls back to the environment.
+        assert_eq!(object_store_options(&st, "az://chain/x"), ObjectStoreOptions::default());
+        // An S3 URL does not take an Azure secret.
+        assert_eq!(object_store_options(&st, "s3://c/x"), ObjectStoreOptions::default());
     }
 
     #[test]

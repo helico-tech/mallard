@@ -164,8 +164,8 @@ impl Config {
             !self.server.api_tokens.is_empty(),
             "server.api_tokens must contain at least one token (e.g. MALLARD_SERVER__API_TOKENS=secret)"
         );
-        self.otel_config().validate().context("otel")?;
-        self.sentry.validate().context("sentry")?;
+        self.otel_config().validate()?;
+        self.sentry.validate()?;
         self.sentry_host().validate().context("server.public_url")?;
         self.bridge.validate()?;
         let artifacts = &self.storage.artifacts_path;
@@ -182,7 +182,6 @@ impl Config {
     pub fn otel_config(&self) -> mallard_otel_server::config::Config {
         let o = &self.otel;
         mallard_otel_server::config::Config {
-            server: Default::default(),
             storage: StorageConfig { artifacts_path: String::new(), ..self.storage.clone() },
             ingest: o.ingest.clone(),
             retention: o.retention.clone(),
@@ -335,6 +334,12 @@ mod tests {
     }
 
     #[test]
+    fn log_format_is_mallards() {
+        assert_eq!(load("", TOKEN).unwrap().server.log_format, LogFormat::Text);
+        assert_eq!(load("[server]\nlog_format = \"json\"", TOKEN).unwrap().server.log_format, LogFormat::Json);
+    }
+
+    #[test]
     fn unknown_and_overridden_keys_are_rejected() {
         for bad in [
             "[server]\ntypo = 1",
@@ -429,6 +434,22 @@ mod tests {
             "[bridge]\ndedupe_window = \"1h\"",
         ] {
             assert!(load(bad, TOKEN).is_err(), "{bad}");
+        }
+    }
+
+    /// Messages name the key as it is written in the mallard config.
+    #[test]
+    fn validation_messages_name_mallard_keys() {
+        for (bad, key) in [
+            ("[otel.query]\ntimeout = \"0\"", "otel.query.timeout"),
+            ("[otel.ingest]\nflush_rows = 0", "otel.ingest.flush_rows"),
+            ("[otel.query]\nmax_concurrent = 0", "otel.query.max_concurrent"),
+            ("[sentry.query]\nmax_window = \"0\"", "sentry.query.max_window"),
+            ("[sentry.ingest]\nbatch_max = 0", "sentry.ingest.batch_max"),
+            ("[sentry.query]\nreaders = 0", "sentry.query.readers"),
+        ] {
+            let err = format!("{:#}", load(bad, TOKEN).unwrap_err());
+            assert!(err.starts_with(key), "{bad}: {err}");
         }
     }
 

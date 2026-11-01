@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -29,3 +29,16 @@ Options: pass the `azure` secret's connection string to the store, or document o
 `AZURE_STORAGE_ACCOUNT_*` variables and fix the example comment. Either way `check
 --connect` should build the sourcemap store. Real Azure was not tried, only the failure
 at start-up. Found during issue 0016; `docs/sentry/deployment.md` says what works today.
+
+Done. Option one: the `azure` secret's `connection_string` reaches the sourcemap store
+through `mallard_duck::object_store_options` (`AccountName`, `AccountKey`, `BlobEndpoint`;
+the rest is ignored). `AccountKey=` and `SharedAccessSignature=` are added to `redact`.
+`mallard check --connect` builds the store and fails with exit 2, which covers `r2://`.
+`r2://` stays unsupported for artifacts, because it needs an endpoint from `account_id`
+and so is not a one-line reuse; the error and the docs name the schemes that work.
+
+Tested: unit tests, `check_connect_fails_on_a_bad_sourcemap_store`, the ignored
+`storage::tests::azure_roundtrip` against Azurite, and `mallard serve` against Azurite
+with one secret for the lake and for sourcemaps. Real Azure was not tried. Not read: the
+repro's `AZURE_STORAGE_CONNECTION_STRING` with no secret; that still fails, now with a
+message saying what to set. `check --connect` does not contact the sourcemap store.

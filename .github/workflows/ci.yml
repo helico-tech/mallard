@@ -84,25 +84,8 @@ jobs:
           npx playwright install --with-deps chromium
           npm run e2e
 
-  helm:
-    name: helm lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: azure/setup-helm@v4
-      - name: Lint and render every CI values file
-        run: |
-          set -e
-          chart=deploy/helm/mallard
-          for f in "$chart"/ci/*.yaml; do
-            echo "::group::$f"
-            helm lint "$chart" --strict -f "$f"
-            helm template ci "$chart" -f "$f" > /dev/null
-            echo "::endgroup::"
-          done
-
   docker:
-    name: docker build, smoke test, helm on kind
+    name: docker build, smoke test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -134,15 +117,9 @@ jobs:
       - name: Server logs
         if: always()
         run: docker logs mallard || true
-      # The same image, installed with the Helm chart on a kind cluster.
-      - uses: azure/setup-helm@v4
-      - uses: helm/kind-action@v1
-        with:
-          cluster_name: mallard
-      - name: Helm install on kind (duckdb, s3 + postgres)
-        run: |
-          kind load docker-image mallard:ci --name mallard
-          deploy/helm/kind/test.sh mallard:ci
+      # The same image in the compose stack: restart, RustFS + Postgres, ingest token.
+      - name: Compose stack end to end
+        run: deploy/compose/test.sh mallard:ci
 
   e2e-sentry:
     name: e2e (real Sentry SDKs)

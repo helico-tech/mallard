@@ -78,16 +78,22 @@ a few minutes. For only the CLI and TUI, on a machine that talks to a server
 elsewhere: `cargo install --path crates/mallard --no-default-features` (quick
 to build, much smaller, no `serve`; [ADR 0023](docs/adr/0023-one-binary.md)).
 
-## Kubernetes
+## Production
+
+mallard ships as a Docker image. There is no Helm chart for now
+([ADR 0026](docs/adr/0026-no-helm-chart-for-now.md)), and nothing publishes the image yet,
+so build it yourself:
 
 ```sh
-helm install mallard deploy/helm/mallard \
-  --set publicUrl=https://mallard.example.com --set apiToken=secret \
-  --set storage.dataPath=s3://my-bucket/mallard/lake/
+docker build -f deploy/docker/Dockerfile -t mallard .
+docker run -d --name mallard -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
+  -e MALLARD_SERVER__API_TOKENS=change-me \
+  -e MALLARD_SERVER__PUBLIC_URL=https://mallard.example.com \
+  mallard
 ```
 
-See `deploy/helm/mallard/values.yaml` and the examples in its `ci/`
-folder (DuckDB file on a PVC, MinIO + Postgres, AWS IRSA + Postgres).
+[`docs/deployment.md`](docs/deployment.md) covers object storage, a Postgres catalog,
+health endpoints and running behind a proxy.
 
 ## Ports and paths
 
@@ -137,6 +143,8 @@ catalog.
 
 ## More
 
+- [`docs/deployment.md`](docs/deployment.md) — how to deploy: Docker, compose, storage,
+  catalog, backups.
 - `docs/architecture.md` and `docs/adr/` — how it fits together.
 - `docs/sentry/`, `docs/otel/` — each side in depth (data model, capacity,
   compatibility, API).

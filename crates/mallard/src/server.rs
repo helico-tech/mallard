@@ -21,7 +21,8 @@ pub(crate) enum ServerCmd {
     Check {
         #[command(flatten)]
         config: ConfigArg,
-        /// Also open the catalog and storage (extensions, secrets, attach).
+        /// Also open the catalog and storage (extensions, secrets, attach) and build
+        /// the sourcemap store (no request to it).
         #[arg(long)]
         connect: bool,
     },
@@ -69,6 +70,8 @@ pub(crate) async fn run(cmd: ServerCmd, output: &Output) -> Result<()> {
         ServerCmd::Check { config, connect } => {
             let cfg = config.load()?;
             if connect {
+                // Exit 2: as with any other bad setting, trying again will not help.
+                commands::check_artifacts(&cfg).map_err(|e| mallard_term::error::usage(format!("{e:#}")))?;
                 commands::check_connection(cfg).await?;
             }
             if output.text() {

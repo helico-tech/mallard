@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-01
 ---
@@ -16,3 +16,8 @@ does not expect it under `sentry/`.
 Move it to `docs/deployment.md`, link it from the README, and update `NOTES.txt`,
 `docs/otel/*` and `docs/sentry/README.md`. `docs/otel/storage-backends.md` could move
 with it. Found during issue 0016.
+
+Done. The page is `docs/deployment.md`, and the README, `AGENTS.md`, `docs/architecture.md`,
+`docs/otel/*` and `docs/sentry/README.md` link to it. No pointer is left behind, because
+nothing external needs one. `docs/otel/storage-backends.md` stays where it is. `NOTES.txt` was
+not updated: the chart is removed next (ADR 0026).

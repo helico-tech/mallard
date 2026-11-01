@@ -305,6 +305,46 @@ async fn bind(addr: &str) -> Result<TcpListener> {
 mod tests {
     use super::*;
 
+    /// If a background job cannot start, the receivers stop and `serve_on` returns
+    /// the error, instead of accepting data that is never flushed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serve_stops_when_background_fails_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["t".into()];
+        cfg.storage.catalog = dir.path().join("catalog.ducklake").display().to_string();
+        cfg.storage.data_path = format!("{}/lake/", dir.path().display());
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
+        let otel = Arc::new(
+            mallard_otel_server::Server::with_connection(cfg.otel_config(), conn.try_clone().unwrap()).await.unwrap(),
+        );
+        let sentry = mallard_sentry_server::Server::with_connection(
+            cfg.sentry.clone(),
+            cfg.sentry_host(),
+            conn.try_clone().unwrap(),
+        )
+        .await
+        .unwrap();
+        let bridge = bridge::install(&cfg.bridge, &sentry, &otel).unwrap();
+        let platform = Platform { cfg: Arc::new(cfg), otel, sentry, bridge, metrics: None };
+        // New connections can no longer select the lake schema, so the flusher fails to start.
+        conn.execute_batch("DETACH lake").unwrap();
+        let bound = || TcpListener::bind("127.0.0.1:0");
+        let listeners = Listeners {
+            http: bound().await.unwrap(),
+            otlp_http: bound().await.unwrap(),
+            otlp_grpc: bound().await.unwrap(),
+            metrics: None,
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            platform.serve_on(listeners, CancellationToken::new()),
+        )
+        .await
+        .expect("serve_on must return when a background job fails");
+        assert!(r.is_err());
+    }
+
     #[tokio::test]
     async fn a_busy_port_fails_start_up() {
         let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();

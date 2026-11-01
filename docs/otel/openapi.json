@@ -1386,16 +1386,16 @@
           "flush_interval_secs": {
             "type": "number",
             "format": "double",
-            "description": "Buffered data is written at least this often (`ingest.flush_interval`),\nso new data can take this long to show up in queries."
+            "description": "Buffered data is written at least this often (`otel.ingest.flush_interval`),\nso new data can take this long to show up in queries."
           },
           "ingest_auth": {
             "type": "boolean",
-            "description": "OTLP ingest needs a bearer token (`auth.ingest_tokens` is set)."
+            "description": "OTLP ingest needs a bearer token (`server.ingest_tokens` is set)."
           },
           "max_window_secs": {
             "type": "integer",
             "format": "int64",
-            "description": "Longest query window (`query.max_window`), in seconds.",
+            "description": "Longest query window (`otel.query.max_window`), in seconds.",
             "minimum": 0
           },
           "retention_secs": {
@@ -1404,7 +1404,7 @@
           },
           "sql": {
             "type": "boolean",
-            "description": "`POST /api/v1/sql` is enabled (`query.enable_sql`)."
+            "description": "`POST /api/v1/sql` is enabled (`otel.query.enable_sql`)."
           }
         }
       },

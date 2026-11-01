@@ -24,7 +24,7 @@ use anyhow::Result;
 use clap::{FromArgMatches, Parser, Subcommand};
 use mallard_client::Client;
 use mallard_term::color::ColorChoice;
-use mallard_term::error::{Described, Hints, Kind};
+use mallard_term::error::{Described, Kind};
 use mallard_term::output::{Format, Output};
 use mallard_term::wait::WaitArgs;
 use mallard_term::window::WindowArgs;
@@ -214,13 +214,6 @@ enum SchemaCmd {
     Attrs(mallard_otel_cli::AttrArgs),
 }
 
-/// Hints in messages name mallard's commands and env vars.
-const ERRORS_HINTS: Hints =
-    Hints { command: "mallard", url_env: "MALLARD_URL", token_env: "MALLARD_TOKEN", project_env: "MALLARD_PROJECT" };
-
-/// The same for the telemetry side.
-const TELEMETRY_HINTS: Hints = ERRORS_HINTS;
-
 /// What every command gets: the client and how to print.
 struct Run {
     client: Client,
@@ -233,14 +226,12 @@ impl Run {
         mallard_sentry_cli::Ctx::new(self.client.sentry.clone())
             .with_project(self.project.clone())
             .with_output(self.output.clone())
-            .with_hints(ERRORS_HINTS)
     }
 
     /// Trace lists get the Sentry error count per trace.
     fn otel(&self) -> mallard_otel_cli::Ctx {
         mallard_otel_cli::Ctx::new(self.client.otel.clone())
             .with_output(self.output.clone())
-            .with_hints(TELEMETRY_HINTS)
             .with_error_lookup(std::sync::Arc::new(errors::SentryErrors(self.client.clone())))
     }
 }
@@ -353,9 +344,11 @@ fn classify(e: &mallard_client::Error, base_url: &str) -> Described {
     let base_url = base_url.trim_end_matches('/');
     match e {
         mallard_client::Error::Sentry(e) => {
-            mallard_sentry_cli::classify(e, &format!("{base_url}/sentry"), &ERRORS_HINTS)
+            mallard_sentry_cli::classify(e, &format!("{base_url}/sentry"), &mallard_sentry_cli::HINTS)
         }
-        mallard_client::Error::Otel(e) => mallard_otel_cli::classify(e, &format!("{base_url}/otel"), &TELEMETRY_HINTS),
+        mallard_client::Error::Otel(e) => {
+            mallard_otel_cli::classify(e, &format!("{base_url}/otel"), &mallard_otel_cli::HINTS)
+        }
         mallard_client::Error::InvalidTraceId(_) => Described::new(Kind::Usage, e.to_string()),
         e => Described::new(Kind::Internal, e.to_string()),
     }

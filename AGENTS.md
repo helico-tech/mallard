@@ -23,9 +23,7 @@ Web UI: `crates/mallard-web/README.md` (`npm run dev|test|e2e` in `crates/mallar
 JS end-to-end tests with real Sentry SDKs against `mallard serve`: `e2e/sentry/README.md`.
 After API changes: `UPDATE_OPENAPI=1 cargo test -p mallard-otel-server -p mallard-sentry-server --test openapi`
 rewrites `docs/otel/openapi.json` and `docs/sentry/openapi.json` (tests check them).
-Helm: `helm lint --strict deploy/helm/mallard -f deploy/helm/mallard/ci/<file>.yaml`;
-the rendered `mallard.toml` must pass `mallard check -c <file>`.
-CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
+The compose stack end to end, with restart: `deploy/compose/test.sh <image:tag>` (CI runs it).
 
 ## Map
 
@@ -41,10 +39,10 @@ CI installs the chart on kind with `deploy/helm/kind/test.sh` (needs kind).
 | `crates/mallard-sentry-*` | Sentry side: `mallard-sentry-protocol` (pure protocol), `mallard-sentry-server` (ingest, writer, `/v1` API), `mallard-sentry-api`, `mallard-sentry-client`, `mallard-sentry-cli` (commands + TUI component), `mallard-sentry-loadgen` |
 | `crates/mallard-otel-*` | OpenTelemetry side: `mallard-otel-server` (OTLP receivers, storage, maintenance, query API), `mallard-otel-api`, `mallard-otel-client`, `mallard-otel-cli` (commands + TUI component), `mallard-otel-loadgen` |
 | `config/` | example configs |
-| `deploy/` | Dockerfile, compose (RustFS + Postgres), Helm chart |
+| `deploy/` | Dockerfile, compose (RustFS + Postgres); no Helm chart (ADR 0026) |
 | `e2e/sentry/` | JS e2e with real Sentry SDKs, browser and sourcemaps |
 | `bench/otel/` | reproducible experiments and capacity runs |
-| `docs/` | [architecture](docs/architecture.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/), [Web UI guidelines and parity](docs/web/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
+| `docs/` | [architecture](docs/architecture.md), [deployment](docs/deployment.md), [ADRs](docs/adr/), [CLI and TUI keys](docs/cli.md), [guide for AI agents](docs/agents.md) (= `mallard help agents`), [specs](docs/specs/), [Web UI guidelines and parity](docs/web/); per side: [docs/sentry/](docs/sentry/), [docs/otel/](docs/otel/) |
 | `work/` | [queue](work/queue.md) → epics and issues (also `work/sentry/`, `work/otel/`) |
 
 Only `mallard` is built as a product binary (plus the load generators

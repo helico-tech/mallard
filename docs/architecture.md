@@ -56,6 +56,7 @@
 - One `duckdb` crate version for the workspace (it is bundled and linked
   once): only `mallard-duck` depends on it; everything else uses
   `mallard_duck::duckdb`.
+- How to run it: [deployment.md](deployment.md).
 - Binaries: only `mallard` (plus the dev load generators `mallard-sentry-loadgen`,
   `mallard-otel-loadgen`); `mallard-server` and the `mallard-sentry-*`/`mallard-otel-*` crates are libraries
   (the old standalone binaries are gone; ADR 0024 lists their names).
