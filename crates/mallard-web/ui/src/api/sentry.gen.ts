@@ -313,7 +313,11 @@ export interface components {
         CreateProject: {
             name: string;
             platform?: string | null;
-            /** @description URL-safe identifier. Derived from `name` when omitted. */
+            /**
+             * @description URL-safe identifier. Derived from `name` when omitted; then a project that has that
+             *     slug under the slug rule (`my_app` for the name `my-app`) is a 409, because a second
+             *     project would take its services.
+             */
             slug?: string | null;
         };
         EventDetail: components["schemas"]["EventSummary"] & {
