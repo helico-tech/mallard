@@ -37,6 +37,8 @@ pub struct Win {
 /// All `odl` commands. Embedders can mount this as a subcommand.
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Check that the server is up (no token needed); exit code 1 if not.
+    Health,
     /// Server health, ingest counters and storage size.
     Status,
     /// Services with request rate, error rate and latency.
@@ -209,6 +211,15 @@ pub async fn run(cmd: Cmd, ctx: &Ctx) -> Result<()> {
     let c = ctx.client.clone();
     let out = ctx.output;
     match cmd {
+        Cmd::Health => {
+            let h = c.health().await?;
+            if out == Output::Json {
+                json(&h)
+            } else {
+                println!("{} {}", h.status, h.version);
+                Ok(())
+            }
+        }
         Cmd::Status => {
             let s = c.stats().await?;
             if out == Output::Json {

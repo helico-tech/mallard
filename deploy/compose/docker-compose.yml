@@ -29,7 +29,7 @@ services:
       ODL_DUCKDB__MEMORY_LIMIT: 1GB
       # ODL_AUTH__API_TOKENS: '["change-me"]'
     healthcheck:
-      test: ["CMD", "odl", "--url", "http://localhost:8080", "services", "--since", "1m", "-o", "json"]
+      test: ["CMD", "odl", "--url", "http://localhost:8080", "health"]
       interval: 10s
       timeout: 5s
       retries: 6
