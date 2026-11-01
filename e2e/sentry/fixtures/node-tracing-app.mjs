@@ -3,7 +3,7 @@
 //
 // `static` sends each trace as a `transaction` item (what mallard's bridge
 // turns into OTel spans); `stream` is SDK 11's default span streaming
-// (`span` items, not bridged yet: work/issues/0014).
+// (`span` items, not bridged yet: work/issues/0017).
 //
 // It serves `GET /checkout`, which runs two child spans; the second one
 // throws, the handler reports the error and answers 500. The app calls its

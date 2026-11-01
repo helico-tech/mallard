@@ -32,7 +32,7 @@ Done (2026-11-01):
   span.
 - Found: @sentry/node 11 streams spans by default (`span` v2 items), which
   the bridge drops. The test uses `traceLifecycle: "static"`; the default
-  is a `todo` test. [issue 0014](0014-bridge-sentry-span-streaming.md).
+  is a `todo` test. [issue 0017](0017-bridge-sentry-span-streaming.md).
 - Also: an unsampled caller (fetch outside a span) makes the server inherit
   "not sampled" in static mode, hence the "checkout client" span.
 

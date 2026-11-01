@@ -61,12 +61,12 @@ The e2e suite and load generators run against `mallard`, so `sentry-ducklake`, `
   `mallard-server`. Dockerfile and Helm already built/ran only
   `mallard-server` + `mallard`: unchanged.
 - 2026-11-01: lost on the way: `otel-ducklake maintenance [--full]`
-  (one-shot) → issue 0012. Per-side docs still describe the standalone
-  setup; notes on the main pages, rewrite → issue 0013.
+  (one-shot) → issue 0015. Per-side docs still describe the standalone
+  setup; notes on the main pages, rewrite → issue 0016.
 - 2026-11-01: checks: fmt, clippy `-D warnings`, `cargo test --workspace`
   green; `npm test` in `e2e/sentry` (all 6 files, Chromium): 27 pass,
-  1 todo (issue 0014).
+  1 todo (issue 0017).
 
 ## Follow-ups
-- [issue 0012](../../issues/0012-one-shot-otel-maintenance.md) one-shot maintenance command
-- [issue 0013](../../issues/0013-per-side-docs-for-mallard.md) per-side docs for mallard
+- [issue 0015](../../issues/0015-one-shot-otel-maintenance.md) one-shot maintenance command
+- [issue 0016](../../issues/0016-per-side-docs-for-mallard.md) per-side docs for mallard

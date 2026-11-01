@@ -4,7 +4,7 @@
 > server and `odl` CLI, which are gone (story 0002/06). The code lives on as
 > the `odl-*` libraries inside mallard: run `mallard-server` (query API under
 > `/otel`, OTLP on :4318/:4317) and the `mallard` CLI; see the
-> [repo README](../../README.md). Rewrite: [issue 0013](../../work/issues/0013-per-side-docs-for-mallard.md).
+> [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
 
 **An OpenTelemetry collector that stores traces, logs and metrics in
 [DuckLake](https://ducklake.select), with a query API, a CLI and a terminal UI.**

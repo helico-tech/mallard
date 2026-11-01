@@ -4,7 +4,7 @@
 > server and `sdl` CLI, which are gone (story 0002/06). The code lives on
 > as the `sdl-*` libraries inside mallard: run `mallard-server` (Sentry under
 > `/sentry`, DSNs `<public_url>/sentry/<id>`) and the `mallard` CLI; see the
-> [repo README](../../README.md). Rewrite: [issue 0013](../../work/issues/0013-per-side-docs-for-mallard.md).
+> [repo README](../../README.md). Rewrite: [issue 0016](../../work/issues/0016-per-side-docs-for-mallard.md).
 
 Self-hosted error tracking that speaks the Sentry protocol and stores
 everything in [DuckLake](https://ducklake.select): Parquet files on S3 (or

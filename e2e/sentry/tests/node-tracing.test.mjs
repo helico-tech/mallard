@@ -95,7 +95,7 @@ test("transactions (traceLifecycle static): spans in /otel, the error under the 
 
 // @sentry/node 11 streams spans by default (`span` envelope items, v2); the
 // bridge only converts `transaction` items, so these spans are dropped.
-test("span streaming (SDK 11 default): spans in /otel", { todo: "work/issues/0014: bridge Sentry span v2 items" }, async () => {
+test("span streaming (SDK 11 default): spans in /otel", { todo: "work/issues/0017: bridge Sentry span v2 items" }, async () => {
   const run = await checkout("stream", "s1");
   const ev = await server.event(project.slug, run.event_id);
   assert.equal(ev.trace_id, run.trace_id, "the error is stored either way");
