@@ -15,9 +15,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("invalid base url: {0}")]
     Url(String),
+    /// An id or slug that can't be a path segment (empty, `.` or `..`).
+    #[error("invalid path segment {0:?}")]
+    InvalidSegment(String),
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("{status}: {message}")]
@@ -39,7 +43,7 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'
 /// go to another path.
 fn segment(s: &str) -> Result<String, Error> {
     if s.is_empty() || s.chars().all(|c| c == '.') {
-        return Err(Error::Url(format!("invalid path segment {s:?}")));
+        return Err(Error::InvalidSegment(s.to_string()));
     }
     Ok(utf8_percent_encode(s, SEGMENT).to_string())
 }
@@ -186,7 +190,7 @@ mod tests {
         assert_eq!(segment("v1.2").unwrap(), "v1.2");
         assert_eq!(segment("é").unwrap(), "%C3%A9");
         for bad in ["", ".", "..", "..."] {
-            assert!(matches!(segment(bad), Err(Error::Url(_))), "{bad:?}");
+            assert!(matches!(segment(bad), Err(Error::InvalidSegment(s)) if s == bad), "{bad:?}");
         }
     }
 
@@ -194,8 +198,9 @@ mod tests {
     fn dot_segments_never_reach_the_server() {
         let c = Client::new("http://127.0.0.1:9", "t").unwrap();
         // The error is returned before any network I/O, so this resolves on the first poll.
-        assert!(matches!(block_on(c.project("..")), Err(Error::Url(_))));
-        assert!(matches!(block_on(c.issue("web", ".", &Default::default())), Err(Error::Url(_))));
+        assert!(matches!(block_on(c.project("..")), Err(Error::InvalidSegment(_))));
+        assert!(matches!(block_on(c.issue("web", ".", &Default::default())), Err(Error::InvalidSegment(_))));
+        assert!(matches!(Client::new("not a url", "t"), Err(Error::Url(_))));
     }
 
     /// Minimal executor for futures that resolve without I/O.

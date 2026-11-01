@@ -43,9 +43,7 @@ fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
         sdl_client::Error::Api { status, message } => {
             format!("request rejected ({status}): {message}")
         }
-        sdl_client::Error::Url(m) if m.starts_with("invalid path segment") => {
-            format!("{m}: ids and slugs can't be empty, '.' or '..'")
-        }
+        sdl_client::Error::InvalidSegment(_) => format!("{e}: ids and slugs can't be empty, '.' or '..'"),
         sdl_client::Error::Url(m) => {
             format!("invalid server url {url:?}: {m} (set SDL_URL or --url)")
         }
@@ -57,6 +55,7 @@ fn describe_raw(e: &sdl_client::Error, url: &str) -> String {
             format!("unexpected response from {url} (version mismatch?): {h}")
         }
         sdl_client::Error::Http(h) => format!("request to {url} failed: {h}"),
+        e => format!("request to {url} failed: {e}"),
     }
 }
 
