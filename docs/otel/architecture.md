@@ -55,9 +55,10 @@ flowchart LR
   `Content-Encoding: gzip | deflate | zstd`. Decompressed size is capped.
   OTLP/JSON doubles may be strings (`"NaN"`, `"Infinity"`, `"-Infinity"`,
   `"1.5"`), as protojson allows. opentelemetry-proto takes them in only a
-  few fields, so a body that contains `NaN"`/`Infinity"`, or that it
-  refuses, is decoded again by a lenient decoder (`otlp/json.rs`) that
-  accepts them in every double field.
+  few fields and sometimes drops them without an error, so a body that it
+  refuses, or a metrics request that comes out with a missing value, is
+  decoded again by a lenient decoder (`otlp/json.rs`) that accepts them in
+  every double field. Unknown keys are ignored.
 - Both convert the request to Arrow record batches (`otlp/convert.rs`) on a
   blocking thread, then push them into the write buffer. Invalid spans are
   reported as OTLP *partial success*.

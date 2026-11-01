@@ -22,7 +22,6 @@ utoipa-axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-memchr.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
