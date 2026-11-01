@@ -14,14 +14,15 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard status` | health of both sides and what the server allows (SQL, windows, retention); exit 6 when a side is down |
 | `mallard setup <name> [--platform p]` | get or create the project; print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars |
 | `mallard find <id>` | a trace or event id (32 hex) or an issue id (16 hex): what it is and the command to see more |
-| `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`; status changes take `--reason` |
-| `mallard events list\|show` | error events; `show --json` is concise, `--raw` adds the Sentry payload |
+| `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`, `--tag k=v` (repeat), `--cursor`; status changes take `--reason` |
+| `mallard events list\|show` | error events; `list --tag k=v`, `--release`, `--env`, `-q`, `--cursor`; `show --json` is concise, `--raw` adds the Sentry payload |
+| `mallard releases list` | releases seen in error events: first/last seen, events, issues, new issues (derived from events; releases made with `sentry-cli releases new` are not stored) |
 | `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs |
 | `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |
 | `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`), follow (`-f`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation |
 | `mallard metrics list\|show <name>` | metric names; one metric over time (`-g p95 -b http.route`) |
-| `mallard sql "<select>"` | read-only SQL over the telemetry tables (exit 7 when off) |
+| `mallard sql "<select>" [--errors]` | read-only SQL over the telemetry tables, or with `--errors` over `events`, `issues`, `issue_activity` (exit 7 when off; ADR 0010) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
 | `mallard tui [-p project]` | both TUIs as tabs: F1 errors, F2 telemetry |
 
@@ -53,6 +54,7 @@ Per command, the same letter for the same thing on both sides:
 | `-n, --limit N` | max rows (`-l` still works for `traces list`) |
 | `-q, --query text` | text search |
 | `-t, --trace id` | only this trace (`events list`, `logs`) |
+| `--cursor c` | the next page: `next_cursor` of the previous answer (`issues list`, `events list`) |
 | `-S, --service name` | only this service (telemetry) |
 
 Default windows differ where the data does: issues 14d, events all (30d

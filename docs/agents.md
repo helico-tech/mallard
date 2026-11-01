@@ -21,6 +21,8 @@ mallard status                             # exit 0: both sides up
 - Lists are one envelope:
   `{"items":[…],"count":20,"limit":20,"truncated":true,"next_cursor":null,"window":{"from":"…","to":"…"}}`.
   `truncated` means more exist: narrow the window or filters, or raise `--limit`.
+  Where `next_cursor` is set (`issues list`, `events list`), pass it as `--cursor`
+  with the same filters to get the next page.
   `ndjson` prints one item per line instead (the truncation note goes to stderr).
 - Single objects (`show`, `status`, `setup`) are the object itself.
 - `--fields a,b,c` keeps only those top-level keys (an unknown field is exit 2 and
@@ -43,7 +45,7 @@ Exit codes:
 | 4 | not found (or `find` found nothing) | check the id, widen `--since` |
 | 5 | conflict | |
 | 6 | unavailable: server down, busy, timeout; `status` with a side down | retry later |
-| 7 | turned off on the server (SQL) | ask for `otel.query.enable_sql = true` |
+| 7 | turned off on the server (SQL) | ask for `otel.query.enable_sql = true` (`sql --errors`: `sentry.query.enable_sql`) |
 | 8 | condition not met | |
 
 ## Recipes
@@ -65,6 +67,15 @@ mallard find <32-hex trace or event id | 16-hex issue id>   # each match has "ne
 ```sh
 mallard issues list --new --since 30m                 # first seen in the window
 mallard issues list --first-release web@1.4.0 --status all
+mallard releases list --since 7d                      # per release: events, issues, new_issues
+```
+Releases come from the `release` of error events; `sentry-cli releases new`
+answers but stores nothing.
+
+**Errors of one user, URL or tenant** (tags; repeat `--tag`, all must match):
+```sh
+mallard issues list --tag url=/checkout --env production --since 1d
+mallard events list --since 1h --tag user=u-42 --fields event_id,title,timestamp
 ```
 
 **Is the fix working?** `count` and `last_seen` cover the window:
@@ -118,9 +129,11 @@ mallard metrics show http.server.request.duration -g p95 -b http.route --since 6
 `max_window_secs`, `retention_secs`, `ingest_lag_secs` (how long new telemetry takes
 to show up), `ingest_auth`.
 
-**Ad-hoc SQL** (telemetry tables `spans`, `logs`, `metric_points`, …; often off):
+**Ad-hoc SQL** (telemetry tables `spans`, `logs`, `metric_points`, …; with `--errors`
+the error tables `events`, `issues`, `issue_activity`; often off):
 ```sh
 mallard sql "SELECT service_name, count(*) FROM spans GROUP BY 1"   # exit 7 when off
+mallard sql --errors "SELECT tags['url'] AS url, count(*) FROM events GROUP BY 1 ORDER BY 2 DESC"
 ```
 
 ## Good to know
@@ -129,5 +142,6 @@ mallard sql "SELECT service_name, count(*) FROM spans GROUP BY 1"   # exit 7 whe
   a lookup that finds nothing right after a test run.
 - Default windows: issues 14d, events all (with `--trace` 30d), traces/logs/metrics 1h,
   `trace`/`find` 7d. The server caps windows (`max_window_secs`).
-- Lists are capped by `--limit` (`-n`); keep it small and use `--fields`.
+- Lists are capped by `--limit` (`-n`); keep it small and use `--fields`. An issue
+  cursor keeps its window and sort; changing `--sort` with a cursor is exit 2.
 - The old paths `mallard errors …` and `mallard telemetry …` still work.

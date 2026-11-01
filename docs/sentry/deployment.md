@@ -145,6 +145,7 @@ Every flag has an environment variable. The most used:
 | `SDL_DUCKDB_MEMORY_LIMIT` | 80% of RAM | e.g. `1GB` (`1GiB` = powers of 1024). |
 | `SDL_DUCKDB_THREADS` | CPUs | DuckDB threads. |
 | `SDL_READERS` | `4` | Read connections for the query API. |
+| `SDL_ENABLE_SQL` | `false` | `POST /v1/sql`: read-only SQL over `events`, `issues`, `issue_activity` (ADR 0010). Tokens become admin access. (mallard: `[sentry.query] enable_sql`, `sql_timeout = "30s"`) |
 | `SDL_BATCH_MAX` / `SDL_BATCH_WINDOW` | `2000` / `500ms` | Max events per commit / how long a quiet server collects before committing (200+ queued events commit at once). |
 | `SDL_INGEST_CONCURRENCY` | `256` | Ingest requests processed at once (bounds request memory). |
 | `SDL_MAINTENANCE_THREADS` | `1` | DuckDB threads during compaction (sorted merges need memory per thread); 0 = unchanged. |

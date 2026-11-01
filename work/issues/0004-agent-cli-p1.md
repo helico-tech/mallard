@@ -25,6 +25,28 @@ Story 0002/08 implemented the P0 list of [the spec](../../docs/specs/agent-cli.m
 - `setup --sentry-cli` (prints `SENTRY_URL`, `SENTRY_ORG`, `SENTRY_PROJECT`,
   `SENTRY_AUTH_TOKEN`), `-q/--quiet`.
 
+## Progress
+- 2026-11-01, Sentry side (branch `feat/cli-p1-sentry`), done:
+  - S9: `issues?tag=k:v` (repeat, all must match, max 10) and
+    `events?tag=&release=&environment=&query=` (window flags already worked);
+    CLI `--tag k=v` on `issues list` and `events list`, plus `--release`,
+    `--env`, `-q` on `events list`. Text search is `query` (like `issues`),
+    not `q`.
+  - S10: `issues` pages: stable order (sort value, then id) and
+    `next_cursor`; the cursor carries the window and the sort. CLI
+    `--cursor` on `issues list` and `events list` (events already had one).
+  - S14: `GET /v1/projects/{p}/releases` (from events; `new_issues` = issues
+    with that `first_release`); CLI `releases list`. The sentry-cli release
+    endpoints are still stubs (noted in `docs/sentry/compatibility.md` and
+    the agent guide).
+  - S15: `POST /v1/sql` over `events`, `issues`, `issue_activity`, off by
+    default (`[sentry.query] enable_sql`, `sql_timeout`); the guard moved to
+    `mallard_duck::sql` and the otel side uses it too (ADR 0010). CLI
+    `mallard sql --errors "<select>"`.
+  - Not done here: `status` does not report the Sentry side's SQL switch
+    (exit 7 tells); `odl-cli`'s SQL table printer could move to
+    `mallard-term` and be shared with `sdl-cli`'s.
+
 ## Notes
 - `status` reports a side as up when its API answers; it does not call
   `/readyz` (a failing otel flush shows in `otel.info.ingest`, not in `ok`).

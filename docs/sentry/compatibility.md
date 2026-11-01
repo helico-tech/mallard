@@ -81,7 +81,7 @@ ProGuard), event reprocessing.
 | `GET /api/0/organizations/{org}/chunk-upload/` | options: sha1, gzip, 8 MiB chunks |
 | `POST /api/0/organizations/{org}/chunk-upload/` | multipart chunks (`file`, `file_gzip`), checksums verified |
 | `POST /api/0/organizations/{org}/artifactbundle/assemble/` | `not_found` + missing chunks, then synchronous `ok` |
-| releases create / update / deploys | answered, not stored |
+| releases create / update / deploys | answered, not stored (stubs: `sentry-cli releases list` shows nothing; releases come from events, see `GET /v1/projects/{p}/releases`) |
 
 Any `org` slug is accepted. Use the server's token (`SDL_API_TOKEN`) as the
 auth token. See [sourcemaps.md](sourcemaps.md).
