@@ -141,7 +141,11 @@ Every flag has an environment variable. The most used:
 | `SDL_DUCKDB_MEMORY_LIMIT` | 80% of RAM | e.g. `1GB`. |
 | `SDL_DUCKDB_THREADS` | CPUs | DuckDB threads. |
 | `SDL_READERS` | `4` | Read connections for the query API. |
-| `SDL_BATCH_MAX` / `SDL_BATCH_WINDOW` | `2000` / `200ms` | Write batching. |
+| `SDL_BATCH_MAX` / `SDL_BATCH_WINDOW` | `2000` / `100ms` | Max events per commit / minimum gap between commits (group commit). |
+| `SDL_FLUSH_ROWS` | `50000` | Also flush inlined rows to Parquet after this many (bounds catalog size). |
+| `SDL_SNAPSHOT_RETENTION` | `1h` | Keep snapshots and replaced files this long; set above your catalog backup age. |
+| `SDL_DUCKDB_TEMP_DIR` | `./.tmp` | DuckDB spill directory. |
+| `SDL_METRICS_LISTEN` | (main port) | Serve `/metrics` on a separate address, e.g. `0.0.0.0:9090`. |
 | `SDL_QUEUE_CAPACITY` | `20000` | Queued events before ingest answers 429. |
 | `SDL_MAX_EVENT_BYTES` / `SDL_MAX_BODY_BYTES` | 1 MiB / 50 MiB | Size limits. |
 | `SDL_SOURCEMAP_CACHE_MB` | `256` | Sourcemap cache. |
@@ -258,6 +262,7 @@ loads at start and does not refresh. So:
 - Every pod runs catalog-wide maintenance (`SDL_CATALOG_WIDE_MAINTENANCE`
   defaults to `true`).
 
+This is tracked in [work/issues/0001](../work/issues/0001-multi-replica-caches.md).
 Until the server refreshes these caches, run one replica (the chart
 default). The Postgres catalog still gives you stateless pods, rolling
 updates with a brief overlap and easy backups. If you do run more pods:
@@ -285,7 +290,9 @@ What to back up: the **catalog** and the **bucket**, together.
   DuckDB file: volume snapshots or a copy taken while the server is stopped.
 - Bucket: turn on object versioning (or soft delete) with a retention of a
   few days. Compaction rewrites Parquet files and the server deletes files
-  that are no longer referenced about an hour after they stop being used. A
+  that are no longer referenced `SDL_SNAPSHOT_RETENTION` (default 1 hour)
+  after they stop being used. Raise it above your backup interval, or rely
+  on versioning. A
   catalog backup older than that points at deleted files; versioning lets you
   restore them.
 - Restoring: restore the catalog, restore missing objects from versions,

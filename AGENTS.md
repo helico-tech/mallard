@@ -27,6 +27,8 @@ GCS / Azure / local disk). Rust workspace; HTTP API with OpenAPI; CLI + TUI.
 - [docs/architecture.md](docs/architecture.md) - parts and how they connect.
 - [docs/data-model.md](docs/data-model.md) - DuckLake tables and why.
 - [docs/adr/](docs/adr/) - decisions.
+- [docs/deployment.md](docs/deployment.md), [docs/compatibility.md](docs/compatibility.md),
+  [docs/sourcemaps.md](docs/sourcemaps.md), [docs/capacity.md](docs/capacity.md)
 - [docs/references/sentry-sourcemap-protocol.md](docs/references/sentry-sourcemap-protocol.md)
 
 ## Work
