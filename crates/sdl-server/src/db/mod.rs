@@ -284,24 +284,26 @@ impl Db {
         &self,
         f: impl FnOnce(&Connection, &Ns) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let _permit = self.permits.clone().acquire_owned().await?;
+        let permit = self.permits.clone().acquire_owned().await?;
         let readers = self.readers.clone();
         let ns = self.ns.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = readers.lock().expect("lock").pop().expect("permit guarantees a connection");
+            // The permit lives in the blocking task, not in this future: if
+            // the caller is cancelled, the connection stays taken until the
+            // query ends.
+            let _permit = permit;
+            let conn = readers.lock().expect("lock").pop();
+            let conn = conn.ok_or_else(|| anyhow!("no free reader connection"))?;
             // One transaction per API call: all its queries see one snapshot
             // (and the catalog is read once, not per statement).
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 conn.execute_batch("BEGIN TRANSACTION")?;
-                let r = f(&conn, &ns);
-                let _ = conn.execute_batch("ROLLBACK");
-                r
+                f(&conn, &ns)
             }));
+            // Also after a panic, so the connection goes back clean.
+            let _ = conn.execute_batch("ROLLBACK");
             readers.lock().expect("lock").push(conn);
-            match result {
-                Ok(r) => r,
-                Err(_) => Err(anyhow!("query panicked")),
-            }
+            result.unwrap_or_else(|_| Err(anyhow!("query panicked")))
         })
         .await?
     }
@@ -331,4 +333,65 @@ pub fn redact(catalog: &str) -> String {
 
 pub fn us_to_dt(us: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_micros(us).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A standalone Db on local storage in `dir`.
+    pub(crate) fn open_db(dir: &std::path::Path, readers: usize) -> Db {
+        let cfg = Config {
+            catalog: dir.join("catalog.ducklake").display().to_string(),
+            readers,
+            batch_window: Duration::from_millis(10),
+            ..Config::default()
+        };
+        let storage = Storage::new(&dir.join("storage").display().to_string(), &cfg).unwrap();
+        Db::open(&cfg, &storage).unwrap()
+    }
+
+    async fn select_one(db: &Db) -> Result<i32> {
+        db.read(|c, _| Ok(c.query_row("SELECT 1", [], |r| r.get(0))?)).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_read_keeps_the_pool_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(open_db(dir.path(), 1));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = oneshot::channel();
+        let slow = db.read(move |_, _| {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            Ok(())
+        });
+        // Drop the read future while its query still runs.
+        tokio::select! {
+            _ = slow => panic!("the slow read finished early"),
+            _ = started_rx => {}
+        }
+        let db2 = db.clone();
+        let next = tokio::spawn(async move { select_one(&db2).await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release_tx.send(()).unwrap();
+        assert_eq!(next.await.unwrap().unwrap(), 1);
+        for _ in 0..3 {
+            assert_eq!(select_one(&db).await.unwrap(), 1);
+        }
+        db.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_read_returns_a_clean_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        let r: Result<()> = db.read(|_, _| panic!("boom")).await;
+        assert!(r.is_err());
+        for _ in 0..3 {
+            assert_eq!(select_one(&db).await.unwrap(), 1, "the reader must not be left in a transaction");
+        }
+        db.shutdown().await;
+    }
 }
