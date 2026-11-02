@@ -7,6 +7,3 @@
 5. [issue 0128 window message names a short key](issues/0128-window-message-names-short-key.md)
 6. [issue 0150 explicit slug opens a twin project](issues/0150-explicit-slug-opens-a-twin-project.md)
 7. [issue 0060 store sentry-cli releases](issues/0060-store-sentry-cli-releases.md)
-8. [issue 0152 stopping the server has no deadline](issues/0152-stopping-has-no-deadline.md)
-9. [issue 0153 two more out-of-memory messages](issues/0153-other-out-of-memory-messages.md)
-10. [issue 0154 `projects show` always fails](issues/0154-projects-show-always-fails.md)
