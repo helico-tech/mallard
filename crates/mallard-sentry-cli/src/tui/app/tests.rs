@@ -454,7 +454,7 @@ fn the_host_chooses_the_project() {
     assert_eq!(app.no_project, None);
 }
 
-/// Standalone `errors tui` keeps its own keys; in a host they are the host's.
+/// Without a host it keeps its own keys; in a host they are the host's.
 #[test]
 fn window_and_picker_keys_belong_to_the_host() {
     let mut app = loaded_app();

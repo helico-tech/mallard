@@ -2,7 +2,7 @@
 
 ## Status
 accepted (supersedes the command naming of 0002 and 0006: `mallard errors …`
-and `mallard telemetry …` are no longer the main paths)
+and `mallard telemetry …` are no longer the main paths); the hidden aliases are removed by 0032
 
 ## Context
 The main users of the `mallard` CLI are AI coding agents and CI scripts;

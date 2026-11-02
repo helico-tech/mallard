@@ -9,3 +9,5 @@
 7. [issue 0156 replicas race on the snapshot id](issues/0156-replicas-race-on-the-snapshot-id.md)
 8. [issue 0181 quoted a=b in the telemetry filters](issues/0181-quoted-key-value-in-telemetry-filters.md)
 9. [issue 0182 a:b=c differs between TUI and web UI](issues/0182-tag-key-with-a-colon-differs-between-tui-and-web.md)
+10. [issue 0184 text views only the old paths had](issues/0184-text-views-only-the-old-paths-had.md)
+11. [issue 0185 TUI components keep a mode without a host](issues/0185-tui-components-keep-a-mode-without-a-host.md)

@@ -160,8 +160,8 @@ fn closed_stdout_is_not_a_crash() {
 
 #[test]
 fn tui_without_a_terminal_fails_with_a_message() {
-    // The Sentry-side TUI checks the terminal before it calls the server.
-    let out = mallard("http://127.0.0.1:9", &["errors", "tui"]);
+    // The TUI checks the terminal before it calls the server.
+    let out = mallard("http://127.0.0.1:9", &["tui"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("needs an interactive terminal"), "{err}");
@@ -170,7 +170,7 @@ fn tui_without_a_terminal_fails_with_a_message() {
 #[test]
 fn maintenance_errors_use_the_api_error_message() {
     let url = serve(vec![("/sentry/v1/maintenance", 500, r#"{"error":"disk full"}"#.into())], Duration::ZERO);
-    let out = mallard(&url, &["errors", "maintenance"]);
+    let out = mallard(&url, &["flush"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("server error (500): disk full") && !err.contains('{'), "{err}");
@@ -197,7 +197,7 @@ fn color_flag_and_short_flags() {
 
 #[test]
 fn errors_print_one_friendly_line() {
-    let out = mallard("http://127.0.0.1:9", &["errors", "info", "--color", "never"]);
+    let out = mallard("http://127.0.0.1:9", &["projects", "list", "--color", "never"]);
     assert_eq!(out.status.code(), Some(6), "unreachable is exit code 6 (ADR 0008)");
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(err.lines().count(), 1, "{err}");

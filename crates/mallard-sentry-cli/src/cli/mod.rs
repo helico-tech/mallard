@@ -170,7 +170,6 @@ pub async fn run(cmd: Command, ctx: &Ctx) -> Result<()> {
 async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
     match cmd {
         Command::SendTest { dsn, message } => commands::send_test(&dsn, &message, ctx).await,
-        Command::Info => commands::info(ctx).await,
         Command::Projects(c) => commands::projects(ctx, c).await,
         Command::Issues(c) => commands::issues(ctx, c).await,
         Command::Events(c) => commands::events(ctx, c).await,
@@ -187,7 +186,6 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             }
             Ok(())
         }
-        Command::Tui => crate::tui::run(ctx).await,
     }
 }
 

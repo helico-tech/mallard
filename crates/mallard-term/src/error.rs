@@ -10,11 +10,11 @@ use crate::color::{ColorChoice, alert};
 use crate::text::clean;
 
 /// How the host names its commands and env vars, for the hints in messages
-/// ("set MALLARD_TOKEN or --token", "create one: mallard errors projects
-/// create <name>").
+/// ("set MALLARD_TOKEN or --token", "create one: mallard projects create
+/// <name>").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hints {
-    /// What runs the commands, e.g. `mallard`, `mallard errors`.
+    /// What runs the commands, e.g. `mallard`.
     pub command: &'static str,
     pub url_env: &'static str,
     pub token_env: &'static str,
@@ -303,7 +303,7 @@ pub fn error_line(d: &Described, color: ColorChoice, json: bool) -> String {
 mod tests {
     use super::*;
 
-    const H: Hints = Hints { command: "mallard errors", url_env: "U", token_env: "T", project_env: "P" };
+    const H: Hints = Hints { command: "host", url_env: "U", token_env: "T", project_env: "P" };
 
     #[test]
     fn describe_every_kind() {

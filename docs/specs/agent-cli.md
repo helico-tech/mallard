@@ -1,6 +1,8 @@
 # mallard CLI for agents — research and spec
 
 Status: P0 implemented in story `work/epics/0002-mallard/08-agent-cli.md` (ADR 0008); P1 is `work/issues/0004-agent-cli-p1.md`.
+The `mallard errors …` and `mallard telemetry …` paths in sections 1, 4 and 10 are what the CLI had when
+this was measured. They are gone (ADR 0032): use the commands of [docs/cli.md](../cli.md).
 Date: 2026-11-01. Based on the `mallard` debug build in `target/debug/mallard`,
 the code in `crates/`, and a throwaway server with seeded data
 (161k spans, 46k logs, 500 Sentry events) used to measure real output sizes.
@@ -286,7 +288,7 @@ plain text (no box drawing) when piped; examples in help; an agent guide.
   churn; but paths stay long (`mallard errors issues list`) and mix styles
   (`errors issues list` vs `telemetry traces`, `telemetry trace` vs `trace`).
 - **B. Flat nouns with `list`/`show` verbs; old paths stay as hidden
-  aliases for one release.** Shorter, one style, matches how agents think
+  aliases for one release (removed before any release, ADR 0032).** Shorter, one style, matches how agents think
   (issues, traces, logs), not the two internal sides. Cost: `mallard` owns
   its clap tree and calls the library functions; this changes ADR 0002
   ("commands show up for free") and needs a new ADR. Story 0002/06 retires
@@ -301,7 +303,8 @@ loop. If you want less churn, A plus all of §5.2–§6 still gets ~80% of the v
 
 ```
 mallard
-  status                         health + ingest + capabilities         (status, errors info, telemetry status/health)
+  status                         health + ingest + capabilities         (status, errors info, telemetry status)
+  health                         is the server up, no token             (telemetry health)
   setup <name>                   create-or-get project; print env vars  NEW
   find <id|value>                what is this id, and everything linked NEW
   projects list | show <p> | create <name> [--if-not-exists]
@@ -312,19 +315,20 @@ mallard
   services                                  RED per service
   ops                                       RED per operation [--compare]
   series   spans | logs | errors            counts / errors / p95 per bucket  NEW (CLI only)
+  stats                                     totals and events per bucket of one project (errors stats)
   metrics  list | show <name>               show = today's `telemetry metric`
   schema   [tables] | attrs                 NEW
   sql "<select>"
   sourcemaps list
-  maintenance run
+  flush                                     maintenance on the running server (errors maintenance)
   send-test
   tui
   help agents                               NEW: agent guide (same text as docs/agents.md)
   (serve, check — moved out by story 07, back behind a feature since ADR 0023)
 ```
 
-Kept aliases (hidden): `errors …`, `sentry …`, `telemetry …`, `otel …`,
-`trace <id>` = `traces show <id>`.
+Kept alias: `trace <id>` = `traces show <id>`. The hidden `errors …`, `sentry …`, `telemetry …`
+and `otel …` of this proposal are gone (ADR 0032).
 
 ### 5.3 Global flags
 
@@ -356,7 +360,7 @@ mallard status --json
 #                  "ingest_lag":"5s","ingest_auth":false}}
 ```
 Exit 0 all ok; 6 if a side is unreachable or not ready; 3 if the token is wrong.
-Replaces `telemetry health` (kept as alias; health stays tokenless).
+The tokenless check is `mallard health` (ADR 0032).
 
 **`mallard setup <name>`** (P0)
 ```sh

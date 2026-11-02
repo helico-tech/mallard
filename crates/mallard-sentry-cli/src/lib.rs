@@ -27,8 +27,6 @@ use mallard_term::window::WindowArgs;
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum Command {
-    /// Server version, storage and ingest queue.
-    Info,
     /// List, create and show projects.
     #[command(subcommand)]
     Projects(ProjectsCmd),
@@ -65,8 +63,6 @@ pub enum Command {
         #[arg(long, default_value = "send-test: hello from the mallard CLI")]
         message: String,
     },
-    /// Interactive terminal dashboard.
-    Tui,
 }
 
 #[derive(Subcommand, Debug)]

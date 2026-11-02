@@ -127,8 +127,14 @@ pub fn render(t: &TraceOverview) -> String {
 
     let mut shown_errors = HashSet::new();
     let mut shown_logs = HashSet::new();
-    let mut stack: Vec<(usize, usize)> = children.get(&None).into_iter().flatten().rev().map(|&i| (i, 0)).collect();
+    // The roots first, then what no root reaches: spans in a parent loop.
+    let roots = children.get(&None).into_iter().flatten().rev().copied();
+    let mut stack: Vec<(usize, usize)> = (0..t.spans.len()).rev().chain(roots).map(|i| (i, 0)).collect();
+    let mut shown_spans = HashSet::new();
     while let Some((i, depth)) = stack.pop() {
+        if !shown_spans.insert(i) {
+            continue;
+        }
         let s = &t.spans[i];
         let pad = "  ".repeat(depth);
         let offset = start.map(|st| (s.start_time - st).num_microseconds().unwrap_or(0) as f64 / 1000.0).unwrap_or(0.0);
@@ -331,6 +337,38 @@ mod tests {
         let line = |name: &str| out.lines().find(|l| l.contains(name)).unwrap().to_string();
         assert!(line("charge").ends_with("⚠ 2"), "{out}");
         assert!(!line("GET /").contains('⚠'), "{out}");
+    }
+
+    fn overview(spans: Vec<Span>) -> TraceOverview {
+        TraceOverview {
+            trace_id: mallard_client::TraceId::parse("0af7651916cd43dd8448eb211c80319c").unwrap(),
+            spans,
+            errors: vec![],
+            logs: vec![],
+            logs_truncated: false,
+            warnings: vec![],
+        }
+    }
+
+    /// Every span shows, also in a parent loop that no root reaches; an empty trace is fine.
+    #[test]
+    fn parent_loops_and_empty_traces() {
+        let spans = vec![span("aa", Some("bb")), span("bb", Some("aa")), span("cc", Some("cc")), span("dd", None)];
+        let out = render(&overview(spans));
+        for id in ["aa", "bb", "cc", "dd"] {
+            assert_eq!(out.lines().filter(|l| l.ends_with(id)).count(), 1, "{id} once: {out}");
+        }
+        assert!(render(&overview(vec![])).contains("no spans found"));
+    }
+
+    #[test]
+    fn huge_durations_do_not_overflow() {
+        let mut a = span("aa", None);
+        a.duration_ns = i64::MAX;
+        let mut b = span("bb", Some("aa"));
+        b.duration_ns = i64::MAX;
+        let out = render(&overview(vec![a, b]));
+        assert_eq!(out.lines().filter(|l| l.contains("✖")).count(), 2, "{out}");
     }
 
     #[test]

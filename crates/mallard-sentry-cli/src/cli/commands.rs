@@ -63,22 +63,6 @@ fn kv(o: Out, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn info(ctx: &Ctx) -> Result<()> {
-    let o = ctx.out;
-    let i = ctx.client.info().await.map_err(|e| ctx.err(e))?;
-    if !ctx.output.text() {
-        return ctx.print_json(&i);
-    }
-    let i = fmt::sanitize(i, true)?;
-    out!(o, "{} {}", p::bold("mallard errors"), i.version);
-    kv(o, "server", ctx.url())?;
-    kv(o, "duckdb", &i.duckdb_version)?;
-    kv(o, "catalog", &i.catalog)?;
-    kv(o, "storage", &i.storage)?;
-    kv(o, "queue", &format!("{} / {}", i.queue_depth, i.queue_capacity))?;
-    Ok(())
-}
-
 pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
     let o = ctx.out;
     match cmd {

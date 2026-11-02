@@ -63,11 +63,24 @@ fn status_exits_6_when_the_server_is_down() {
     assert_eq!((o.status.code(), stderr_json(&o)["error"]["code"].as_str()), (Some(6), Some("unavailable")));
 }
 
+/// The old `errors …` and `telemetry …` paths are ordinary usage errors (ADR 0032).
 #[test]
-fn old_paths_still_work() {
-    for args in [&["errors", "--help"][..], &["telemetry", "traces", "--help"], &["otel", "logs", "--help"]] {
-        assert_eq!(mallard(args).status.code(), Some(0), "{args:?}");
+fn old_paths_are_usage_errors() {
+    for args in [
+        &["errors"][..],
+        &["errors", "--help"],
+        &["sentry", "issues", "list"],
+        &["telemetry", "traces", "--help"],
+        &["otel", "logs", "--help"],
+    ] {
+        let o = mallard(args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(o.stdout.is_empty(), "{args:?}");
+        assert!(String::from_utf8_lossy(&o.stderr).contains("unrecognized subcommand"), "{args:?}");
     }
+    let o = mallard(&["errors", "--json"]);
+    assert_eq!((o.status.code(), stderr_json(&o)["error"]["code"].as_str()), (Some(2), Some("usage")));
+    assert_eq!(mallard(&["series", "errors", "--help"]).status.code(), Some(0), "keeps its name");
 }
 
 /// The commands of the `server` feature.
