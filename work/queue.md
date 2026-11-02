@@ -6,3 +6,4 @@
 4. [issue 0155 OTel retention loses to the flusher](issues/0155-otel-retention-loses-to-the-flusher.md)
 5. [issue 0156 replicas race on the snapshot id](issues/0156-replicas-race-on-the-snapshot-id.md)
 6. [issue 0139 metric point without a value](issues/0139-otlp-metric-point-without-value.md)
+6. [issue 0192 Web UI: the open "differs" rows of the parity table](issues/0192-web-ui-differences-from-the-tui.md)

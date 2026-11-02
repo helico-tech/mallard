@@ -20,8 +20,7 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, hosted: bool) {
     let row = |k: &str, d: &str| row_w(k, d, 14);
     // The keys every tab shares come first (mallard_term::tui::keys).
     let mut left = vec![section_line("Everywhere")];
-    let picker = keys::APP_PICKER.to_string();
-    left.extend(keys::SHARED.iter().filter(|(k, _)| hosted || *k != picker).map(|(k, d)| row_w(k, d, 22)));
+    left.extend(keys::shared(hosted).map(|(k, d)| row_w(k, d, 22)));
     left.push(Line::raw(""));
     left.push(Line::from(Span::styled(format!("  {} Data refreshes every 5s.", keys::TIMES), th::faint())));
     let mut right = vec![

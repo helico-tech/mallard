@@ -182,9 +182,7 @@ impl Embedded {
 
     pub(super) fn draw_help(&self, f: &mut Frame, area: Rect) {
         // The keys every tab shares come first (mallard_term::tui::keys).
-        let picker = keys::APP_PICKER.to_string();
-        let mut rows: Vec<(&str, &str)> =
-            keys::SHARED.iter().copied().filter(|(k, _)| self.hosted || *k != picker).collect();
+        let mut rows: Vec<(&str, &str)> = keys::shared(self.hosted).copied().collect();
         rows.extend([
             ("", ""),
             ("Overview", "↵ service → operations → traces"),

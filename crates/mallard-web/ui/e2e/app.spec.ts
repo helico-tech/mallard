@@ -580,6 +580,20 @@ test.describe("one app and one window", () => {
     expect((await seen).url()).not.toContain("service=");
   });
 
+  test("the logs of a trace show in an app without telemetry", async ({ page }) => {
+    // The seeded project `api` has no service of that name; its traces run through checkout-api.
+    await page.goto("/errors/api");
+    await page.locator("table tbody tr", { hasText: "PaymentDeclinedError" }).first().click();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: "Trace" })).toBeVisible();
+    await page.keyboard.press("x");
+    await expect(page.getByRole("grid", { name: "Spans of the trace" })).toBeVisible();
+    await page.keyboard.press("l");
+    await expect(page.getByText("card declined").first()).toBeVisible();
+    await page.keyboard.press("c");
+    await expect(page.getByRole("heading", { name: "api has no telemetry" })).toBeVisible();
+  });
+
   test("two service names with one slug are one app, and both are read", async ({ page, request }) => {
     const now = Date.now();
     for (const name of ["Two Names", "two-names"]) {

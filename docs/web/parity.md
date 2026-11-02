@@ -1,6 +1,6 @@
 # Web UI and TUI parity
 
-State on 2026-11-01. Epic 0004 changed the app scope and the window; rows below say so, and since story 0004/03 the TUI follows the same rules (`mallard tui`; the errors and telemetry tabs on their own keep their earlier keys and windows).
+State on 2026-11-02, after issues 0190 and 0191. Epic 0004 changed the app scope and the window; rows below say so, and since story 0004/03 the TUI follows the same rules (`mallard tui`; the errors and telemetry tabs on their own keep their earlier keys and windows).
 
 The TUI source is the reference (`crates/mallard/src/tui.rs`, `crates/sdl-cli/src/tui/`,
 `crates/odl-cli/src/tui/`, `crates/mallard-term/`). The web UI was driven with the
@@ -92,7 +92,12 @@ changed in the browser, because the seeded data has no such case.
 | A side the app lacks | Says so, with `mallard setup <app>` | Same | ok |
 | Filter suggestions | The list shows while typing; Tab takes the selected row, the first unless you moved; ↑↓ choose; ↵ applies what is typed | The list opens while typing or on ↓; nothing is taken until you move to it, then Enter or Tab takes it. Otherwise Tab moves the focus, as in a browser | intended |
 | Issue search | Text, and `tag=value` | Same | ok |
-| Cmd-K, app home page | None | Web only (stories 0004/04, 05) | intended |
+| Find an id | `ctrl-k`, `↵` looks up; one match with no warning lands, else a list (issue 0191) | Cmd-K looks up while typing; one match lands | intended |
+| Find an id, with a warning | Shows the warning and a list, because a side could not be read | One match lands at once, the warning goes unseen (issue 0192) | **differs** |
+| Choose an app in search | `p` is the picker; `ctrl-k` is ids only | Cmd-K also lists the apps | intended |
+| App home page | Overview stays telemetry, errors are one key away (F1); a page across both sides costs more than it gives | Overview of an app also shows new issues, events and worst operations (story 0004/05) | intended |
+| Pause all auto refresh | None; `space` pauses the log follow | A button on every screen | intended |
+| Load more issues | The last row reads 200 more, up to 500 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next page with a cursor, no end; all pages stay live | **differs** (issue 0192) |
 | Project picker reloads projects | Yes | Only with `r` (code) | **differs** |
 | Project switch | Toast "switched to X", keeps filters | Same | ok |
 
@@ -151,7 +156,7 @@ changed in the browser, because the seeded data has no such case.
 |---|---|---|---|
 | Columns | start, root, duration, bar, spans, errors, sentry, services | Same | ok |
 | Call | `limit=200, since, service, operation, errors_only, min/max, attributes` | Same | ok |
-| Load more | n/a | Next 200 with cursor, from and to; a new window starts again at 200 | intended |
+| Load more | The last row reads 200 more, up to 1000 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next 200 with cursor, from and to; a new window starts again at 200; all pages stay live | **differs** (issue 0192) |
 | Move, Enter, `→`, `l`, `x` | Yes | Yes | ok |
 | `/` and `f`, tokens, quotes, `>200`, attributes | Yes | Yes | ok |
 | Bad filter | Flash, old filter stays, prompt closes | Inline message, old filter stays, box stays open | **differs** |
@@ -198,6 +203,7 @@ changed in the browser, because the seeded data has no such case.
 | `s` severity cycle and toast | all, info, warn, error; by number (`debug`→warn, `fatal`→all, `14`→error) | Same | ok |
 | `/` filter, bad level, `c`, Esc clears | Yes | Yes | ok |
 | `r` | Clears and reloads the records | Same | ok |
+| Logs of a trace, in an app with no telemetry | Shown: a trace is asked for by id | Same (issue 0190) | ok |
 | Volume title and legend | "service and text filter only" | Same | ok |
 | Time format, 400 char cut | Yes, with `…` | Yes, no `…` | ok |
 | Note after a failed tail | Cleared by the next good poll | Same | ok |
@@ -224,11 +230,11 @@ changed in the browser, because the seeded data has no such case.
 | Ingest and storage tables | Yes | Yes | ok |
 | Ingest rate | In the panel title | In the header | intended |
 | Snapshot id | Exact | Exact | ok |
-| Extra "What the server allows" | n/a | Added | intended |
+| What the server allows | One line under Ingest (issue 0191) | A section | ok |
 
 ## Not checked
 
-- The TUI was not run next to the web UI; it is read from source.
+- The TUI was not run next to the web UI; it is read from source. `ctrl-k` was driven in a pseudo-terminal, not in a terminal app or a multiplexer, where the key may be taken.
 - The production binary with these changes: no CSP, and no `asset` route for direct links.
 - A real server outage: failures were simulated by blocking requests.
 - Gap row and tail start in a real burst, or after a pause over 10 minutes.

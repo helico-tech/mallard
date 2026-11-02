@@ -176,6 +176,13 @@ impl Embedded {
         self.dispatch(reqs);
     }
 
+    /// Open an issue of a project by id; with an event, that event on the stack trace.
+    pub fn open_issue(&mut self, project: &str, issue: &str, event: Option<&str>) {
+        self.ensure_started();
+        let reqs = self.app.show_issue(project, issue, event);
+        self.dispatch(reqs);
+    }
+
     fn ensure_started(&mut self) {
         if !self.started {
             self.started = true;

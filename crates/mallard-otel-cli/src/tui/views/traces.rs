@@ -34,6 +34,8 @@ pub struct State {
     pub sel: TableState,
     pub error: Option<String>,
     pub refreshed: Option<Instant>,
+    /// Pages asked for beyond the first, by moving to the last row.
+    pub pages: u32,
     pub detail: Option<Detail>,
     /// Error events of the listed traces (host's error lookup).
     pub errors: ErrorMap,
@@ -43,6 +45,8 @@ pub struct Detail {
     pub trace_id: String,
     /// Approximate start, used to narrow the lookup window.
     pub hint: Option<DateTime<Utc>>,
+    /// The span to select when the trace arrives.
+    pub want_span: Option<String>,
     pub trace: Option<Trace>,
     pub rows: Vec<Row>,
     pub total_ns: i64,
@@ -66,6 +70,7 @@ impl Detail {
         Self {
             trace_id,
             hint,
+            want_span: None,
             trace: None,
             rows: vec![],
             total_ns: 1,
@@ -113,10 +118,21 @@ fn retry_delay(failures: u32) -> Duration {
     crate::tui::RETRY * 2u32.pow(failures.min(4))
 }
 
+/// Rows of the list at first, and how many more the last row asks for.
+const TRACE_PAGE: u32 = 200;
+/// The most the server gives in one answer. The list reads as one answer so that `r`
+/// brings all of it up to date.
+const TRACE_CAP: u32 = 1000;
+
 impl State {
+    pub fn limit(&self) -> u32 {
+        (TRACE_PAGE * (self.pages + 1)).min(TRACE_CAP)
+    }
+
     /// Show the list for `filter` (the caller cancels a pending list).
     pub fn show_for(&mut self, filter: TraceFilter) {
         self.filter = filter;
+        self.pages = 0;
         self.detail = None;
         self.list.clear();
         self.refreshed = None;
@@ -136,7 +152,7 @@ impl State {
         {
             let (rows, total) = waterfall::layout(&t.spans);
             // Keep the selected span across refreshes.
-            let keep = d.selected_span().map(|s| s.span_id.clone());
+            let keep = d.want_span.take().or_else(|| d.selected_span().map(|s| s.span_id.clone()));
             let refresh = d.trace.is_some();
             d.rows = rows;
             d.total_ns = total;
@@ -209,6 +225,12 @@ impl Embedded {
         if !force && !due(self.traces.refreshed, Duration::from_secs(5)) {
             return;
         }
+        // Past the first page there is no auto refresh: rows hold still while someone reads
+        // them, and a deep list is not read again every 5 s on the shared connection. `r`
+        // clears `refreshed`, so it reads the whole list once more.
+        if !force && self.traces.pages > 0 && self.traces.refreshed.is_some() {
+            return;
+        }
         let f = &self.traces.filter;
         let q = TraceQuery {
             since: Some(self.since().to_string()),
@@ -218,7 +240,7 @@ impl Embedded {
             min_duration_ms: f.min_ms,
             max_duration_ms: f.max_ms,
             attributes: crate::attrs(&f.attrs),
-            limit: Some(200),
+            limit: Some(self.traces.limit()),
             ..Default::default()
         };
         let c = self.client.clone();
@@ -256,10 +278,30 @@ impl Embedded {
 
     pub(crate) fn open_trace_detail(&mut self, id: String) {
         let hint = self.traces.list.iter().find(|t| t.trace_id == id).map(|t| t.start_time);
+        self.show_trace_detail(id, hint, None);
+    }
+
+    pub(crate) fn show_trace_detail(&mut self, id: String, hint: Option<DateTime<Utc>>, span: Option<String>) {
         self.loader.cancel(Kind::Trace);
         self.loader.cancel(Kind::TraceLogs);
         self.loader.cancel(Kind::SpanErrors);
-        self.traces.detail = Some(Detail::new(id, hint));
+        let mut detail = Detail::new(id, hint);
+        detail.want_span = span;
+        self.traces.detail = Some(detail);
+        self.refresh_traces(true);
+    }
+
+    /// On the last row of a full list: read more, up to what the server gives.
+    fn more_traces(&mut self) {
+        let t = &mut self.traces;
+        if t.sel.selected() != Some(t.list.len().saturating_sub(1)) || (t.list.len() as u32) < t.limit() {
+            return;
+        }
+        if t.limit() >= TRACE_CAP {
+            self.flash(format!("the first {TRACE_CAP} traces: narrow the window or the filter"));
+            return;
+        }
+        t.pages += 1;
         self.refresh_traces(true);
     }
 
@@ -270,6 +312,7 @@ impl Embedded {
             }
             Ok(f) => {
                 self.traces.filter = f;
+                self.traces.pages = 0;
                 self.traces.refreshed = None;
                 self.traces.sel.select(Some(0));
                 self.loader.cancel(Kind::Traces);
@@ -335,6 +378,7 @@ impl Embedded {
         let t = &mut self.traces;
         if let Some(i) = nav(t.sel.selected().unwrap_or(0), t.list.len(), k, 10) {
             t.sel.select(Some(i));
+            self.more_traces();
             return Some(Outcome::Consumed);
         }
         let selected = t.sel.selected().and_then(|i| t.list.get(i)).map(|x| x.trace_id.clone());
@@ -397,8 +441,12 @@ impl Embedded {
                 TSpan::styled(clean(&q).into_owned(), theme::bold())
             },
         ]);
-        let block =
-            widgets::panel_with("Traces", Line::from(format!(" {} newest ", t.list.len())).style(theme::faint()), true);
+        let block = widgets::panel_with(
+            "Traces",
+            Line::from(format!(" {} newest{} ", t.list.len(), if t.pages > 0 { ", paused, r refreshes" } else { "" }))
+                .style(theme::faint()),
+            true,
+        );
         let inner = block.inner(area);
         f.render_widget(block, area);
         let [fl, table_area] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);

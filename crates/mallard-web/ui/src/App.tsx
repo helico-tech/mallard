@@ -8,7 +8,7 @@ import { get, setUnauthorizedHandler, type Session } from "@/api/client";
 import { ErrorBoundary } from "@/app/ErrorBoundary";
 import { Login } from "@/app/Login";
 import { Shell } from "@/app/Shell";
-import { ScopeProvider } from "@/app/window";
+import { ScopeProvider, useParam } from "@/app/window";
 import { TelemetryScope } from "@/components/scope-states";
 import { IssuePage } from "@/features/errors/IssuePage";
 import { ErrorsLanding, IssuesPage } from "@/features/errors/IssuesPage";
@@ -18,10 +18,18 @@ import { MetricsPage } from "@/features/telemetry/MetricsPage";
 import { StatusPage } from "@/features/telemetry/StatusPage";
 import { TracePage } from "@/features/telemetry/TracePage";
 import { TracesPage } from "@/features/telemetry/TracesPage";
+import { parseLogFilter } from "@/lib/query";
 
 // ECharts is the biggest dependency: load it with the screens that draw lines.
 const OverviewPage = lazy(() => import("@/features/telemetry/OverviewPage"));
 const MetricPage = lazy(() => import("@/features/telemetry/MetricPage"));
+
+/** The logs of a trace show in any app: an error's project often has no service of that name. */
+function LogsRoute() {
+  const [f] = useParam("f");
+  const parsed = parseLogFilter(f);
+  return <TelemetryScope byId={!("error" in parsed) && !!parsed.trace}><LogsPage /></TelemetryScope>;
+}
 
 /** Keeps what a link says about the app and the window. */
 function Home() {
@@ -70,7 +78,7 @@ export function App() {
           <Route path="/telemetry/overview" element={<OverviewPage />} />
           <Route path="/telemetry/traces" element={<TelemetryScope><TracesPage /></TelemetryScope>} />
           <Route path="/telemetry/traces/:traceId" element={<TracePage />} />
-          <Route path="/telemetry/logs" element={<TelemetryScope><LogsPage /></TelemetryScope>} />
+          <Route path="/telemetry/logs" element={<LogsRoute />} />
           <Route path="/telemetry/metrics" element={<TelemetryScope><MetricsPage /></TelemetryScope>} />
           <Route path="/telemetry/metrics/:name" element={<TelemetryScope><MetricPage /></TelemetryScope>} />
           <Route path="/telemetry/status" element={<StatusPage />} />

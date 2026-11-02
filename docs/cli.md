@@ -148,6 +148,7 @@ These keys mean the same on both tabs and every screen (the list is
 | `ctrl-c` | quit |
 | `F1` `F2` | switch tab (`mallard tui`) |
 | `p` | choose the app, on every screen (`mallard tui`; `mallard errors tui`: switch project) |
+| `ctrl-k` | find an id, on every screen, also while typing a filter (`mallard tui`) |
 
 Screen keys:
 
@@ -172,6 +173,22 @@ that tab, with what to do. Opening an event of another project moves the picker 
 of the two sides' `max_window_secs`, starting at 1h. The errors tab on its own (`mallard errors
 tui`) keeps its 24h start and its own list. An empty issue list in a window under 24h offers `d`:
 show last 24h, so older issues do not look like no issues.
+
+### Find an id (`mallard tui`)
+
+`ctrl-k`, paste a trace, event, issue or span id, `↵`. One match opens at once, on the tab of its
+side and in its own project. Several matches, or a part of the server that could not be read, show
+as a list first, with what could not be read. `ctrl-u` clears, `esc` or `ctrl-k` closes. It looks in
+the longest window the server allows, like `mallard find` (`GET /api/v1/find`). "Nothing found" and
+"Could not look this up" are different answers: a failure never reads as not found.
+
+### Long lists
+
+The issue and trace lists read 200 rows. On the last row of a full list they read 200 more, up to
+what the server gives in one answer: 500 issues, 1000 traces. There the TUI says so; narrow the
+window or the filter. A list grown past 200 no longer refreshes by itself: its rows hold still and
+the title says "paused, r refreshes"; `r` reads the whole list again. Another filter, sort, window
+or app starts again at 200, and live.
 
 ### Suggestions in a filter
 

@@ -119,6 +119,9 @@ fn render_filters(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
     let mut title = vec![title_span("Issues"), Span::styled(format!("{} ", app.status.as_str()), th::dim())];
+    if app.list_paused() {
+        title.push(Span::styled("paused, r refreshes ", th::dim()));
+    }
     if let Some(e) = app.issues_error.as_ref().filter(|_| !app.issues.is_empty()) {
         // The list is still shown; the failed refresh is noted in the title.
         title.push(Span::styled(format!("✗ refresh failed: {} ", fmt::truncate(e, 60)), Style::new().fg(th::RED)));

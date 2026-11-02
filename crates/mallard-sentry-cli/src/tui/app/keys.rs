@@ -239,7 +239,7 @@ impl App {
 
     fn on_key_issues(&mut self, k: KeyEvent) -> Step {
         if Self::move_selection(&mut self.issues_state, self.issues.len(), k.code) {
-            return done(vec![]);
+            return done(self.more_issues());
         }
         done(match k.code {
             KeyCode::Char('q') => return (vec![], Outcome::Quit),
@@ -290,6 +290,51 @@ impl App {
             KeyCode::Char('U') => self.set_selected_status(IssueStatus::Unresolved),
             _ => return ignored(),
         })
+    }
+
+    /// On the last row of a full list: read more, up to what the server gives.
+    fn more_issues(&mut self) -> Vec<Req> {
+        let last = self.issues_state.selected() == Some(self.issues.len().saturating_sub(1));
+        if !last || (self.issues.len() as u32) < self.issue_limit {
+            return vec![];
+        }
+        if self.issue_limit >= ISSUE_CAP {
+            self.toast(format!("The first {ISSUE_CAP} issues: narrow the window or the search"), false);
+            return vec![];
+        }
+        self.issue_limit = (self.issue_limit + ISSUE_PAGE).min(ISSUE_CAP);
+        self.issues_key().map(Req::Issues).into_iter().collect()
+    }
+
+    /// Open an issue by id, in its project, also from another screen. With an event: that
+    /// event, on the stack trace. Esc returns to the list.
+    pub(crate) fn show_issue(&mut self, project: &str, issue: &str, event: Option<&str>) -> Vec<Req> {
+        self.overlay = Overlay::None;
+        self.input = None;
+        self.suggest.close();
+        let mut reqs = vec![];
+        if !self.current_project().is_some_and(|p| p.slug == project) && self.project.as_deref() != Some(project) {
+            self.switch_project(project.to_string());
+            reqs.extend(self.list_requests());
+        }
+        self.push(Screen::Detail(Box::new(Detail {
+            id: issue.to_string(),
+            event_id: event.map(str::to_string),
+            tab: event.map(|_| Tab::Stack),
+            ..Default::default()
+        })));
+        reqs.extend([
+            Req::Issue { project: project.to_string(), id: issue.to_string(), window: self.window },
+            Req::Events { project: project.to_string(), issue: issue.to_string(), before: None },
+        ]);
+        if let Some(event_id) = event {
+            reqs.push(Req::Event {
+                project: project.to_string(),
+                issue: issue.to_string(),
+                event_id: event_id.to_string(),
+            });
+        }
+        self.track(reqs)
     }
 
     fn open_selected(&mut self) -> Vec<Req> {
