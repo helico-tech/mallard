@@ -1,8 +1,9 @@
 //! DuckDB + DuckLake access.
 //!
 //! - One **writer thread** owns the primary connection. All writes go
-//!   through it as commands on a bounded channel, so there are never write
-//!   conflicts inside the process, and events are committed in batches.
+//!   through it as commands on a queue, so there are never write conflicts
+//!   inside the process, and events are committed in batches. Ingest stops
+//!   at `queue_capacity` waiting commands ([`send_below`]).
 //! - A **maintenance thread** flushes and compacts on its own connection,
 //!   so that does not pause ingest (ADR 0014).
 //! - A small **reader pool** of cloned connections serves the query API.
@@ -17,6 +18,7 @@ pub mod writer;
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use crossbeam_channel::{Sender, TrySendError};
 use maintenance::MaintCmd;
 use mallard_duck::duckdb::{Connection, InterruptHandle};
 use mallard_sentry_api::IssueStatus;
@@ -146,7 +148,7 @@ impl Caches {
 }
 
 pub struct Db {
-    tx: crossbeam_channel::Sender<WriteCmd>,
+    tx: Sender<WriteCmd>,
     readers: Arc<Mutex<Vec<Connection>>>,
     permits: Arc<Semaphore>,
     pub caches: Arc<Caches>,
@@ -169,7 +171,7 @@ const PROJECT_REFRESH_GAP: Duration = Duration::from_secs(1);
 /// The maintenance thread as [`Db`] sees it.
 #[derive(Clone)]
 struct Maintainer {
-    tx: crossbeam_channel::Sender<MaintCmd>,
+    tx: Sender<MaintCmd>,
     stopping: Arc<AtomicBool>,
     interrupt: Arc<InterruptHandle>,
     thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
@@ -190,6 +192,22 @@ impl Maintainer {
         self.interrupt.interrupt();
         let _ = self.tx.try_send(MaintCmd::Stop);
     }
+}
+
+/// Queue `cmd` unless `limit` commands are waiting already.
+///
+/// Both queues are `crossbeam_channel::unbounded`, with the limit here. A bounded channel of
+/// that crate keeps what is queued until its last `Sender` is gone, and [`Db`] holds one: a
+/// command queued between a thread's last read and the end of that thread would stay there,
+/// its `reply` neither answered nor dropped, and whoever waits for it would wait for ever
+/// (issue 0158, and the server that never exited after an invalidated catalog). An unbounded
+/// one drops what is queued when its `Receiver` is dropped, also when the thread panics, so a
+/// `reply` always ends. A few callers at once can pass the limit by a few.
+fn send_below<T>(tx: &Sender<T>, limit: usize, cmd: T) -> Result<(), TrySendError<T>> {
+    if tx.len() >= limit {
+        return Err(TrySendError::Full(cmd));
+    }
+    tx.try_send(cmd)
 }
 
 /// A job that is due once per interval.
@@ -272,8 +290,9 @@ impl Db {
         let maintenance_conn = conn.try_clone()?;
         drop(conn);
 
-        let (tx, rx) = crossbeam_channel::bounded(cfg.ingest.queue_capacity.max(1));
-        let (maint_tx, maint_rx) = crossbeam_channel::bounded(16);
+        // Unbounded: see `send_below`.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (maint_tx, maint_rx) = crossbeam_channel::unbounded();
         let inlined = Arc::new(AtomicUsize::new(0));
         let catalog_lost = CancellationToken::new();
         let w = writer::Writer::new(
@@ -364,11 +383,7 @@ impl Db {
         let _ = tokio::task::spawn_blocking(move || m.stop_and_join()).await;
         let Some(handle) = self.writer_thread.lock().expect("lock").take() else { return };
         let (tx, rx) = oneshot::channel();
-        let sender = self.tx.clone();
-        let sent = tokio::task::spawn_blocking(move || sender.send(WriteCmd::Shutdown { reply: tx }).is_ok())
-            .await
-            .unwrap_or(false);
-        if sent {
+        if self.tx.send(WriteCmd::Shutdown { reply: tx }).is_ok() {
             let _ = rx.await;
         }
         let _ = tokio::task::spawn_blocking(move || handle.join()).await;
@@ -386,9 +401,9 @@ impl Db {
     /// Queue a command without waiting. Fails fast when the queue is full so
     /// ingest can answer 429 instead of piling up memory.
     pub fn try_send(&self, cmd: WriteCmd) -> Result<(), EnqueueError> {
-        self.tx.try_send(cmd).map_err(|e| match e {
-            crossbeam_channel::TrySendError::Full(_) => EnqueueError::Full,
-            crossbeam_channel::TrySendError::Disconnected(_) => EnqueueError::Stopped,
+        send_below(&self.tx, self.queue_capacity.max(1), cmd).map_err(|e| match e {
+            TrySendError::Full(_) => EnqueueError::Full,
+            TrySendError::Disconnected(_) => EnqueueError::Stopped,
         })
     }
 
@@ -398,11 +413,8 @@ impl Db {
         make: impl FnOnce(oneshot::Sender<Result<T, E>>) -> WriteCmd,
     ) -> Result<T, E> {
         let (tx, rx) = oneshot::channel();
-        let cmd = make(tx);
-        let sender = self.tx.clone();
-        // Management calls may wait for queue space instead of failing.
-        let sent = tokio::task::spawn_blocking(move || sender.send(cmd).is_ok()).await.map_err(anyhow::Error::from)?;
-        if !sent {
+        // Past the limit if need be: management calls do not fail on a full queue.
+        if self.tx.send(make(tx)).is_err() {
             return Err(anyhow!("writer stopped").into());
         }
         rx.await.map_err(|_| anyhow!("writer stopped"))?
@@ -965,6 +977,40 @@ pub(crate) mod tests {
         // `SYNC_INTERVAL` is 100 ms in tests.
         tokio::time::timeout(Duration::from_secs(30), db.catalog_lost.cancelled()).await.unwrap();
         db.shutdown().await;
+    }
+
+    /// Issue 0170: a command queued after the writer's last read, during its final flush, is never
+    /// read. Its `reply` has to end all the same, or whoever waits for it never stops, and the
+    /// process never exits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_is_queued_during_the_stop_gets_an_answer() {
+        use mallard_sentry_protocol::{NormalizeContext, ProcessedEvent, normalize_event};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(open_db(dir.path(), 1));
+        let stop = {
+            let db = db.clone();
+            tokio::spawn(async move { db.shutdown().await })
+        };
+        let mut replies = Vec::new();
+        loop {
+            let at = Utc::now();
+            let ev = normalize_event(serde_json::json!({"message": "late"}), &NormalizeContext::new(at));
+            let (reply, rx) = oneshot::channel();
+            let event = ProcessedEvent::from_normalized(&ev, at);
+            let w = EventWrite { project_id: 1, event, payload_json: ev.to_string(), reply };
+            match db.try_send(WriteCmd::Event(Box::new(w))) {
+                Ok(()) => replies.push(rx),
+                Err(EnqueueError::Stopped) => break,
+                Err(EnqueueError::Full) => tokio::time::sleep(Duration::from_millis(1)).await,
+            }
+        }
+        let all_ended = async {
+            for rx in replies {
+                let _ = rx.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(20), all_ended).await.expect("a reply that never ends");
+        stop.await.unwrap();
     }
 
     /// Issue 0144: events commit one at a time with the other side of the process.

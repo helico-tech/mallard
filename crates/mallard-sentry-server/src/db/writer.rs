@@ -139,6 +139,9 @@ impl NewIssueCount {
     }
 }
 
+/// `WriteCmd::Maintenance` waiting for the maintenance thread, at most; more are refused.
+const MAINTENANCE_RUNS_QUEUED: usize = 16;
+
 /// A drained queue with at least this many events commits without waiting
 /// for the batch window.
 const EARLY_COMMIT_EVENTS: usize = 200;
@@ -470,7 +473,7 @@ impl Writer {
             }
             WriteCmd::Maintenance { reply } => {
                 // Never wait here: that would pause ingest.
-                if let Err(e) = self.maintainer.try_send(MaintCmd::RunNow { reply })
+                if let Err(e) = super::send_below(&self.maintainer, MAINTENANCE_RUNS_QUEUED, MaintCmd::RunNow { reply })
                     && let MaintCmd::RunNow { reply } = e.into_inner()
                 {
                     let _ = reply.send(Err(anyhow!("maintenance is busy or stopped")));
