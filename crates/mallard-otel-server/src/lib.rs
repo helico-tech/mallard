@@ -71,7 +71,7 @@ pub fn run_maintenance(cfg: &Config, full: bool) -> Result<Vec<String>> {
     cfg.validate()?;
     let lake = Lake::open(cfg)?;
     let conn = lake.connect()?;
-    store::maintenance::run_once(&conn, &lake.schema, &cfg.maintenance, &cfg.retention, full)
+    store::maintenance::run_once(&conn, &lake.schema, &lake.locks, &cfg.maintenance, &cfg.retention, full)
 }
 
 /// Test hook (not a stable API): OTLP traces as Arrow batches for the `spans` table.

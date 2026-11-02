@@ -130,6 +130,9 @@ One thread runs these tasks, on the replica that holds the lease in `otel.meta`
 Merges and deletes only touch this schema's tables. Snapshot expiry and file
 cleanup are catalog-wide; this side owns them (ADR 0001).
 
+A flush and a retention `DELETE` take turns in one process, because they conflict
+(ADR 0033). So flushes wait while a day is deleted, and the buffer takes what comes in.
+
 ### Query API (`api/`, `query/`)
 
 - `axum` routes generated together with an OpenAPI document (`utoipa`).

@@ -64,6 +64,8 @@ until its next interval.
   that never held the lease. Check all replicas before you conclude nothing runs.
 - A task that outlives the lease can overlap with the next holder. That is safe:
   the loser logs a failed task and the next run tries again.
+- A retention `DELETE` conflicts with the flushes of the other replicas. A large one can keep losing
+  ([issue 0194](../../work/issues/0194-retention-on-replicas.md)).
 
 ## Sizing
 

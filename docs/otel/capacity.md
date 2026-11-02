@@ -331,6 +331,51 @@ failed request in any run. There is nothing to fix here:
 Not measured here: a memory limit, the compose settings (4 threads, 128 MB buffer), object storage, OTLP/gRPC, two
 replicas ([issue 0156](../../work/issues/0156-replicas-race-on-the-snapshot-id.md)), runs longer than 4 minutes.
 
+## Retention next to the flusher
+
+Measured on `mallard` on 2026-11-02, for [issue 0155](../../work/issues/0155-otel-retention-loses-to-the-flusher.md).
+A release build as a native process, 8 DuckDB threads, 8 GB, a DuckDB-file catalog, local disk. Other work was running on
+the machine, so treat these as rough. Ranges are the lowest and highest of two runs. "Before" is without turns
+([ADR 0033](../adr/0033-retention-and-flushes-take-turns.md)), "after" with them.
+
+**Many small tries:** retention `1m`, a try every 10 s, four runs at once at paced rates, 10 min before and 6 min after;
+5 min at full speed (`--rate 100000 --batch 50`, Sentry `--rate 0 --concurrency 512`).
+
+| load | build | tries with rows won | lost | flushes lost | spans/s | events/s | oldest row at most (limit 60 s) | rows past retention at most |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| medium | before | 53-54 | 0 | 0-1 | 2,805-2,815 | 299 | 70 s | 27,108-27,480 |
+| medium | after | 30 | 0 | 0 | 2,813 | 298 | 70 s | 27,253-27,412 |
+| heavy | before | 53-54 | 0-1 | 2-3 | 11,233-11,238 | 997-998 | 70-74 s | 110,826-165,559 |
+| heavy | after | 29 | 0 | 0 | 11,243-11,250 | 996 | 70-71 s | 109,269-120,317 |
+| both sides at full speed | before | **0** | **19-20** | 0 | 291,768-295,145 | 3,278-3,944 | **290-303 s, rising** | **70.4 M, rising** |
+| both sides at full speed | after | 15-16 | 0 | 0 | 268,645-273,526 | 4,051-4,088 | 70-78 s | 3.1-4.9 M |
+
+At full speed a try now costs about 8% of OTLP's speed at this interval, where each try removes millions of rows. The shipped
+interval is an hour. That was not measured.
+
+**The backfill of [the issue](../../work/issues/0155-otel-retention-loses-to-the-flusher.md):** `--backfill 30d --rate 5`, OTLP
+alone, retention `7d`, a try every 10 s, until the 146 M spans were sent.
+
+| build | tries with rows won | lost | flushes lost | spans/s | rows past retention at the end |
+|---|---:|---:|---:|---:|---:|
+| before | 2-7 | **32-34** | 2-7 | 289,272-291,652 | **95.6-106.5 M** |
+| after | 28 | 0 | 0 | 325,261-328,003 | 1.4-1.5 M (the rest of the current day) |
+
+**One large try, at paced rates:** a lake with 30 days of history (146 M spans, 112 M past retention), retention `7d`, a try
+every 30 s, 4 min. So this is less than one day of rows at medium rates (242 M).
+
+| load | build | tries | lost | how long a try took | rows deleted, all tables | spans past retention at the end | throttled | lowest 5 s of spans/s |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| medium | before | 6 | **6** | 6.5-10.6 s (p50) | **0** | **112 M** | 0 | 2,727-2,731 |
+| medium | after | 7 | 0 | 9.3-9.7 s, then 37-91 ms | 151.7 M | 1.5 M | 0 | 2,719-2,748 |
+| heavy | before | 6 | **6** | 6.7-7.8 s (p50) | **0** | **112 M** | 0 | 11,075-11,099 |
+| heavy | after | 7 | 0 | 10.4-10.7 s, then 37-219 ms | 151.7 M | 1.5 M | 0 | 11,052-11,060 |
+| medium, 4 threads, 1 GB, a `128MB` buffer | after | 7 | 0 | 10.3-10.9 s, then 40-212 ms | 151.7 M | 1.5 M | 0 | 2,707-2,743 |
+
+So flushes that wait 10 s for a `DELETE` do not hurt at these rates. A full day is more and was not measured: linear from these
+numbers about 14 s at medium rates and about a minute at heavy rates. A buffer that fills meanwhile gives OTLP senders a 429
+for that time, which they retry.
+
 ## Reproducing
 
 This runs the same load against `mallard serve`:
