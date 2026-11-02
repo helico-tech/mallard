@@ -190,7 +190,8 @@ async fn handle(ingest: Arc<Ingest>, signal: Signal, headers: HeaderMap, body: B
             Signal::Metrics => ok_response(
                 fmt,
                 &ExportMetricsServiceResponse {
-                    partial_success: (a.rejected > 0).then_some(ExportMetricsPartialSuccess {
+                    // With nothing rejected a message is a warning (OTLP): exemplars left out.
+                    partial_success: (a.rejected > 0 || !a.message.is_empty()).then_some(ExportMetricsPartialSuccess {
                         rejected_data_points: a.rejected as i64,
                         error_message: a.message,
                     }),

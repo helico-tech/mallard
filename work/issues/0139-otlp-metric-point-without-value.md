@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -20,3 +20,8 @@ the `series` list is empty.
 
 ## Notes
 Found during issue 0138. `otlp/convert.rs` appends `number_value(p.value.as_ref())` as it is.
+
+Done: a gauge or sum point with no value now counts in `rejectedDataPoints` and is not stored, unless its `no recorded
+value` flag is set, which is how a sender marks a series as gone. An exemplar with no value is left out and named in
+the message; its point stays, so it does not count as rejected. The `asDouble` key in a body and how it is decoded did
+not change. Tested in `convert.rs`; the reply over HTTP was not checked by a separate test.
