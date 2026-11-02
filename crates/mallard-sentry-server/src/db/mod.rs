@@ -628,7 +628,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
-        let settings = maintenance::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
+        let settings = maintenance::Maintenance { catalog_wide: Some(Duration::from_secs(3600)) };
         Db::with_connection(conn, &cfg, settings, Default::default(), "test".into()).unwrap()
     }
 
@@ -714,7 +714,7 @@ pub(crate) mod tests {
             Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicBool::new(true)),
             &Config::default(),
-            maintenance::Maintenance { catalog_wide: None, threads: 0 },
+            maintenance::Maintenance { catalog_wide: None },
         );
         let e = tokio::task::spawn_blocking(move || m.run_now()).await.unwrap().unwrap_err();
         assert!(format!("{e:#}").contains("stopped"), "{e:#}");
@@ -891,7 +891,7 @@ pub(crate) mod tests {
         let limits = conn.try_clone().unwrap();
         let mut cfg = Config::default();
         cfg.ingest.batch_window = Duration::from_millis(10);
-        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let settings = maintenance::Maintenance { catalog_wide: None };
         let db = Db::with_connection(conn, &cfg, settings, Default::default(), "test".into()).unwrap();
         // The lowest limit DuckDB takes: about what it uses right now.
         let short = || {
@@ -933,7 +933,7 @@ pub(crate) mod tests {
         };
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let other = conn.try_clone().unwrap();
-        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let settings = maintenance::Maintenance { catalog_wide: None };
         let db = Db::with_connection(conn, &Config::default(), settings, Default::default(), "test".into()).unwrap();
         assert!(!db.catalog_lost.is_cancelled());
         other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
@@ -958,7 +958,7 @@ pub(crate) mod tests {
         };
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let other = conn.try_clone().unwrap();
-        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let settings = maintenance::Maintenance { catalog_wide: None };
         let db = Db::with_connection(conn, &Config::default(), settings, Default::default(), "test".into()).unwrap();
         other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
         other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
@@ -979,7 +979,7 @@ pub(crate) mod tests {
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let mut cfg = Config::default();
         cfg.ingest.batch_window = Duration::from_millis(10);
-        let settings = maintenance::Maintenance { catalog_wide: None, threads: 0 };
+        let settings = maintenance::Maintenance { catalog_wide: None };
         let lock = mallard_duck::CommitLock::default();
         let db = Db::with_connection(conn, &cfg, settings, lock.clone(), "test".into()).unwrap();
         let other_side = lock.hold();

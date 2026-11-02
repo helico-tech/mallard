@@ -11,7 +11,6 @@
 //!     api_tokens: vec!["secret".into()],
 //!     artifacts: None,
 //!     catalog_maintenance: None,
-//!     maintenance_threads: 0,
 //!     commit_lock: Default::default(),
 //! };
 //! let server = Server::with_connection(Config::default(), host, conn).await?;
@@ -78,14 +77,12 @@ pub struct Server {
 impl Server {
     /// `conn` has the DuckLake catalog attached as `lake` (with secrets
     /// set). We create the `sentry` schema in it. Global DuckDB settings
-    /// belong to the host and are left untouched (except
-    /// `host.maintenance_threads`, which must be 0 on a shared connection).
+    /// belong to the host and are left untouched.
     pub async fn with_connection(cfg: Config, host: Host, conn: mallard_duck::duckdb::Connection) -> Result<Server> {
         cfg.validate()?;
         host.validate()?;
         let c = cfg.clone();
-        let maintenance =
-            db::maintenance::Maintenance { catalog_wide: host.catalog_maintenance, threads: host.maintenance_threads };
+        let maintenance = db::maintenance::Maintenance { catalog_wide: host.catalog_maintenance };
         let artifacts = host.artifacts.clone();
         let commit_lock = host.commit_lock.clone();
         // Both create directories and open files: keep them off async threads.

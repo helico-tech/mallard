@@ -20,3 +20,5 @@ Not investigated. A `sample` of the process showed the threads idle, with DuckDB
 tokio's waiting, but it does not show which `await` the test is stuck on. The test has
 `let _ = rx.await` with no time limit, so a `reply` that is neither answered nor dropped would
 wait for ever; that is a guess.
+
+2026-11-02: the same kind of hang was caught in another test: a deadlock in DuckDB after `SET threads`, which only the tests ran ([issue 0193](0193-red-ci-after-0192.md)). That is gone. A second way to hang, with the same symptom, is still open here: see the bounded queues in `fix/stop-hangs`.

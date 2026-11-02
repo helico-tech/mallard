@@ -629,6 +629,7 @@ test.describe("one app and one window", () => {
     await expect(page.getByRole("option", { name: "Last 7d" })).toBeVisible();
     await expect(page.getByRole("option", { name: "Last 14d" })).toHaveCount(0);
     expect(problems.filter((p) => !p.includes("400"))).toEqual([]);
+    await page.unrouteAll({ behavior: "ignoreErrors" });
   });
 
   test("no issues in a short window offers a day", async ({ page }) => {
@@ -838,6 +839,8 @@ test.describe("a long list", () => {
     expect(reads).toBe(0);
     await page.keyboard.press("r");
     await expect.poll(() => reads).toBe(2);
+    // The last read can still be on its way, and would fail the next test.
+    await page.unrouteAll({ behavior: "ignoreErrors" });
   });
 });
 
