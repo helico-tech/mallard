@@ -487,7 +487,7 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
                 c.trace(id, &TraceGetQuery { since: Some(since), ..Default::default() }).await
             };
             let t = match get(since.clone()).await {
-                // The server's query.max_window is smaller than the window
+                // The server's otel.query.max_window is smaller than the window
                 // asked for: fall back to one day.
                 Err(e) if e.is_window_too_large() && since != "24h" => {
                     ctx.output

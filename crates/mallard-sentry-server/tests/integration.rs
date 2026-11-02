@@ -542,7 +542,7 @@ async fn ingest_auth_compression_cors_and_dedupe() {
     // Bad query parameters get the JSON error body too, like the OTel API.
     let (s, v) = t.api(reqwest::Method::GET, "/v1/projects/web/events?limit=many", None).await;
     assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{v}");
-    // Windows: since, from/to and step, bounded by query.max_window.
+    // Windows: since, from/to and step, bounded by sentry.query.max_window.
     let (s, v) = t.api(reqwest::Method::GET, "/v1/projects/web/issues?since=400d", None).await;
     assert_eq!(s, 400, "{v}");
     assert!(v["message"].as_str().unwrap().contains("max_window"), "{v}");

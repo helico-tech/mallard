@@ -86,11 +86,14 @@ fn ingest_error(e: IngestError) -> Response {
 }
 
 /// Give a transaction to the host's sink, or drop it when there is none.
-fn forward_transaction(state: &AppState, project_id: u32, payload: Bytes) {
+fn forward_transaction(state: &AppState, inc: &Incoming, payload: Bytes) {
+    let project_id = inc.project_id;
     let sink = state.transaction_sink.get();
     let slug = state.db.caches.project(project_id).map(|p| p.slug);
     match (sink, slug) {
-        (Some(sink), Some(project_slug)) => sink.transaction(Transaction { project_id, project_slug, payload }),
+        (Some(sink), Some(project_slug)) => {
+            sink.transaction(Transaction { project_id, project_slug, client_ip: inc.client_ip.clone(), payload });
+        }
         _ => metrics::counter!("mallard_sentry_ingest_items_dropped_total", "type" => "transaction").increment(1),
     }
 }
@@ -275,7 +278,7 @@ async fn envelope(State(state): State<Arc<AppState>>, Path(project_id): Path<Str
                 }
             }
             // Stored by the host when it set a sink (mallard: as traces).
-            "transaction" => forward_transaction(&state, inc.project_id, item.payload.clone()),
+            "transaction" => forward_transaction(&state, &inc, item.payload.clone()),
             // Span streaming (SDK 11 default); also stored by the host's sink.
             "span" => forward_spans(&state, &inc, &env, item),
             // Accepted and dropped: sessions, client reports, attachments,
@@ -318,7 +321,7 @@ async fn store(State(state): State<Arc<AppState>>, Path(project_id): Path<String
     };
     // Transactions sent to /store/ by very old SDKs are not errors.
     if raw.get("type").and_then(Value::as_str) == Some("transaction") {
-        forward_transaction(&state, inc.project_id, json_bytes.into());
+        forward_transaction(&state, &inc, json_bytes.into());
         return axum::Json(json!({ "id": raw.get("event_id") })).into_response();
     }
     let r = match process_event(&state, &inc.source(), raw, None).await {

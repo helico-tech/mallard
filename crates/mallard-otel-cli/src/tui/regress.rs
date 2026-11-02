@@ -482,7 +482,7 @@ fn trace_lookup_backs_off() {
     let too_large = mallard_otel_client::Error::Api {
         status: 400,
         code: "bad_request".into(),
-        message: "larger than query.max_window".into(),
+        message: "time window larger than <side>.query.max_window (1day)".into(),
     };
     d.on_error(&too_large);
     assert!(d.short_window);
