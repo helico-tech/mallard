@@ -132,11 +132,12 @@ export function SearchPalette() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matches, apps, text, id, navigate, setApp]);
 
-  // One thing found for a whole id: land on it, that is why it was pasted.
+  // One thing found for a whole id: land on it, that is why it was pasted. With a warning a side
+  // could not be read, so there may be more: show both, as the TUI does.
   const landed = useRef<string | null>(null);
   useEffect(() => {
     if (!open) landed.current = null;
-    if (open && id && found.data && !found.isFetching && matches.length === 1 && landed.current !== id) {
+    if (open && id && found.data && !found.isFetching && matches.length === 1 && !found.data.warnings.length && landed.current !== id) {
       landed.current = id;
       navigate(addressOf(matches[0]!));
       setOpenAndClear(false);

@@ -68,7 +68,7 @@ function WaterfallRow({ row, totalMs, selected, sentryCount, collapsed, onSelect
         )}
         <span aria-hidden className="mr-1.5 size-2 shrink-0 rounded-full" style={{ background: serviceColor(s.service_name) }} />
         <span className="mr-2 hidden max-w-[30%] shrink-0 truncate text-kumo-subtle @3xl:block" title={s.service_name}>{s.service_name}</span>
-        {sentryCount > 0 && <WarningIcon aria-label={`${sentryCount} Sentry errors`} className="mr-1 shrink-0 text-kumo-warning" />}
+        {sentryCount > 0 && <WarningIcon aria-label={`${sentryCount} Sentry ${sentryCount === 1 ? "error" : "errors"}`} className="mr-1 shrink-0 text-kumo-warning" />}
         {row.orphan && <span className="mr-2 shrink-0 text-xs text-kumo-warning" title="The parent span was not received">orphan</span>}
         <span className={cn("truncate", failed ? "font-medium text-kumo-danger" : "text-kumo-default")} title={s.name}>{s.name}</span>
         {collapsed && <span className="tnum ml-1.5 shrink-0 text-xs text-kumo-subtle">+{compact(row.descendants)}</span>}
@@ -327,7 +327,7 @@ export function TracePage() {
         actions={
           q.data && (
             <>
-              <Button variant="secondary" icon={errorCount > 0 ? <WarningIcon className="text-kumo-warning" /> : undefined} onClick={toErrors}>{errorCount} Sentry errors</Button>
+              <Button variant="secondary" icon={errorCount > 0 ? <WarningIcon className="text-kumo-warning" /> : undefined} onClick={toErrors}>{errorCount} Sentry {errorCount === 1 ? "error" : "errors"}</Button>
               <Button variant="secondary" onClick={() => navigate(`/telemetry/logs?f=${encodeURIComponent(`trace=${traceId}`)}`)}>{compact(logs.length)} logs</Button>
             </>
           )

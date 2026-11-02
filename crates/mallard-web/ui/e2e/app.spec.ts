@@ -765,6 +765,25 @@ test.describe("search with Cmd-K", () => {
     await expect(page.getByRole("dialog")).toBeHidden();
   });
 
+  test("one match with a warning stays open, so the warning is seen", async ({ page, request }) => {
+    const res = await request.get("http://127.0.0.1:38080/otel/api/v1/traces?since=1h&limit=1", { headers: { authorization: `Bearer ${TOKEN}` } });
+    const [trace] = (await res.json()) as { trace_id: string }[];
+    await page.route(/\/api\/v1\/find/, async (route) => {
+      const r = await route.fetch();
+      const body = await r.json();
+      body.warnings = ["errors: could not be read"];
+      await route.fulfill({ response: r, json: body });
+    });
+    await page.goto("/telemetry/status");
+    await expect(page.getByRole("heading", { name: "Ingest", exact: true })).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    await box(page).fill(trace!.trace_id);
+    await expect(page.getByText(/Not everything could be read/)).toBeVisible();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page).not.toHaveURL(/\/telemetry\/traces\//);
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+  });
+
   test("an issue id opens the issue, and picks its app", async ({ page, request }) => {
     const res = await request.get("http://127.0.0.1:38080/sentry/v1/projects/web/issues?since=1h&limit=1", { headers: { authorization: `Bearer ${TOKEN}` } });
     const { issues } = (await res.json()) as { issues: { id: string }[] };

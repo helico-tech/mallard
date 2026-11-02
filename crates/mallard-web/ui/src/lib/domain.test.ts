@@ -13,6 +13,12 @@ describe("domain", () => {
     expect(severityName(24, "")).toBe("FATAL");
     expect(severityName(0, "warning")).toBe("WARN");
     expect(severityName(0, "?")).toBe("-");
+    expect(severityName(0, "err")).toBe("ERROR");
+    expect(severityName(25, "warn")).toBe("WARN");
+    expect(severityName(25, "")).toBe("-");
+    expect([1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21].map((n) => severityName(n, ""))).toEqual([
+      "TRACE", "TRACE", "DEBUG", "DEBUG", "INFO", "INFO", "WARN", "WARN", "ERROR", "ERROR", "FATAL",
+    ]);
   });
   it("level labels", () => {
     expect(levelLabel("warning")).toBe("Warn");

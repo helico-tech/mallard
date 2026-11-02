@@ -41,16 +41,13 @@ export function levelLabel(level: string): string {
   }
 }
 
-/** 1–4 TRACE, 5–8 DEBUG, 9–12 INFO, 13–16 WARN, 17–20 ERROR, 21–24 FATAL; else from the text. */
+/** 1–4 TRACE, 5–8 DEBUG, 9–12 INFO, 13–16 WARN, 17–20 ERROR, 21–24 FATAL; else from the text, as in the TUI. */
 export function severityName(number: number, text: string): string {
-  if (number >= 21 && number <= 24) return "FATAL";
-  if (number >= 17) return number <= 20 ? "ERROR" : "-";
-  if (number >= 13) return "WARN";
-  if (number >= 9) return "INFO";
-  if (number >= 5) return "DEBUG";
-  if (number >= 1) return "TRACE";
+  if (number >= 1 && number <= 24) return ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"][Math.floor((number - 1) / 4)]!;
   const t = text.toUpperCase();
-  for (const name of ["FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"]) if (t.startsWith(name)) return name;
+  for (const [start, name] of [["FATAL", "FATAL"], ["ERR", "ERROR"], ["WARN", "WARN"], ["INFO", "INFO"], ["DEBUG", "DEBUG"], ["TRACE", "TRACE"]] as const) {
+    if (t.startsWith(start)) return name;
+  }
   return "-";
 }
 
