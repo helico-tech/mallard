@@ -791,6 +791,54 @@ test.describe("search with Cmd-K", () => {
   });
 });
 
+test.describe("a long list", () => {
+  test("traces hold still past the first page, until r", async ({ page }) => {
+    const reads: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/otel/api/v1/traces?")) reads.push(r.url());
+    });
+    await page.goto("/telemetry/traces");
+    const note = page.getByText("does not refresh by itself");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await expect(note).toHaveCount(0);
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(note).toBeVisible();
+    reads.length = 0;
+    await page.waitForTimeout(6000);
+    expect(reads).toEqual([]);
+    await page.keyboard.press("r");
+    await expect.poll(() => reads.length).toBe(2);
+    expect(reads.filter((u) => u.includes("cursor="))).toHaveLength(1);
+    // Another filter is another list: one page, and live again.
+    await page.keyboard.press("E");
+    await expect(note).toHaveCount(0);
+  });
+
+  test("issues hold still past the first page, until r", async ({ page }) => {
+    // The demo data has too few issues for a second page.
+    let reads = 0;
+    await page.route(/\/issues\?/, async (route) => {
+      const url = new URL(route.request().url());
+      reads++;
+      const res = await route.fetch();
+      const body = await res.json();
+      body.next_cursor = url.searchParams.get("cursor") ? null : "more";
+      if (url.searchParams.get("cursor")) body.issues = [];
+      await route.fulfill({ response: res, json: body });
+    });
+    await page.goto("/errors/web");
+    const note = page.getByText("does not refresh by itself");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(note).toBeVisible();
+    reads = 0;
+    await page.waitForTimeout(6000);
+    expect(reads).toBe(0);
+    await page.keyboard.press("r");
+    await expect.poll(() => reads).toBe(2);
+  });
+});
+
 test.describe("first screen", () => {
   test("selection stays on a row by id across a refresh", async ({ page }) => {
     await page.goto("/telemetry/traces");

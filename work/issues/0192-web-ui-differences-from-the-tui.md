@@ -19,9 +19,8 @@ Worth doing first, because they can mislead:
 
 Small, seen in the README screenshots: the trace page says "1 Sentry errors".
 
-## Deep lists re-read every page
-`useInfiniteQuery` with `refetchInterval` and no `maxPages` (`TracesPage.tsx`, `IssuesPage.tsx`) reads
-every loaded page again every 5 s, with no end to how many. Counted in a browser on 2026-11-02 on the
-demo data, requests to `/traces` in 11 s: one page 2 reads, two pages 4 reads (2 with a cursor). The
-cost on a large lake is not measured. The TUI stops its auto refresh past the first page for this
-reason (issue 0191); the same rule, or a measurement, is the choice here.
+## Done: deep lists hold still
+`useInfiniteQuery` with `refetchInterval` read every loaded page again every 5 s, with no end to how
+many. Counted in a browser on 2026-11-02 on the demo data, requests to `/traces` in 11 s: one page 2
+reads, two pages 4 reads (2 with a cursor). The owner chose the TUI's rule (issue 0191): past the
+first page no auto refresh, and `r` reads all pages. `firstPageOnly` in `components/list.tsx`.
