@@ -1282,6 +1282,119 @@ async fn delta_sums_exp_histograms_and_summaries() {
     h.stop().await;
 }
 
+/// A quoted finite double is valid protojson. The plain decoder accepts it and
+/// loses it: the point's value, the exemplar's value, or the whole metric's data
+/// (issue 0138). One metric per request: each must be noticed on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn json_quoted_finite_doubles_keep_their_value() {
+    let h = harness(None).await;
+    let t = now_ns() - 1_000_000_000;
+    // Summaries are cumulative: a value needs a point in an earlier one-minute bucket.
+    let (start, before) = (t - 180_000_000_000, t - 120_000_000_000);
+    let exemplar =
+        format!(r#"{{"timeUnixNano":"{t}","asDouble":"0.25","traceId":"{TRACE_HEX}","spanId":"0000000000000001"}}"#);
+    let metrics = [
+        format!(r#"{{"name":"q.point","gauge":{{"dataPoints":[{{"timeUnixNano":"{t}","asDouble":"1.5"}}]}}}}"#),
+        format!(r#"{{"name":"q.spaced","gauge":{{"dataPoints":[{{"timeUnixNano":"{t}","asDouble" : "1.5"}}]}}}}"#),
+        format!(
+            r#"{{"name":"q.exemplar","gauge":{{"dataPoints":[{{"timeUnixNano":"{t}","asDouble":1,"exemplars":[{exemplar}]}}]}}}}"#
+        ),
+        format!(
+            r#"{{"name":"q.attribute","gauge":{{"dataPoints":[{{"timeUnixNano":"{t}","asDouble":1,
+                "attributes":[{{"key":"ratio","value":{{"doubleValue":"0.5"}}}}]}}]}}}}"#
+        ),
+        format!(
+            r#"{{"name":"q.histogram","histogram":{{"aggregationTemporality":1,"dataPoints":[{{
+                "startTimeUnixNano":"{start}","timeUnixNano":"{t}","count":"2","sum":"3","min":"0.5","max":"2.5",
+                "bucketCounts":["1","1"],"explicitBounds":["1.5"]}}]}}}}"#
+        ),
+        format!(
+            r#"{{"name":"q.summary","summary":{{"dataPoints":[
+                {{"startTimeUnixNano":"{start}","timeUnixNano":"{before}","count":"2","sum":"7",
+                  "quantileValues":[{{"quantile":"0.5","value":"3.5"}}]}},
+                {{"startTimeUnixNano":"{start}","timeUnixNano":"{t}","count":"4","sum":"14",
+                  "quantileValues":[{{"quantile":"0.5","value":"3.5"}}]}}]}}}}"#
+        ),
+    ];
+    for metric in metrics {
+        let body = format!(r#"{{"resourceMetrics":[{{"scopeMetrics":[{{"metrics":[{metric}]}}]}}]}}"#);
+        let (s, reply) = h.post("/v1/metrics", "application/json", body.into_bytes()).await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&reply));
+        assert!(!String::from_utf8_lossy(&reply).contains("no data"), "{}", String::from_utf8_lossy(&reply));
+    }
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        (v.len() == 6).then_some(())
+    })
+    .await;
+    let value = async |name: &str, agg: &str| {
+        let q = format!("/api/v1/metrics/query?name={name}&since=15m&step=1m&agg={agg}&exemplars=true");
+        h.eventually(|| async {
+            let r: MetricQueryResult = h.get(&q).await;
+            let v = r.series.first()?.points.first()?.value;
+            Some((v, r))
+        })
+        .await
+    };
+    assert_eq!(value("q.point", "max").await.0, 1.5);
+    assert_eq!(value("q.spaced", "max").await.0, 1.5);
+    let (v, r) = value("q.exemplar", "max").await;
+    assert_eq!(v, 1.0);
+    assert_eq!(r.exemplars.iter().map(|e| e.value).collect::<Vec<_>>(), vec![0.25]);
+    let r = value("q.attribute", "max&group_by=ratio").await.1;
+    assert_eq!(r.series[0].labels["ratio"], "0.5");
+    assert_eq!(value("q.histogram", "avg").await.0, 1.5);
+    assert_eq!(value("q.histogram", "count").await.0, 2.0);
+    assert_eq!(value("q.summary", "p50").await.0, 3.5);
+    h.stop().await;
+}
+
+/// OTLP/JSON receivers ignore fields they do not know, also inside an
+/// `AnyValue`, whichever decoder path the body takes (issue 0138).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn json_unknown_keys_in_any_value_are_ignored() {
+    let h = harness(None).await;
+    let t = now_ns() - 1_000_000_000;
+    let logs = format!(
+        r#"{{"resourceLogs":[{{"resource":{{"attributes":[{{"key":"service.name","value":{{"stringValue":"unknown-keys"}}}}]}},
+          "scopeLogs":[{{"logRecords":[{{"timeUnixNano":"{t}","body":{{"future":{{"a":[1]}},"stringValue":"kept"}},
+            "attributes":[{{"key":"after","value":{{"intValue":"7","future":1}}}},
+              {{"key":"nested","value":{{"arrayValue":{{"values":[{{"future":null,"boolValue":true}}]}}}}}},
+              {{"key":"lenient","value":{{"doubleValue":"NaN","future":"x"}}}},
+              {{"key":"only","value":{{"future":1}}}}]}}]}}]}}]}}"#
+    );
+    let (s, body) = h.post("/v1/logs", "application/json", logs.into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let metrics = format!(
+        r#"{{"resourceMetrics":[{{"scopeMetrics":[{{"metrics":[{{"name":"unknown.keys",
+          "gauge":{{"dataPoints":[{{"timeUnixNano":"{t}","asDouble":2.5,
+            "attributes":[{{"key":"k","value":{{"stringValue":"v","future":{{}}}}}}]}}]}}}}]}}]}}]}}"#
+    );
+    let (s, body) = h.post("/v1/metrics", "application/json", metrics.into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let logs: Vec<LogRecord> = h
+        .eventually(|| async {
+            let v: Vec<LogRecord> = h.get("/api/v1/logs?since=1h&service=unknown-keys").await;
+            (v.len() == 1).then_some(v)
+        })
+        .await;
+    assert_eq!(logs[0].body, "kept");
+    assert_eq!(logs[0].attributes["after"], "7");
+    assert_eq!(logs[0].attributes["nested"], "[true]");
+    assert_eq!(logs[0].attributes["lenient"], "NaN");
+    h.eventually(|| async {
+        let v: Vec<MetricInfo> = h.get("/api/v1/metrics?since=1h").await;
+        v.iter().any(|m| m.name == "unknown.keys").then_some(())
+    })
+    .await;
+    let r: MetricQueryResult =
+        h.get("/api/v1/metrics/query?name=unknown.keys&since=15m&step=1m&agg=max&group_by=k").await;
+    assert_eq!(r.series[0].labels["k"], "v");
+    assert_eq!(r.series[0].points[0].value, 2.5);
+    h.stop().await;
+}
+
 /// Traces and logs page through a cursor: every item once, in order, also
 /// when many items share a timestamp.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

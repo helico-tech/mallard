@@ -53,7 +53,7 @@ pub struct Detail {
     pub error: Option<String>,
     /// Retry a failed lookup after this time.
     pub retry_at: Option<Instant>,
-    /// Use a 24 h window: the server rejected 7 days (query.max_window).
+    /// Use a 24 h window: the server rejected 7 days (otel.query.max_window).
     pub short_window: bool,
     /// Failed lookups in a row, for the retry back-off.
     pub failures: u32,

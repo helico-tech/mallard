@@ -161,7 +161,8 @@ struct Held {
 
 /// What a queued payload is.
 enum Kind {
-    Transaction,
+    /// A transaction and the address of its request.
+    Transaction(Option<String>),
     /// A v2 `span` item and what its envelope's headers say.
     Spans(span::Defaults),
     /// A standalone `span` item of an SDK before 11, same.
@@ -172,7 +173,7 @@ impl Kind {
     /// The metric that counts outcomes of this kind of item.
     fn metric(&self) -> &'static str {
         match self {
-            Kind::Transaction => "mallard_bridge_transactions_total",
+            Kind::Transaction(_) => "mallard_bridge_transactions_total",
             Kind::Spans(_) | Kind::Standalone(_) => "mallard_bridge_span_items_total",
         }
     }
@@ -201,7 +202,7 @@ impl Transactions {
 
 impl mallard_sentry_server::TransactionSink for Transactions {
     fn transaction(&self, t: mallard_sentry_server::Transaction) {
-        self.queue(Kind::Transaction, t.project_slug, &t.payload);
+        self.queue(Kind::Transaction(t.client_ip), t.project_slug, &t.payload);
     }
 }
 
@@ -264,7 +265,7 @@ impl SpanStore {
     fn store(&self, t: &Held) -> &'static str {
         let Ok(payload) = serde_json::from_slice(&t.payload) else { return "invalid" };
         let req = match &t.kind {
-            Kind::Transaction => transaction::to_otlp(&payload, &t.project_slug),
+            Kind::Transaction(client_ip) => transaction::to_otlp(&payload, &t.project_slug, client_ip.as_deref()),
             Kind::Spans(defaults) => span::to_otlp(&payload, defaults, &t.project_slug),
             Kind::Standalone(defaults) => span::standalone_to_otlp(&payload, defaults, &t.project_slug),
         };

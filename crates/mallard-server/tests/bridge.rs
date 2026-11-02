@@ -109,6 +109,38 @@ fn captured_inp_envelope() -> String {
     format!("{header}\n{item}\n{span}\n")
 }
 
+/// An envelope from a real browser SDK in headless Chromium (issue 0135; nothing
+/// removed), moved to the last few seconds. Returns its trace id and the body.
+fn captured_browser_envelope(text: &str) -> (String, String) {
+    let mut lines = text.lines();
+    let mut header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    let item = lines.next().unwrap();
+    let mut payload: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    let times = |v: &Value, key: &str| v[key].as_f64();
+    let list = |p: &Value| ["spans", "items"].iter().find(|k| p[**k].is_array()).map(|k| k.to_string());
+    let items = list(&payload);
+    let last = times(&payload, "timestamp")
+        .or_else(|| {
+            let spans = payload[items.as_deref()?].as_array()?;
+            Some(spans.iter().filter_map(|s| times(s, "end_timestamp")).fold(0.0, f64::max))
+        })
+        .unwrap();
+    let shift = (now_secs() - 1.0 - last).round();
+    let moved = |v: &mut Value| {
+        for k in ["start_timestamp", "timestamp", "end_timestamp"] {
+            if let Some(t) = v[k].as_f64() {
+                v[k] = json!(t + shift);
+            }
+        }
+    };
+    moved(&mut payload);
+    if let Some(items) = items {
+        payload[items.as_str()].as_array_mut().unwrap().iter_mut().for_each(moved);
+    }
+    header["sent_at"] = json!(chrono::Utc::now().to_rfc3339());
+    (header["trace"]["trace_id"].as_str().unwrap().to_string(), format!("{header}\n{item}\n{payload}\n"))
+}
+
 async fn post_envelope(http: &reqwest::Client, url: &str, project: &Project, body: String) {
     let r = http
         .post(format!("{url}/sentry/api/{}/envelope/", project.id))
@@ -336,6 +368,139 @@ async fn captured_browser_10_inp_span_becomes_an_otel_span() {
     assert_eq!(attr("release"), None, "on the resource");
     assert_eq!(attr("environment"), None, "on the resource");
     srv.stop().await;
+}
+
+/// The address stored for each thing a browser SDK sends, by what it asked for
+/// (issue 0135). Each case is what that SDK sent when it ran: `{{auto}}` on the
+/// user up to SDK 9, `sdk.settings.infer_ip` on events and transactions in 10,
+/// `ingest_settings.infer_ip` on the span container in 11.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn captured_browser_sdks_get_the_address_they_ask_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| c.bridge.dedupe_window = Duration::from_millis(200)).await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let shop = project(&client, "shop").await;
+    let http = reqwest::Client::new();
+    const AUTO: Option<&str> = Some("127.0.0.1");
+
+    let with_errors = [
+        (
+            "9, sendDefaultPii",
+            include_str!("fixtures/sentry-browser-9-pageload.envelope"),
+            include_str!("fixtures/sentry-browser-9-error.envelope"),
+            AUTO,
+        ),
+        (
+            "10, sendDefaultPii",
+            include_str!("fixtures/sentry-browser-10-pageload.envelope"),
+            include_str!("fixtures/sentry-browser-10-error.envelope"),
+            AUTO,
+        ),
+        (
+            "10, no sendDefaultPii",
+            include_str!("fixtures/sentry-browser-10-no-pii-pageload.envelope"),
+            include_str!("fixtures/sentry-browser-10-no-pii-error.envelope"),
+            None,
+        ),
+    ];
+    for (name, pageload, error, want) in with_errors {
+        let (trace, pageload) = captured_browser_envelope(pageload);
+        let (_, error) = captured_browser_envelope(error);
+        post_envelope(&http, &srv.url, &shop, pageload).await;
+        post_envelope(&http, &srv.url, &shop, error).await;
+        let t = eventually(name, || async {
+            let t = client.trace_overview(&trace, None).await.unwrap();
+            (!t.spans.is_empty() && !t.errors.is_empty()).then_some(t)
+        })
+        .await;
+        for s in &t.spans {
+            let root = s.parent_span_id.is_none();
+            let got = s.attributes.get("client.address").map(String::as_str);
+            assert_eq!(got, want.filter(|_| root), "{name}: span {}", s.name);
+        }
+        let e = &t.errors[0];
+        let ev = client.sentry.event(&shop.id.to_string(), &e.event_id, Some(&e.issue_id)).await.unwrap();
+        assert_eq!(ev.payload["user"]["ip_address"].as_str(), want, "{name}: {}", ev.payload["user"]);
+    }
+
+    let streamed = [
+        ("11, user info", include_str!("fixtures/sentry-browser-11-spans.envelope"), AUTO),
+        ("11, no user info", include_str!("fixtures/sentry-browser-11-no-user-info-spans.envelope"), None),
+    ];
+    for (name, spans, want) in streamed {
+        let (trace, spans) = captured_browser_envelope(spans);
+        post_envelope(&http, &srv.url, &shop, spans).await;
+        let t = eventually(name, || async {
+            let t = client.trace_overview(&trace, None).await.unwrap();
+            (!t.spans.is_empty()).then_some(t)
+        })
+        .await;
+        assert!(t.spans.len() > 1, "{name}");
+        for s in &t.spans {
+            let got = s.attributes.get("client.address").map(String::as_str);
+            assert_eq!(got, want.filter(|_| s.name == "Pageload"), "{name}: span {}", s.name);
+        }
+    }
+    srv.stop().await;
+}
+
+/// The address is the one `{{auto}}` of an event gets: `X-Forwarded-For` counts
+/// only with `sentry.ingest.trust_forwarded_for` (issue 0135).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_inferred_address_follows_trust_forwarded_for() {
+    for (trust, want) in [(false, "127.0.0.1"), (true, "203.0.113.9")] {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = start_with(dir.path(), |c| {
+            c.bridge.dedupe_window = Duration::from_millis(200);
+            c.sentry.ingest.trust_forwarded_for = trust;
+        })
+        .await;
+        let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+        let shop = project(&client, "shop").await;
+        let http = reqwest::Client::new();
+        let envelopes = [
+            include_str!("fixtures/sentry-browser-10-pageload.envelope"),
+            include_str!("fixtures/sentry-browser-10-error.envelope"),
+            include_str!("fixtures/sentry-browser-11-spans.envelope"),
+        ];
+        let mut traces = Vec::new();
+        for text in envelopes {
+            let (trace, body) = captured_browser_envelope(text);
+            traces.push(trace);
+            let r = http
+                .post(format!("{}/sentry/api/{}/envelope/", srv.url, shop.id))
+                .header("X-Sentry-Auth", format!("Sentry sentry_version=7, sentry_key={}", shop.public_key))
+                .header("X-Forwarded-For", "203.0.113.9")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert!(r.status().is_success(), "sentry ingest: {}", r.status());
+        }
+        let root = |trace: String| {
+            let client = &client;
+            async move {
+                eventually("the root span", || async {
+                    let t = client.trace_overview(&trace, None).await.unwrap();
+                    t.spans.into_iter().find(|s| s.parent_span_id.is_none())
+                })
+                .await
+            }
+        };
+        let pageload = root(traces[0].clone()).await;
+        assert_eq!(pageload.attributes.get("client.address").map(String::as_str), Some(want), "trust {trust}");
+        let streamed = root(traces[2].clone()).await;
+        assert_eq!(streamed.attributes.get("client.address").map(String::as_str), Some(want), "trust {trust}");
+        let t = eventually("the error", || async {
+            let t = client.trace_overview(&traces[1], None).await.unwrap();
+            (!t.errors.is_empty()).then_some(t)
+        })
+        .await;
+        let e = &t.errors[0];
+        let ev = client.sentry.event(&shop.id.to_string(), &e.event_id, Some(&e.issue_id)).await.unwrap();
+        assert_eq!(ev.payload["user"]["ip_address"], want, "trust {trust}");
+        srv.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

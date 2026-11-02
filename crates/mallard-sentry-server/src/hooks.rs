@@ -13,6 +13,8 @@ use uuid::Uuid;
 pub struct Transaction {
     pub project_id: u32,
     pub project_slug: String,
+    /// The address of the request, like [`Spans::client_ip`].
+    pub client_ip: Option<String>,
     /// The transaction's JSON, not parsed or checked.
     pub payload: Bytes,
 }
@@ -38,8 +40,9 @@ pub struct Spans<'a> {
     /// of the trace, `sdk` the SDK), not checked. Borrowed: one envelope can
     /// hold many items, and its headers can be large.
     pub envelope_headers: &'a Map<String, Value>,
-    /// The address of the request, as for `user.ip_address = "{{auto}}"` of
-    /// an event (`ingest.trust_forwarded_for` applies).
+    /// The address of the request, to store only when the SDK asks for it
+    /// (`mallard_sentry_protocol::event::client_address`;
+    /// `ingest.trust_forwarded_for` applies).
     pub client_ip: Option<&'a str>,
     /// The item's JSON, not parsed or checked.
     pub payload: &'a [u8],

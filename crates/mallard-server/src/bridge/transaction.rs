@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use mallard_sentry_protocol::event::{parse_span_id, parse_timestamp, parse_trace_id};
+use mallard_sentry_protocol::event::{client_address, parse_span_id, parse_timestamp, parse_trace_id, sdk_infer_ip};
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
@@ -14,7 +14,8 @@ use serde_json::Value;
 
 /// One OTLP request with the transaction's root span and its child spans.
 /// `None` when the transaction has no valid `contexts.trace` ids or end time.
-pub fn to_otlp(tx: &Value, project_slug: &str) -> Option<ExportTraceServiceRequest> {
+/// `client_ip` is the address of the request; only the root span can get it.
+pub fn to_otlp(tx: &Value, project_slug: &str, client_ip: Option<&str>) -> Option<ExportTraceServiceRequest> {
     let trace = tx.get("contexts")?.get("trace")?;
     let trace_id = trace_id_bytes(trace.get("trace_id"))?;
     let root_id = span_id_bytes(trace.get("span_id"))?;
@@ -32,6 +33,9 @@ pub fn to_otlp(tx: &Value, project_slug: &str) -> Option<ExportTraceServiceReque
             root.set(to, user.get(from));
         }
     }
+    let infer_ip = sdk_infer_ip(tx.get("sdk"));
+    let mut attributes = root.finish();
+    set_address(&mut attributes, "client.address", infer_ip, client_ip);
     let op = str_of(trace, "op").unwrap_or_default();
     let mut spans = vec![Span {
         trace_id: trace_id.clone(),
@@ -42,12 +46,15 @@ pub fn to_otlp(tx: &Value, project_slug: &str) -> Option<ExportTraceServiceReque
         start_time_unix_nano: start,
         end_time_unix_nano: end.max(start),
         status: status(str_of(trace, "status")),
-        attributes: root.finish(),
+        attributes,
         ..Default::default()
     }];
 
     let child_spans = tx.get("spans").and_then(Value::as_array).into_iter().flatten();
-    spans.extend(child_spans.filter_map(|s| sentry_span(s, Some(&trace_id), &root_id)));
+    spans.extend(child_spans.filter_map(|s| sentry_span(s, Some(&trace_id), &root_id)).map(|mut s| {
+        set_address(&mut s.attributes, "client.address", not_added(infer_ip), client_ip);
+        s
+    }));
 
     let tags = tx.get("tags");
     let service = tags.and_then(|t| str_of(t, "service.name")).unwrap_or(project_slug);
@@ -96,6 +103,32 @@ pub(super) fn sentry_span(s: &Value, trace_id: Option<&[u8]>, parent: &[u8]) -> 
         attributes: a.finish(),
         ..Default::default()
     })
+}
+
+/// Store what [`client_address`] says in the attribute `key`: fill `{{auto}}`,
+/// drop what must not be stored, add the address when `infer_ip` asks.
+pub(super) fn set_address(attributes: &mut Vec<KeyValue>, key: &str, infer_ip: Option<&str>, request: Option<&str>) {
+    let at = attributes.iter().position(|kv| kv.key == key);
+    let sent = at.and_then(|i| match attributes[i].value.as_ref()?.value.as_ref()? {
+        any_value::Value::StringValue(s) => Some(s.as_str()),
+        _ => None,
+    });
+    let value = client_address(sent, infer_ip, request)
+        .map(|a| AnyValue { value: Some(any_value::Value::StringValue(a.to_string())) });
+    match (at, value) {
+        (Some(i), Some(v)) => attributes[i].value = Some(v),
+        (Some(i), None) => {
+            attributes.remove(i);
+        }
+        (None, Some(v)) => attributes.push(KeyValue { key: key.to_string(), value: Some(v), ..Default::default() }),
+        (None, None) => {}
+    }
+}
+
+/// `infer_ip` for a span that does not get the address unless it holds
+/// `{{auto}}` itself: one address per transaction or segment, on its root.
+pub(super) fn not_added(infer_ip: Option<&str>) -> Option<&str> {
+    infer_ip.filter(|i| *i != "auto")
 }
 
 /// A non-empty string field.
@@ -211,6 +244,46 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The client address of the root and of a child span.
+    #[test]
+    fn client_address_only_when_the_sdk_asks() {
+        let addresses = |sdk: Value, user: Value, child: Value, client_ip: Option<&str>| {
+            let tx = json!({
+                "contexts": {"trace": {"span_id": "a1b2c3d4e5f60718", "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}},
+                "start_timestamp": 1793538736.0, "timestamp": 1793538737.0, "sdk": sdk, "user": user,
+                "spans": [{"span_id": "1111111111111111", "start_timestamp": 1793538736.0, "timestamp": 1793538737.0,
+                           "data": child}]
+            });
+            let req = to_otlp(&tx, "shop", client_ip).unwrap();
+            let spans = &req.resource_spans[0].scope_spans[0].spans;
+            let get = |s: &Span| attr(&s.attributes, "client.address");
+            (get(&spans[0]), get(&spans[1]))
+        };
+        let ip = "203.0.113.9";
+        let (auto, never) = (json!({"settings": {"infer_ip": "auto"}}), json!({"settings": {"infer_ip": "never"}}));
+        let (none, want_ip) = (json!({}), Some(ip.to_string()));
+        let asked = json!({"ip_address": "{{auto}}"});
+        let own = json!({"ip_address": "198.51.100.7"});
+        let child_asked = json!({"client.address": "{{auto}}"});
+        let no_addr: (Option<String>, Option<String>) = (None, None);
+
+        assert_eq!(addresses(auto.clone(), none.clone(), none.clone(), Some(ip)), (want_ip.clone(), None));
+        assert_eq!(addresses(auto.clone(), none.clone(), none.clone(), None), no_addr);
+        assert_eq!(addresses(never.clone(), none.clone(), none.clone(), Some(ip)), no_addr);
+        assert_eq!(addresses(none.clone(), none.clone(), none.clone(), Some(ip)), no_addr, "the SDK did not ask");
+        assert_eq!(addresses(none.clone(), asked.clone(), none.clone(), Some(ip)), (want_ip.clone(), None));
+        assert_eq!(addresses(none.clone(), asked.clone(), none.clone(), None), no_addr, "not the placeholder");
+        assert_eq!(addresses(never.clone(), asked.clone(), child_asked.clone(), Some(ip)), no_addr);
+        assert_eq!(addresses(none.clone(), none.clone(), child_asked.clone(), Some(ip)), (None, want_ip.clone()));
+        assert_eq!(addresses(none.clone(), none.clone(), child_asked, None), no_addr);
+        assert_eq!(
+            addresses(auto, own.clone(), none.clone(), Some(ip)),
+            (Some("198.51.100.7".to_string()), None),
+            "the SDK's own"
+        );
+        assert_eq!(addresses(never, own, none.clone(), Some(ip)), no_addr);
+    }
+
     /// What @sentry/node 8 sends for an Express request with two child spans.
     fn node_transaction() -> Value {
         json!({
@@ -260,7 +333,7 @@ mod tests {
 
     #[test]
     fn node_transaction_becomes_a_root_span_with_children() {
-        let req = to_otlp(&node_transaction(), "shop").unwrap();
+        let req = to_otlp(&node_transaction(), "shop", None).unwrap();
         let rs = &req.resource_spans[0];
         let res = &rs.resource.as_ref().unwrap().attributes;
         assert_eq!(attr(res, "service.name").as_deref(), Some("shop"), "the project slug, not OTel's `node`");
@@ -310,14 +383,14 @@ mod tests {
         let mut tx = node_transaction();
         tx["tags"]["service.name"] = json!("checkout");
         tx["start_timestamp"] = json!("2024-11-01T08:33:20.100Z");
-        let req = to_otlp(&tx, "shop").unwrap();
+        let req = to_otlp(&tx, "shop", None).unwrap();
         let rs = &req.resource_spans[0];
         assert_eq!(attr(&rs.resource.as_ref().unwrap().attributes, "service.name").as_deref(), Some("checkout"));
         assert!(rs.scope_spans[0].spans[0].start_time_unix_nano > 0, "RFC 3339 timestamps work too");
 
         tx["contexts"]["trace"]["trace_id"] = json!("not hex");
-        assert!(to_otlp(&tx, "shop").is_none());
-        assert!(to_otlp(&json!({"type": "transaction"}), "shop").is_none());
+        assert!(to_otlp(&tx, "shop", None).is_none());
+        assert!(to_otlp(&json!({"type": "transaction"}), "shop", None).is_none());
     }
 
     #[test]
