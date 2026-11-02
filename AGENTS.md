@@ -69,7 +69,8 @@ Only `mallard` is built as a product binary (plus the load generators
   use `Q`/`J` extractors so bad input gets that body too.
 - One DuckDB connection is shared: catalog `lake`, schemas `sentry` and
   `otel` (ADR 0001). Libraries never change global DuckDB settings on a
-  shared connection; `mallard-server` owns `[duckdb]`.
+  shared connection; `mallard-server` owns `[duckdb]`. A writer that commits
+  to the lake holds the shared `mallard_duck::CommitLock` around `COMMIT` (ADR 0030).
 - All timestamps are UTC `TIMESTAMP` (bundled DuckDB has no ICU).
 - Tables are append-only. Sentry: write rows only on the writer thread
   (`mallard-sentry-server/src/db/writer.rs`), flush and compact on the maintenance thread

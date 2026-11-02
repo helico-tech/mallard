@@ -1,8 +1,9 @@
 # Capacity and sizing
 
-Except for [Both sides in one container](#both-sides-in-one-container), these numbers
+Except for [Both sides in one container](#both-sides-in-one-container) and
+[Both sides at full speed](#both-sides-at-full-speed), these numbers
 were measured on the old standalone `otel-ducklake` binary, which is gone. They were not
-measured again on `mallard serve`, where the same code shares its DuckDB with the Sentry
+measured again in a container on `mallard serve`, where the same code shares its DuckDB with the Sentry
 side. They count telemetry alone.
 
 **Short answer:** a 2 GiB container runs both sides for small and mid-sized companies, with
@@ -178,7 +179,10 @@ Today's image and defaults, nothing overridden but what the table says:
 
 In the 4 GiB run OTLP also got 4,852 throttled requests and 184 failed at the load generator, but it reached
 the offered 11,200 spans/s and dropped no rows. At full speed OTLP is held back hard and compaction does not
-keep up, but the 2 GiB container stayed up for the 10 minutes tested.
+keep up, but the 2 GiB container stayed up for the 10 minutes tested. These runs came before one commit at a
+time ([ADR 0030](../adr/0030-one-lake-commit-at-a-time.md)) and were not repeated in a container since. Natively,
+the same heavy rates had no throttling before or after it ([below](#both-sides-at-full-speed)), so that part is
+not explained.
 
 How the defaults were found. All of these ran with `MALLOC_ARENA_MAX=2` and 16 MB target files:
 
@@ -269,6 +273,63 @@ interval (5-minute runs were fine), many queries at once, OTLP/gRPC (a gRPC requ
 `max_request_bytes` from the budget, so a 128MB buffer allows 4 at once), an S3 store over the network
 (compose ran RustFS on the same machine). Compressed OTLP/HTTP at 2,800 spans/s was checked for 2 minutes
 with a 128MB buffer: 0 throttled. Each setting ran once.
+
+## Both sides at full speed
+
+Measured on `mallard` on 2026-11-02, for [issue 0144](../../work/issues/0144-otel-flush-conflicts-with-sentry-ingest.md).
+A release build as a native process on an 18-core Apple M5 Pro, 10 DuckDB threads, a 512 MB buffer, no memory
+limit, local disk. Other work was running on the machine (load 2-28 at the start of a run), so treat these as
+rough. Ranges are the lowest and highest run. "Before" is without one commit at a time
+([ADR 0030](../adr/0030-one-lake-commit-at-a-time.md)), "after" with it. "Failed" is at the load generator.
+
+**At full speed**, 150 s (OTLP `--backfill 30d --rate 5`, Sentry `--rate 0 --concurrency 512`):
+
+| catalog | sides | build | runs | spans/s | events/s | flush conflicts | throttled | failed |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| DuckDB file | OTLP | before | 3 | 329,349-346,005 | | 0 | 1,302-1,396 | 0 |
+| DuckDB file | OTLP | after | 3 | 326,220-343,564 | | 0 | 1,322-1,340 | 0 |
+| DuckDB file | Sentry | before | 3 | | 5,233-5,390 | | 0 | 0 |
+| DuckDB file | Sentry | after | 3 | | 5,004-5,407 | | 0 | 0 |
+| DuckDB file | both | before | 3 | **5,407-21,046** | 4,977-5,087 | 7-10 | 204-268 | 12-22 |
+| DuckDB file | both | after | 6 | **260,469-270,215** | 3,668-4,186 | 0-1 | 1,144-1,204 | 0 |
+| Postgres | OTLP | after | 1 | 335,141 | | 0 | 1,346 | 0 |
+| Postgres | Sentry | after | 1 | | 6,437 | | 0 | 0 |
+| Postgres | both | before | 2 | 105,845-116,123 | 5,493-5,512 | 1-2 | 676-740 | 0 |
+| Postgres | both | after | 4 | 270,591-306,042 | 2,696-3,470 | 0 | 1,232-1,300 | 0 |
+
+The one conflict "after" is retention against the flush, not the snapshot id
+([issue 0155](../../work/issues/0155-otel-retention-loses-to-the-flusher.md)). The throttled requests "after" are
+no more than OTLP alone gets: the buffer fills for a moment at this speed, and no request ran out of tries.
+
+**This is the price of one catalog at full speed:** on a DuckDB file OTLP loses about 20% and Sentry about 24% against
+running alone (averages). On Postgres OTLP loses about 13% and Sentry about 52%, against one run alone each. Sentry pays
+for the fix. Against "before", on a DuckDB file its speed fell about 21% and its latency rose: p50 61-66 ms to 71-81 ms,
+p99 515-631 ms to 650-939 ms, slowest 1.1-1.4 s to 2.3-4.0 s. On Postgres its speed fell about 43%, its p99 went
+from 295-296 ms to 477-1,186 ms, and its slowest from 0.7-1.1 s to 1.3-5.8 s.
+
+**One side at full speed**, the other at a real rate, DuckDB file, 150 s:
+
+| load | build | runs | spans/s | lowest 5 s | events/s | conflicts | throttled | failed | buffer peak |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Sentry full speed + 11,200 spans/s | before | 2 | 11,198-11,199 | 652-845 | 5,327-5,358 | 7-8 | 112-144 | 0-8 | 512 MB |
+| Sentry full speed + 11,200 spans/s | after | 4 | 11,215-11,230 | 11,040-11,093 | 4,528-5,202 | 0 | 0 | 0 | 96-102 MB |
+| OTLP full speed + 1,000 events/s | before | 1 | 290,597 | 204,513 | 993 | 0 | 1,316 | 0 | 512 MB |
+| OTLP full speed + 1,000 events/s | after | 1 | 333,004 | 285,963 | 993 | 0 | 1,348 | 0 | 512 MB |
+
+So a burst of errors alone was enough to stop OTLP flushes before: a sender at a normal rate got 429s.
+
+**Real rates**, both sides paced, DuckDB file, 240 s, twice before and three times after. No conflict, throttled or
+failed request in any run. There is nothing to fix here:
+
+| load | build | spans/s | events/s | flush p50 | slowest flush | Sentry p99 |
+|---|---|---:|---:|---:|---:|---:|
+| medium: 300 events/s + 2,800 spans/s | before | 2,809-2,813 | 297 | 61-63 ms | 319-380 ms | 533-540 ms |
+| medium | after | 2,812-2,814 | 297 | 62-66 ms | 290-475 ms | 538-544 ms |
+| heavy: 1,000 events/s + 11,200 spans/s | before | 11,244-11,253 | 996 | 231-253 ms | 512-742 ms | 411-423 ms |
+| heavy | after | 11,220-11,252 | 996 | 233-256 ms | 366-626 ms | 410-487 ms |
+
+Not measured here: a memory limit, the compose settings (4 threads, 128 MB buffer), object storage, OTLP/gRPC, two
+replicas ([issue 0156](../../work/issues/0156-replicas-race-on-the-snapshot-id.md)), runs longer than 4 minutes.
 
 ## Reproducing
 

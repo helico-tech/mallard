@@ -37,6 +37,8 @@
 
 ## Key rules
 
+- One lake commit at a time on a DuckDB instance: the writers of both sides hold one
+  `mallard_duck::CommitLock` around `COMMIT` (ADR 0030). Maintenance does not.
 - Each side owns its domain (ingest, storage schema, maintenance).
   `mallard-*` never writes into their schemas directly.
 - The bridge (ADR 0009, 0010, 0013) crosses sides in process through small library
