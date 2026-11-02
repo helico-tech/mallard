@@ -29,7 +29,7 @@ use opentelemetry_proto::tonic::{
         trace::v1::ExportTraceServiceRequest,
     },
     common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
-    metrics::v1::{Exemplar, exemplar, metric::Data, number_data_point},
+    metrics::v1::{DataPointFlags, Exemplar, NumberDataPoint, exemplar, metric::Data, number_data_point},
     resource::v1::Resource,
 };
 use xxhash_rust::xxh3::Xxh3;
@@ -222,22 +222,30 @@ struct ExemplarCol {
     trace_id: Vec<Option<[u8; 16]>>,
     span_id: UInt64Builder,
     attrs: AttrCol,
+    /// Exemplars left out: they had no value, which is invalid in OTLP.
+    no_value: u64,
 }
 
 impl ExemplarCol {
     /// The exemplars of one data point whose time is `point_time` (µs).
     fn append(&mut self, exemplars: &[Exemplar], point_time: i64) {
+        let mut kept = 0;
         for e in exemplars {
+            let Some(value) = e.value else {
+                self.no_value += 1;
+                continue;
+            };
+            kept += 1;
             self.time.append_value(if e.time_unix_nano == 0 { point_time } else { nanos_to_micros(e.time_unix_nano) });
-            self.value.append_option(e.value.map(|v| match v {
+            self.value.append_value(match value {
                 exemplar::Value::AsDouble(d) => d,
                 exemplar::Value::AsInt(i) => i as f64,
-            }));
+            });
             self.trace_id.push(trace_id(&e.trace_id));
             self.span_id.append_option(span_id(&e.span_id));
             self.attrs.append(&attrs(&e.filtered_attributes));
         }
-        self.offsets.close_row(exemplars.len());
+        self.offsets.close_row(kept);
     }
 
     fn finish(&mut self) -> (Field, ArrayRef) {
@@ -691,7 +699,7 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
     let mut s_q_off = ListOffsets::default();
     let (mut s_q, mut s_v) = (Float64Builder::new(), Float64Builder::new());
 
-    let mut rejected = 0u64;
+    let (mut no_data, mut no_value) = (0u64, 0u64);
     for rm in &req.resource_metrics {
         let res = ResourceCtx::new(rm.resource.as_ref());
         let res_hash = resource_hash(&res);
@@ -713,6 +721,10 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                     Some(Data::Gauge(g)) => {
                         ctx.kind = "gauge";
                         for p in &g.data_points {
+                            if is_invalid_point(p) {
+                                no_value += 1;
+                                continue;
+                            }
                             let t =
                                 np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
                             np_ex.append(&p.exemplars, t);
@@ -725,6 +737,10 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                         ctx.kind = "sum";
                         ctx.temporality = temporality(sum.aggregation_temporality);
                         for p in &sum.data_points {
+                            if is_invalid_point(p) {
+                                no_value += 1;
+                                continue;
+                            }
                             let t =
                                 np.append(&ctx, p.time_unix_nano, p.start_time_unix_nano, p.flags, &p.attributes, recv);
                             np_ex.append(&p.exemplars, t);
@@ -787,15 +803,25 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
                             s_q_off.close_row(p.quantile_values.len());
                         }
                     }
-                    None => rejected += 1,
+                    None => no_data += 1,
                 }
             }
         }
     }
 
-    let mut out = Converted { rejected, ..Default::default() };
-    if rejected > 0 {
-        out.reject_reason = Some(format!("{rejected} metrics had no data"));
+    let no_exemplar_value = np_ex.no_value + h_ex.no_value + e_ex.no_value;
+    let mut out = Converted { rejected: no_data + no_value, ..Default::default() };
+    let reasons: Vec<String> = [
+        (no_data, "metrics had no data"),
+        (no_value, "data points had no value"),
+        (no_exemplar_value, "exemplars had no value and were left out"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    if !reasons.is_empty() {
+        out.reject_reason = Some(reasons.join("; "));
     }
     if np.rows > 0 {
         out.accepted += np.rows as u64;
@@ -852,6 +878,12 @@ pub fn convert_metrics(req: &ExportMetricsServiceRequest) -> Converted {
     out
 }
 
+/// A point with no value is invalid in OTLP, unless it says so itself: `no recorded value` is how
+/// a sender marks a series as gone (a Prometheus staleness marker).
+fn is_invalid_point(p: &NumberDataPoint) -> bool {
+    p.value.is_none() && p.flags & DataPointFlags::NoRecordedValueMask as u32 == 0
+}
+
 fn number_value(v: Option<&number_data_point::Value>) -> Option<f64> {
     match v? {
         number_data_point::Value::AsDouble(d) => Some(*d),
@@ -862,6 +894,57 @@ fn number_value(v: Option<&number_data_point::Value>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue 0139: the sender hears about a point or exemplar with no value, and nothing is stored
+    /// that looks like a metric but has no series. A marked point stays: it means something.
+    #[test]
+    fn a_point_without_a_value_is_rejected_unless_it_says_so() {
+        use opentelemetry_proto::tonic::{
+            collector::metrics::v1::ExportMetricsServiceRequest,
+            metrics::v1::{Gauge, Metric, ResourceMetrics, ScopeMetrics, Sum},
+        };
+        let value = Some(number_data_point::Value::AsDouble(1.5));
+        let point = |value, flags, exemplars| NumberDataPoint { value, flags, exemplars, ..Default::default() };
+        let no_value_exemplar = Exemplar::default();
+        let good_exemplar = Exemplar { value: Some(exemplar::Value::AsDouble(2.5)), ..Default::default() };
+        let gone = DataPointFlags::NoRecordedValueMask as u32;
+        let metric = |name: &str, data| Metric { name: name.into(), data: Some(data), ..Default::default() };
+        let req = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![
+                        Metric { name: "none".into(), ..Default::default() },
+                        metric(
+                            "g",
+                            Data::Gauge(Gauge {
+                                data_points: vec![
+                                    point(value, 0, vec![no_value_exemplar, good_exemplar]),
+                                    point(None, 0, vec![]),
+                                    point(None, gone, vec![]),
+                                ],
+                            }),
+                        ),
+                        metric("s", Data::Sum(Sum { data_points: vec![point(None, 0, vec![])], ..Default::default() })),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let c = convert_metrics(&req);
+        assert_eq!((c.accepted, c.rejected), (2, 3));
+        assert_eq!(
+            c.reject_reason.as_deref(),
+            Some("1 metrics had no data; 2 data points had no value; 1 exemplars had no value and were left out")
+        );
+        let b = &c.batches.iter().find(|(t, _)| *t == TableId::MetricPoints).unwrap().1;
+        let values = b.column_by_name("value").unwrap().as_primitive::<arrow::datatypes::Float64Type>();
+        assert_eq!((values.value(0), values.is_null(1)), (1.5, true));
+        let exemplars = b.column_by_name("exemplars").unwrap().as_list::<i32>();
+        let first = exemplars.value(0);
+        let kept = first.as_struct().column_by_name("value").unwrap().as_primitive::<arrow::datatypes::Float64Type>();
+        assert_eq!((kept.len(), kept.value(0)), (1, 2.5));
+    }
     use opentelemetry_proto::tonic::{
         common::v1::ArrayValue,
         trace::v1::{ResourceSpans, ScopeSpans, Span, span::Event},
@@ -994,7 +1077,12 @@ mod tests {
             resource_metrics: vec![ResourceMetrics {
                 scope_metrics: vec![ScopeMetrics {
                     metrics: vec![
-                        m(Data::Gauge(Gauge { data_points: vec![NumberDataPoint::default()] })),
+                        m(Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                value: Some(number_data_point::Value::AsInt(1)),
+                                ..Default::default()
+                            }],
+                        })),
                         m(Data::Histogram(Histogram {
                             data_points: vec![HistogramDataPoint::default()],
                             ..Default::default()
@@ -1044,6 +1132,7 @@ mod tests {
         };
         let gauge = NumberDataPoint {
             time_unix_nano: t,
+            value: Some(number_data_point::Value::AsDouble(1.0)),
             exemplars: vec![
                 ex(t - 1_000, exemplar::Value::AsDouble(1.5), vec![1; 16]),
                 // zero time -> point time; int value; invalid trace id -> NULL
