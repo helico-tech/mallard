@@ -679,6 +679,24 @@ async fn host_hooks_and_in_process_events() {
     t.stop().await;
 }
 
+/// The API's `query` is one piece of text: `a=b` in it filters on no tag. Splitting a search box
+/// into text and tags is for the clients, and `"a=b"` there arrives as this.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_query_parameter_is_plain_text() {
+    let t = TestServer::start().await;
+    t.create_project("web").await;
+    let ev = json!({"platform": "python", "tags": {"x": "y"},
+        "exception": {"values": [{"type": "ValueError", "value": "bad a=b here"}]}});
+    t.server.ingest_event(1, ev).await.unwrap();
+    let found = t.get("/v1/projects/web/issues?query=a%3Db").await;
+    assert_eq!(found["issues"].as_array().unwrap().len(), 1, "{found}");
+    let other = t.get("/v1/projects/web/issues?query=x%3Dy").await;
+    assert_eq!(other["issues"].as_array().unwrap().len(), 0, "a tag of the event is not text: {other}");
+    let tag = t.get("/v1/projects/web/issues?tag=x:y").await;
+    assert_eq!(tag["issues"].as_array().unwrap().len(), 1, "{tag}");
+    t.stop().await;
+}
+
 /// A name without a slug means the app of that name. A project with that slug under the slug
 /// rule already is that app, and a second one would take its services (issue 0149).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

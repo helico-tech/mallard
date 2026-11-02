@@ -5,6 +5,7 @@ describe("filter language", () => {
   it("tokens keep quotes together", () => {
     expect(tokens('a "b c" d=e  f="g h"')).toEqual(["a", "b c", "d=e", "f=g h"]);
     expect(tokens("")).toEqual([]);
+    expect(tokens('"" a')).toEqual(["", "a"]);
   });
   it("durations", () => {
     expect(parseDurationMs("250")).toBe(250);
@@ -53,7 +54,16 @@ describe("filter language", () => {
   it("issue filter: key=value is a tag, other words search the text", () => {
     expect(parseIssueFilter('undefined total browser="Chrome 120"')).toEqual({ tags: ["browser:Chrome 120"], query: "undefined total" });
     expect(parseIssueFilter("")).toEqual({ tags: [] });
+    expect(parseIssueFilter("url=/a=b")).toEqual({ tags: ["url:/a=b"] });
     expect(parseIssueFilter(Array.from({ length: 11 }, (_, i) => `k${i}=v`).join(" "))).toHaveProperty("error");
+  });
+
+  it("issue filter: an = in quotes is text", () => {
+    expect(parseIssueFilter('"a=b"')).toEqual({ tags: [], query: "a=b" });
+    expect(parseIssueFilter('"a=b c" x')).toEqual({ tags: [], query: "a=b c x" });
+    expect(parseIssueFilter('"a"=b')).toEqual({ tags: [], query: "a=b" });
+    expect(parseIssueFilter('"a=b" c=d')).toEqual({ tags: ["c:d"], query: "a=b" });
+    expect(parseIssueFilter('a="b=c"')).toEqual({ tags: ["a:b=c"] });
   });
 
   it("find ids: 16 or 32 hex, in any form", () => {

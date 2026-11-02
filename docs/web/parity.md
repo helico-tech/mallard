@@ -91,7 +91,7 @@ changed in the browser, because the seeded data has no such case.
 | Errors with All apps | Asks to pick an app: issues are per project (ADR 0028) | Same | ok |
 | A side the app lacks | Says so, with `mallard setup <app>` | Same | ok |
 | Filter suggestions | The list shows while typing; Tab takes the selected row, the first unless you moved; ↑↓ choose; ↵ applies what is typed | The list opens while typing or on ↓; nothing is taken until you move to it, then Enter or Tab takes it. Otherwise Tab moves the focus, as in a browser | intended |
-| Issue search | Text, and `tag=value` | Same | ok |
+| Issue search | Text, and `tag=value`; `"a=b"` in quotes is text | Same | ok |
 | Cmd-K, app home page | None | Web only (stories 0004/04, 05) | intended |
 | Project picker reloads projects | Yes | Only with `r` (code) | **differs** |
 | Project switch | Toast "switched to X", keeps filters | Same | ok |

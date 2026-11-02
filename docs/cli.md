@@ -187,7 +187,9 @@ unavailable".
 | issues | tags of the project | `/projects/{p}/tags` |
 
 In the issue filter, `key=value` is a tag filter and the other words search the text, as in the
-web UI. In an app, `service=` can only name one of its services: another is refused with a message
+web UI. A word with its `=` in quotes is text too: `"a=b"` searches for that text, while
+`a="b c"` is a tag with a space in its value. (`issues list -q` is always text; use `--tag` for a
+tag.) In an app, `service=` can only name one of its services: another is refused with a message
 and nothing is read for it. `trace=` on logs follows the trace across apps, because it asks by id.
 `op=` values come from at most the last 24h. Difference with the web UI, on purpose: there a
 suggestion is taken only after you move to it; here the first one is ready for `tab`.

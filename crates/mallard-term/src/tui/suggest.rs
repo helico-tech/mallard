@@ -524,6 +524,9 @@ mod tests {
         s.edited("\"free te", 8, now);
         assert!(!s.has_items());
         assert_eq!(s.poll(now + 2 * LATER), None, "free text");
+        s.edited("\"a=b", 4, now);
+        assert!(!s.has_items());
+        assert_eq!(s.poll(now + 3 * LATER), None, "`=` in quotes starts no value");
     }
 
     #[test]

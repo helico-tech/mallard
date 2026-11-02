@@ -521,7 +521,11 @@ fn key_value_words_are_tag_filters() {
     assert_eq!(f("connection refused"), (Some("connection refused".into()), vec![]));
     assert_eq!(f("url=/a boom"), (Some("boom".into()), vec!["url:/a".to_string()]));
     assert_eq!(f("url=/a=b user=\"a b\""), (None, vec!["url:/a=b".to_string(), "user:a b".to_string()]));
-    assert_eq!(f("\"a=b\""), (None, vec!["a:b".to_string()]), "like the web UI: a=b is always a tag");
+    assert_eq!(f("\"a=b\""), (Some("a=b".into()), vec![]), "quoted is text, like the web UI");
+    assert_eq!(f("\"a=b c\" x"), (Some("a=b c x".into()), vec![]));
+    assert_eq!(f("\"a\"=b"), (Some("a=b".into()), vec![]), "the key has a quote");
+    assert_eq!(f("\"a=b\" c=d"), (Some("a=b".into()), vec!["c:d".to_string()]), "each word on its own");
+    assert_eq!(f("a=\"b=c\""), (None, vec!["a:b=c".to_string()]), "only the value is quoted");
     assert_eq!(f("=x"), (Some("=x".into()), vec![]));
     let key = IssuesKey {
         project: "web".into(),
@@ -532,6 +536,8 @@ fn key_value_words_are_tag_filters() {
     };
     let q = key.query();
     assert_eq!((q.query.as_deref(), q.tag.as_slice()), (Some("boom"), &["url:/a".to_string()][..]));
+    let q = IssuesKey { query: "\"url=/a\"".into(), ..key }.query();
+    assert_eq!((q.query.as_deref(), q.tag.as_slice()), (Some("url=/a"), &[][..]), "what is sent to the server");
 }
 
 const LATER: Duration = Duration::from_millis(300);

@@ -7,3 +7,5 @@
 5. [issue 0060 store sentry-cli releases](issues/0060-store-sentry-cli-releases.md)
 6. [issue 0155 OTel retention loses to the flusher](issues/0155-otel-retention-loses-to-the-flusher.md)
 7. [issue 0156 replicas race on the snapshot id](issues/0156-replicas-race-on-the-snapshot-id.md)
+8. [issue 0181 quoted a=b in the telemetry filters](issues/0181-quoted-key-value-in-telemetry-filters.md)
+9. [issue 0182 a:b=c differs between TUI and web UI](issues/0182-tag-key-with-a-colon-differs-between-tui-and-web.md)

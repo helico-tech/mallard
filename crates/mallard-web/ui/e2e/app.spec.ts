@@ -718,6 +718,21 @@ test.describe("the filter bar suggests", () => {
     await reading;
     await expect(page).toHaveURL(/q=/);
   });
+
+  test("a quoted a=b in the issue search is text, an unquoted one a tag", async ({ page }) => {
+    await page.goto("/errors/web");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    const search = page.getByLabel("Search issues");
+    await search.fill('"a=b"');
+    await expect(page.getByRole("option")).toHaveCount(0);
+    const text = page.waitForRequest((r) => r.url().includes("/issues?") && r.url().includes("query=a%3Db"));
+    await page.keyboard.press("Enter");
+    expect((await text).url()).not.toContain("tag=");
+    await search.fill("a=b");
+    const tag = page.waitForRequest((r) => r.url().includes("/issues?") && r.url().includes("tag=a%3Ab"));
+    await page.keyboard.press("Enter");
+    expect((await tag).url()).not.toContain("query=");
+  });
 });
 
 test.describe("search with Cmd-K", () => {

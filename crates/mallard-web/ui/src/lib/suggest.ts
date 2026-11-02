@@ -8,6 +8,8 @@ export interface Token {
   key: string | null;
   /** The value typed so far, or the word when there is no `=`. */
   text: string;
+  /** Inside a quoted word: free text, nothing to suggest. */
+  free?: boolean;
 }
 
 export interface Suggestion {
@@ -34,7 +36,10 @@ export function tokenAt(text: string, caret: number): Token {
   }
   const raw = text.slice(start, Math.min(caret, end));
   const eq = raw.indexOf("=");
-  if (eq <= 0) return { start, end, key: null, text: raw.replaceAll('"', "") };
+  if (eq <= 0 || raw.slice(0, eq).includes('"')) {
+    const word = { start, end, key: null, text: raw.replaceAll('"', "") };
+    return raw.includes('"') ? { ...word, free: true } : word;
+  }
   return { start, end, key: raw.slice(0, eq), text: raw.slice(eq + 1).replaceAll('"', "") };
 }
 
