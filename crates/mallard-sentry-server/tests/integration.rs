@@ -1011,3 +1011,34 @@ async fn envelope_sent_at_corrects_the_client_clock() {
     assert!(off < 30, "first seen {first_seen} is {off} s off");
     t.stop().await;
 }
+
+/// Issue 0130, with DuckDB's own invalidation of the catalog (not through an out-of-memory
+/// error): the event is refused and `run_background` ends with an error, so the process exits.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invalidated_catalog_ends_the_background_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = mallard_duck::StorageConfig {
+        catalog: dir.path().join("catalog.ducklake").display().to_string(),
+        data_path: dir.path().join("lake").display().to_string(),
+        ..Default::default()
+    };
+    let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+    let other = conn.try_clone().unwrap();
+    let host = Host {
+        public_url: "http://localhost/sentry".into(),
+        api_tokens: vec![TOKEN.into()],
+        artifacts: None,
+        catalog_maintenance: None,
+        maintenance_threads: 0,
+    };
+    let server = Server::with_connection(Config::default(), host, conn).await.unwrap();
+    let project = server.create_project("web", "web", None).await.unwrap();
+
+    other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+    other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+    assert!(server.ingest_event(project, json!({"message": "not stored"})).await.is_err());
+
+    let never = std::future::pending();
+    let ended = tokio::time::timeout(Duration::from_secs(30), server.run_background(never)).await.unwrap();
+    assert!(ended.unwrap_err().to_string().contains("invalidated"));
+}

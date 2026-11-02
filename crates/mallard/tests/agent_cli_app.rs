@@ -295,6 +295,38 @@ async fn text_output_cleans_server_text() {
     srv.stop().await;
 }
 
+/// Issue 0151: a number is not a slug. It used to find the project with that id, so an app
+/// named `1` got the setup of another app, with exit 0. Now it is a usage error, as it already
+/// was for an id that does not exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_number_does_not_get_the_project_with_that_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let url = srv.url.as_str();
+    let s = mallard(url, &["setup", "my_app", "--slug", "my_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&json!(1), &json!(true)), "{s}");
+
+    for args in [
+        &["setup", "1", "--json"][..],
+        &["setup", "99", "--json"],
+        &["setup", "01", "--json"],
+        &["setup", "x", "--slug", "1", "--json"],
+        &["projects", "create", "1", "--if-not-exists", "--json"],
+        &["projects", "create", "x", "--slug", "1", "--if-not-exists", "--json"],
+    ] {
+        let o = mallard(url, args).await;
+        assert_eq!(o.code, 2, "{args:?}: {}", o.stderr);
+        assert_eq!(o.stdout, "", "{args:?}");
+        assert!(o.error()["message"].as_str().unwrap().contains("numeric"), "{args:?}: {}", o.stderr);
+    }
+    let list = mallard(url, &["projects", "list", "--json"]).await.ok().json();
+    assert_eq!(list["count"], 1, "nothing was created: {list}");
+    // The slug it has still finds it.
+    let s = mallard(url, &["setup", "x", "--slug", "my_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&json!(1), &json!(false)), "{s}");
+    srv.stop().await;
+}
+
 /// Issue 0149: `mallard setup my_app` next to a project `my_app`, with the issue's own
 /// commands. It gets that project, again and again, and the telemetry its env vars name joins
 /// it: one app, no second project.

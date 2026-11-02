@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -27,3 +27,11 @@ Run `bench/mallard/memory/run.sh` with a limit Sentry compaction cannot fit, for
 Probably two more entries in `TRANSIENT` (`failed to allocate`, `could not allocate`) and a
 test. `crates/mallard-otel-server` is being changed on another branch, so it is not fixed
 here. See also issue 0130, where an invalidated catalog also lands in the permanent branch.
+
+## What changed
+`mallard_duck::is_out_of_memory` holds DuckDB's words for short memory, read from its buffer manager:
+the two above plus `failed to pin block` and `failed to reserve memory`, which come from the same
+function and would have dropped rows the same way. The OTel writer asks it instead of keeping its own
+entries, so such a flush is put back and retried. The Sentry writer uses the same list (issue 0132).
+Test: `short_memory_drops_nothing` runs a real allocation error (a low `memory_limit`); before the fix it
+dropped all 20,000 rows.

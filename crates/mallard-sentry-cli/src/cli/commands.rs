@@ -144,7 +144,10 @@ pub async fn create_or_get(
 ) -> Result<(Project, bool)> {
     let wanted = slug.clone().unwrap_or_else(|| slugify(name));
     match ctx.client.project(&wanted).await {
-        Ok(p) => return Ok((p, false)),
+        Ok(p) if p.slug == wanted => return Ok((p, false)),
+        // The route also takes an id: a number found another project. Creating answers that a
+        // number is no slug (issue 0151).
+        Ok(_) => {}
         Err(e) if e.is_not_found() => {}
         Err(e) => return Err(ctx.err(e)),
     }

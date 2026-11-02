@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -37,3 +37,31 @@ not tested for long enough to rule out a similar failure. The simplest fix is pr
 process on this error, so the restart policy reattaches the catalog. Lives in
 `mallard-duck` and the writers of both sides; not fixed here because another branch is
 changing those crates.
+
+## What changed
+The suggestion holds: the process exits and its restart attaches the catalog. Not with `process::exit` in
+a writer, which would leave threads inside DuckDB (a crash, issue 0018, ADR 0014) and is a global side effect
+in a library. `serve_on` already stops everything and returns the error when a side's `run_background` ends
+early, and `mallard serve` then exits 1, so the writers only make that happen:
+
+- `mallard_duck::is_invalidated` recognises DuckDB's message. It is not short memory, even when the message
+  quotes that as its cause, so nothing retries it.
+- OTel: `is_permanent` is false for it, so no rows are dropped as refused by a table. The flusher stops, pushes
+  are refused from then on (429 / `UNAVAILABLE`, which exporters retry, so they reach the restarted server),
+  and `run_background` ends with the error.
+- Sentry: a failed batch, or the 30 s read of what other processes wrote (for an idle server), ends
+  `run_background` the same way.
+
+Attaching the catalog again inside the process (what DuckDB's message suggests) was not chosen: every
+connection of both sides, the reader pool and the staging database hang on it, and it would have to be
+coordinated with running statements. A restart does that with code that already exists.
+
+What it does not do: acknowledged OTLP rows still in the buffer are lost, up to one `flush_interval` plus
+what arrives until the next flush notices, as with a killed process. Reads and maintenance do not detect it,
+only the writers. The stop has no deadline ([issue 0152](0152-stopping-has-no-deadline.md)).
+
+Tests use DuckDB's own invalidation (`SET debug_checkpoint_abort`, then `CHECKPOINT` of the catalog), which gives
+the error text of this issue; before the fix the flusher dropped the rows. **A real out-of-memory invalidation
+was not triggered.** Checked once by hand, with a temporary patch: the real binary logged it, exited 1 under a
+second after the next flush, and started fine on the same catalog afterwards. `bench/mallard/memory` and
+`deploy/compose/test.sh` were not run, so the restart policy of compose did not act on it.

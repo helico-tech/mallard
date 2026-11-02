@@ -224,7 +224,7 @@ impl Ingest {
         if let Err(e) = self.buffer.push(c.batches) {
             let items = accepted + rejected;
             return Err(match e {
-                Backpressure::Full { .. } => {
+                Backpressure::Full { .. } | Backpressure::CatalogLost => {
                     self.stats.record_request(signal, 0, items, 0);
                     self.stats.throttled_request(signal);
                     IngestError::Backpressure(e.to_string())
@@ -342,5 +342,17 @@ mod tests {
         let s = &stats.ingest(0).signals[0];
         assert_eq!((s.requests, s.accepted, s.throttled, s.invalid), (ok + 2, ok + 1, 1, 1));
         assert_eq!(s.throttled_requests, 1);
+    }
+
+    /// Issue 0130: exporters get an answer they retry, and reach the restarted server.
+    #[test]
+    fn an_invalidated_catalog_is_an_answer_to_retry() {
+        let stats = Arc::new(Stats::default());
+        let buffer = Arc::new(WriteBuffer::new(1 << 30, u64::MAX, stats.clone()));
+        buffer.catalog_lost.cancel();
+        let tokens = Tokens::new([""], mallard_common::auth::AuthPolicy::OpenIfEmpty);
+        let ingest = Ingest::new(buffer, stats, tokens, 1 << 20, 1 << 20);
+        let r = ingest.handle_blocking(Request::Traces(one_span()));
+        assert!(matches!(r, Err(IngestError::Backpressure(_))));
     }
 }

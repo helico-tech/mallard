@@ -246,10 +246,18 @@ impl Server {
     }
 
     /// Wait for `shutdown` to resolve, then stop cleanly (see [`Server::shutdown`]).
-    /// Same shape as `mallard_otel_server::Server::run_background`.
+    /// Same shape as `mallard_otel_server::Server::run_background`: it ends earlier, with an
+    /// error, when the catalog gets invalidated.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        shutdown.await;
+        let lost = self.state.db.catalog_lost.clone();
+        tokio::select! {
+            () = shutdown => {}
+            () = lost.cancelled() => {}
+        }
         self.shutdown().await;
+        if lost.is_cancelled() {
+            anyhow::bail!(mallard_duck::CATALOG_INVALIDATED);
+        }
         Ok(())
     }
 

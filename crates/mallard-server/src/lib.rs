@@ -349,6 +349,68 @@ mod tests {
         assert!(r.is_err());
     }
 
+    /// Issue 0130, with DuckDB's own invalidation of the catalog (not through an out-of-memory
+    /// error): the first data that cannot be stored stops the server, with an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invalidated_catalog_stops_the_server_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["t".into()];
+        cfg.storage.catalog = dir.path().join("catalog.ducklake").display().to_string();
+        cfg.storage.data_path = format!("{}/lake/", dir.path().display());
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
+        let otel = Arc::new(
+            mallard_otel_server::Server::with_connection(cfg.otel_config(), conn.try_clone().unwrap()).await.unwrap(),
+        );
+        let sentry = mallard_sentry_server::Server::with_connection(
+            cfg.sentry.clone(),
+            cfg.sentry_host(),
+            conn.try_clone().unwrap(),
+        )
+        .await
+        .unwrap();
+        let bridge = bridge::install(&cfg.bridge, &sentry, &otel).unwrap();
+        let platform = Platform { cfg: Arc::new(cfg), otel, sentry, bridge, metrics: None };
+        let bound = || TcpListener::bind("127.0.0.1:0");
+        let listeners = Listeners {
+            http: bound().await.unwrap(),
+            otlp_http: bound().await.unwrap(),
+            otlp_grpc: bound().await.unwrap(),
+            metrics: None,
+        };
+        let otlp = listeners.otlp_http.local_addr().unwrap();
+        let serving = tokio::spawn(platform.serve_on(listeners, CancellationToken::new()));
+
+        let send_a_log = || async {
+            let body = r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"x"}}]}]}]}"#;
+            let to = format!("http://{otlp}/v1/logs");
+            let client = reqwest::Client::new();
+            client.post(to).header("content-type", "application/json").body(body).send().await.unwrap().status()
+        };
+
+        // Flushed: the server runs, so what follows is not a failure to start.
+        assert_eq!(send_a_log().await, 200);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let n: i64 = conn.query_row("SELECT count(*) FROM lake.otel.logs", [], |r| r.get(0)).unwrap();
+            if n == 1 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the first log was not flushed");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        conn.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        conn.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+        assert_eq!(send_a_log().await, 200);
+
+        let r = tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+            .await
+            .expect("serve_on must return when the catalog is invalidated")
+            .unwrap();
+        assert!(r.unwrap_err().to_string().contains("invalidated"));
+    }
+
     #[tokio::test]
     async fn a_busy_port_fails_start_up() {
         let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();

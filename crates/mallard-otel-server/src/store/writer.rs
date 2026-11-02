@@ -19,6 +19,10 @@
 //!   batches are written one by one; those that still fail permanently are
 //!   dropped, logged and counted in `dropped_rows`. The other tables are
 //!   flushed right away, so one broken table cannot block every signal.
+//! - The catalog was invalidated ([`mallard_duck::is_invalidated`]): nothing can be written
+//!   until it is attached again. Pushes are refused from then on, the flusher stops and
+//!   [`crate::Server::run_background`] ends with an error, so the process exits and its
+//!   restart attaches the catalog. What is buffered is lost.
 //!
 //! Data that was acknowledged but not yet flushed is lost only if the process
 //! dies hard (see docs/adr/0003-ingest-durability.md).
@@ -33,6 +37,7 @@ use std::{
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
 use mallard_duck::duckdb::Connection;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::{CATALOG, Lake, schema::TableId};
@@ -56,6 +61,8 @@ pub struct WriteBuffer {
     max_bytes: u64,
     flush_rows: u64,
     stats: Arc<Stats>,
+    /// Cancelled when the flusher found the catalog invalidated.
+    pub(crate) catalog_lost: CancellationToken,
 }
 
 /// Why a push was refused.
@@ -69,11 +76,15 @@ pub enum Backpressure {
         "request expands to {bytes} bytes in memory, more than ingest.max_buffer_bytes ({max}); send smaller batches"
     )]
     TooLarge { bytes: u64, max: u64 },
+    /// The process is about to exit. Exporters retry, and reach the restarted server.
+    #[error("{}", mallard_duck::CATALOG_INVALIDATED)]
+    CatalogLost,
 }
 
 impl WriteBuffer {
     pub fn new(max_bytes: u64, flush_rows: u64, stats: Arc<Stats>) -> Self {
-        Self { state: Mutex::new(State::default()), cv: Condvar::new(), max_bytes, flush_rows, stats }
+        let catalog_lost = CancellationToken::new();
+        Self { state: Mutex::new(State::default()), cv: Condvar::new(), max_bytes, flush_rows, stats, catalog_lost }
     }
 
     /// Add batches. All or nothing.
@@ -89,6 +100,9 @@ impl WriteBuffer {
             return Err(Backpressure::TooLarge { bytes, max: self.max_bytes });
         }
         let mut st = self.state.lock().unwrap();
+        if self.catalog_lost.is_cancelled() {
+            return Err(Backpressure::CatalogLost);
+        }
         let used = st.bytes + st.inflight_bytes;
         if used + bytes > self.max_bytes {
             return Err(Backpressure::Full { buffered: used, max: self.max_bytes });
@@ -146,6 +160,13 @@ impl WriteBuffer {
         (taken, st.shutdown)
     }
 
+    /// The catalog is gone: refuse pushes from now on. Returns the rows left in the buffer.
+    fn lose_catalog(&self) -> u64 {
+        let st = self.state.lock().unwrap();
+        self.catalog_lost.cancel();
+        st.rows
+    }
+
     /// A flush of `inflight` bytes finished. Batches not written (`back`) go
     /// back to the front.
     fn settle(&self, inflight: u64, back: Option<Taken>) {
@@ -184,26 +205,17 @@ struct FlushError {
 }
 
 /// Message parts of errors that retrying can fix even while appending:
-/// storage, network, memory, interrupts, conflicts. Appender errors often
-/// carry no DuckDB error type ("the column must exist in the table"), so
-/// this is the list of exceptions, not of permanent errors.
-const TRANSIENT: &[&str] = &[
-    "IO Error",
-    "HTTP Error",
-    "Connection",
-    "connection",
-    "Out of Memory",
-    "out of memory",
-    "Interrupt",
-    "timeout",
-    "Timeout",
-    "conflict",
-    "Conflict",
-];
+/// storage, network, interrupts, conflicts ([`is_permanent`] adds short
+/// memory). Appender errors often carry no DuckDB error type ("the column must
+/// exist in the table"), so this is the list of exceptions, not of permanent
+/// errors.
+const TRANSIENT: &[&str] =
+    &["IO Error", "HTTP Error", "Connection", "connection", "Interrupt", "timeout", "Timeout", "conflict", "Conflict"];
 
 /// True when retrying `e` cannot help: appending to one table failed
 /// (opening its appender or converting a batch to its columns), and not
-/// for a transient reason ([`TRANSIENT`]). Commit errors are never
+/// for a transient reason ([`TRANSIENT`], short memory) and not because the catalog is
+/// gone, which says nothing about the rows. Commit errors are never
 /// permanent: that is where data reaches the object store and catalog, so
 /// a storage outage never drops data.
 fn is_permanent(e: &FlushError) -> bool {
@@ -212,6 +224,8 @@ fn is_permanent(e: &FlushError) -> bool {
     }
     let msg = format!("{:#}", e.error);
     !TRANSIENT.iter().any(|t| msg.contains(t))
+        && !mallard_duck::is_out_of_memory(&e.error)
+        && !mallard_duck::is_invalidated(&e.error)
 }
 
 /// Append all batches in one transaction. A panic in the DuckDB or Arrow
@@ -353,6 +367,11 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
                 failures += 1;
                 let msg = super::redact(&format!("{:#}", e.error));
                 stats.flush_err(msg.clone());
+                if mallard_duck::is_invalidated(&e.error) {
+                    let lost = rows + buf.lose_catalog();
+                    error!(rows = lost, error = %msg, "{}; the buffered rows are lost", mallard_duck::CATALOG_INVALIDATED);
+                    break;
+                }
                 let back = match e.table.filter(|_| is_permanent(&e)) {
                     Some(t) => {
                         error!(
@@ -550,14 +569,66 @@ mod tests {
             "IO Error: Could not write file \"s3://bucket/x.parquet\"",
             "HTTP Error: HTTP PUT error on 's3://bucket/x.parquet' (HTTP 503)",
             "Out of Memory Error: failed to allocate",
+            // Issue 0131: DuckDB's words for short memory, without its error type.
+            "flushing appender for spans: Failed to append: failed to allocate data of size 256.0 KiB (731.1 MiB/732.4 MiB used)",
+            "opening appender for spans: Failed to get table information from DuckLake: could not allocate block of size 256.0 KiB (732.1 MiB/732.4 MiB used)",
             "IO Error: Unable to connect to Postgres at localhost:5432: Connection refused",
             "TransactionContext Error: Catalog write-write conflict on alter with table \"logs\"",
             "Invalid Input Error: Transaction conflict: cannot add data to table logs",
+            // Issue 0130: the catalog is gone, with a cause that has no words of `TRANSIENT`.
+            "opening appender for spans: Failed to get table information from DuckLake: Database \"x\" has been invalidated because checkpointing failed.",
         ] {
             assert!(!is_permanent(&e(logs, msg)), "{msg}");
         }
         // Commit errors are never pinned on a table: always retried.
         assert!(!is_permanent(&e(None, "Conversion Error: during commit")));
+    }
+
+    /// Issue 0131, with a real allocation error: nothing is dropped, and the rows are
+    /// written once memory is back.
+    #[test]
+    fn short_memory_drops_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let conn = lake.connect().unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
+        // The lowest limit DuckDB takes: about what it uses right now.
+        [4, 8, 16, 32, 64, 128]
+            .into_iter()
+            .find(|mb| conn.execute_batch(&format!("SET memory_limit = '{mb}MB'")).is_ok())
+            .expect("a limit near what is in use");
+        buf.push(logs(20_000)).unwrap();
+        wait_for(|| "no failed flush".into(), || stats.ingest(0).flush_errors > 0);
+        conn.execute_batch("SET memory_limit = '1GB'").unwrap();
+        wait_for(
+            || format!("dropped={}", stats.ingest(0).dropped_rows),
+            || count(&conn, "logs") == 20_000 || stats.ingest(0).dropped_rows > 0,
+        );
+        assert_eq!(stats.ingest(0).dropped_rows, 0);
+        flusher.stop();
+    }
+
+    /// Issue 0130, with DuckDB's own invalidation, as a failed checkpoint of the catalog
+    /// causes it (not through an out-of-memory error): no row counts as refused by its table,
+    /// the flusher stops and new data is refused, so it is not acknowledged.
+    #[test]
+    fn an_invalidated_catalog_drops_nothing_and_stops_taking_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let conn = lake.connect().unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
+        conn.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        conn.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+        buf.push(logs(3)).unwrap();
+        wait_for(|| "catalog_lost not set".into(), || buf.catalog_lost.is_cancelled());
+        assert_eq!(stats.ingest(0).dropped_rows, 0);
+        assert!(matches!(buf.push(logs(1)), Err(Backpressure::CatalogLost)));
+        flusher.stop();
+        assert_eq!(stats.ingest(0).dropped_rows, 0);
     }
 
     #[test]

@@ -259,6 +259,8 @@ impl Server {
     /// Run the flusher and (if enabled) maintenance until `shutdown`
     /// completes, then flush remaining buffered data. Stop the receivers
     /// before the shutdown future resolves so nothing arrives afterwards.
+    /// Ends earlier, with an error, when the catalog gets invalidated: the
+    /// process must exit, as only attaching the catalog again helps.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
         let cfg = &self.cfg;
         let flusher = Flusher::start(&self.lake, self.buffer.clone(), cfg.ingest.flush_interval, self.stats.clone())?;
@@ -267,7 +269,10 @@ impl Server {
         } else {
             None
         };
-        shutdown.await;
+        tokio::select! {
+            () = shutdown => {}
+            () = self.buffer.catalog_lost.cancelled() => {}
+        }
         info!("shutting down: flushing buffered data");
         // Start the final flush right away; stopping maintenance may take a
         // moment (it finishes its current statement).
@@ -279,6 +284,9 @@ impl Server {
             flusher.stop();
         })
         .await?;
+        if self.buffer.catalog_lost.is_cancelled() {
+            anyhow::bail!(mallard_duck::CATALOG_INVALIDATED);
+        }
         Ok(())
     }
 }
