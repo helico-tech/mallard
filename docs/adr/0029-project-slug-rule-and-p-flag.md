@@ -1,7 +1,7 @@
 # 0029. Project slugs join by the slug rule; -p is an error where it means nothing
 
 ## Status
-accepted
+accepted; refined by 0031 (no new project with the slug of another under the slug rule)
 
 ## Context
 ADR 0027 joins a project and a service when their slugs are equal, but `check_slug`

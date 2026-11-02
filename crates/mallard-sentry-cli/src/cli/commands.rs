@@ -63,22 +63,6 @@ fn kv(o: Out, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn info(ctx: &Ctx) -> Result<()> {
-    let o = ctx.out;
-    let i = ctx.client.info().await.map_err(|e| ctx.err(e))?;
-    if !ctx.output.text() {
-        return ctx.print_json(&i);
-    }
-    let i = fmt::sanitize(i, true)?;
-    out!(o, "{} {}", p::bold("mallard errors"), i.version);
-    kv(o, "server", ctx.url())?;
-    kv(o, "duckdb", &i.duckdb_version)?;
-    kv(o, "catalog", &i.catalog)?;
-    kv(o, "storage", &i.storage)?;
-    kv(o, "queue", &format!("{} / {}", i.queue_depth, i.queue_capacity))?;
-    Ok(())
-}
-
 pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
     let o = ctx.out;
     match cmd {
@@ -135,7 +119,8 @@ pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
 
 /// The project with this slug, created when it does not exist. `true` when it was
 /// created. Without a slug the server derives it from the name and answers 409 when a project
-/// has it under the slug rule, so the project `my_app` is the one `setup my_app` gets.
+/// has it under the slug rule, so the project `my_app` is the one `setup my_app` gets. A slug
+/// that was asked for means that slug: such a project is a conflict (ADR 0031).
 pub async fn create_or_get(
     ctx: &Ctx,
     name: &str,
@@ -155,10 +140,13 @@ pub async fn create_or_get(
     let req = CreateProject { name: name.to_string(), slug, platform };
     match ctx.client.create_project(&req).await {
         Ok(p) => Ok((p, true)),
-        // Created by someone else in between.
-        Err(e) if e.status() == Some(409) && given => {
-            Ok((ctx.client.project(&wanted).await.map_err(|e| ctx.err(e))?, false))
-        }
+        Err(e) if e.status() == Some(409) && given => match ctx.client.project(&wanted).await {
+            // Created by someone else in between.
+            Ok(p) => Ok((p, false)),
+            // Another project is this app, under another slug.
+            Err(lookup) if lookup.is_not_found() => Err(ctx.err(e)),
+            Err(lookup) => Err(ctx.err(lookup)),
+        },
         Err(e) if e.status() == Some(409) => {
             let projects = ctx.client.projects().await.map_err(|e| ctx.err(e))?;
             let id = app_projects(projects.iter().map(|p| (p.id, p.slug.as_str()))).get(&wanted).map(|(id, _)| *id);

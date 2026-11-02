@@ -1321,6 +1321,49 @@ pub(crate) mod tests {
         two_processes(&format!("sqlite:{}", dir.path().join("catalog.sqlite").display()), dir.path()).await;
     }
 
+    /// Two spellings of one app at once, also from two processes: one project (ADR 0031).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_spellings_of_one_app_make_one_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = format!("sqlite:{}", dir.path().join("catalog.sqlite").display());
+        let a = Arc::new(open_db_on(&catalog, dir.path(), 2, |_| {}));
+        let b = Arc::new(open_db_on(&catalog, dir.path(), 2, |_| {}));
+        for i in 0..4 {
+            let (one, other) = (format!("app_{i}"), format!("app-{i}"));
+            let (a2, b2) = (a.clone(), b.clone());
+            let t1 = tokio::spawn(async move { create(&a2, &one).await });
+            let t2 = tokio::spawn(async move { create(&b2, &other).await });
+            let results = [t1.await.unwrap(), t2.await.unwrap()];
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "app {i}: {results:?}");
+        }
+        for db in [a, b] {
+            Arc::into_inner(db).unwrap().shutdown().await;
+        }
+    }
+
+    /// A catalog that already has both spellings keeps both, and the exact slug wins (ADR 0029).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_catalog_with_both_spellings_keeps_answering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_db(dir.path(), 1);
+        create(&db, "my_app").await.unwrap();
+        let conn = db.readers.lock().unwrap().pop().unwrap();
+        conn.execute_batch(&db.ns.sql(
+            "INSERT INTO $S.projects SELECT 2, 'my-app', name, platform, public_key, created_at FROM $S.projects",
+        ))
+        .unwrap();
+        db.readers.lock().unwrap().push(conn);
+        let taken = |r: Result<ProjectRow, WriteError>| match r {
+            Err(WriteError::SlugTaken(s)) => format!("slug {s}"),
+            Err(WriteError::SameApp(s)) => format!("app {s}"),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(taken(create(&db, "my_app").await), "slug my_app");
+        assert_eq!(taken(create(&db, "my-app").await), "slug my-app");
+        assert_eq!(taken(create(&db, "my__app").await), "app my-app");
+        db.shutdown().await;
+    }
+
     /// Needs an empty Postgres database of its own, e.g.
     /// `MALLARD_TEST_POSTGRES='host=127.0.0.1 port=5432 dbname=lake user=postgres password=pw'`.
     #[tokio::test(flavor = "multi_thread")]

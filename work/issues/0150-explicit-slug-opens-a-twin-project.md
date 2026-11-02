@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-01
 ---
@@ -24,3 +24,14 @@ mallard apps      # my-app and my_app
 Options: a 409 for such a slug too, which changes what an explicit slug may do and must not break
 `Server::create_project` for the bridge, or a warning. A choice for the user, so not made in 0149.
 `a_name_without_a_slug_compares_through_the_slug_rule` pins today's behaviour.
+
+Owner's decision: refuse with a 409 (ADR 0031). `WriteCmd::CreateProject` now compares through the slug
+rule inside its transaction, for a slug that was asked for and one derived from a name, so the check in
+the handler from issue 0149 went away and two spellings at once make one project. `setup --slug` and
+`projects create --slug --if-not-exists` exit 5 and name the project.
+
+The bridge: `Server::create_project` answers with the id of the project that is the same app, so a
+`bridge.default_project` whose twin exists uses the twin. Its exceptions go there and no project is
+created. Tested with the issue's commands against a real server
+(`a_slug_that_is_asked_for_does_not_open_a_twin`) and for the bridge in both spellings
+(`the_default_project_uses_its_twin`).

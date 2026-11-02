@@ -61,25 +61,19 @@ fn log_need(a: &mallard_otel_cli::LogArgs) -> Result<Need> {
 
 /// `events list --trace`: looks in all projects.
 fn across_projects(cmd: &Cmd) -> bool {
-    let list =
-        |c: &mallard_sentry_cli::EventsCmd| matches!(c, mallard_sentry_cli::EventsCmd::List { trace: Some(_), .. });
-    match cmd {
-        Cmd::Events(c) | Cmd::Errors { cmd: mallard_sentry_cli::Command::Events(c) } => list(c),
-        _ => false,
-    }
+    matches!(cmd, Cmd::Events(mallard_sentry_cli::EventsCmd::List { trace: Some(_), .. }))
 }
 
 /// Whether the command works on one project: what `-p` chooses.
 fn takes_project(cmd: &Cmd) -> bool {
-    use mallard_sentry_cli::Command as Errors;
     match cmd {
-        Cmd::Issues(_) | Cmd::Events(_) | Cmd::Releases(_) | Cmd::Sourcemaps(_) | Cmd::Find { .. } | Cmd::Tui => {
-            !across_projects(cmd)
-        }
-        Cmd::Errors {
-            cmd:
-                Errors::Issues(_) | Errors::Events(_) | Errors::Stats { .. } | Errors::Releases(_) | Errors::Sourcemaps(_),
-        } => !across_projects(cmd),
+        Cmd::Issues(_)
+        | Cmd::Events(_)
+        | Cmd::Stats { .. }
+        | Cmd::Releases(_)
+        | Cmd::Sourcemaps(_)
+        | Cmd::Find { .. }
+        | Cmd::Tui => !across_projects(cmd),
         Cmd::Series(c) => c.scope().is_none(),
         _ => false,
     }
@@ -94,14 +88,13 @@ pub(crate) fn project_flag_problem(cmd: &Cmd) -> Option<&'static str> {
         Some("-p does not apply with --trace: a trace is searched across all projects\n")
     } else {
         Some(
-            "-p does not apply to this command; it works on issues, events, releases, sourcemaps, find, series \
-             errors and tui. For telemetry use -S or --app\n",
+            "-p does not apply to this command; it works on issues, events, stats, releases, sourcemaps, find, \
+             series errors and tui. For telemetry use -S or --app\n",
         )
     }
 }
 
 fn need(cmd: &Cmd) -> Result<Need> {
-    use mallard_otel_cli::Command as Otel;
     if matches!(cmd, Cmd::Tui) {
         return Ok(Need::Picker);
     }
@@ -112,27 +105,19 @@ fn need(cmd: &Cmd) -> Result<Need> {
         return Err(usage("--app does not apply with --trace: a trace is searched across all projects"));
     }
     match cmd {
-        Cmd::Traces(TracesCmd::List(a)) | Cmd::Telemetry { cmd: Otel::Traces(a) } => {
-            services_need(&a.w, a.service.as_ref(), None)
-        }
-        Cmd::Logs(a) | Cmd::Telemetry { cmd: Otel::Logs(a) } => log_need(a),
-        Cmd::Ops(a) | Cmd::Telemetry { cmd: Otel::Ops(a) } => services_need(&a.w, a.service.as_ref(), None),
-        Cmd::Metrics(MetricsCmd::List(a)) | Cmd::Telemetry { cmd: Otel::Metrics(a) } => {
-            services_need(&a.w, a.service.as_ref(), None)
-        }
-        Cmd::Metrics(MetricsCmd::Show(a)) | Cmd::Telemetry { cmd: Otel::Metric(a) } => {
-            services_need(&a.w, a.service.as_ref(), None)
-        }
-        Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) | Cmd::Telemetry { cmd: Otel::Attrs(a) } => {
-            services_need(&a.w, a.service.as_ref(), None)
-        }
+        Cmd::Traces(TracesCmd::List(a)) => services_need(&a.w, a.service.as_ref(), None),
+        Cmd::Logs(a) => log_need(a),
+        Cmd::Ops(a) => services_need(&a.w, a.service.as_ref(), None),
+        Cmd::Metrics(MetricsCmd::List(a)) => services_need(&a.w, a.service.as_ref(), None),
+        Cmd::Metrics(MetricsCmd::Show(a)) => services_need(&a.w, a.service.as_ref(), None),
+        Cmd::Schema(SchemaArgs { cmd: Some(SchemaCmd::Attrs(a)) }) => services_need(&a.w, a.service.as_ref(), None),
         Cmd::Series(c) => match c.scope() {
             Some((w, service)) => services_need(w, service, None),
             None => Ok(Need::Project),
         },
         _ => Err(usage(
-            "--app does not apply to this command; it works where -p or -S do: issues, events, releases, sourcemaps, \
-             find, traces list, logs, ops, metrics, schema attrs, series, tui",
+            "--app does not apply to this command; it works where -p or -S do: issues, events, stats, releases, \
+             sourcemaps, find, traces list, logs, ops, metrics, schema attrs, series, tui",
         )),
     }
 }

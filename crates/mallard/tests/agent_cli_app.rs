@@ -134,9 +134,8 @@ async fn app_scopes_each_side() {
     let series = mallard(url, &["series", "logs", "--app", "checkout-api", "--json"]).await.ok().json();
     let total: u64 = series["items"].as_array().unwrap().iter().map(|p| p["total"].as_u64().unwrap()).sum();
     assert_eq!(total, 2, "{series}");
-    // The hidden alias, --fields, ndjson and the flag before the command.
-    let v =
-        mallard(url, &["--app", "worker", "telemetry", "logs", "--json", "--fields", "service_name"]).await.ok().json();
+    // --fields, ndjson and the flag before the command.
+    let v = mallard(url, &["--app", "worker", "logs", "--json", "--fields", "service_name"]).await.ok().json();
     assert_eq!(v["items"][0], json!({"service_name": "worker"}), "{v}");
     let nd = mallard(url, &["logs", "--app", "worker", "--format", "ndjson"]).await.ok();
     assert_eq!(nd.stdout.lines().count(), 1, "{}", nd.stdout);
@@ -156,8 +155,8 @@ async fn app_scopes_each_side() {
     assert_eq!(found["items"][0]["kind"], "issue", "{found}");
     let empty = mallard(url, &["issues", "list", "--app", "web", "--json"]).await.ok().json();
     assert_eq!(empty["count"], 0, "a project with no errors is a real empty list: {empty}");
-    let rel = mallard(url, &["errors", "stats", "--app", "checkout-api", "--json"]).await;
-    assert_eq!(rel.code, 0, "the old path: {}", rel.stderr);
+    let stats = mallard(url, &["stats", "--app", "checkout-api", "--json"]).await.ok().json();
+    assert_eq!(stats["total_events"], 1, "the app's project: {stats}");
 
     // A side the app lacks is an error, not an empty list that looks like no errors.
     let o = mallard(url, &["issues", "list", "--app", "worker", "--json"]).await;
@@ -389,16 +388,76 @@ async fn setup_finds_a_project_through_the_slug_rule() {
     assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("x_y"), &json!(true)), "{s}");
     let s = mallard(url, &["setup", "x", "--slug", "x_y", "--json"]).await.ok().json();
     assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("x_y"), &json!(false)), "{s}");
-    // A server that already has both keeps both, and the exact slug wins.
+    srv.stop().await;
+}
+
+/// What only the old `errors …` and `telemetry …` paths could do has a top-level form (ADR 0032).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_stats_and_flush_work_on_a_real_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let url = srv.url.as_str();
+
+    // `health` needs no token, unlike `status`.
+    let wrong = [("MALLARD_TOKEN", "wrong")];
+    let h = mallard_env(url, &wrong, &["health", "--json"]).await.ok().json();
+    assert_eq!(h["status"], "ok", "{h}");
+    assert_eq!(mallard_env(url, &wrong, &["status", "--json"]).await.code, 3);
+    assert_eq!(mallard("http://127.0.0.1:9", &["health", "--json"]).await.code, 6, "down");
+
+    // `flush` runs on the server, and needs a token.
+    let f = mallard(url, &["flush", "--json"]).await.ok().json();
+    assert_eq!(f, json!({"ok": true}));
+    assert!(mallard(url, &["flush"]).await.ok().stdout.contains("maintenance done"));
+    assert_eq!(mallard_env(url, &wrong, &["flush", "--json"]).await.code, 3);
+
+    // `stats` has totals, which `series errors` does not.
+    mallard(url, &["projects", "create", "web", "--json"]).await.ok();
+    let s = mallard(url, &["stats", "-p", "web", "--since", "1h", "--json"]).await.ok().json();
+    assert_eq!((&s["total_events"], &s["unique_issues"]), (&json!(0), &json!(0)), "{s}");
+    assert!(s["new_issues"].is_u64() && s["affected_users"].is_u64(), "{s}");
+    srv.stop().await;
+}
+
+/// Issue 0150, with the issue's own commands: a slug that was asked for, next to a project with
+/// the same slug under the slug rule, is a conflict that names that project. Nothing is
+/// created, and with --if-not-exists too: this slug does not exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slug_that_is_asked_for_does_not_open_a_twin() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let url = srv.url.as_str();
+    let http = reqwest::Client::new();
     let r = http
         .post(format!("{url}/sentry/v1/projects"))
         .bearer_auth(TOKEN)
-        .json(&json!({"name": "x", "slug": "my-app"}))
+        .json(&json!({"name": "x", "slug": "my_app"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 201);
-    let s = mallard(url, &["setup", "my_app", "--json"]).await.ok().json();
-    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("my-app"), &json!(false)), "{s}");
+    let id = r.json::<Value>().await.unwrap()["id"].clone();
+
+    for args in [
+        &["setup", "z", "--slug", "my-app", "--json"][..],
+        &["setup", "z", "--slug", "my__app", "--json"],
+        &["projects", "create", "z", "--slug", "my-app", "--json"],
+        &["projects", "create", "z", "--slug", "my-app", "--if-not-exists", "--json"],
+    ] {
+        let o = mallard(url, args).await;
+        assert_eq!(o.code, 5, "{args:?}: {}", o.stderr);
+        assert_eq!(o.stdout, "", "{args:?}");
+        let error = o.error();
+        assert_eq!(error["code"], "conflict", "{args:?}: {error}");
+        assert!(error["message"].as_str().unwrap().contains("my_app"), "{args:?}: {error}");
+    }
+    let apps = mallard(url, &["apps", "--json"]).await.ok().json();
+    assert_eq!(apps["count"], 1, "one app: {apps}");
+    assert_eq!((&apps["items"][0]["slug"], &apps["items"][0]["project"]), (&json!("my_app"), &id), "{apps}");
+    // The slug it has still works, and so does the name.
+    let s = mallard(url, &["setup", "z", "--slug", "my_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&id, &json!(false)), "{s}");
+    let s = mallard(url, &["setup", "my-app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&id, &json!(false)), "{s}");
     srv.stop().await;
 }

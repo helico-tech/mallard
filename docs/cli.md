@@ -15,13 +15,15 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | command | what |
 |---|---|
 | `mallard status` | health of both sides and what the server allows (SQL, windows, retention); exit 6 when a side is down |
-| `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project (one with the same slug under the slug rule counts: `my_app` for `my-app`); print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
+| `mallard health` | is the server up; needs no token; exit 6 if not |
+| `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project (one with the same slug under the slug rule counts: `my_app` for `my-app`; with `--slug my-app` that project is a conflict, exit 5); print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
 | `mallard apps [--since 24h]` | every app: a project and the services with the same slug, or either alone (ADR 0027). Projects are listed whatever the window; services need data in it |
 | `mallard find <id>` | a trace or event id (32 hex) or an issue or span id (16 hex): what it is and the command to see more |
 | `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`, `--tag k=v` (repeat), `--cursor`; status changes take `--reason` |
 | `mallard events list\|show` | error events; `list --tag k=v`, `--release`, `--env`, `-q`, `--cursor`; `show --json` is concise, `--raw` adds the Sentry payload |
 | `mallard releases list` | releases seen in error events: first/last seen, events, issues, new issues (derived from events; releases made with `sentry-cli releases new` are not stored) |
-| `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs |
+| `mallard stats [-p project \| --app slug] [--interval 1h]` | one project: total events, issues, new issues, affected users, and events per bucket (default window 24h; `series errors` has the buckets as a list) |
+| `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs. A new slug that another project has under the slug rule is a conflict, exit 5, also with `--if-not-exists` |
 | `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace; `--cursor` for the next page); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |
 | `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`; `--cursor` for the next page), follow (`-f`, stops by itself with `--for 2m` or `--until-match <text>`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation; `ops --compare 1d` adds p95 and error rate of the same window a day earlier, and the change |
@@ -30,6 +32,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard sql "<select>" [--errors]` | read-only SQL over the telemetry tables, or with `--errors` over `events`, `issues`, `issue_activity` (exit 7 when off; ADR 0011; `-n` rows and 32 MiB per answer, ADR 0015) |
 | `mallard schema [tables]`, `mallard schema attrs` | the tables and columns `sql` can query, per `side` (`errors` tables need `sql --errors`); attribute keys with counts, or the top values of `--key` (`--signal spans\|logs\|metrics`, `-S`, `--metric`; sampled) |
 | `mallard sourcemaps list`, `mallard send-test` | uploaded bundles; send a test error to a DSN |
+| `mallard flush` | the running server flushes, compacts and expires error data now, as `POST /sentry/v1/maintenance` does; needs only the token, not the config |
 | `mallard tui [-p project \| --app slug]` | both TUIs as tabs, one app and one time window: F1 errors, F2 telemetry |
 | `mallard web [--addr a]` | the Web UI on `127.0.0.1:8088`: the same screens and keys in a browser |
 
@@ -45,9 +48,7 @@ not these: there they are a usage error (exit 2) that says so.
 | `mallard maintenance [--full]` | both sides' maintenance once, then exit; stop the server first with a DuckDB-file or SQLite catalog |
 | `mallard install-extensions --dir <dir>` | download all DuckDB extensions, for running without internet (the Docker image does this) |
 
-The old paths still work, hidden: `mallard errors …` (the Sentry command
-set: `info`, `stats`, `maintenance`, …) and `mallard telemetry …` (the telemetry
-one: `health`, `status`, `metric`, waterfall `trace`, …). Side details:
+Side details:
 [crates/mallard-sentry-cli/README.md](../crates/mallard-sentry-cli/README.md), [otel/cli.md](otel/cli.md).
 
 ## Shared flags
@@ -58,7 +59,7 @@ Global (any position):
 |---|---|---|
 | `--url` | `MALLARD_URL` | server base URL |
 | `--token` | `MALLARD_TOKEN` | API token |
-| `-p, --project` | `MALLARD_PROJECT` | Sentry project id or slug; optional with one project. Only on `issues`, `events`, `releases`, `sourcemaps`, `find`, `series errors`, `tui`: elsewhere, and with `events list --trace`, the flag is exit 2 and the env var is ignored |
+| `-p, --project` | `MALLARD_PROJECT` | Sentry project id or slug; optional with one project. Only on `issues`, `events`, `stats`, `releases`, `sourcemaps`, `find`, `series errors`, `tui`: elsewhere, and with `events list --trace`, the flag is exit 2 and the env var is ignored |
 | `--app slug` | | an app (`mallard apps`): its project and its services, in place of `-p` and `-S` |
 | `--format text\|json\|ndjson` | `MALLARD_FORMAT` | output format; `--json` = `--format json` |
 | `--fields a,b` | | keep only these top-level fields (unknown field: exit 2) |
@@ -82,7 +83,7 @@ Per command, the same letter for the same thing on both sides:
 Default windows differ where the data does: issues 14d, events all (30d
 with `--trace`), traces/logs/metrics 1h, `trace` and `find` 7d.
 
-`--app <slug>` works where `-p` or `-S` do: `issues`, `events`, `releases`, `sourcemaps`,
+`--app <slug>` works where `-p` or `-S` do: `issues`, `events`, `stats`, `releases`, `sourcemaps`,
 `find`, `series errors` take the app's project; `traces list`, `logs`, `ops`, `metrics`,
 `schema attrs`, `series spans|logs` take all its service names (ADR 0027, 0028). There is no
 `app=` in any filter.
@@ -147,7 +148,7 @@ These keys mean the same on both tabs and every screen (the list is
 | `?` | help |
 | `ctrl-c` | quit |
 | `F1` `F2` | switch tab (`mallard tui`) |
-| `p` | choose the app, on every screen (`mallard tui`; `mallard errors tui`: switch project) |
+| `p` | choose the app, on every screen (`mallard tui`) |
 
 Screen keys:
 
@@ -169,8 +170,7 @@ errors are per project. `-p` or `--app` is the first choice. An app without a si
 that tab, with what to do. Opening an event of another project moves the picker along.
 
 `t` and `T` change the window on both tabs: 5m, 15m, 1h, 6h, 24h, 7d, 14d, 30d, up to the smaller
-of the two sides' `max_window_secs`, starting at 1h. The errors tab on its own (`mallard errors
-tui`) keeps its 24h start and its own list. An empty issue list in a window under 24h offers `d`:
+of the two sides' `max_window_secs`, starting at 1h. An empty issue list in a window under 24h offers `d`:
 show last 24h, so older issues do not look like no issues.
 
 ### Suggestions in a filter
@@ -187,7 +187,9 @@ unavailable".
 | issues | tags of the project | `/projects/{p}/tags` |
 
 In the issue filter, `key=value` is a tag filter and the other words search the text, as in the
-web UI. In an app, `service=` can only name one of its services: another is refused with a message
+web UI. A word with its `=` in quotes is text too: `"a=b"` searches for that text, while
+`a="b c"` is a tag with a space in its value. (`issues list -q` is always text; use `--tag` for a
+tag.) In an app, `service=` can only name one of its services: another is refused with a message
 and nothing is read for it. `trace=` on logs follows the trace across apps, because it asks by id.
 `op=` values come from at most the last 24h. Difference with the web UI, on purpose: there a
 suggestion is taken only after you move to it; here the first one is ready for `tab`.

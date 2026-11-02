@@ -4,8 +4,8 @@
 
 - `GET /otel/api/v1/health`: this side's liveness (no auth). `/healthz` and `/readyz`
   cover the server.
-- `mallard status`: both sides in short.
-- `mallard telemetry status` / `GET /otel/api/v1/stats`: requests, accepted, throttled and
+- `mallard status`: both sides in short. `mallard health`: is the server up, without a token.
+- `mallard status --json` (`otel.info`) / `GET /otel/api/v1/stats`: requests, accepted, throttled and
   invalid items per signal, and `throttled_requests` (requests refused before their body was read); buffer fill; flush count, errors and duration; rows, files,
   bytes and inlined rows per table; last maintenance run.
 - Prometheus (`/metrics`): `mallard_otel_ingest_requests_total`,

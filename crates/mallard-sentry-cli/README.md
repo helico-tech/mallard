@@ -20,7 +20,8 @@ Global flags and env vars (`--url`, `--token`, `-p`, `--format`, ...): see
 
 When the server has exactly one project, `-p` is optional. The bridge creates a
 project per service for OTel exceptions (`bridge.default_project`), so a server with
-OTel traffic can need it.
+OTel traffic can need it. When a project already has that slug under the slug rule (`my_app` for
+`my-app`), the bridge uses it (ADR 0031).
 
 Text that comes from events (titles, messages, frames, tags, ...) or from
 the server is cleaned before it is printed: control and bidi characters are
@@ -34,11 +35,8 @@ quietly with exit 0. Errors are one line on stderr, with the exit codes of
 
 ## Commands
 
-Flat commands, plus `mallard errors …` (or `sentry …`), a hidden alias that keeps the
-command set of this side.
-
 ```
-mallard errors info                                   server version, storage, queue depth
+mallard status --json                          sentry.info: server version, storage, queue depth
 mallard projects list
 mallard projects create <name> [--slug s] [--platform node] [--if-not-exists]   prints the DSN
 mallard projects show <project>                               DSN first, then details
@@ -52,15 +50,14 @@ mallard events list [--issue id | -t trace_id] [-n limit] [-s 1h] [--tag key=val
 mallard events show <event_id> [--issue id]    exception chain, frames (newest first,
                                            in-app highlighted with source context),
                                            breadcrumbs, tags, user, request
-mallard errors stats [-s 24h] [--interval 1h]        totals and events per bucket
+mallard stats [-s 24h] [--interval 1h]         totals and events per bucket
 mallard releases list [-s 14d] [-n limit]      releases seen in events (derived; not sentry-cli's)
 mallard sql --errors "<select>" [-n limit]     read-only SQL over events, issues, issue_activity
                                            (server: sentry.query.enable_sql; exit 7 when off)
 mallard sourcemaps list                        uploaded artifact bundles
-mallard errors maintenance                     flush and compact now, on the server
+mallard flush                                  flush and compact now, on the server
 mallard send-test --dsn <dsn> [--message m]    send a test error (Sentry envelope protocol)
 mallard tui                                    terminal UI; F1 is this side
-mallard errors tui                             the TUI with only this side
 ```
 
 `send-test` needs no token: it posts an envelope to

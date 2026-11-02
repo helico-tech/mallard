@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 use comfy_table::{Cell, CellAlignment, Color};
 use mallard_otel_client::api::*;
-use mallard_term::color::{alert, bold, cyan, dim, green, red, yellow};
+use mallard_term::color::{alert, bold, cyan, dim, green, yellow};
 pub(crate) use mallard_term::fmt::{bytes, compact, ms};
 pub(crate) use mallard_term::table::table;
 pub(crate) use mallard_term::text::clean;
@@ -47,71 +47,6 @@ fn red_cells(r: &RedStats) -> Vec<Cell> {
         Cell::new(ms(r.p95_ms)).set_alignment(CellAlignment::Right),
         Cell::new(ms(r.p99_ms)).set_alignment(CellAlignment::Right),
     ]
-}
-
-pub(crate) fn stats_text(s: &Stats, url: &str) -> String {
-    let mut out = String::new();
-    put!(out, "{} {} {}", bold("mallard telemetry"), clean(&s.version), dim(&format!("({url})")));
-    put!(
-        out,
-        "uptime {}   catalog {}   data {}   snapshot {}",
-        uptime(s.uptime_secs),
-        cyan(&s.storage.catalog_type.to_string()),
-        cyan(&clean(&s.storage.data_path)),
-        s.storage.snapshot_id
-    );
-    let i = &s.ingest;
-    let mut t = table(&["signal", "requests", "accepted", "throttled", "throttled requests", "invalid"]);
-    for sig in &i.signals {
-        t.add_row(vec![
-            Cell::new(sig.signal),
-            num(sig.requests as f64),
-            num(sig.accepted as f64),
-            num(sig.throttled as f64),
-            num(sig.throttled_requests as f64),
-            num(sig.invalid as f64),
-        ]);
-    }
-    put!(out, "\n{}\n{t}", bold("Ingest"));
-    let fill = i.buffered_bytes as f64 / i.max_buffer_bytes.max(1) as f64;
-    put!(
-        out,
-        "buffer {} rows / {} of {} ({:.0}%)   flushes {}   flush errors {}",
-        i.buffered_rows,
-        bytes(i.buffered_bytes),
-        bytes(i.max_buffer_bytes),
-        fill * 100.0,
-        i.flushes,
-        if i.flush_errors > 0 { red(&i.flush_errors.to_string()) } else { green("0") }
-    );
-    if let Some(f) = &i.last_flush {
-        put!(out, "last flush {} rows in {} at {}", f.rows, ms(f.duration_ms), f.at.format("%H:%M:%S"));
-    }
-    if let Some(e) = &i.last_flush_error {
-        put!(out, "{} {}", red("last flush error:"), clean(e));
-    }
-    let mut t = table(&["table", "rows", "inlined", "files", "size"]);
-    for tb in &s.storage.tables {
-        t.add_row(vec![
-            Cell::new(clean(&tb.name)),
-            num(tb.rows as f64),
-            num(tb.inlined_rows as f64),
-            num(tb.files as f64),
-            Cell::new(bytes(tb.bytes as u64)).set_alignment(CellAlignment::Right),
-        ]);
-    }
-    put!(out, "\n{}\n{t}", bold("Storage"));
-    if let Some(m) = &s.storage.last_maintenance {
-        let status = if m.ok { green("ok") } else { red("failed") };
-        put!(
-            out,
-            "last maintenance: {} {status} at {} — {}",
-            clean(&m.task),
-            m.at.format("%H:%M:%S"),
-            clean(&m.detail)
-        );
-    }
-    out
 }
 
 /// Server uptime, e.g. `5m 3s`, `2h 10m`, `3d 4h`.
@@ -201,52 +136,6 @@ pub(crate) fn traces_text(v: &[TraceSummary], sentry: Option<&[Option<u64>]>) ->
         t.add_row(row);
     }
     t.to_string()
-}
-
-/// Waterfall: indented span tree with a timeline bar, one line per entry.
-/// Uses the TUI's layout, so spans with missing parents or parent loops are
-/// shown too.
-pub(crate) fn trace_lines(t: &Trace, show_attrs: bool) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(start) = t.spans.iter().map(|s| s.start_time).min() else {
-        out.push(format!("{} {}  (no spans)", bold("trace"), clean(&t.trace_id)));
-        return out;
-    };
-    let (rows, end_ns) = crate::waterfall::layout(&t.spans);
-    out.push(format!(
-        "{} {}  {}  {} spans  {}",
-        bold("trace"),
-        clean(&t.trace_id),
-        start.format("%Y-%m-%d %H:%M:%S%.3f UTC"),
-        t.spans.len(),
-        ms(end_ns as f64 / 1e6)
-    ));
-    let width = 40usize;
-    for row in &rows {
-        let s = &t.spans[row.span];
-        let (a, len) = crate::waterfall::bar(row.offset_ns, row.duration_ns, end_ns, width as u16);
-        let (a, len) = (a as usize, len as usize);
-        let bar = format!("{}{}{}", " ".repeat(a), "█".repeat(len), " ".repeat(width.saturating_sub(a + len)));
-        let bar = if s.status_code == SpanStatus::Error { red(&bar) } else { cyan(&bar) };
-        let label = format!("{}{} {}", row.prefix, bold(&clean(&s.service_name)), clean(&s.name));
-        let err = if s.status_code == SpanStatus::Error { format!(" {}", red("✗")) } else { String::new() };
-        out.push(format!("{bar} {:>9}  {label}{err}", ms(s.duration_ns as f64 / 1e6)));
-        if show_attrs {
-            let indent = " ".repeat(row.depth * 2 + 2);
-            for (k, v) in &s.attributes {
-                out.push(format!("{}  {indent}{} = {}", " ".repeat(width + 10), dim(&clean(k)), clean(v)));
-            }
-            for e in &s.events {
-                out.push(format!(
-                    "{}  {indent}• {} {}",
-                    " ".repeat(width + 10),
-                    yellow(&clean(&e.name)),
-                    dim(&fmt_attrs(&e.attributes))
-                ));
-            }
-        }
-    }
-    out
 }
 
 /// `k=v k=v`, cleaned.
@@ -385,24 +274,6 @@ pub(crate) fn attributes_text(s: &AttributeStats, key: Option<&str>) -> String {
     format!("{t}\n{}", dim(&sampled))
 }
 
-/// One row per column: table, column, type; the time column of each table
-/// is marked.
-pub(crate) fn schema_text(tables: &[SchemaTable]) -> String {
-    let mut t = table(&["table", "column", "type", ""]);
-    for tb in tables {
-        for c in &tb.columns {
-            let time = if c.name == tb.time_column { "time" } else { "" };
-            t.add_row(vec![
-                Cell::new(clean(&tb.name)).fg(Color::White),
-                Cell::new(clean(&c.name)),
-                Cell::new(clean(&c.data_type)),
-                Cell::new(time).fg(Color::Cyan),
-            ]);
-        }
-    }
-    t.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,14 +331,6 @@ mod tests {
     #[test]
     fn output_is_cleaned() {
         assert!(only_sgr(&log_line(&record(EVIL))), "{:?}", log_line(&record(EVIL)));
-        let mut span = crate::waterfall::tests::span("1", None, 0, 1);
-        span.name = EVIL.into();
-        span.service_name = EVIL.into();
-        span.attributes.insert(EVIL.into(), EVIL.into());
-        let t = Trace { trace_id: EVIL.into(), spans: vec![span] };
-        for l in trace_lines(&t, true) {
-            assert!(only_sgr(&l), "{l:?}");
-        }
         let sql = SqlResponse {
             columns: vec![SqlColumn { name: EVIL.into(), data_type: "VARCHAR".into() }],
             rows: vec![vec![serde_json::Value::String(EVIL.into())], vec![serde_json::json!([EVIL])]],

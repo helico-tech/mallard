@@ -95,15 +95,19 @@ pub(super) struct IssuesKey {
     pub query: String,
 }
 
-/// The search bar's text, read like the web UI's box: a `key=value` word is a tag filter,
-/// the other words search the text.
+/// The search bar's text, read like the web UI's box: a `key=value` word is a tag filter, the
+/// other words search the text. So does a word with its `=` in quotes: `"a=b"` is text, while
+/// `a="b c"` is a tag.
 pub(super) fn split_filter(q: &str) -> (Option<String>, Vec<String>) {
     let mut text = vec![];
     let mut tags = vec![];
-    for word in mallard_term::tui::suggest::tokenize(q) {
+    for range in mallard_term::tui::suggest::word_ranges(q) {
+        let word = &q[range];
         match word.split_once('=') {
-            Some((k, v)) if !k.is_empty() && !k.contains(':') => tags.push(format!("{k}:{v}")),
-            _ => text.push(word),
+            Some((k, v)) if !k.is_empty() && !k.contains([':', '"']) => {
+                tags.push(format!("{k}:{}", v.replace('"', "")));
+            }
+            _ => text.push(word.replace('"', "")),
         }
     }
     ((!text.is_empty()).then(|| text.join(" ")), tags)
@@ -496,7 +500,7 @@ pub(super) struct App {
     /// Last failed load of the issue list / the stats panel.
     pub issues_error: Option<String>,
     pub stats_error: Option<String>,
-    /// A background load panicked; `mallard errors tui` quits on this.
+    /// A background load panicked; the host quits on this.
     pub fatal: Option<String>,
     /// Loads in flight, per kind. Every request gets exactly one response
     /// (a panic becomes `Resp::Panicked`), so the counts never leak.

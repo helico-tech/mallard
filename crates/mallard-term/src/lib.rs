@@ -1,6 +1,6 @@
 //! Terminal output shared by mallard's two CLIs (`mallard-sentry-cli`, `mallard-otel-cli`), their
-//! TUIs and the `mallard` host, so `mallard errors …` and
-//! `mallard telemetry …` look and behave like one tool (ADR 0006).
+//! TUIs and the `mallard` host, so all commands look and behave like one tool
+//! (ADR 0006).
 //!
 //! - [`text`]: make untrusted text safe for a terminal; width-aware cutting.
 //! - [`fmt`]: numbers, sizes, durations and times (always UTC).

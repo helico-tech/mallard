@@ -5,6 +5,7 @@
 
 mod picker;
 
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -385,11 +386,17 @@ fn host(client: &Client, project: Option<String>) -> Host {
 }
 
 pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!("mallard tui needs an interactive terminal (stdin and stdout must be a TTY)");
+    }
     // Fail fast with a clear message instead of an empty screen.
     client.sentry.info().await.map_err(|e| crate::described(mallard_client::Error::Sentry(e), client.base_url()))?;
     let mut host = host(client, project);
 
-    let mut term = ratatui::init();
+    let mut term = ratatui::try_init().map_err(|e| {
+        ratatui::restore();
+        anyhow::anyhow!("cannot set up the terminal: {e}")
+    })?;
     let result = event_loop(&mut term, &mut host).await;
     ratatui::restore();
     result

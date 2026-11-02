@@ -672,6 +672,28 @@ async fn host_hooks_and_in_process_events() {
     let id = t.server.create_project("Checkout", "checkout", Some("python")).await.unwrap();
     assert_eq!(t.server.create_project("Checkout", "checkout", None).await.unwrap(), id, "existing slug");
     assert!(t.server.create_project("x", "42", None).await.is_err(), "numeric slug");
+    // Another spelling of an app: that app's project, for the bridge's default project (ADR 0031).
+    let mine = t.server.create_project("Mine", "my_app", None).await.unwrap();
+    assert_eq!(t.server.create_project("x", "my-app", None).await.unwrap(), mine, "the same app");
+    assert_eq!(t.server.project_by_slug("my-app"), None, "no second project");
+    t.stop().await;
+}
+
+/// The API's `query` is one piece of text: `a=b` in it filters on no tag. Splitting a search box
+/// into text and tags is for the clients, and `"a=b"` there arrives as this.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_query_parameter_is_plain_text() {
+    let t = TestServer::start().await;
+    t.create_project("web").await;
+    let ev = json!({"platform": "python", "tags": {"x": "y"},
+        "exception": {"values": [{"type": "ValueError", "value": "bad a=b here"}]}});
+    t.server.ingest_event(1, ev).await.unwrap();
+    let found = t.get("/v1/projects/web/issues?query=a%3Db").await;
+    assert_eq!(found["issues"].as_array().unwrap().len(), 1, "{found}");
+    let other = t.get("/v1/projects/web/issues?query=x%3Dy").await;
+    assert_eq!(other["issues"].as_array().unwrap().len(), 0, "a tag of the event is not text: {other}");
+    let tag = t.get("/v1/projects/web/issues?tag=x:y").await;
+    assert_eq!(tag["issues"].as_array().unwrap().len(), 1, "{tag}");
     t.stop().await;
 }
 
@@ -693,17 +715,23 @@ async fn a_name_without_a_slug_compares_through_the_slug_rule() {
     let (s, v) = post(json!({"name": "my_app two"})).await;
     assert_eq!((s, v["slug"].as_str()), (201, Some("my-app-two")), "another name is another app: {v}");
 
-    // A slug that was asked for is taken as is, also next to such a project (issue 0150).
-    let (s, v) = post(json!({"name": "x", "slug": "my-app"})).await;
-    assert_eq!((s, v["slug"].as_str()), (201, Some("my-app")), "{v}");
+    // A slug that was asked for gets the same answer next to such a project (issue 0150).
+    for slug in ["my-app", "my__app", "my-app-"] {
+        let (s, v) = post(json!({"name": "x", "slug": slug})).await;
+        assert_eq!(s, 409, "{slug}: {v}");
+        assert_eq!(v["error"], "conflict", "{v}");
+        assert!(v["message"].as_str().unwrap().contains("\"my_app\""), "says which one: {v}");
+    }
     let (s, v) = post(json!({"name": "x", "slug": "my_app"})).await;
     assert_eq!(s, 409, "the same slug twice: {v}");
+    let (s, v) = post(json!({"name": "x", "slug": "other_app"})).await;
+    assert_eq!((s, v["slug"].as_str()), (201, Some("other_app")), "a slug nobody has under the rule: {v}");
 
     // Bad names say the same as before.
     assert_eq!(post(json!({"name": "42"})).await.0, 400, "numeric slug");
     assert_eq!(post(json!({"name": "!!"})).await.0, 400, "empty slug");
     let slugs: Vec<_> = t.get("/v1/projects").await.as_array().unwrap().iter().map(|p| p["slug"].clone()).collect();
-    assert_eq!(slugs, ["my_app", "my-app-two", "my-app"]);
+    assert_eq!(slugs, ["my_app", "my-app-two", "other_app"]);
     t.stop().await;
 }
 

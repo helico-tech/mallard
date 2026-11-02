@@ -29,7 +29,9 @@ type S = State<Arc<AppState>>;
 impl From<WriteError> for ApiErr {
     fn from(e: WriteError) -> Self {
         match e {
-            WriteError::SlugTaken(_) => ApiErr::new(StatusCode::CONFLICT, "conflict", e.to_string()),
+            WriteError::SlugTaken(_) | WriteError::SameApp(_) => {
+                ApiErr::new(StatusCode::CONFLICT, "conflict", e.to_string())
+            }
             WriteError::IssueNotFound => not_found("issue"),
             WriteError::Db(e) => e.into(),
         }
@@ -280,21 +282,11 @@ async fn list_projects(State(state): S) -> ApiResult<Vec<Project>> {
     responses((status = 201, body = Project), (status = 400, body = ApiError), (status = 409, body = ApiError)))]
 async fn create_project(State(state): S, J(req): J<CreateProject>) -> Result<(StatusCode, Json<Project>), ApiErr> {
     let CreateProject { name, slug, platform } = req;
-    let derived = slug.is_none();
     let slug = slug.unwrap_or_else(|| slugify(&name));
     check_slug(&slug).map_err(bad)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(bad("name is required"));
-    }
-    // A name means the app of that name. A project `my_app` already is the app `my-app`, and
-    // a second one would take its services (ADR 0029). A slug that was asked for is taken as is.
-    if derived {
-        state.db.refresh_projects().await;
-        let projects = state.db.caches.projects();
-        if let Some((_, taken)) = app_projects(projects.iter().map(|p| (p.id, p.slug.as_str()))).get(&slug) {
-            return Err(WriteError::SlugTaken(taken.to_string()).into());
-        }
     }
     let row = state.db.call(|reply| WriteCmd::CreateProject { name, slug, platform, reply }).await?;
     Ok((StatusCode::CREATED, Json(to_project(&state, row)?)))
@@ -749,6 +741,7 @@ mod tests {
         use super::*;
         let status = |e: WriteError| ApiErr::from(e).status;
         assert_eq!(status(WriteError::SlugTaken("x".into())), StatusCode::CONFLICT);
+        assert_eq!(status(WriteError::SameApp("x".into())), StatusCode::CONFLICT);
         assert_eq!(status(WriteError::IssueNotFound), StatusCode::NOT_FOUND);
         // A database error whose text happens to say "not found" is a 500.
         assert_eq!(status(WriteError::Db(anyhow::anyhow!("table not found"))), StatusCode::INTERNAL_SERVER_ERROR);
