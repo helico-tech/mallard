@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, oneshot};
+use tokio_util::sync::CancellationToken;
 pub use writer::{EventWrite, NewBundle, NewBundleFile, WriteCmd, WriteError};
 
 #[derive(Debug, Clone)]
@@ -155,6 +156,8 @@ pub struct Db {
     pub queue_capacity: usize,
     writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     maintainer: Maintainer,
+    /// Cancelled when the writer found the catalog invalidated.
+    pub catalog_lost: CancellationToken,
     /// When the projects were last read because of a miss.
     project_refresh: Mutex<Option<Instant>>,
 }
@@ -271,8 +274,17 @@ impl Db {
         let (tx, rx) = crossbeam_channel::bounded(cfg.ingest.queue_capacity.max(1));
         let (maint_tx, maint_rx) = crossbeam_channel::bounded(16);
         let inlined = Arc::new(AtomicUsize::new(0));
-        let w =
-            writer::Writer::new(writer_conn, ns.clone(), rx, caches.clone(), cfg, maint_tx.clone(), inlined.clone())?;
+        let catalog_lost = CancellationToken::new();
+        let w = writer::Writer::new(
+            writer_conn,
+            ns.clone(),
+            rx,
+            caches.clone(),
+            cfg,
+            maint_tx.clone(),
+            inlined.clone(),
+            catalog_lost.clone(),
+        )?;
         let handle = std::thread::Builder::new().name("ducklake-writer".into()).spawn(move || w.run())?;
         let stopping = Arc::new(AtomicBool::new(false));
         let interrupt = maintenance_conn.interrupt_handle();
@@ -304,6 +316,7 @@ impl Db {
                 interrupt,
                 thread: Arc::new(Mutex::new(Some(maint_handle))),
             },
+            catalog_lost,
             project_refresh: Mutex::new(None),
         })
     }
@@ -903,6 +916,52 @@ pub(crate) mod tests {
         assert!(waited >= Duration::from_secs(2), "tried again for about 2.5 s, not {waited:?}");
         queue_event(&db, "later", Utc::now()).await.unwrap().unwrap();
         assert_eq!(count_events(&db).await, 2);
+        db.shutdown().await;
+    }
+
+    /// Issue 0130, with DuckDB's own invalidation, as a failed checkpoint of the catalog causes
+    /// it (not through an out-of-memory error): the writer says so, without waiting for retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_writer_notices_an_invalidated_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: dir.path().join("lake").display().to_string(),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let other = conn.try_clone().unwrap();
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let db = Db::with_connection(conn, &Config::default(), settings, "test".into()).unwrap();
+        assert!(!db.catalog_lost.is_cancelled());
+        other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+
+        let t0 = Instant::now();
+        let failed = queue_event(&db, "not stored", Utc::now()).await.unwrap();
+        assert!(mallard_duck::is_invalidated(&failed.unwrap_err()));
+        assert!(t0.elapsed() < Duration::from_secs(2), "no retries: {:?}", t0.elapsed());
+        assert!(db.catalog_lost.is_cancelled());
+        db.shutdown().await;
+    }
+
+    /// With nothing to write, the regular read of what other processes wrote notices it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_writer_notices_an_invalidated_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: dir.path().join("lake").display().to_string(),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let other = conn.try_clone().unwrap();
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let db = Db::with_connection(conn, &Config::default(), settings, "test".into()).unwrap();
+        other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+        // `SYNC_INTERVAL` is 100 ms in tests.
+        tokio::time::timeout(Duration::from_secs(30), db.catalog_lost.cancelled()).await.unwrap();
         db.shutdown().await;
     }
 

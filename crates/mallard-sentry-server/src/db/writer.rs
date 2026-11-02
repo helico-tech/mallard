@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 pub struct EventWrite {
     pub project_id: u32,
@@ -116,6 +117,8 @@ pub struct Writer {
     inlined: Arc<AtomicUsize>,
     new_issues: NewIssueCount,
     sync: Tick,
+    /// Cancelled when the catalog was invalidated: the process must exit.
+    catalog_lost: CancellationToken,
 }
 
 /// New issues per project in the current hour, of this process.
@@ -297,6 +300,7 @@ fn load_bundles(conn: &Connection, ns: &Ns, caches: &Caches, since_us: i64) -> R
 }
 
 impl Writer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conn: Connection,
         ns: Ns,
@@ -305,6 +309,7 @@ impl Writer {
         cfg: &Config,
         maintainer: Sender<MaintCmd>,
         inlined: Arc<AtomicUsize>,
+        catalog_lost: CancellationToken,
     ) -> Result<Self> {
         conn.execute_batch(&ns.sql("ATTACH IF NOT EXISTS ':memory:' AS $T"))?;
         conn.execute_batch(&ns.sql(STAGING))?;
@@ -320,6 +325,7 @@ impl Writer {
             inlined,
             new_issues: NewIssueCount::default(),
             sync: Tick::new(SYNC_INTERVAL),
+            catalog_lost,
         })
     }
 
@@ -407,8 +413,18 @@ impl Writer {
             .timestamp_micros();
         if let Err(e) = self.sync_catalog(since_us) {
             tracing::warn!(error = format!("{e:#}"), "reading what other processes wrote failed");
+            self.check_invalidated(&e);
         }
         self.sync.done();
+    }
+
+    /// Nothing works on an invalidated catalog: have [`crate::Server::run_background`] end,
+    /// so the process exits and its restart attaches it again (issue 0130).
+    fn check_invalidated(&self, e: &anyhow::Error) {
+        if mallard_duck::is_invalidated(e) && !self.catalog_lost.is_cancelled() {
+            tracing::error!(error = format!("{e:#}"), "{}", mallard_duck::CATALOG_INVALIDATED);
+            self.catalog_lost.cancel();
+        }
     }
 
     /// Pick up what other processes wrote (ADR 0021). New issues are found on
@@ -503,6 +519,7 @@ impl Writer {
             Err(e) => {
                 metrics::counter!("mallard_sentry_write_errors_total").increment(1);
                 tracing::error!(events = n, error = format!("{e:#}"), "batch failed");
+                self.check_invalidated(e);
             }
         }
         let reply = result.map_err(Arc::new);

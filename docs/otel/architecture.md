@@ -159,6 +159,7 @@ cleanup are catalog-wide; this side owns them (ADR 0001).
 |---|---|
 | object store / catalog unavailable | flushes fail and are retried; buffer fills; receivers return 429/`UNAVAILABLE`; exporters retry. Queries fail with 500. |
 | one table no longer accepts our rows (schema edited by hand) | that table's batches are dropped (`dropped_rows`, `error` log); other tables keep flushing. |
+| catalog invalidated (a DuckDB-file catalog whose checkpoint failed, e.g. out of memory) | nothing is dropped as refused by a table. Pushes get 429/`UNAVAILABLE`, the process stops and exits 1, and its restart attaches the catalog. What was buffered and not yet flushed is lost. |
 | process killed (SIGKILL, OOM) | up to `flush_interval` of acknowledged data in memory is lost. To avoid that: a [Collector with a persistent queue](deployment.md#with-an-opentelemetry-collector-in-front-recommended-for-zero-loss) in front. |
 | SIGTERM / Ctrl-C | receivers stop accepting, the bridge stores what it holds, maintenance stops, buffer is flushed, exit. |
 | query too slow | interrupted after `otel.query.timeout` → 504. |

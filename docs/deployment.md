@@ -37,7 +37,7 @@ yourself.
 docker build -f deploy/docker/Dockerfile -t mallard .
 
 # Everything on a local volume (DuckDB catalog + local storage):
-docker run -d --name mallard -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
+docker run -d --name mallard --restart unless-stopped -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
   -e MALLARD_SERVER__API_TOKENS=change-me \
   -e MALLARD_SERVER__PUBLIC_URL=http://localhost:8080 \
   -e MALLARD_STORAGE__ARTIFACTS_PATH=/data/artifacts \
@@ -126,6 +126,10 @@ What holds on any platform, including Kubernetes:
   catalog can take a while, so allow up to 5 minutes at start-up.
 - **Stopping**: on `SIGTERM` the server flushes both sides. Give it at least 60 s; 90 s is
   safer (`terminationGracePeriodSeconds: 90` in Kubernetes).
+- **Restart policy**: required (`restart: unless-stopped` in compose, the default in Kubernetes). With a
+  DuckDB-file catalog, running out of memory during a catalog checkpoint can invalidate the catalog for the
+  whole process. Nothing can be stored until it is attached again, so the server logs that at `error`, stops
+  and exits with code 1. Without a restart policy it stays down. What was buffered and not yet flushed is lost.
 - **Security**: it runs as uid 10001 and needs no capabilities (drop them all), and the root
   filesystem can be read-only. It needs a writable `/data` and `/tmp`.
 - **Volumes**: with a DuckDB-file catalog, `/data` must persist, and only one process may
