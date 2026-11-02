@@ -40,8 +40,6 @@ pub struct Maintenance {
     /// Expire snapshots and delete old files catalog-wide, keeping
     /// snapshots this long (`None`: another component does it).
     pub catalog_wide: Option<Duration>,
-    /// `SET threads` while compacting (0 = leave alone).
-    pub threads: usize,
 }
 
 pub enum MaintCmd {
@@ -169,7 +167,7 @@ impl Maintainer {
 
     /// Answered only when all of it is done: the one-shot command exits then.
     pub fn run_now(&mut self) -> Result<()> {
-        let r = self.flush_inlined().and_then(|_| self.compact_and_expire());
+        let r = again_on_conflict(&self.stopping, || self.flush_inlined()).and_then(|_| self.compact_and_expire());
         self.flush.done();
         self.compact.done();
         r
@@ -196,21 +194,6 @@ impl Maintainer {
         if let Err(e) = self.retention() {
             errors.push(format!("retention: {e:#}"));
         }
-        // Sorted merges need memory per thread: compact with fewer threads,
-        // then restore the previous setting.
-        let restore_threads: Option<i64> = match self.settings.threads {
-            0 => None,
-            n => {
-                let current: Option<i64> =
-                    self.conn.query_row("SELECT current_setting('threads')::BIGINT", [], |r| r.get(0)).ok();
-                if current.is_some_and(|c| c > n as i64) {
-                    let _ = self.conn.execute_batch(&format!("SET threads = {n}"));
-                    current
-                } else {
-                    None
-                }
-            }
-        };
         // Each step runs even if an earlier one failed, so snapshots keep
         // expiring when e.g. one table cannot be compacted.
         for table in COMPACTED_TABLES {
@@ -224,9 +207,6 @@ impl Maintainer {
             if let Err(e) = self.conn.execute_batch(&sql) {
                 errors.push(format!("compacting {table}: {e}"));
             }
-        }
-        if let Some(t) = restore_threads {
-            let _ = self.conn.execute_batch(&format!("SET threads = {t}"));
         }
         if let Some(keep) = self.settings.catalog_wide {
             let cutoff = (Utc::now() - chrono::Duration::from_std(keep).unwrap_or_default()).timestamp_micros();
@@ -257,6 +237,25 @@ impl Maintainer {
     }
 }
 
+/// How often [`Maintainer::run_now`] tries a flush.
+const FLUSH_TRIES: usize = 3;
+
+/// Run `flush`, again if it lost to other commits. Next to a writer that commits all the time, a
+/// flush can use up all of DuckLake's own retries. The periodic flush can wait for its next turn,
+/// but whoever asked for this run waits for the answer.
+fn again_on_conflict(stopping: &AtomicBool, mut flush: impl FnMut() -> Result<()>) -> Result<()> {
+    let mut tries = 1;
+    loop {
+        match flush() {
+            Err(e) if tries < FLUSH_TRIES && mallard_duck::is_conflict(&e) && !stopping.load(Ordering::Relaxed) => {
+                tracing::debug!(error = format!("{e:#}"), "flush lost to other commits; trying again");
+                tries += 1;
+            }
+            r => return r,
+        }
+    }
+}
+
 /// Write inlined rows of this schema to Parquet.
 pub fn flush_inlined(conn: &Connection, ns: &Ns) -> Result<()> {
     let started = Instant::now();
@@ -265,4 +264,36 @@ pub fn flush_inlined(conn: &Connection, ns: &Ns) -> Result<()> {
     metrics::histogram!("mallard_sentry_flush_seconds").record(started.elapsed().as_secs_f64());
     tracing::debug!(ms = started.elapsed().as_millis() as u64, "flushed inlined data");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tries(stopping: bool, error: &str) -> (usize, bool) {
+        let mut n = 0;
+        let r = again_on_conflict(&AtomicBool::new(stopping), || {
+            n += 1;
+            Err(anyhow!("{error}"))
+        });
+        (n, r.is_ok())
+    }
+
+    #[test]
+    fn a_flush_tries_again_only_after_a_conflict() {
+        assert_eq!(tries(false, "Conflict on update"), (FLUSH_TRIES, false));
+        assert_eq!(tries(false, "disk full"), (1, false));
+        assert_eq!(tries(true, "Conflict on update"), (1, false));
+    }
+
+    #[test]
+    fn a_flush_stops_trying_once_it_worked() {
+        let mut n = 0;
+        let r = again_on_conflict(&AtomicBool::new(false), || {
+            n += 1;
+            if n == 1 { Err(anyhow!("Conflict on update")) } else { Ok(()) }
+        });
+        assert!(r.is_ok());
+        assert_eq!(n, 2);
+    }
 }

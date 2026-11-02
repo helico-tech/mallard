@@ -192,9 +192,6 @@ pub struct Host {
     /// keeping snapshots this long. `None` when another component of a
     /// shared catalog does it (ADR 0001).
     pub catalog_maintenance: Option<Duration>,
-    /// DuckDB threads while compacting (`SET threads` is global). 0 = leave
-    /// the setting alone; must be 0 on a shared connection.
-    pub maintenance_threads: usize,
     /// Shared with other writers on this DuckDB (ADR 0030).
     pub commit_lock: mallard_duck::CommitLock,
 }
@@ -242,7 +239,6 @@ impl std::fmt::Debug for Host {
             .field("api_tokens", &self.api_tokens.len())
             .field("artifacts", &self.artifacts)
             .field("catalog_maintenance", &self.catalog_maintenance)
-            .field("maintenance_threads", &self.maintenance_threads)
             .finish()
     }
 }
@@ -299,7 +295,6 @@ mod tests {
             api_tokens: vec!["hunter2".into()],
             artifacts: None,
             catalog_maintenance: None,
-            maintenance_threads: 0,
             commit_lock: Default::default(),
         };
         host("https://x.example/sentry").validate().unwrap();

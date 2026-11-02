@@ -209,7 +209,6 @@ impl Config {
                 options: mallard_duck::object_store_options(&self.storage, artifacts),
             }),
             catalog_maintenance: None,
-            maintenance_threads: 0,
             commit_lock: Default::default(),
         }
     }
@@ -320,7 +319,7 @@ mod tests {
         let cfg = load("", TOKEN).unwrap();
         assert_eq!(format!("{:?}", cfg.sentry), format!("{:?}", mallard_sentry_server::Config::default()));
         let host = cfg.sentry_host();
-        assert_eq!((host.catalog_maintenance, host.maintenance_threads), (None, 0));
+        assert_eq!(host.catalog_maintenance, None);
     }
 
     #[test]
@@ -396,7 +395,6 @@ mod tests {
         assert_eq!(h.public_url, "https://mallard.example.com/sentry");
         assert_eq!(h.api_tokens, ["a", "b"]);
         assert_eq!(h.catalog_maintenance, None);
-        assert_eq!(h.maintenance_threads, 0);
         let a = h.artifacts.unwrap();
         assert_eq!(a.url, "s3://bucket/artifacts");
         assert_eq!(a.options.endpoint.as_deref(), Some("http://minio:9000"));

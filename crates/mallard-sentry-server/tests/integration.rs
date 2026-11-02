@@ -47,7 +47,6 @@ impl TestServer {
                 options: Default::default(),
             }),
             catalog_maintenance: Some(Duration::from_secs(3600)),
-            maintenance_threads: 1,
             commit_lock: Default::default(),
         };
         let server = Server::with_connection(cfg, host, conn).await.unwrap();
@@ -898,7 +897,6 @@ async fn embedded_with_shared_connection_and_clean_shutdown() {
         api_tokens: vec![TOKEN.into()],
         artifacts: None,
         catalog_maintenance: None,
-        maintenance_threads: 0,
         commit_lock: Default::default(),
     };
     let server = Server::with_connection(cfg, host, conn).await.unwrap();
@@ -1059,7 +1057,6 @@ async fn an_invalidated_catalog_ends_the_background_job() {
         api_tokens: vec![TOKEN.into()],
         artifacts: None,
         catalog_maintenance: None,
-        maintenance_threads: 0,
         commit_lock: Default::default(),
     };
     let server = Server::with_connection(Config::default(), host, conn).await.unwrap();
