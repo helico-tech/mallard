@@ -440,6 +440,68 @@ async fn otel_exceptions_find_a_project_with_an_underscore() {
     srv.stop().await;
 }
 
+/// `bridge.default_project` whose twin exists, under the slug rule: the exceptions go to the
+/// twin. A second project would take the services of the first (issue 0150, ADR 0031).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_project_uses_its_twin() {
+    for (default, twin) in [("catch-all", "catch_all"), ("catch_all", "catch-all")] {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = start_with(dir.path(), |c| {
+            c.bridge.dedupe_window = Duration::from_millis(100);
+            c.bridge.default_project = default.into();
+        })
+        .await;
+        let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+        let req = CreateProject { name: "Mine".into(), slug: Some(twin.into()), platform: None };
+        let mine = client.sentry.create_project(&req).await.unwrap();
+
+        // Two exceptions: the first may reach the writer, the second comes from what it learned.
+        for (service, span) in [("no-such-project", "000000000000000a"), ("nor-this-one", "000000000000000b")] {
+            let trace = "5bf92f3577b34da6a3ce929d0e0e4739";
+            let spans = json!({"resourceSpans": [{
+                "resource": {"attributes": [kv("service.name", service)]},
+                "scopeSpans": [{"spans": [otel_span(trace, span, "work", Some(service))]}]}]});
+            let http = reqwest::Client::new();
+            let sent = http.post(format!("{}/v1/traces", srv.otlp_url)).json(&spans).send().await.unwrap();
+            assert!(sent.status().is_success());
+        }
+        let issues = eventually("both issues in the twin", || async {
+            let list = client.sentry.issues(twin, &IssueQuery::default()).await.ok()?;
+            (list.issues.len() == 2).then_some(list.issues)
+        })
+        .await;
+        assert!(issues.iter().all(|i| i.project_id == mine.id));
+        let slugs: Vec<String> = client.sentry.projects().await.unwrap().into_iter().map(|p| p.slug).collect();
+        assert_eq!(slugs, [twin], "default {default}: no second project");
+        srv.stop().await;
+    }
+}
+
+/// The default project is made once when nothing is its twin, and used from then on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_project_is_created_with_its_own_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| {
+        c.bridge.dedupe_window = Duration::from_millis(100);
+        c.bridge.default_project = "catch_all".into();
+    })
+    .await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let spans = json!({"resourceSpans": [{
+        "resource": {"attributes": [kv("service.name", "no-such-project")]},
+        "scopeSpans": [{"spans": [otel_span("5bf92f3577b34da6a3ce929d0e0e473a", "000000000000000a", "work", Some("KeyError"))]}]}]});
+    let http = reqwest::Client::new();
+    assert!(http.post(format!("{}/v1/traces", srv.otlp_url)).json(&spans).send().await.unwrap().status().is_success());
+    eventually("the issue in the default project", || async {
+        let list = client.sentry.issues("catch_all", &IssueQuery::default()).await.ok()?;
+        (!list.issues.is_empty()).then_some(())
+    })
+    .await;
+    let slugs: Vec<String> = client.sentry.projects().await.unwrap().into_iter().map(|p| p.slug).collect();
+    assert_eq!(slugs, ["catch_all"]);
+    srv.stop().await;
+}
+
 /// An app on @sentry/node 8+ that also exports OTLP sends its root span and
 /// one child both ways (same ids); its db span only goes to Sentry. Each
 /// span is stored once, the OTLP copy where there is one, whichever copy

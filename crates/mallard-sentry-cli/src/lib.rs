@@ -77,7 +77,8 @@ pub enum ProjectsCmd {
     /// Create a project and print its DSN.
     Create {
         name: String,
-        /// URL-safe id (derived from the name when omitted).
+        /// URL-safe id (derived from the name when omitted). The same slug under the slug rule
+        /// on another project (`my_app`, `my-app`) is a conflict, exit 5.
         #[arg(long)]
         slug: Option<String>,
         /// SDK platform, e.g. node, javascript, python.

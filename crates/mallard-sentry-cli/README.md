@@ -20,7 +20,8 @@ Global flags and env vars (`--url`, `--token`, `-p`, `--format`, ...): see
 
 When the server has exactly one project, `-p` is optional. The bridge creates a
 project per service for OTel exceptions (`bridge.default_project`), so a server with
-OTel traffic can need it.
+OTel traffic can need it. When a project already has that slug under the slug rule (`my_app` for
+`my-app`), the bridge uses it (ADR 0031).
 
 Text that comes from events (titles, messages, frames, tags, ...) or from
 the server is cleaned before it is printed: control and bidi characters are

@@ -389,16 +389,48 @@ async fn setup_finds_a_project_through_the_slug_rule() {
     assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("x_y"), &json!(true)), "{s}");
     let s = mallard(url, &["setup", "x", "--slug", "x_y", "--json"]).await.ok().json();
     assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("x_y"), &json!(false)), "{s}");
-    // A server that already has both keeps both, and the exact slug wins.
+    srv.stop().await;
+}
+
+/// Issue 0150, with the issue's own commands: a slug that was asked for, next to a project with
+/// the same slug under the slug rule, is a conflict that names that project. Nothing is
+/// created, and with --if-not-exists too: this slug does not exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slug_that_is_asked_for_does_not_open_a_twin() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start(dir.path()).await;
+    let url = srv.url.as_str();
+    let http = reqwest::Client::new();
     let r = http
         .post(format!("{url}/sentry/v1/projects"))
         .bearer_auth(TOKEN)
-        .json(&json!({"name": "x", "slug": "my-app"}))
+        .json(&json!({"name": "x", "slug": "my_app"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 201);
-    let s = mallard(url, &["setup", "my_app", "--json"]).await.ok().json();
-    assert_eq!((&s["project"]["slug"], &s["created"]), (&json!("my-app"), &json!(false)), "{s}");
+    let id = r.json::<Value>().await.unwrap()["id"].clone();
+
+    for args in [
+        &["setup", "z", "--slug", "my-app", "--json"][..],
+        &["setup", "z", "--slug", "my__app", "--json"],
+        &["projects", "create", "z", "--slug", "my-app", "--json"],
+        &["projects", "create", "z", "--slug", "my-app", "--if-not-exists", "--json"],
+    ] {
+        let o = mallard(url, args).await;
+        assert_eq!(o.code, 5, "{args:?}: {}", o.stderr);
+        assert_eq!(o.stdout, "", "{args:?}");
+        let error = o.error();
+        assert_eq!(error["code"], "conflict", "{args:?}: {error}");
+        assert!(error["message"].as_str().unwrap().contains("my_app"), "{args:?}: {error}");
+    }
+    let apps = mallard(url, &["apps", "--json"]).await.ok().json();
+    assert_eq!(apps["count"], 1, "one app: {apps}");
+    assert_eq!((&apps["items"][0]["slug"], &apps["items"][0]["project"]), (&json!("my_app"), &id), "{apps}");
+    // The slug it has still works, and so does the name.
+    let s = mallard(url, &["setup", "z", "--slug", "my_app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&id, &json!(false)), "{s}");
+    let s = mallard(url, &["setup", "my-app", "--json"]).await.ok().json();
+    assert_eq!((&s["project"]["id"], &s["created"]), (&id, &json!(false)), "{s}");
     srv.stop().await;
 }

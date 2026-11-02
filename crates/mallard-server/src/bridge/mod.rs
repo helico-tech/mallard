@@ -472,34 +472,37 @@ impl Ctx {
     }
 
     /// The project of the service's app (the same choice as `/api/v1/apps`, so a project
-    /// `my_app` takes the service `my_app`); else the default project; else a new project
-    /// for the service. Missing ones are created.
+    /// `my_app` takes the service `my_app`); else the default project, or the project that is
+    /// the same app under the slug rule (ADR 0031); else a new project for the service. Missing
+    /// ones are created.
     async fn project(&self, e: &OtelException) -> Option<u32> {
         let service = service_slug(&e.service);
-        let joined = |projects: Vec<(u32, String)>| {
-            app_projects(projects.iter().map(|(id, slug)| (*id, slug.as_str()))).get(&service).map(|(id, _)| *id)
+        let of_app = |projects: &[(u32, String)], app: &str| {
+            app_projects(projects.iter().map(|(id, slug)| (*id, slug.as_str()))).get(app).map(|(id, _)| *id)
         };
-        if let Some(id) = joined(self.sentry.project_slugs()) {
+        let known = self.sentry.project_slugs();
+        if let Some(id) = of_app(&known, &service) {
             return Some(id);
         }
         let (name, slug) = match self.default_project.as_str() {
             "" => (e.service.as_str(), service.clone()),
             p => (p, p.to_string()),
         };
-        if let Some(id) = self.sentry.project_by_slug(&slug) {
+        if let Some(id) = self.sentry.project_by_slug(&slug).or_else(|| of_app(&known, &service_slug(&slug))) {
             return Some(id);
         }
-        // About to create one, and creating only sees the exact slug: another process may
-        // just have made the service's project under a slug only the rule matches. If this
-        // read fails, the create most likely fails too.
-        if let Ok(projects) = self.sentry.projects().await
-            && let Some(id) = joined(projects.into_iter().map(|p| (p.id, p.slug)).collect())
-        {
-            return Some(id);
+        // About to create one for `slug`, and creating only looks at that: another process may
+        // just have made the service's project. If this read fails, the create most likely
+        // fails too.
+        if let Ok(projects) = self.sentry.projects().await {
+            let projects: Vec<_> = projects.into_iter().map(|p| (p.id, p.slug)).collect();
+            if let Some(id) = of_app(&projects, &service) {
+                return Some(id);
+            }
         }
         match self.sentry.create_project(name, &slug, Some(e.platform())).await {
             Ok(id) => {
-                tracing::info!(project = %slug, "created a project for OTel exceptions");
+                tracing::info!(project = %slug, id, "a project for OTel exceptions: created, or the same app");
                 Some(id)
             }
             Err(err) => {

@@ -188,8 +188,9 @@ impl Server {
         self.state.db.caches.projects().into_iter().map(|p| (p.id, p.slug)).collect()
     }
 
-    /// Create a project (same rules as `POST /v1/projects`) and return its
-    /// id. When the slug is taken, the existing project's id.
+    /// Create a project (same rules as `POST /v1/projects`) and return its id. When the slug
+    /// is taken, the existing project's id; when a project is the same app under the slug
+    /// rule, that project's id (ADR 0031).
     pub async fn create_project(&self, name: &str, slug: &str, platform: Option<&str>) -> Result<u32> {
         api::check_slug(slug).map_err(anyhow::Error::msg)?;
         let (name, slug2, platform) = (name.trim().to_string(), slug.to_string(), platform.map(str::to_string));
@@ -198,8 +199,8 @@ impl Server {
             self.state.db.call(|reply| db::WriteCmd::CreateProject { name, slug: slug2, platform, reply }).await;
         match r {
             Ok(p) => Ok(p.id),
-            Err(db::WriteError::SlugTaken(_)) => {
-                self.project_by_slug(slug).ok_or_else(|| anyhow::anyhow!("project {slug} vanished"))
+            Err(db::WriteError::SlugTaken(found) | db::WriteError::SameApp(found)) => {
+                self.project_by_slug(&found).ok_or_else(|| anyhow::anyhow!("project {found} vanished"))
             }
             Err(e) => Err(e.into()),
         }

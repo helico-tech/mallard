@@ -15,13 +15,13 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | command | what |
 |---|---|
 | `mallard status` | health of both sides and what the server allows (SQL, windows, retention); exit 6 when a side is down |
-| `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project (one with the same slug under the slug rule counts: `my_app` for `my-app`); print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
+| `mallard setup <name> [--platform p] [--sentry-cli]` | get or create the project (one with the same slug under the slug rule counts: `my_app` for `my-app`; with `--slug my-app` that project is a conflict, exit 5); print `SENTRY_DSN` and the `OTEL_EXPORTER_OTLP_*` env vars; `--sentry-cli` adds `SENTRY_URL` (the server root), `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_AUTH_TOKEN` |
 | `mallard apps [--since 24h]` | every app: a project and the services with the same slug, or either alone (ADR 0027). Projects are listed whatever the window; services need data in it |
 | `mallard find <id>` | a trace or event id (32 hex) or an issue or span id (16 hex): what it is and the command to see more |
 | `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`, `--tag k=v` (repeat), `--cursor`; status changes take `--reason` |
 | `mallard events list\|show` | error events; `list --tag k=v`, `--release`, `--env`, `-q`, `--cursor`; `show --json` is concise, `--raw` adds the Sentry payload |
 | `mallard releases list` | releases seen in error events: first/last seen, events, issues, new issues (derived from events; releases made with `sentry-cli releases new` are not stored) |
-| `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs |
+| `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs. A new slug that another project has under the slug rule is a conflict, exit 5, also with `--if-not-exists` |
 | `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace; `--cursor` for the next page); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |
 | `mallard logs` | search (`-S`, `-l`, `-q`, `-t`, `-a`; `--cursor` for the next page), follow (`-f`, stops by itself with `--for 2m` or `--until-match <text>`), or `--around <time> --window 1m` |
 | `mallard services`, `mallard ops` | request rate, error rate, latency per service / operation; `ops --compare 1d` adds p95 and error rate of the same window a day earlier, and the change |

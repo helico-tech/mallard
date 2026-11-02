@@ -125,7 +125,8 @@ mallard issues resolve <issue-id> --reason "fixed in #123" --json
 
 **Set up a new app** (safe to repeat; never fails because the project exists; a project with the
 same slug under the slug rule counts, so `setup my_app` next to a project `my_app` gets that one,
-and `OTEL_SERVICE_NAME` is its slug):
+and `OTEL_SERVICE_NAME` is its slug; `--slug my-app` next to `my_app` asks for a second project of
+that app, which is a conflict, exit 5):
 ```sh
 mallard setup checkout --platform node >> .env
 # SENTRY_DSN, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL, OTEL_SERVICE_NAME

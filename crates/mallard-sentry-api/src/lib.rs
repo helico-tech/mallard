@@ -129,9 +129,9 @@ pub fn app_projects<'a>(projects: impl IntoIterator<Item = (u32, &'a str)>) -> H
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateProject {
     pub name: String,
-    /// URL-safe identifier. Derived from `name` when omitted; then a project that has that
-    /// slug under the slug rule (`my_app` for the name `my-app`) is a 409, because a second
-    /// project would take its services.
+    /// URL-safe identifier. Derived from `name` when omitted. A project that has the same
+    /// slug under the slug rule (`my_app` next to `my-app`) is a 409, also for a slug that was
+    /// asked for, because a second project would take its services.
     pub slug: Option<String>,
     pub platform: Option<String>,
 }

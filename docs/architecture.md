@@ -82,8 +82,9 @@
   itself: which project and services are one app (ADR 0027, `service_slug` in
   `mallard-sentry-api` is the one slug rule, also the bridge's, and project slugs go through it
   too, so `my_app` joins the service `my_app`; with several such projects `app_projects` picks
-  one, and `POST /v1/projects` without a slug and `mallard setup` find that one instead of opening a
-  second), and what an id points at. Document:
+  one; `POST /v1/projects` refuses a second with a 409, with or without a slug, `mallard setup`
+  without `--slug` finds that one, and `bridge.default_project` uses it, ADR 0031), and what an id
+  points at. Document:
   `docs/openapi.json`. It calls the libraries' `Server` methods (`service_names`,
   `projects`, `find_event`, …), which run on each side's read path with its limits,
   so it never depends on their table layout. A side that fails adds to `warnings`;

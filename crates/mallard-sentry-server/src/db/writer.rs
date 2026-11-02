@@ -22,7 +22,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use mallard_duck::duckdb::{Connection, params};
-use mallard_sentry_api::IssueStatus;
+use mallard_sentry_api::{IssueStatus, app_projects, service_slug};
 use mallard_sentry_protocol::ProcessedEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -43,6 +43,9 @@ pub struct EventWrite {
 pub enum WriteError {
     #[error("a project with slug {0:?} already exists")]
     SlugTaken(String),
+    /// Another slug that is the same under the slug rule: the project that holds that app.
+    #[error("the project {0:?} is already this app: `_` and `-` count as the same in a slug")]
+    SameApp(String),
     #[error("issue not found")]
     IssueNotFound,
     #[error(transparent)]
@@ -743,7 +746,9 @@ impl Writer {
     /// Ids count up. Writing the `project_seq` row in the same transaction
     /// makes two concurrent calls conflict, also across processes (a
     /// `DELETE` conflicts with concurrent writes, ADR 0021); the loser tries
-    /// again and sees the other's project, its id and its slug.
+    /// again and sees the other's project, its id and its slug. A slug that is the same under
+    /// the slug rule counts as taken: a second project would take the services of the first
+    /// (ADR 0031). It is checked here, so two spellings at once cannot both pass.
     fn create_project(&self, name: String, slug: String, platform: Option<String>) -> Result<ProjectRow, WriteError> {
         let ns = &self.ns;
         let mut key = [0u8; 16];
@@ -751,10 +756,16 @@ impl Writer {
         let public_key = hex::encode(key);
         let created_at = Utc::now();
         let id = self.in_tx(|c| {
-            let taken: i64 =
-                c.query_row(&ns.sql("SELECT count(*) FROM $S.projects WHERE slug = ?"), [&slug], |r| r.get(0))?;
-            if taken > 0 {
-                return Ok(None);
+            let mut q = c.prepare(&ns.sql("SELECT id, slug FROM $S.projects"))?;
+            let projects = q
+                .query_map([], |r| Ok((r.get::<_, i32>(0)? as u32, r.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            if projects.iter().any(|(_, s)| *s == slug) {
+                return Ok(Err(WriteError::SlugTaken(slug.clone())));
+            }
+            let apps = app_projects(projects.iter().map(|(id, s)| (*id, s.as_str())));
+            if let Some((_, taken)) = apps.get(&service_slug(&slug)) {
+                return Ok(Err(WriteError::SameApp(taken.to_string())));
             }
             let id: i32 = c.query_row(&ns.sql("SELECT coalesce(max(id), 0) + 1 FROM $S.projects"), [], |r| r.get(0))?;
             c.execute(&ns.sql("DELETE FROM $S.meta WHERE key = ?"), [PROJECT_SEQ])?;
@@ -766,14 +777,11 @@ impl Writer {
                 &ns.sql("INSERT INTO $S.projects VALUES (?, ?, ?, ?, ?, make_timestamp(?))"),
                 params![id, slug, name, platform, public_key, created_at.timestamp_micros()],
             )?;
-            Ok(Some(id))
+            Ok(Ok(id))
         })?;
         // Also when the slug is taken: tells the cache about that project.
         load_projects(&self.conn, ns, &self.caches)?;
-        match id {
-            Some(id) => Ok(ProjectRow { id: id as u32, slug, name, platform, public_key, created_at }),
-            None => Err(WriteError::SlugTaken(slug)),
-        }
+        Ok(ProjectRow { id: id? as u32, slug, name, platform, public_key, created_at })
     }
 
     fn set_status(

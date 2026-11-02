@@ -44,7 +44,8 @@ pub struct BridgeConfig {
     /// Sentry events and issues.
     pub exceptions: bool,
     /// Project slug for OTel exceptions whose `service.name` matches no
-    /// project (created when missing). Empty: one new project per service.
+    /// project (created when missing; a project that is the same app under the slug rule is
+    /// used instead, ADR 0031). Empty: one new project per service.
     pub default_project: String,
     /// How long a bridged item waits for its copy from the other side
     /// (dedupe, ADR 0009 and 0010): an OTel exception for a Sentry SDK
