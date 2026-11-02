@@ -27,13 +27,19 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::server::TcpIncoming;
 use tower_http::{catch_panic::CatchPanicLayer, compression::CompressionLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 
 pub use config::Config;
 use config::{OTEL_PREFIX, SENTRY_PREFIX};
 
 /// Path of the sentry-cli API.
 const SENTRY_CLI_PREFIX: &str = "/api/0";
+
+/// How long a stop waits for requests in flight. A client holding one open must not hold up
+/// the final flush, or the exit (issue 0152). Well below the 60 s `docs/deployment.md` asks for
+/// on `SIGTERM`, so the flush still has time.
+const RECEIVERS_GRACE: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(500) } else { std::time::Duration::from_secs(20) };
 
 /// sentry-cli (Rust, 2.x and 3.x) refuses a `--url` with a path ("not on URL
 /// root"), so its API is served on the root as well as under `/sentry`.
@@ -220,13 +226,24 @@ impl Platform {
             shutdown.cancel();
             r
         };
+        let aborts = [t1.abort_handle(), t2.abort_handle(), t3.abort_handle(), t4.abort_handle()];
         let receivers = async {
-            let (a, b, c, d) = tokio::join!(t1, t2, t3, t4);
+            let all = async { tokio::join!(t1, t2, t3, t4) };
+            let give_up = async {
+                shutdown.cancelled().await;
+                tokio::time::sleep(RECEIVERS_GRACE).await;
+                warn!("requests still open after the grace period; stopping without them");
+                aborts.iter().for_each(|a| a.abort());
+                std::future::pending::<()>().await;
+            };
+            let (a, b, c, d) = tokio::select! { all = all => all, () = give_up => unreachable!() };
             receivers_down.cancel();
-            a??;
-            b??;
-            c??;
-            d??;
+            for r in [a, b, c, d] {
+                match r {
+                    Err(e) if e.is_cancelled() => {}
+                    r => r??,
+                }
+            }
             anyhow::Ok(())
         };
         let (r, o, s, (), ()) = tokio::join!(receivers, otel_bg, sentry_bg, transactions_bg, exceptions_bg);
@@ -409,6 +426,45 @@ mod tests {
             .expect("serve_on must return when the catalog is invalidated")
             .unwrap();
         assert!(r.unwrap_err().to_string().contains("invalidated"));
+    }
+
+    /// Issue 0152: a client in the middle of a request does not hold up the stop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_held_open_does_not_hold_up_the_stop() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["t".into()];
+        cfg.storage.catalog = dir.path().join("catalog.ducklake").display().to_string();
+        cfg.storage.data_path = format!("{}/lake/", dir.path().display());
+        let platform = Platform::new(cfg).await.unwrap();
+        let bound = || TcpListener::bind("127.0.0.1:0");
+        let listeners = Listeners {
+            http: bound().await.unwrap(),
+            otlp_http: bound().await.unwrap(),
+            otlp_grpc: bound().await.unwrap(),
+            metrics: None,
+        };
+        let otlp = listeners.otlp_http.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let serving = tokio::spawn(platform.serve_on(listeners, shutdown.clone()));
+
+        // Headers and only part of the body: the handler waits for the rest.
+        let mut held = tokio::net::TcpStream::connect(otlp).await.unwrap();
+        held.write_all(
+            b"POST /v1/logs HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{",
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+            .await
+            .expect("serve_on must return while the request is still open")
+            .unwrap()
+            .unwrap();
+        drop(held);
     }
 
     #[tokio::test]

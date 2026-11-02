@@ -321,6 +321,9 @@ async fn a_number_does_not_get_the_project_with_that_id() {
     }
     let list = mallard(url, &["projects", "list", "--json"]).await.ok().json();
     assert_eq!(list["count"], 1, "nothing was created: {list}");
+    // Issue 0154: its own argument is not the `-p` flag.
+    let shown = mallard(url, &["projects", "show", "my_app", "--json"]).await.ok().json();
+    assert_eq!(shown["slug"], "my_app", "{shown}");
     // The slug it has still finds it.
     let s = mallard(url, &["setup", "x", "--slug", "my_app", "--json"]).await.ok().json();
     assert_eq!((&s["project"]["id"], &s["created"]), (&json!(1), &json!(false)), "{s}");

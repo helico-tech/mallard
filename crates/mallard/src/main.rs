@@ -570,6 +570,7 @@ mod tests {
             &["trace", id, "-p", "web"],
             &["status", "-p", "web"],
             &["projects", "list", "-p", "web"],
+            &["projects", "show", "web", "-p", "other"],
             &["sql", "SELECT 1", "-p", "web"],
             &["series", "spans", "-p", "web"],
             &["telemetry", "services", "-p", "web"],
@@ -595,6 +596,8 @@ mod tests {
             &["tui", "-p", "web"],
             &["errors", "stats", "-p", "web"],
             &["services", "-p", ""],
+            &["projects", "show", "web"],
+            &["errors", "projects", "show", "web"],
         ] {
             parse_ok(args);
         }

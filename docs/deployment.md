@@ -124,8 +124,8 @@ What holds on any platform, including Kubernetes:
   settings are `server.api_tokens` and, so that DSNs are right, `server.public_url`.
 - **Health**: `/healthz` for liveness and for start-up, and `/readyz` for readiness. Attaching the
   catalog can take a while, so allow up to 5 minutes at start-up.
-- **Stopping**: on `SIGTERM` the server flushes both sides. Give it at least 60 s; 90 s is
-  safer (`terminationGracePeriodSeconds: 90` in Kubernetes).
+- **Stopping**: on `SIGTERM` the server waits up to 20 s for requests in flight, then flushes both
+  sides. Give it at least 60 s; 90 s is safer (`terminationGracePeriodSeconds: 90` in Kubernetes).
 - **Restart policy**: required (`restart: unless-stopped` in compose, the default in Kubernetes). With a
   DuckDB-file catalog, running out of memory during a catalog checkpoint can invalidate the catalog for the
   whole process. Nothing can be stored until it is attached again, so the server logs that at `error`, stops

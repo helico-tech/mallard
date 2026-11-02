@@ -243,8 +243,16 @@ pub fn is_conflict(e: &anyhow::Error) -> bool {
 
 /// What DuckDB says when memory is short (its buffer manager and allocator). Some paths, such as
 /// the appender, pass these on without the "Out of Memory Error" type.
-const OUT_OF_MEMORY: &[&str] =
-    &["out of memory", "failed to allocate", "could not allocate", "failed to pin block", "failed to reserve memory"];
+const OUT_OF_MEMORY: &[&str] = &[
+    "out of memory",
+    "failed to allocate",
+    "could not allocate",
+    "failed to pin block",
+    "failed to reserve memory",
+    "failed to re-allocate",
+    // The limit on temporary files: not over in a moment, but no reason to drop rows either.
+    "failed to offload data block",
+];
 
 /// Whether a statement failed because memory was short. The next try will likely
 /// work: another statement, often a compaction, holds the memory only for a moment.
@@ -440,6 +448,8 @@ mod tests {
             "opening appender for spans: could not allocate block of size 256.0 KiB (1/2 used)",
             "failed to pin block of size 256.0 KiB (1/2 used)",
             "failed to reserve memory data of size 256.0 KiB (1/2 used)",
+            "Failed to re-allocate block of 1024 bytes (bad allocation)",
+            "failed to offload data block of size 256.0 KiB (1/2 used)",
         ] {
             assert!(is_out_of_memory(&anyhow::anyhow!(msg.to_string())), "{msg}");
         }

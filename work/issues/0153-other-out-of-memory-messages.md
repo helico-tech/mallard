@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-02
 ---
@@ -16,3 +16,7 @@ Not seen in a run; from reading DuckDB's source.
 
 ## Notes
 Probably two more entries. The second is not short for a moment like the others, so check that retrying it is right.
+
+Done: both messages are in the list. Retrying `failed to offload data block` is right too: the OTel buffer fills and
+throttles instead of dropping acknowledged rows, and Sentry's retries are bounded. Only the matching is tested; neither
+error was caused for real.
