@@ -1,7 +1,7 @@
 # 0030 — One lake commit at a time on a DuckDB instance
 
 ## Status
-proposed (the owner decides when merging)
+accepted (by the owner, 2026-11-02)
 
 ## Context
 Both sides commit to one catalog from their own threads (ADR 0001). Every DuckLake commit takes the next

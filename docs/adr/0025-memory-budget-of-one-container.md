@@ -1,8 +1,7 @@
 # 0025 — The memory budget of one container, and what it takes to keep it
 
 ## Status
-proposed (merged so `main` has safe defaults; the owner can still reject the 16 MB target, the two Sentry
-defaults or `MALLOC_ARENA_MAX`)
+accepted (by the owner, 2026-11-02)
 
 ## Context
 Both sides share one process and one `duckdb.memory_limit`. The rule of the old binaries counted one
