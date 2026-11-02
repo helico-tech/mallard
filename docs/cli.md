@@ -44,7 +44,7 @@ not these: there they are a usage error (exit 2) that says so.
 | command | what |
 |---|---|
 | `mallard serve` | run the server until Ctrl-C or SIGTERM; logs go to stderr |
-| `mallard check [--connect]` | validate the config (a bad one is exit 2); `--connect` also opens the catalog and storage, and builds the sourcemap store (a bad `artifacts_path` is exit 2) |
+| `mallard check [--connect]` | validate the config (a bad one is exit 2); `--connect` also opens the catalog, builds the sourcemap store (a bad `artifacts_path` is exit 2), and writes a small file to `data_path` and to the sourcemap store (storage it cannot use is exit 1) |
 | `mallard maintenance [--full]` | both sides' maintenance once, then exit; stop the server first with a DuckDB-file or SQLite catalog |
 | `mallard install-extensions --dir <dir>` | download all DuckDB extensions, for running without internet (the Docker image does this) |
 

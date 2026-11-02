@@ -25,16 +25,28 @@ pub async fn serve(cfg: Config) -> Result<()> {
     platform.serve(shutdown).await
 }
 
-/// Open the catalog and storage of `cfg`: extensions, secrets, `ATTACH`.
+/// Open the catalog of `cfg` (extensions, secrets, `ATTACH`), then contact the object
+/// storage: write to `data_path`, and to the sourcemap store if there is one. `ATTACH`
+/// alone would pass with a wrong key or a missing bucket.
 pub async fn check_connection(cfg: Config) -> Result<()> {
-    tokio::task::spawn_blocking(move || mallard_duck::open_connection(&cfg.storage, &cfg.duckdb))
-        .await?
-        .context("opening the DuckLake catalog")?;
+    let artifacts = cfg.sentry_host().artifacts;
+    tokio::task::spawn_blocking(move || {
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).context("opening the DuckLake catalog")?;
+        mallard_duck::check_data_path(&conn, &cfg.storage)
+    })
+    .await??;
+    if let Some(artifacts) = artifacts {
+        artifacts
+            .check_reachable()
+            .await
+            .map_err(|e| anyhow::anyhow!(mallard_duck::redact(&format!("{e:#}"))))
+            .with_context(|| format!("storage.artifacts_path ({})", artifacts.url))?;
+    }
     Ok(())
 }
 
 /// Build the sourcemap store of `cfg`, as start-up does, so a bad
-/// `storage.artifacts_path` fails here too. It does not contact the store.
+/// `storage.artifacts_path` fails here too. [`check_connection`] contacts it.
 pub fn check_artifacts(cfg: &Config) -> Result<()> {
     let Some(artifacts) = cfg.sentry_host().artifacts else { return Ok(()) };
     artifacts

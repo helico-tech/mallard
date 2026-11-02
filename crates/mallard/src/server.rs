@@ -21,8 +21,8 @@ pub(crate) enum ServerCmd {
     Check {
         #[command(flatten)]
         config: ConfigArg,
-        /// Also open the catalog and storage (extensions, secrets, attach) and build
-        /// the sourcemap store (no request to it).
+        /// Also open the catalog (extensions, secrets, attach), write a small file to
+        /// data_path, and write and delete one in the sourcemap store.
         #[arg(long)]
         connect: bool,
     },

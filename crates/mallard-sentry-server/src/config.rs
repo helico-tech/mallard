@@ -215,6 +215,12 @@ impl Artifacts {
     pub fn check(&self) -> anyhow::Result<()> {
         crate::storage::Storage::new(&self.url, &self.options).map(|_| ())
     }
+
+    /// Contact the store: write and delete a small object.
+    pub async fn check_reachable(&self) -> anyhow::Result<()> {
+        let store = crate::storage::Storage::new(&self.url, &self.options)?;
+        store.check_reachable(std::time::Duration::from_secs(30)).await
+    }
 }
 
 impl Host {

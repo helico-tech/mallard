@@ -10,3 +10,4 @@
 8. [issue 0185 TUI components keep a mode without a host](issues/0185-tui-components-keep-a-mode-without-a-host.md)
 9. [issue 0186 mallard trace default window above the server limit](issues/0186-trace-default-window-above-server-limit.md)
 10. [issue 0192 Web UI: the open "differs" rows of the parity table](issues/0192-web-ui-differences-from-the-tui.md)
+11. [issue 0158 shutdown test sometimes hangs](issues/0158-shutdown-test-hangs-sometimes.md)

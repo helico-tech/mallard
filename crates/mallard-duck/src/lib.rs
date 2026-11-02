@@ -85,6 +85,25 @@ pub fn open_connection(storage: &StorageConfig, duckdb: &DuckDbConfig) -> Result
     Ok(conn)
 }
 
+/// The file [`check_data_path`] writes.
+const CHECK_FILE: &str = "mallard-check.parquet";
+
+/// Write a small Parquet file to `data_path` and read it back. `ATTACH` does not touch the
+/// data path, so a wrong key or a missing bucket would show up only at the first flush.
+///
+/// DuckDB SQL cannot delete a file. So it is one name that each check overwrites, and
+/// orphan cleanup removes it, as it removes every file no snapshot references.
+pub fn check_data_path(conn: &Connection, st: &StorageConfig) -> Result<()> {
+    let file = sql_str(&format!("{}/{CHECK_FILE}", st.data_path.trim_end_matches('/')));
+    conn.execute_batch(&format!("COPY (SELECT 1 AS ok) TO {file} (FORMAT parquet)"))
+        .and_then(|()| {
+            conn.query_row(&format!("SELECT count(*) FROM read_parquet({file})"), [], |r| r.get::<_, i64>(0))
+        })
+        .map_err(|e| anyhow::anyhow!(redact(&e.to_string())))
+        .with_context(|| format!("storage.data_path ({}): writing and reading a test file", st.data_path))?;
+    Ok(())
+}
+
 /// Download extensions into `duckdb.extension_directory` (see [`ALL_EXTENSIONS`]).
 pub fn install_extensions(duckdb: &DuckDbConfig, names: &[impl AsRef<str>]) -> Result<()> {
     if !duckdb.extension_directory.is_empty() {
@@ -606,5 +625,30 @@ mod tests {
             .query_row("SELECT count(*) FROM duckdb_databases() WHERE database_name = ?", [CATALOG], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// One file however often it runs, which orphan cleanup removes; and a path it cannot
+    /// write to fails, which `ATTACH` alone would not notice.
+    #[test]
+    fn the_data_path_check_writes_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = dir.path().join("lake");
+        let st = StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: format!("{}/", lake.display()),
+            ..Default::default()
+        };
+        let conn = open_connection(&st, &DuckDbConfig::default()).unwrap();
+        check_data_path(&conn, &st).unwrap();
+        check_data_path(&conn, &st).unwrap();
+        assert_eq!(std::fs::read_dir(&lake).unwrap().count(), 1);
+        assert!(lake.join(CHECK_FILE).is_file());
+
+        conn.execute_batch("CALL ducklake_delete_orphaned_files('lake', cleanup_all => true)").unwrap();
+        assert!(!lake.join(CHECK_FILE).exists());
+
+        std::fs::remove_dir_all(&lake).unwrap();
+        let err = check_data_path(&conn, &st).unwrap_err();
+        assert!(format!("{err:#}").starts_with("storage.data_path ("), "{err:#}");
     }
 }

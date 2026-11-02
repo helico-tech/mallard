@@ -189,6 +189,8 @@ fn check_connect_fails_on_a_bad_sourcemap_store() {
                    connection_string = \"AccountName=a;AccountKey=not-base64!!\"";
     let m = usage(&check("badkey", bad_key));
     assert!(m.contains("Azure") && !m.contains("not-base64"), "{m}");
+    let m = usage(&check("account", "artifacts_path = \"az://acct.blob.core.windows.net/c/artifacts\""));
+    assert!(m.contains("storage.artifacts_path") && m.contains("az://<container>/<prefix>"), "{m}");
 
     // A good one still connects (local store, DuckDB file).
     let o = check("local", &format!("artifacts_path = \"{}/artifacts\"", dir.path().display()));
@@ -196,4 +198,7 @@ fn check_connect_fails_on_a_bad_sourcemap_store() {
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["connected"], true, "{v}");
     assert!(dir.path().join("artifacts").is_dir());
+    // It really wrote to the lake, and left nothing in the sourcemap store.
+    assert!(dir.path().join("local/mallard-check.parquet").is_file());
+    assert_eq!(std::fs::read_dir(dir.path().join("artifacts/artifacts")).unwrap().count(), 0);
 }
