@@ -100,7 +100,7 @@ impl Maintainer {
     }
 
     pub fn run(mut self) {
-        // `stopping` too: a full queue can lose the `Stop` command.
+        // `stopping` too: the `Stop` command waits behind what was queued before it.
         while !self.stopping.load(Ordering::Relaxed) {
             let wait = self.flush.due_in().min(self.compact.due_in()).min(ROWS_CHECK_INTERVAL);
             match self.rx.recv_timeout(wait) {
