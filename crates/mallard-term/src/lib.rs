@@ -11,7 +11,8 @@
 //! - [`output`]: `--format`, `--fields`, the list envelope (ADR 0008).
 //! - [`window`]: the shared `--since/--from/--to` flags.
 //! - [`wait`]: `--wait <dur>`, poll until there is a result (exit 8 on timeout).
-//! - [`tui`]: theme, shared widgets, the shared keys and [`tui::Outcome`].
+//! - [`tui`]: theme, shared widgets (also [`tui::suggest`], the filter bar's list), the
+//!   shared keys, [`tui::Outcome`] and [`tui::Scope`].
 
 #![warn(unreachable_pub)]
 

@@ -2,9 +2,9 @@
 
 use super::*;
 
-pub(super) fn render_help(f: &mut Frame, area: Rect) {
+pub(super) fn render_help(f: &mut Frame, area: Rect, hosted: bool) {
     use mallard_term::tui::keys;
-    let r = centered(area, 112, 20);
+    let r = centered(area, 112, 21);
     f.render_widget(Clear, r);
     let block = Block::new()
         .borders(Borders::ALL)
@@ -20,14 +20,15 @@ pub(super) fn render_help(f: &mut Frame, area: Rect) {
     let row = |k: &str, d: &str| row_w(k, d, 14);
     // The keys every tab shares come first (mallard_term::tui::keys).
     let mut left = vec![section_line("Everywhere")];
-    left.extend(keys::SHARED.iter().map(|(k, d)| row_w(k, d, 22)));
+    let picker = keys::APP_PICKER.to_string();
+    left.extend(keys::SHARED.iter().filter(|(k, _)| hosted || *k != picker).map(|(k, d)| row_w(k, d, 22)));
     left.push(Line::raw(""));
     left.push(Line::from(Span::styled(format!("  {} Data refreshes every 5s.", keys::TIMES), th::faint())));
-    let right = vec![
+    let mut right = vec![
         section_line("Issues list"),
         row("tab ← → 1-4", "status tab"),
         row("s", "cycle sort"),
-        row("p", "switch project"),
+        row("/", "key=value is a tag; tab accepts"),
         row("R I U", "resolve / ignore / unresolve"),
         Line::raw(""),
         section_line("Issue detail"),
@@ -38,6 +39,9 @@ pub(super) fn render_help(f: &mut Frame, area: Rect) {
         row("x", "this event's trace"),
         row("R I U", "resolve / ignore / unresolve"),
     ];
+    if !hosted {
+        right.insert(3, row("p", "switch project"));
+    }
     let [l, rr] = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(inner);
     f.render_widget(Paragraph::new(left), l);
     f.render_widget(Paragraph::new(right), rr);

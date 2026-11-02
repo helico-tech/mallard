@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "api-types": "openapi-typescript ../../../docs/sentry/openapi.json -o src/api/sentry.gen.ts && openapi-typescript ../../../docs/otel/openapi.json -o src/api/otel.gen.ts",
+    "api-types": "openapi-typescript ../../../docs/sentry/openapi.json -o src/api/sentry.gen.ts && openapi-typescript ../../../docs/otel/openapi.json -o src/api/otel.gen.ts && openapi-typescript ../../../docs/openapi.json -o src/api/app.gen.ts",
     "e2e": "playwright test"
   },
   "dependencies": {

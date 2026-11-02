@@ -57,6 +57,10 @@ name = "agent_cli_p1"
 required-features = ["server"]
 
 [[test]]
+name = "agent_cli_app"
+required-features = ["server"]
+
+[[test]]
 name = "maintenance"
 required-features = ["server"]
 

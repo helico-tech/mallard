@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cycleLevel, parseDurationMs, parseLogFilter, parseSeverity, parseTraceFilter, parseTraceId, setToken, tokens } from "./query";
+import { cycleLevel, parseDurationMs, parseFindId, parseIssueFilter, parseLogFilter, parseSeverity, parseTraceFilter, parseTraceId, setToken, tokens } from "./query";
 
 describe("filter language", () => {
   it("tokens keep quotes together", () => {
@@ -48,5 +48,19 @@ describe("filter language", () => {
   it("trace ids", () => {
     expect(parseTraceId("0AF76519-16cd-43dd-8448-eb211c80319c")).toBe("0af7651916cd43dd8448eb211c80319c");
     expect(parseTraceId("abc")).toBeNull();
+  });
+
+  it("issue filter: key=value is a tag, other words search the text", () => {
+    expect(parseIssueFilter('undefined total browser="Chrome 120"')).toEqual({ tags: ["browser:Chrome 120"], query: "undefined total" });
+    expect(parseIssueFilter("")).toEqual({ tags: [] });
+    expect(parseIssueFilter(Array.from({ length: 11 }, (_, i) => `k${i}=v`).join(" "))).toHaveProperty("error");
+  });
+
+  it("find ids: 16 or 32 hex, in any form", () => {
+    expect(parseFindId(" 0AF7651916CD43DD8448EB211C80319C ")).toBe("0af7651916cd43dd8448eb211c80319c");
+    expect(parseFindId("0af76519-16cd-43dd-8448-eb211c80319c")).toBe("0af7651916cd43dd8448eb211c80319c");
+    expect(parseFindId("b7ad6b7169203331")).toBe("b7ad6b7169203331");
+    expect(parseFindId("checkout-api")).toBeNull();
+    expect(parseFindId("abc")).toBeNull();
   });
 });

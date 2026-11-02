@@ -12,12 +12,14 @@ mod theme;
 mod ui;
 
 use crate::cli::describe;
-use app::{App, FetchError, Kind, Req, Resp};
+use app::{App, FetchError, Kind, Req, Resp, Window};
 use crossterm::event::{Event, KeyEventKind};
 use futures::FutureExt;
 use mallard_sentry_client::Client;
-use mallard_sentry_client::types::{EventQuery, WindowQuery};
+use mallard_sentry_client::types::{EventQuery, TagQuery, WindowQuery};
 use mallard_term::error::Hints;
+use mallard_term::tui::Scope;
+use mallard_term::tui::suggest::{FETCH_TIMEOUT, LIMIT};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use std::future::Future;
@@ -45,11 +47,13 @@ pub struct Embedded {
     started: bool,
     /// Loads that may still be running.
     tasks: Vec<AbortHandle>,
+    /// The search bar's fetch: a newer one replaces it.
+    suggest_task: Option<AbortHandle>,
 }
 
 impl Drop for Embedded {
     fn drop(&mut self) {
-        for t in &self.tasks {
+        for t in self.tasks.iter().chain(&self.suggest_task) {
             t.abort();
         }
     }
@@ -62,13 +66,60 @@ impl Embedded {
     pub fn new(client: Client, project: Option<String>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = Handle::current();
-        Embedded { app: App::new(client.base_url(), project), client, handle, tx, rx, started: false, tasks: vec![] }
+        Embedded {
+            app: App::new(client.base_url(), project),
+            client,
+            handle,
+            tx,
+            rx,
+            started: false,
+            tasks: vec![],
+            suggest_task: None,
+        }
     }
 
     /// Name the host's command and env vars in hints (default [`crate::HINTS`]).
     pub fn with_hints(mut self, hints: Hints) -> Self {
         self.app.hints = hints;
         self
+    }
+
+    /// The host owns the time window and the app picker: `t`, `T` and `p` come back
+    /// [`Outcome::Ignored`], and with no app chosen this tab asks for one.
+    pub fn set_hosted(&mut self, hosted: bool) {
+        self.app.hosted = hosted;
+    }
+
+    /// The host's one window for all tabs. A window the errors side does not know
+    /// changes nothing.
+    pub fn set_window(&mut self, since: &str) {
+        let Some(w) = Window::parse(since) else { return };
+        let reqs = self.app.set_window(w);
+        self.send_when_started(reqs);
+    }
+
+    /// The host's app.
+    pub fn set_scope(&mut self, scope: &Scope) {
+        let reqs = self.app.set_scope(scope);
+        self.send_when_started(reqs);
+    }
+
+    fn send_when_started(&mut self, reqs: Vec<Req>) {
+        // Before the start there is nothing to reload: the start loads what is set now.
+        if self.started {
+            let reqs = self.app.track(reqs);
+            self.dispatch(reqs);
+        }
+    }
+
+    /// The project shown: the host's choice, or one this tab went to for an event.
+    pub fn project(&self) -> Option<&str> {
+        self.app.project.as_deref()
+    }
+
+    /// The server's longest window, once it has said so.
+    pub fn max_window_secs(&self) -> Option<u64> {
+        self.app.info.as_ref()?.max_window_secs
     }
 
     /// Draw inside `area` only.
@@ -138,7 +189,13 @@ impl Embedded {
         for r in reqs {
             let kind = r.kind();
             let task = self.handle.spawn(guarded(kind, fetch(self.client.clone(), r, self.app.hints), self.tx.clone()));
-            self.tasks.push(task.abort_handle());
+            if kind == Kind::Suggest {
+                if let Some(old) = self.suggest_task.replace(task.abort_handle()) {
+                    old.abort();
+                }
+            } else {
+                self.tasks.push(task.abort_handle());
+            }
         }
     }
 }
@@ -209,6 +266,20 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
             let result = c.events_by_trace(&trace_id).await.map_err(e);
             Resp::Trace { trace_id, result }
         }
+        Req::Suggest { project, window, scope, want } => {
+            let q = TagQuery {
+                since: Some(window.since().into()),
+                key: want.key.clone(),
+                prefix: (!want.prefix.is_empty()).then(|| want.prefix.clone()),
+                limit: Some(LIMIT),
+            };
+            let answer = tokio::time::timeout(FETCH_TIMEOUT, c.tags(&project, &q)).await;
+            let items = answer
+                .ok()
+                .and_then(Result::ok)
+                .map(|s| s.items.into_iter().map(|i| (i.value.unwrap_or(i.key), i.count)).collect());
+            Resp::Suggest { scope, want, items }
+        }
     }
 }
 
@@ -243,7 +314,7 @@ pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
                         Outcome::Quit => break,
                         Outcome::Jump(t) => ui.open_trace(&t),
                         Outcome::JumpEvent { trace_id, event_id } => ui.open_trace_event(&trace_id, &event_id),
-                        Outcome::Consumed | Outcome::Ignored => {}
+                        Outcome::Consumed | Outcome::Ignored | Outcome::SetWindow(_) => {}
                     },
                     Some(Err(e)) => return Err(e.into()),
                     None => break,
@@ -360,6 +431,173 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("loads still running after drop");
+    }
+
+    /// The server never answers: keys are handled at once and no text is lost.
+    #[tokio::test]
+    async fn typing_never_waits_on_a_server_that_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let mut ui = Embedded::new(Client::new(&url, Some("t")).unwrap(), Some("web".into()));
+        ui.set_hosted(true);
+        ui.tick();
+        let started = Instant::now();
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('/'))), Outcome::Consumed);
+        for c in "url=".chars() {
+            assert_eq!(ui.handle_event(&key(KeyCode::Char(c))), Outcome::Consumed);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        ui.tick();
+        let first = ui.suggest_task.clone().expect("a fetch is running");
+        assert!(!first.is_finished(), "and it does not end");
+        for c in "/check".chars() {
+            assert_eq!(ui.handle_event(&key(KeyCode::Char(c))), Outcome::Consumed);
+        }
+        ui.tick();
+        assert_eq!(ui.app.input.as_deref(), Some("url=/check"));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        term.draw(|f| ui.draw(f, f.area())).unwrap();
+        assert!(screen(&term).contains("url=/check"), "{}", screen(&term));
+        assert_eq!(ui.handle_event(&key(KeyCode::Enter)), Outcome::Consumed);
+        assert_eq!(ui.app.query, "url=/check", "applied without an answer");
+    }
+
+    /// A server with one project, one tag value holding U+202E and no issues. Hands back
+    /// what it was asked, with the query strings as they came in.
+    async fn server_with_a_hostile_tag() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use mallard_sentry_client::types::{IssueList, TagCount, TagStats};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let hits = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let hits = hits.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let mut n = 0;
+                    while !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf[n..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(k) => n += k,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let full = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    hits.lock().unwrap().push(full.clone());
+                    let at = crate::tui::fixtures::now();
+                    let body = match full.split('?').next().unwrap() {
+                        "/v1/projects" => serde_json::to_string(&crate::tui::fixtures::projects()).unwrap(),
+                        p if p.ends_with("/tags") => serde_json::to_string(&TagStats {
+                            total_rows: 1,
+                            sampled_rows: 1,
+                            counted_from: at,
+                            items: vec![TagCount { key: "user".into(), value: Some("a\u{202e}b".into()), count: 1 }],
+                        })
+                        .unwrap(),
+                        p if p.ends_with("/issues") => serde_json::to_string(&IssueList {
+                            issues: vec![],
+                            window_start: at,
+                            window_end: at,
+                            next_cursor: None,
+                        })
+                        .unwrap(),
+                        _ => "{}".to_string(),
+                    };
+                    let status = if body == "{}" { "503 X" } else { "200 OK" };
+                    let answer = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(answer.as_bytes()).await;
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    /// Issue 0148. Accepting a suggestion puts the value in the bar as the server has it:
+    /// the frame only ever shows it cleaned, in the list, the bar, the filter row and the
+    /// empty list, and the request holds the real value, or it would filter on nothing.
+    #[tokio::test]
+    async fn an_accepted_suggestion_shows_cleaned_and_sends_the_real_value() {
+        let (url, seen) = server_with_a_hostile_tag().await;
+        let mut ui = Embedded::new(Client::new(&url, Some("t")).unwrap(), Some("web".into()));
+        let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut frame = |ui: &mut Embedded, says: &str| {
+            term.draw(|f| ui.draw(f, f.area())).unwrap();
+            let s = screen(&term);
+            assert!(!s.contains('\u{202e}'), "raw text on the terminal: {s}");
+            assert!(s.contains(says), "no {says:?} in\n{s}");
+        };
+        const SHOWN: &str = "a\\u{202e}b";
+
+        ui.tick();
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('/'))), Outcome::Consumed);
+        for c in "user=".chars() {
+            assert_eq!(ui.handle_event(&key(KeyCode::Char(c))), Outcome::Consumed);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        for _ in 0..200 {
+            ui.tick();
+            if ui.app.suggest.has_items() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ui.app.suggest.has_items(), "no suggestion: {:?}", seen.lock().unwrap());
+        frame(&mut ui, SHOWN);
+
+        assert_eq!(ui.handle_event(&key(KeyCode::Tab)), Outcome::Consumed);
+        assert_eq!(ui.app.input.as_deref(), Some("user=a\u{202e}b "), "raw in the bar");
+        frame(&mut ui, &format!("user={SHOWN}"));
+
+        assert_eq!(ui.handle_event(&key(KeyCode::Enter)), Outcome::Consumed);
+        assert_eq!(ui.app.query, "user=a\u{202e}b");
+        let sent = |seen: &std::sync::Mutex<Vec<String>>| {
+            seen.lock().unwrap().iter().any(|q| q.contains("/issues?") && q.contains("tag=user%3Aa%E2%80%AEb"))
+        };
+        for _ in 0..200 {
+            ui.tick();
+            if sent(&seen) && ui.app.issues_loaded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sent(&seen), "{:?}", seen.lock().unwrap());
+        assert!(ui.app.issues_loaded);
+        frame(&mut ui, &format!("matching \"user={SHOWN}\""));
+        frame(&mut ui, &format!("/ user={SHOWN}"));
+
+        // Opened again it holds the same raw text, drawn cleaned.
+        assert_eq!(ui.handle_event(&key(KeyCode::Char('/'))), Outcome::Consumed);
+        assert_eq!(ui.app.input.as_deref(), Some("user=a\u{202e}b"));
+        frame(&mut ui, &format!(" user={SHOWN}"));
+    }
+
+    /// In a host, the tab asks for an app, or says the app has no project.
+    #[tokio::test]
+    async fn an_empty_scope_says_what_to_do() {
+        let client = Client::new("http://127.0.0.1:9", Some("t")).unwrap();
+        let mut ui = Embedded::new(client, None);
+        ui.set_hosted(true);
+        ui.set_window("1h");
+        assert_eq!(ui.app.window, Window::Hour, "before the start: only the field");
+        let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        term.draw(|f| ui.draw(f, f.area())).unwrap();
+        let s = screen(&term);
+        assert!(s.contains("Pick an app to see its errors") && s.contains("press p to choose"), "{s}");
+        assert!(!s.contains("loading"), "nothing is loading: {s}");
+        ui.set_scope(&Scope::App { slug: "work\u{202e}er".into(), project: None, services: vec!["w".into()] });
+        term.draw(|f| ui.draw(f, f.area())).unwrap();
+        let s = screen(&term);
+        assert!(s.contains("has no project, so no errors here") && s.contains("gives it a DSN"), "{s}");
+        assert!(!s.contains('\u{202e}'), "{s}");
+        // The window a host sends that this side does not know changes nothing.
+        ui.set_window("2d");
+        assert_eq!(ui.app.window, Window::Hour);
     }
 
     #[tokio::test]

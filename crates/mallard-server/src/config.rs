@@ -192,6 +192,7 @@ impl Config {
                 ingest_tokens: self.server.ingest_tokens.clone(),
             },
             duckdb: self.duckdb.clone(),
+            commit_lock: Default::default(),
         }
     }
 
@@ -208,6 +209,7 @@ impl Config {
             }),
             catalog_maintenance: None,
             maintenance_threads: 0,
+            commit_lock: Default::default(),
         }
     }
 }

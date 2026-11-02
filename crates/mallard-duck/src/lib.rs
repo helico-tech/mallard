@@ -17,6 +17,7 @@ mod lease;
 pub mod sql;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result, bail};
 pub use config::{CatalogKind, DuckDbConfig, SecretConfig, StorageConfig};
@@ -241,6 +242,60 @@ pub fn is_conflict(e: &anyhow::Error) -> bool {
     text.contains("conflict") || text.contains("maximum retry count") || text.contains("database is locked")
 }
 
+/// One lake commit at a time on a DuckDB instance: its writers [`hold`](Self::hold) one clone of this
+/// around `COMMIT`.
+///
+/// Every DuckLake commit takes the next snapshot id, and of two at once one fails on the
+/// catalog's primary key and tries again. A large commit takes longer than the gap between small
+/// ones, so next to a writer committing all the time it never wins (ADR 0030). This does nothing
+/// for other processes on the catalog: for those the retries stay.
+#[derive(Clone, Debug, Default)]
+pub struct CommitLock(Arc<Mutex<()>>);
+
+impl CommitLock {
+    pub fn hold(&self) -> MutexGuard<'_, ()> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether both are clones of one lock.
+    pub fn is_shared_with(&self, other: &CommitLock) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What DuckDB says when memory is short (its buffer manager and allocator). Some paths, such as
+/// the appender, pass these on without the "Out of Memory Error" type.
+const OUT_OF_MEMORY: &[&str] = &[
+    "out of memory",
+    "failed to allocate",
+    "could not allocate",
+    "failed to pin block",
+    "failed to reserve memory",
+    "failed to re-allocate",
+    // The limit on temporary files: not over in a moment, but no reason to drop rows either.
+    "failed to offload data block",
+];
+
+/// Whether a statement failed because memory was short. The next try will likely
+/// work: another statement, often a compaction, holds the memory only for a moment.
+pub fn is_out_of_memory(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}").to_ascii_lowercase();
+    !is_invalidated(e) && OUT_OF_MEMORY.iter().any(|m| text.contains(m))
+}
+
+/// Whether DuckDB gave up on a database. A failed checkpoint of a DuckDB-file catalog, for
+/// example because memory ran out, invalidates it for the whole process: every statement on it
+/// fails until it is attached again. Trying again cannot help (even if the message quotes an
+/// out-of-memory error as the cause), and rows meant for it are not at fault.
+pub fn is_invalidated(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("has been invalidated")
+}
+
+/// What a server says, and exits with, once [`is_invalidated`] is true. Both sides' connections
+/// hang on that catalog, so attaching it again is what a restart is for (issue 0130).
+pub const CATALOG_INVALIDATED: &str =
+    "the DuckLake catalog has been invalidated and nothing can be stored; exiting, a restart attaches it again";
+
 /// Create the parent directory of a local file path.
 fn ensure_parent_dir(file: &str) -> Result<()> {
     match Path::new(file).parent() {
@@ -391,6 +446,39 @@ fn azure_options(connection_string: &str) -> ObjectStoreOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The words of issue 0130: it quotes short memory as the cause, but will not pass.
+    #[test]
+    fn an_invalidated_database_is_not_short_memory() {
+        let e = anyhow::anyhow!(
+            "IO Error: Failed to query most recent snapshot for DuckLake: Database \"__ducklake_metadata_lake\" \
+             has been invalidated because checkpointing failed. Detach and reattach it before using it again. \
+             Original error: failed to allocate data of size 6.0 MiB (751.6 MiB/732.4 MiB used)"
+        );
+        assert!(is_invalidated(&e));
+        assert!(!is_out_of_memory(&e));
+        let fatal = "FATAL Error: Failed: database has been invalidated because of a previous fatal error.";
+        assert!(is_invalidated(&anyhow::anyhow!(fatal)));
+        assert!(!is_invalidated(&anyhow::anyhow!("Out of Memory Error: failed to allocate data of size 6.0 MiB")));
+    }
+
+    #[test]
+    fn short_memory_is_recognised_in_all_of_duckdbs_words() {
+        for msg in [
+            "Out of Memory Error: failed to pin block of size 1 MiB",
+            "flushing appender for spans: Failed to append: failed to allocate data of size 256.0 KiB (1/2 used)",
+            "opening appender for spans: could not allocate block of size 256.0 KiB (1/2 used)",
+            "failed to pin block of size 256.0 KiB (1/2 used)",
+            "failed to reserve memory data of size 256.0 KiB (1/2 used)",
+            "Failed to re-allocate block of 1024 bytes (bad allocation)",
+            "failed to offload data block of size 256.0 KiB (1/2 used)",
+        ] {
+            assert!(is_out_of_memory(&anyhow::anyhow!(msg.to_string())), "{msg}");
+        }
+        for msg in ["IO Error: disk full", "Binder Error: no such column \"memory\""] {
+            assert!(!is_out_of_memory(&anyhow::anyhow!(msg.to_string())), "{msg}");
+        }
+    }
 
     fn storage(toml_text: &str) -> StorageConfig {
         toml::from_str(toml_text).unwrap()

@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 created: 2026-11-01
 ---
 # Epic 0004 — One app concept, and search that helps

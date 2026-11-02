@@ -18,6 +18,7 @@ mod input;
 mod loader;
 mod query;
 mod standalone;
+mod suggestions;
 mod theme;
 mod views;
 mod widgets;
@@ -49,7 +50,10 @@ pub use standalone::run_standalone;
 /// What the host should do after an event; `x` on a trace is
 /// [`Outcome::Jump`] (errors of this trace).
 pub use mallard_term::tui::Outcome;
-use mallard_term::tui::keys;
+use mallard_term::{
+    text::clean,
+    tui::{Scope, keys, suggest::Suggest},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum View {
@@ -114,6 +118,13 @@ pub struct Embedded {
     errors: Option<Arc<dyn crate::ErrorLookup>>,
     /// Kinds whose last load failed: only the first failure flashes.
     failing: HashSet<Kind>,
+    /// In a host with one window and one app picker for its tabs: `t`, `T` and `p` are
+    /// the host's (they return [`Outcome::Ignored`]).
+    hosted: bool,
+    /// The host's app; everything but a trace opened by id is limited to its services.
+    scope: Scope,
+    trace_suggest: Suggest,
+    log_suggest: Suggest,
 }
 
 impl std::fmt::Debug for Embedded {
@@ -182,7 +193,76 @@ impl Embedded {
             errors_enabled: false,
             errors: None,
             failing: HashSet::new(),
+            hosted: false,
+            scope: Scope::All,
+            trace_suggest: Suggest::new(suggestions::TRACE_KEYS),
+            log_suggest: Suggest::new(suggestions::LOG_KEYS),
         }
+    }
+
+    /// The host owns the time window and the app picker (see the field).
+    pub fn set_hosted(&mut self, hosted: bool) {
+        self.hosted = hosted;
+    }
+
+    /// The server's longest window, once it has said so.
+    pub fn max_window_secs(&self) -> Option<u64> {
+        self.stats.as_ref()?.capabilities.as_ref().map(|c| c.max_window_secs)
+    }
+
+    /// Limit the views to an app's services. A filter on another service goes, because a
+    /// filter must not disagree with the picker (ADR 0028).
+    pub fn set_scope(&mut self, scope: &Scope) {
+        if self.scope == *scope {
+            return;
+        }
+        self.scope = scope.clone();
+        if !self.traces.filter.service.as_ref().is_none_or(|s| self.in_scope(s)) {
+            self.traces.filter.service = None;
+        }
+        if !self.logs.filter.service.as_ref().is_none_or(|s| self.in_scope(s)) {
+            self.logs.filter.service = None;
+            self.logs.query = views::logs::without_service(&self.logs.query);
+        }
+        if !self.overview.ops.as_ref().is_none_or(|(s, _)| self.in_scope(s)) {
+            self.overview.ops = None;
+        }
+        self.overview.services.clear();
+        self.overview.span_series = None;
+        self.overview.log_series = None;
+        self.traces.list.clear();
+        self.traces.sel.select(None);
+        self.metrics.list.clear();
+        self.invalidate();
+    }
+
+    fn in_scope(&self, service: &str) -> bool {
+        match &self.scope {
+            Scope::All => true,
+            Scope::App { services, .. } => services.iter().any(|s| s == service),
+        }
+    }
+
+    /// What to send as `service`: a filter's value (always inside the scope), or the scope.
+    pub(crate) fn scoped(&self, filter: Option<&str>) -> Vec<String> {
+        match (filter, &self.scope) {
+            (Some(s), _) => vec![s.to_string()],
+            (None, Scope::All) => vec![],
+            (None, Scope::App { services, .. }) => services.clone(),
+        }
+    }
+
+    /// An app without telemetry in the window: nothing to ask the server for. Sending no
+    /// `service` would show every service instead. A trace opened by id is not scoped.
+    fn no_telemetry(&self) -> Option<&str> {
+        let Scope::App { slug, services, .. } = &self.scope else { return None };
+        let by_id = match self.view {
+            View::Status => true,
+            View::Traces => self.traces.detail.is_some(),
+            View::Logs => self.logs.filter.trace.is_some(),
+            _ => false,
+        };
+        (services.is_empty() && !by_id).then_some(slug.as_str())
     }
 
     /// Show the `x errors` key in hints and help. The key always returns
@@ -279,6 +359,7 @@ impl Embedded {
         self.spin = self.spin.wrapping_add(1);
         for l in self.loader.drain() {
             match l.result {
+                Ok(Data::Suggest(a)) => self.suggest_answer(*a),
                 Ok(data) => {
                     self.last_ok = Some(Instant::now());
                     self.apply(l.kind, data);
@@ -297,12 +378,15 @@ impl Embedded {
                 self.stats_at = Some(Instant::now());
             }
         }
-        match self.view {
-            View::Overview => self.refresh_overview(false),
-            View::Traces => self.refresh_traces(false),
-            View::Logs => self.refresh_logs(),
-            View::Metrics => self.refresh_metrics(false),
-            View::Status => {}
+        self.poll_suggest();
+        if self.no_telemetry().is_none() {
+            match self.view {
+                View::Overview => self.refresh_overview(false),
+                View::Traces => self.refresh_traces(false),
+                View::Logs => self.refresh_logs(),
+                View::Metrics => self.refresh_metrics(false),
+                View::Status => {}
+            }
         }
         if self.loader.no_runtime {
             self.stats_error = Some("no tokio runtime: cannot load data".into());
@@ -331,7 +415,11 @@ impl Embedded {
                 self.stats = Some(*s);
                 self.stats_error = None;
             }
-            Data::Services(v) => self.overview.set_services(v),
+            Data::Services(mut v) => {
+                // The endpoint has no `service` filter.
+                v.retain(|s| self.in_scope(&s.raw));
+                self.overview.set_services(v);
+            }
             Data::Operations(v) => self.overview.set_operations(v),
             Data::SpanSeries(s) => self.overview.span_series = Some(s),
             Data::LogSeries(s) => match kind {
@@ -347,13 +435,12 @@ impl Embedded {
                 self.load_span_errors();
             }
             Data::Errors(r) => self.traces.set_errors(kind, r.unwrap_or_default()),
-            Data::Logs(v) => match kind {
-                Kind::TraceLogs => self.traces.set_trace_logs(v),
-                _ => self.logs_loaded(v),
-            },
+            Data::Logs(v) => self.traces.set_trace_logs(v),
+            Data::LogPage { records, tail } => self.logs_loaded(records, *tail),
             Data::Tail { records, truncated } => self.logs_tail_loaded(records, truncated),
             Data::MetricList(v) => self.metrics.set_list(v),
             Data::MetricQuery(r) => self.metrics.set_result(r),
+            Data::Suggest(a) => self.suggest_answer(*a),
         }
     }
 
@@ -385,8 +472,8 @@ impl Embedded {
                 }
             }
             Kind::MetricList => self.metrics.error = Some(e),
-            // Error lookups report their failures as data.
-            Kind::TraceErrors | Kind::SpanErrors => {}
+            // These report their failures as data.
+            Kind::TraceErrors | Kind::SpanErrors | Kind::Suggest => {}
             Kind::MetricQuery => {
                 if let Some(c) = &mut self.metrics.chart {
                     c.error = Some(e);
@@ -459,11 +546,11 @@ impl Embedded {
                 self.set_view(VIEWS[j].0);
                 Outcome::Consumed
             }
-            KeyCode::Char(keys::WINDOW_NEXT) => {
+            KeyCode::Char(keys::WINDOW_NEXT) if !self.hosted => {
                 self.cycle_window(true);
                 Outcome::Consumed
             }
-            KeyCode::Char(keys::WINDOW_PREV) => {
+            KeyCode::Char(keys::WINDOW_PREV) if !self.hosted => {
                 self.cycle_window(false);
                 Outcome::Consumed
             }
@@ -479,22 +566,54 @@ impl Embedded {
 
     pub(crate) fn start_prompt(&mut self, target: PromptTarget, label: &'static str, help: &'static str, value: &str) {
         self.prompt = Some(Prompt { target, label, help, input: Input::new(value) });
+        if let Some(s) = self.suggest_of(target) {
+            s.open(value, value.chars().count(), Instant::now());
+        }
     }
 
     /// A key while a prompt is open. Ctrl-C and Esc cancel it.
     fn prompt_key(&mut self, k: &KeyEvent) -> Outcome {
+        let Some(target) = self.prompt.as_ref().map(|p| p.target) else { return Outcome::Ignored };
+        let now = Instant::now();
+        // Tab and the arrows are the list's while it shows; every other key is the input's.
+        if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && let Some(s) = self.suggest_of(target)
+            && s.has_items()
+        {
+            match k.code {
+                KeyCode::Tab => {
+                    if let (Some((value, cursor)), Some(p)) = (s.accept(now), &mut self.prompt) {
+                        p.input = Input { value, cursor };
+                    }
+                    return Outcome::Consumed;
+                }
+                KeyCode::Down | KeyCode::Up => {
+                    s.select(if k.code == KeyCode::Down { 1 } else { -1 });
+                    return Outcome::Consumed;
+                }
+                _ => {}
+            }
+        }
         let Some(p) = &mut self.prompt else { return Outcome::Ignored };
         match p.input.handle(k) {
             InputResult::Ignored => return Outcome::Ignored,
             InputResult::Edited => {
+                let (value, cursor) = (p.input.value.clone(), p.input.cursor);
                 if p.target == PromptTarget::MetricSearch {
-                    self.metrics.search = p.input.value.clone();
+                    self.metrics.search = value.clone();
                     self.metrics.clamp_selection();
+                }
+                if let Some(s) = self.suggest_of(target) {
+                    s.edited(&value, cursor, now);
                 }
             }
             // A metric search keeps what was typed; Esc in the list clears it.
-            InputResult::Cancel => self.prompt = None,
+            InputResult::Cancel => {
+                self.prompt = None;
+                self.close_suggest(target);
+            }
             InputResult::Submit => {
+                self.close_suggest(target);
                 let p = self.prompt.take().unwrap();
                 let v = p.input.value.trim().to_string();
                 match p.target {
@@ -511,6 +630,13 @@ impl Embedded {
         Outcome::Consumed
     }
 
+    fn close_suggest(&mut self, target: PromptTarget) {
+        self.loader.cancel(Kind::Suggest);
+        if let Some(s) = self.suggest_of(target) {
+            s.close();
+        }
+    }
+
     /// Render the whole UI into `area`.
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
         if area.width < 20 || area.height < 6 {
@@ -522,14 +648,24 @@ impl Embedded {
                 .areas(area);
         self.draw_header(f, header);
         self.draw_tabs(f, tabs);
-        match self.view {
-            View::Overview => self.draw_overview(f, body),
-            View::Traces => self.draw_traces(f, body),
-            View::Logs => self.draw_logs(f, body),
-            View::Metrics => self.draw_metrics(f, body),
-            View::Status => self.draw_status(f, body),
+        if let Some(slug) = self.no_telemetry() {
+            let (slug, since) = (clean(slug).into_owned(), self.since().to_string());
+            self.draw_no_telemetry(f, body, &slug, &since);
+        } else {
+            match self.view {
+                View::Overview => self.draw_overview(f, body),
+                View::Traces => self.draw_traces(f, body),
+                View::Logs => self.draw_logs(f, body),
+                View::Metrics => self.draw_metrics(f, body),
+                View::Status => self.draw_status(f, body),
+            }
         }
         self.draw_footer(f, footer);
+        if let Some(target) = self.prompt.as_ref().map(|p| p.target)
+            && let Some(s) = self.suggest_of(target)
+        {
+            s.render(f, body, footer);
+        }
         if self.help {
             self.draw_help(f, body);
         }

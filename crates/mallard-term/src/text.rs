@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use serde::{Serialize, de::DeserializeOwned};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Bidi overrides and marks: they can make text display in another order
@@ -50,6 +51,37 @@ fn clean_impl(s: &str, keep_newlines: bool) -> Cow<'_, str> {
         }
     }
     Cow::Owned(out)
+}
+
+fn clean_line_or_text(s: &str, keep_newlines: bool) -> String {
+    if keep_newlines { clean_text(s).into_owned() } else { clean(s).into_owned() }
+}
+
+fn clean_value(v: &mut serde_json::Value, keep_newlines: bool) {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => *s = clean_line_or_text(s, keep_newlines),
+        Value::Array(a) => a.iter_mut().for_each(|x| clean_value(x, keep_newlines)),
+        Value::Object(o) => {
+            let old = std::mem::take(o);
+            for (k, mut x) in old {
+                clean_value(&mut x, keep_newlines);
+                o.insert(clean_line_or_text(&k, keep_newlines), x);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`clean_text`] (or [`clean`]) every string and object key inside an API response, so
+/// no field of it can carry terminal escape sequences, also a field added later. Used
+/// for all non-JSON output and the TUIs; `--json` output is escaped by serde instead.
+/// Fails closed: a value that does not survive the JSON round trip is an error, never
+/// returned uncleaned.
+pub fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> Result<T, serde_json::Error> {
+    let mut value = serde_json::to_value(&v)?;
+    clean_value(&mut value, keep_newlines);
+    serde_json::from_value(value)
 }
 
 /// Escape what serde_json leaves raw in strings (DEL, C1 controls, bidi
@@ -120,6 +152,29 @@ pub fn pad(s: &str, w: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_cleans_nested_strings_and_keys() {
+        let v = serde_json::json!({"t\x1b[2J": ["x\x1b]0;pwn\x07", {"k": "\u{9b}"}], "n": 1, "m": "a\nb"});
+        let s = sanitize(v.clone(), false).unwrap();
+        let text = s.to_string();
+        assert!(!text.contains('\u{1b}') && !text.contains('\u{9b}') && !text.contains('\u{7}'), "{text}");
+        assert!(text.contains("\"n\":1"));
+        assert_eq!(s["m"], "a b", "one line");
+        assert_eq!(sanitize(v, true).unwrap()["m"], "a\nb", "line breaks kept");
+    }
+
+    #[test]
+    fn sanitize_fails_closed() {
+        #[derive(Serialize, serde::Deserialize, Debug)]
+        struct Ratio {
+            label: String,
+            value: f64,
+        }
+        // NaN serializes to null, which does not deserialize as f64.
+        let r = sanitize(Ratio { label: "\x1b[2Jx".into(), value: f64::NAN }, false);
+        assert!(r.is_err(), "{r:?}");
+    }
 
     /// Payloads an app could send: OSC 52 (clipboard), a CSI that clears the
     /// screen, an OSC 8 link, a C1 CSI, a carriage return, a tab and a bidi

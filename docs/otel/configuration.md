@@ -131,8 +131,8 @@ greater than 0.
 
 | key | default | meaning |
 |---|---|---|
-| `memory_limit` | DuckDB default (80% of RAM) | Always set it in containers. Process memory peaks at about `memory_limit` + `otel.ingest.max_buffer_bytes` + 0.5 GB, e.g. `1GB` with a 256 MB buffer in 2 GiB. |
-| `threads` | all cores | DuckDB worker threads. |
+| `memory_limit` | DuckDB default (80% of RAM) | Always set it in containers. Process memory peaks at up to `memory_limit` + `otel.ingest.max_buffer_bytes` + 0.9 GiB with both sides under load, e.g. `1GB` with a 128 MB buffer in 2 GiB ([capacity](capacity.md#both-sides-in-one-container)). |
+| `threads` | all cores | DuckDB worker threads, or the container's CPU limit (`--cpus`). More threads use more memory: a 2 GiB container was measured with 4. |
 | `temp_directory` | DuckDB default | Spill location for large queries. |
 | `extension_directory` | `~/.duckdb/extensions` | Where extensions are installed. The image uses `/opt/duckdb/extensions`. |
 | `autoinstall_extensions` | `true` | Download missing extensions at start-up. The image sets `false` and ships them pre-installed. |

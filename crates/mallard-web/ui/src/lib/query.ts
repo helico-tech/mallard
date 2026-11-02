@@ -167,6 +167,25 @@ export function parseLogFilter(s: string): LogFilter | { error: string } {
   return f;
 }
 
+export interface IssueFilter {
+  tags: string[];
+  query?: string;
+}
+
+/** The search box of the issue list: `key=value` is a tag, other words search the
+ *  title and culprit. The server takes at most 10 tags. */
+export function parseIssueFilter(s: string): IssueFilter | { error: string } {
+  const tags: string[] = [];
+  const words: string[] = [];
+  for (const t of tokens(s)) {
+    const pair = splitPair(t);
+    if (pair) tags.push(`${pair[0]}:${pair[1]}`);
+    else words.push(t);
+  }
+  if (tags.length > 10) return { error: "at most 10 tag filters" };
+  return { tags, query: words.length ? words.join(" ") : undefined };
+}
+
 const LEVEL = /(^|\s)(level|lvl|severity|sev)=\S*/gi;
 
 /** `s` on the logs screen: all → info → warn → error → all, rewriting the `level=` token. */
@@ -183,6 +202,12 @@ export function setToken(filter: string, key: string, value: string): string {
   const kept = tokens(filter).filter((t) => !t.toLowerCase().startsWith(`${key.toLowerCase()}=`));
   const quote = (t: string) => (t.includes(" ") ? t.replace(/=(.*)$/, '="$1"') : t);
   return [...kept.map(quote), quote(`${key}=${value}`)].join(" ");
+}
+
+/** What `mallard find` can look up: 32 hex (trace, event) or 16 hex (issue, span). */
+export function parseFindId(s: string): string | null {
+  const hex = s.trim().replaceAll("-", "").toLowerCase();
+  return /^[0-9a-f]+$/.test(hex) && (hex.length === 32 || hex.length === 16) ? hex : null;
 }
 
 /** A trace id in any form; null when it is not one. */

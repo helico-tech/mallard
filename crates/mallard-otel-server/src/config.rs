@@ -23,6 +23,9 @@ pub struct Config {
     pub query: QueryConfig,
     pub auth: AuthConfig,
     pub duckdb: DuckDbConfig,
+    /// Set by a host that shares this DuckDB with another writer (ADR 0030). Not a setting.
+    #[serde(skip)]
+    pub commit_lock: mallard_duck::CommitLock,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

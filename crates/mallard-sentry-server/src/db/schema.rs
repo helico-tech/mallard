@@ -118,7 +118,10 @@ pub fn table_options() -> Vec<String> {
         "ALTER TABLE $S.events SET (parquet_compression = 'zstd')".into(),
         // Payloads are large and never filtered on: no min/max stats.
         "ALTER TABLE $S.events SET (skip_stats_columns = ['payload', 'message', 'exception_value'])".into(),
-        "ALTER TABLE $S.events SET (target_file_size = '64MB')".into(),
+        // Merging up to this size is what uses the most memory: events shrink about
+        // 20 times on disk. With 64MB compaction ran out of memory at a 1.2GB
+        // `duckdb.memory_limit`, with 16MB it did not (docs/otel/capacity.md).
+        "ALTER TABLE $S.events SET (target_file_size = '16MB')".into(),
         "ALTER TABLE $S.issues SET (data_inlining_row_limit = 10000)".into(),
         "ALTER TABLE $S.issue_activity SET (data_inlining_row_limit = 10000)".into(),
         "ALTER TABLE $S.artifact_files SET (data_inlining_row_limit = 10000)".into(),

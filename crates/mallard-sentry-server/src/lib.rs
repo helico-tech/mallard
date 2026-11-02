@@ -12,6 +12,7 @@
 //!     artifacts: None,
 //!     catalog_maintenance: None,
 //!     maintenance_threads: 0,
+//!     commit_lock: Default::default(),
 //! };
 //! let server = Server::with_connection(Config::default(), host, conn).await?;
 //! let app = axum::Router::new().nest("/sentry", server.router());
@@ -40,6 +41,9 @@ pub use hooks::{EventObserver, IngestError, SpanSink, Spans, Transaction, Transa
 use anyhow::Result;
 use db::Db;
 use mallard_common::auth::{AuthPolicy, Tokens};
+use mallard_common::http::ApiErr;
+use mallard_common::window::Window;
+use mallard_sentry_api::{EventDetail, EventSummary, IssueDetail, Project};
 use sourcemaps::SourceMaps;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -83,6 +87,7 @@ impl Server {
         let maintenance =
             db::maintenance::Maintenance { catalog_wide: host.catalog_maintenance, threads: host.maintenance_threads };
         let artifacts = host.artifacts.clone();
+        let commit_lock = host.commit_lock.clone();
         // Both create directories and open files: keep them off async threads.
         let (db, storage) = tokio::task::spawn_blocking(move || {
             let storage = artifacts.map(|a| Storage::new(&a.url, &a.options)).transpose()?;
@@ -95,7 +100,8 @@ impl Server {
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            anyhow::Ok((Db::with_connection(conn, &c, maintenance, mallard_duck::redact(&catalog))?, storage))
+            let db = Db::with_connection(conn, &c, maintenance, commit_lock, mallard_duck::redact(&catalog))?;
+            anyhow::Ok((db, storage))
         })
         .await??;
         if host.api_tokens.iter().all(|t| t.trim().is_empty()) {
@@ -177,6 +183,11 @@ impl Server {
         self.state.db.caches.projects.read().expect("lock").values().find(|p| p.slug == slug).map(|p| p.id)
     }
 
+    /// The id and slug of every project this process knows. Reads no catalog; [`Self::projects`] does.
+    pub fn project_slugs(&self) -> Vec<(u32, String)> {
+        self.state.db.caches.projects().into_iter().map(|p| (p.id, p.slug)).collect()
+    }
+
     /// Create a project (same rules as `POST /v1/projects`) and return its
     /// id. When the slug is taken, the existing project's id.
     pub async fn create_project(&self, name: &str, slug: &str, platform: Option<&str>) -> Result<u32> {
@@ -194,6 +205,37 @@ impl Server {
         }
     }
 
+    /// The longest window the query API accepts (`sentry.query.max_window`).
+    pub fn max_window(&self) -> std::time::Duration {
+        self.state.cfg.query.max_window
+    }
+
+    /// All projects, read from the catalog now; fails when it cannot be read.
+    pub async fn projects(&self) -> Result<Vec<Project>, ApiErr> {
+        self.state.all_projects().await
+    }
+
+    /// The project with this id or slug.
+    pub async fn project(&self, r: &str) -> Option<Project> {
+        self.state.project_ref(r).await
+    }
+
+    /// The events of one trace in the window, across projects (at most 50).
+    pub async fn trace_events(&self, w: Window, trace_id: uuid::Uuid) -> Result<Vec<EventSummary>, ApiErr> {
+        self.state.trace_events(w, trace_id).await
+    }
+
+    /// One event by id, in any project.
+    pub async fn find_event(&self, id: uuid::Uuid) -> Result<Option<EventDetail>, ApiErr> {
+        self.state.event_by_id(id).await
+    }
+
+    /// One issue by id (a 16 hex group hash), with the id of its project, in
+    /// `project` or in all projects.
+    pub async fn find_issues(&self, group: u64, project: Option<u32>) -> Result<Vec<(u32, IssueDetail)>, ApiErr> {
+        self.state.issues_by_id(group, project).await
+    }
+
     /// Ready to serve: the writer runs and the catalog answers. The error
     /// is a short reason (details are logged).
     pub async fn ready(&self) -> Result<(), String> {
@@ -207,10 +249,18 @@ impl Server {
     }
 
     /// Wait for `shutdown` to resolve, then stop cleanly (see [`Server::shutdown`]).
-    /// Same shape as `mallard_otel_server::Server::run_background`.
+    /// Same shape as `mallard_otel_server::Server::run_background`: it ends earlier, with an
+    /// error, when the catalog gets invalidated.
     pub async fn run_background(&self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        shutdown.await;
+        let lost = self.state.db.catalog_lost.clone();
+        tokio::select! {
+            () = shutdown => {}
+            () = lost.cancelled() => {}
+        }
         self.shutdown().await;
+        if lost.is_cancelled() {
+            anyhow::bail!(mallard_duck::CATALOG_INVALIDATED);
+        }
         Ok(())
     }
 

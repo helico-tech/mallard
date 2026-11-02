@@ -53,6 +53,13 @@ pub fn bad(msg: impl Into<String>) -> QueryError {
     QueryError::BadRequest(msg.into())
 }
 
+/// How many rows a lookup saw (up to its limit) and the earliest time among them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counted {
+    pub count: u64,
+    pub first: Option<DateTime<Utc>>,
+}
+
 /// Fixed-size pool of read connections.
 ///
 /// A connection and its semaphore permit always travel together inside the
@@ -277,6 +284,17 @@ impl Filter {
         self.add(format!("{col} >= ? AND {col} < ?"), [ts(w.from), ts(w.to)]);
     }
 
+    /// The repeated `service=` parameter. One value is `service_name = ?`, as it
+    /// always was; none adds nothing.
+    pub fn services(&mut self, services: &[String]) {
+        let values = services.iter().map(|s| Value::Text(s.clone()));
+        match services {
+            [] => {}
+            [_] => self.add("service_name = ?", values),
+            many => self.add(format!("service_name IN ({})", vec!["?"; many.len()].join(", ")), values),
+        }
+    }
+
     /// `key=value` filters on span/log/metric attributes or resource attributes.
     pub fn attributes(&mut self, spec: Option<&str>) -> QResult<()> {
         if let Some(spec) = spec {
@@ -325,6 +343,18 @@ pub fn json_str<T: serde::de::DeserializeOwned + Default>(s: Option<&str>) -> T 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_filter_keeps_one_value_as_it_was() {
+        let filter = |s: &[&str]| {
+            let mut f = Filter::default();
+            f.services(&s.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            (f.clauses, f.params.len())
+        };
+        assert_eq!(filter(&[]), (vec![], 0));
+        assert_eq!(filter(&["a"]), (vec!["service_name = ?".to_string()], 1));
+        assert_eq!(filter(&["a", "b"]), (vec!["service_name IN (?, ?)".to_string()], 2));
+    }
 
     #[test]
     fn trace_ids() {

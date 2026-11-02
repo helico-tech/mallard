@@ -17,7 +17,7 @@ test.describe("errors tab", () => {
   test.use({ viewport: { width: 1600, height: 900 } });
 
   test("list, open with the keyboard, sections, back", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("j");
     await page.keyboard.press("k");
@@ -45,7 +45,7 @@ test.describe("errors tab", () => {
   });
 
   test("older and newer events", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page.getByText(/^Event 1\//)).toBeVisible();
@@ -56,7 +56,7 @@ test.describe("errors tab", () => {
   });
 
   test("x goes to the trace, and x on the span back to the error", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/issues\//);
@@ -156,7 +156,7 @@ test.describe("shared rules", () => {
     await expect(page.getByText(trace!.start_time.slice(0, 19).replace("T", " "))).toBeVisible();
   });
 
-  test("t and T walk the presets; each side keeps its own window", async ({ page }) => {
+  test("t and T walk the presets; one window across both sides", async ({ page }) => {
     await page.goto("/telemetry/traces");
     await expect(page).toHaveURL(/w=1h/);
     await page.keyboard.press("t");
@@ -165,9 +165,9 @@ test.describe("shared rules", () => {
     await page.keyboard.press("T");
     await expect(page).toHaveURL(/w=15m/);
     await page.keyboard.press("F1");
-    await expect(page).toHaveURL(/\/errors\/.*w=24h/);
+    await expect(page).toHaveURL(/\/errors\?.*w=15m/);
     await page.keyboard.press("F2");
-    await expect(page).toHaveURL(/w=15m/);
+    await expect(page).toHaveURL(/\/telemetry\/traces\?.*w=15m/);
   });
 
   test("a toast does not take the keys away, an open dialog does", async ({ page }) => {
@@ -199,7 +199,7 @@ test.describe("shared rules", () => {
     await expect(page).toHaveURL(/w=1h/);
   });
 
-  const SCREENS = ["/errors", "/telemetry/overview", "/telemetry/traces", "/telemetry/logs", "/telemetry/metrics", "/telemetry/status"];
+  const SCREENS = ["/errors", "/errors/web", "/telemetry/overview?app=web", "/telemetry/overview?app=", "/telemetry/overview", "/telemetry/traces", "/telemetry/logs", "/telemetry/metrics", "/telemetry/status"];
   const SIZES = [{ width: 1440, height: 900 }, { width: 1280, height: 720 }, { width: 1024, height: 700 }, { width: 390, height: 800 }];
 
   for (const size of SIZES) {
@@ -310,7 +310,7 @@ test.describe("long values and reloads", () => {
   });
 
   test("Esc goes back to where you came from, past the tabs", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("tab", { name: "Stack trace" })).toBeVisible();
@@ -339,7 +339,7 @@ test.describe("long values and reloads", () => {
 
 test.describe("the TUI keeps its state", () => {
   test("Enter on the Events tab shows that event", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page.getByText(/^Event 1\//)).toBeVisible();
@@ -353,7 +353,7 @@ test.describe("the TUI keeps its state", () => {
   });
 
   test("a and w stay on across sections, and work from any section", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("tab", { name: "Stack trace" })).toBeVisible();
@@ -366,7 +366,7 @@ test.describe("the TUI keeps its state", () => {
   });
 
   test("F1 and F2 come back to the same view with its filter", async ({ page }) => {
-    await page.goto("/telemetry/traces?f=errors&w=6h");
+    await page.goto("/telemetry/traces?app=web&f=errors&w=6h");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("F1");
     await expect(page.getByLabel("Search issues")).toBeVisible();
@@ -412,18 +412,18 @@ test.describe("the TUI keeps its state", () => {
   });
 
   test("back follows the side's own stack, not the browser's", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("tab", { name: "Stack trace" })).toBeVisible();
     await page.keyboard.press("F2");
-    await expect(page.getByRole("heading", { name: "Services" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Worst operations" })).toBeVisible();
     await page.keyboard.press("F1");
     await expect(page.getByRole("tab", { name: "Stack trace" })).toBeVisible();
     await page.keyboard.press("t");
-    await expect(page).toHaveURL(/w=7d/);
+    await expect(page).toHaveURL(/w=6h/);
     await page.keyboard.press("Escape");
-    await expect(page).toHaveURL(/\/errors\/web\?.*w=7d/);
+    await expect(page).toHaveURL(/\/errors\/web\?.*w=6h/);
   });
 
   test("Enter in a search box applies and hands the keys back", async ({ page }) => {
@@ -438,7 +438,7 @@ test.describe("the TUI keeps its state", () => {
   });
 
   test("a closed menu gives Enter back to the list", async ({ page }) => {
-    await page.goto("/errors");
+    await page.goto("/errors/web");
     await expect(page.locator("table tbody tr").first()).toBeVisible();
     await page.keyboard.press("p");
     await expect(page.getByRole("listbox")).toBeVisible();
@@ -446,6 +446,23 @@ test.describe("the TUI keeps its state", () => {
     await expect(page.getByRole("listbox")).toBeHidden();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/issues\//);
+  });
+
+  test("on a slow machine, quick keys do not undo each other", async ({ page }) => {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.type("min=1ms");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/f=min/);
+    await page.keyboard.press("c");
+    await expect(page).not.toHaveURL(/f=/);
+    await page.keyboard.press("E");
+    await page.keyboard.press("t");
+    await expect(page).toHaveURL(/f=errors/);
+    await expect(page).toHaveURL(/w=6h/);
   });
 
   test("logs have a cursor from the start: o, Enter, q", async ({ page }) => {
@@ -492,6 +509,256 @@ test.describe("sign-in mode", () => {
     expect(await page.evaluate(() => document.cookie)).not.toContain("mallard_session");
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page.getByLabel("API token")).toBeVisible();
+  });
+});
+
+test.describe("one app and one window", () => {
+  const pick = async (page: Page, name: string) => {
+    await page.getByRole("combobox", { name: "App", exact: true }).click();
+    await page.getByRole("option", { name }).click();
+  };
+
+  test("the picker scopes telemetry, stays across tabs, and a link keeps it", async ({ page }) => {
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    const scoped = page.waitForRequest((r) => r.url().includes("/otel/api/v1/traces?") && r.url().includes("service=checkout-api"));
+    await pick(page, "checkout-api");
+    await scoped;
+    await expect(page).toHaveURL(/app=checkout-api/);
+    await page.keyboard.press("t");
+    await page.keyboard.press("3");
+    await expect(page.getByLabel("Filter logs")).toBeVisible();
+    await expect(page).toHaveURL(/app=checkout-api/);
+    await expect(page).toHaveURL(/w=6h/);
+    await expect(page.getByRole("log").getByRole("row").first()).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("combobox", { name: "App", exact: true })).toContainText("checkout-api");
+    await expect(page).toHaveURL(/w=6h/);
+    await pick(page, "All apps");
+    await expect(page).not.toHaveURL(/app=/);
+    await expect(page.getByRole("combobox", { name: "App", exact: true })).toContainText("All apps");
+  });
+
+  test("All apps: the errors tab asks for an app", async ({ page }) => {
+    await page.goto("/errors");
+    await expect(page.getByRole("heading", { name: "Pick an app" })).toBeVisible();
+    await page.getByRole("row", { name: /web/ }).click();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/errors\/web/);
+    await expect(page.getByRole("combobox", { name: "App", exact: true })).toContainText("web");
+    await page.keyboard.press("F2");
+    await expect(page).toHaveURL(/\/telemetry\/overview\?.*app=web/);
+    await page.keyboard.press("p");
+    await page.getByRole("option", { name: "api errors" }).click();
+    await expect(page).toHaveURL(/app=api/);
+    await expect(page.getByRole("listbox")).toBeHidden();
+    await page.keyboard.press("F1");
+    await expect(page).toHaveURL(/\/errors\/api/);
+  });
+
+  test("a side an app lacks says so, with the fix", async ({ page }) => {
+    await page.goto("/errors?app=checkout-api");
+    await expect(page.getByRole("heading", { name: "checkout-api has no error tracking" })).toBeVisible();
+    await expect(page.locator("main")).toContainText("mallard setup checkout-api");
+    await page.goto("/telemetry/traces?app=api");
+    await expect(page.getByRole("heading", { name: /api has no telemetry/ })).toBeVisible();
+    await expect(page.locator("main")).toContainText("mallard setup api");
+    await page.getByRole("button", { name: "Show all apps" }).click();
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+  });
+
+  test("a service filter can narrow an app, not leave it", async ({ page }) => {
+    await page.goto(`/telemetry/traces?app=web&f=${encodeURIComponent("service=payments")}`);
+    await expect(page.getByRole("heading", { name: "service=payments is not part of web" })).toBeVisible();
+    await page.getByRole("button", { name: "Clear the filter" }).click();
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+  });
+
+  test("the logs of a trace stay whole inside an app", async ({ page }) => {
+    const seen = page.waitForRequest((r) => r.url().includes("/otel/api/v1/logs?") && r.url().includes("trace_id="));
+    await page.goto(`/telemetry/logs?app=web&f=${encodeURIComponent(`trace=${"ab".repeat(16)}`)}`);
+    expect((await seen).url()).not.toContain("service=");
+  });
+
+  test("two service names with one slug are one app, and both are read", async ({ page, request }) => {
+    const now = Date.now();
+    for (const name of ["Two Names", "two-names"]) {
+      const res = await request.post(`${OTLP}/v1/traces`, {
+        data: { resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: name } }] }, scopeSpans: [{ spans: [
+          { traceId: "ef".repeat(16), spanId: name === "Two Names" ? "01".repeat(8) : "02".repeat(8), name: "op", kind: 2, startTimeUnixNano: `${now}000000`, endTimeUnixNano: `${now + 5}000000`, status: {} },
+        ] }] }] },
+      });
+      expect(res.ok()).toBeTruthy();
+    }
+    await expect(async () => {
+      const req = page.waitForRequest((r) => r.url().includes("/otel/api/v1/traces?"), { timeout: 2000 });
+      await page.goto("/telemetry/traces?app=two-names");
+      expect((await req).url()).toContain("service=Two+Names&service=two-names");
+    }).toPass({ timeout: 20_000 });
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+  });
+
+  test("a preset one side refuses is not offered, and a link to it does not fail", async ({ page }) => {
+    await page.route("**/otel/api/v1/stats", async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.capabilities.max_window_secs = 7 * 86400;
+      await route.fulfill({ response: res, json: body });
+    });
+    const problems = watch(page);
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.goto("/telemetry/traces?w=30d");
+    await expect(page).toHaveURL(/w=(1h|7d)/);
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.getByRole("combobox", { name: "Time window" }).click();
+    await expect(page.getByRole("option", { name: "Last 7d" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Last 14d" })).toHaveCount(0);
+    expect(problems.filter((p) => !p.includes("400"))).toEqual([]);
+  });
+
+  test("no issues in a short window offers a day", async ({ page }) => {
+    await page.goto("/errors/web?w=5m&q=nothing-matches-this");
+    await expect(page.getByRole("heading", { name: /No unresolved issues/ })).toBeVisible();
+    await page.getByRole("button", { name: "Show last 24h" }).click();
+    await expect(page).toHaveURL(/w=24h/);
+  });
+});
+
+test.describe("the app home page", () => {
+  test("shows both sides, and each number leads to what it counts", async ({ page }) => {
+    const problems = watch(page);
+    await page.goto("/telemetry/overview?app=web");
+    await expect(page.getByRole("heading", { name: "web", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Worst operations" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "New issues" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Error rate/ })).toBeVisible();
+    await page.getByRole("link", { name: /Events/ }).click();
+    await expect(page).toHaveURL(/\/errors\/web/);
+    await page.goBack();
+    await page.getByRole("link", { name: /Error rate/ }).click();
+    await expect(page).toHaveURL(/\/telemetry\/traces\?.*f=errors/);
+    await page.goBack();
+    const op = page.locator("table").last().getByRole("link").first();
+    await op.click();
+    await expect(page).toHaveURL(/\/telemetry\/traces\?.*f=op/);
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    expect(problems).toEqual([]);
+  });
+
+  test("an app with one side shows that side and how to add the other", async ({ page }) => {
+    const problems = watch(page);
+    await page.goto("/telemetry/overview?app=api");
+    await expect(page.getByRole("heading", { name: "New issues" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /api has no telemetry/ })).toBeVisible();
+    await page.goto("/telemetry/overview?app=checkout-api");
+    await expect(page.getByRole("heading", { name: "Worst operations" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "checkout-api has no error tracking" })).toBeVisible();
+    expect(problems).toEqual([]);
+  });
+});
+
+test.describe("the filter bar suggests", () => {
+  test("keys, then values; keyboard only, and Enter still applies", async ({ page }) => {
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.type("ser");
+    const list = page.getByRole("listbox", { name: /Suggestions/ });
+    await expect(list.getByRole("option", { name: /service=/ })).toBeVisible();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Tab");
+    await expect(page.getByLabel("Filter traces")).toHaveValue("service=");
+    await expect(list.getByRole("option", { name: /checkout-api/ })).toBeVisible();
+    await page.keyboard.type("check");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.getByLabel("Filter traces")).toHaveValue("service=checkout-api ");
+    await expect(list).toBeHidden();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/f=service%3Dcheckout-api/);
+  });
+
+  test("attribute values come with counts; nothing is taken unless you move to it", async ({ page }) => {
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.type("http.route=");
+    const list = page.getByRole("listbox", { name: /Suggestions/ });
+    await expect(list.getByRole("option", { name: /\/checkout/ })).toBeVisible();
+    await expect(list.getByRole("option").first()).toHaveText(/\d$/);
+    await page.keyboard.press("Escape");
+    await expect(list).toBeHidden();
+    await expect(page.getByLabel("Filter traces")).toHaveValue("http.route=");
+    await page.keyboard.press("Tab");
+    await expect(page.getByLabel("Filter traces")).not.toBeFocused();
+  });
+
+  test("logs suggest levels; issues suggest tags", async ({ page }) => {
+    await page.goto("/telemetry/logs");
+    await expect(page.getByRole("log").getByRole("row").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.type("level=w");
+    await expect(page.getByRole("option", { name: "warn" })).toBeVisible();
+    await page.goto("/errors/web");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.press("ArrowDown");
+    const option = page.getByRole("option").first();
+    await expect(option).toBeVisible();
+    const key = (await option.innerText()).split(/\s/)[0]!;
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.getByLabel("Search issues")).toHaveValue(`${key}=`);
+    await expect(page.getByRole("option").first()).toBeVisible();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    const reading = page.waitForRequest((r) => r.url().includes("/issues?") && r.url().includes("tag="));
+    await page.keyboard.press("Enter");
+    await reading;
+    await expect(page).toHaveURL(/q=/);
+  });
+});
+
+test.describe("search with Cmd-K", () => {
+  const box = (page: Page) => page.getByLabel("App name, or a trace, event, issue or span id");
+
+  test("paste a trace id and land on it", async ({ page, request }) => {
+    const res = await request.get("http://127.0.0.1:38080/otel/api/v1/traces?since=1h&limit=1", { headers: { authorization: `Bearer ${TOKEN}` } });
+    const [trace] = (await res.json()) as { trace_id: string }[];
+    await page.goto("/telemetry/status");
+    await expect(page.getByRole("heading", { name: "Ingest", exact: true })).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    await box(page).fill(trace!.trace_id);
+    await expect(page).toHaveURL(new RegExp(`/telemetry/traces/${trace!.trace_id}`));
+    await expect(page.getByRole("grid", { name: "Spans of the trace" })).toBeVisible();
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  test("an issue id opens the issue, and picks its app", async ({ page, request }) => {
+    const res = await request.get("http://127.0.0.1:38080/sentry/v1/projects/web/issues?since=1h&limit=1", { headers: { authorization: `Bearer ${TOKEN}` } });
+    const { issues } = (await res.json()) as { issues: { id: string }[] };
+    await page.goto("/telemetry/status");
+    await expect(page.getByRole("heading", { name: "Ingest", exact: true })).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    await box(page).fill(issues[0]!.id);
+    await expect(page).toHaveURL(new RegExp(`/errors/web/issues/${issues[0]!.id}`));
+    await expect(page.getByRole("combobox", { name: "App", exact: true })).toContainText("web");
+  });
+
+  test("an unknown id says so; a name finds apps; it works while typing elsewhere", async ({ page }) => {
+    await page.goto("/telemetry/traces");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.keyboard.press("/");
+    await page.keyboard.press("ControlOrMeta+k");
+    await box(page).fill("0".repeat(32));
+    await expect(page.getByText(/Nothing found for/)).toBeVisible();
+    await box(page).fill("check");
+    await expect(page.getByRole("option", { name: /checkout-api/ })).toBeVisible();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/app=checkout-api/);
+    await expect(page.getByRole("dialog")).toBeHidden();
   });
 });
 

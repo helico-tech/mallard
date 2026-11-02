@@ -2,10 +2,7 @@
 //! from `mallard_term`; what is here is specific to error tracking.
 
 pub(crate) use mallard_term::fmt::{age, bytes, relative_time, timestamp};
-pub(crate) use mallard_term::text::{clean, clean_text, pad, truncate, truncate_left, width};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
+pub(crate) use mallard_term::text::{clean, pad, truncate, truncate_left, width};
 
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -92,35 +89,7 @@ pub(crate) fn hbar(value: u64, max: u64, width: usize) -> String {
     s
 }
 
-fn clean_line_or_text(s: &str, keep_newlines: bool) -> String {
-    if keep_newlines { clean_text(s).into_owned() } else { clean(s).into_owned() }
-}
-
-fn clean_value(v: &mut Value, keep_newlines: bool) {
-    match v {
-        Value::String(s) => *s = clean_line_or_text(s, keep_newlines),
-        Value::Array(a) => a.iter_mut().for_each(|x| clean_value(x, keep_newlines)),
-        Value::Object(o) => {
-            let old = std::mem::take(o);
-            for (k, mut x) in old {
-                clean_value(&mut x, keep_newlines);
-                o.insert(clean_line_or_text(&k, keep_newlines), x);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// [`clean_text`] (or [`clean`]) every string and object key inside an API response, so
-/// no field of it can carry terminal escape sequences. Used for all
-/// non-JSON output; `--json` output is escaped by serde instead. Fails
-/// closed: a value that does not survive the JSON round trip is an error,
-/// never returned uncleaned.
-pub(crate) fn sanitize<T: Serialize + DeserializeOwned>(v: T, keep_newlines: bool) -> Result<T, serde_json::Error> {
-    let mut value = serde_json::to_value(&v)?;
-    clean_value(&mut value, keep_newlines);
-    serde_json::from_value(value)
-}
+pub(crate) use mallard_term::text::sanitize;
 
 #[cfg(test)]
 mod tests {
@@ -142,26 +111,6 @@ mod tests {
         assert_eq!(resample(&[], 3), vec![0, 0, 0]);
         let v: Vec<u64> = (0..24).collect();
         assert_eq!(resample(&v, 12).iter().sum::<u64>(), v.iter().sum::<u64>());
-    }
-
-    #[test]
-    fn sanitize_cleans_nested_strings_and_keys() {
-        let v = serde_json::json!({"t\x1b[2J": ["x\x1b]0;pwn\x07", {"k": "\u{9b}"}], "n": 1});
-        let s = sanitize(v, false).unwrap().to_string();
-        assert!(!s.contains('\u{1b}') && !s.contains('\u{9b}') && !s.contains('\u{7}'), "{s}");
-        assert!(s.contains("\"n\":1"));
-    }
-
-    #[test]
-    fn sanitize_fails_closed() {
-        #[derive(Serialize, serde::Deserialize, Debug)]
-        struct Ratio {
-            label: String,
-            value: f64,
-        }
-        // NaN serializes to null, which does not deserialize as f64.
-        let r = sanitize(Ratio { label: "\x1b[2Jx".into(), value: f64::NAN }, false);
-        assert!(r.is_err(), "{r:?}");
     }
 
     #[test]

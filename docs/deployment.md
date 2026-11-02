@@ -37,7 +37,7 @@ yourself.
 docker build -f deploy/docker/Dockerfile -t mallard .
 
 # Everything on a local volume (DuckDB catalog + local storage):
-docker run -d --name mallard -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
+docker run -d --name mallard --restart unless-stopped -p 8080:8080 -p 4318:4318 -p 4317:4317 -v mallard-data:/data \
   -e MALLARD_SERVER__API_TOKENS=change-me \
   -e MALLARD_SERVER__PUBLIC_URL=http://localhost:8080 \
   -e MALLARD_STORAGE__ARTIFACTS_PATH=/data/artifacts \
@@ -124,8 +124,12 @@ What holds on any platform, including Kubernetes:
   settings are `server.api_tokens` and, so that DSNs are right, `server.public_url`.
 - **Health**: `/healthz` for liveness and for start-up, and `/readyz` for readiness. Attaching the
   catalog can take a while, so allow up to 5 minutes at start-up.
-- **Stopping**: on `SIGTERM` the server flushes both sides. Give it at least 60 s; 90 s is
-  safer (`terminationGracePeriodSeconds: 90` in Kubernetes).
+- **Stopping**: on `SIGTERM` the server waits up to 20 s for requests in flight, then flushes both
+  sides. Give it at least 60 s; 90 s is safer (`terminationGracePeriodSeconds: 90` in Kubernetes).
+- **Restart policy**: required (`restart: unless-stopped` in compose, the default in Kubernetes). With a
+  DuckDB-file catalog, running out of memory during a catalog checkpoint can invalidate the catalog for the
+  whole process. Nothing can be stored until it is attached again, so the server logs that at `error`, stops
+  and exits with code 1. Without a restart policy it stays down. What was buffered and not yet flushed is lost.
 - **Security**: it runs as uid 10001 and needs no capabilities (drop them all), and the root
   filesystem can be read-only. It needs a writable `/data` and `/tmp`.
 - **Volumes**: with a DuckDB-file catalog, `/data` must persist, and only one process may
@@ -367,8 +371,9 @@ What to back up: the **catalog** and the **bucket**, together.
 
 Measured numbers are in [sentry/capacity.md](sentry/capacity.md) and
 [otel/capacity.md](otel/capacity.md). Set `duckdb.memory_limit` to about half the
-container memory: DuckDB uses some memory outside its limit, and the telemetry write
-buffer needs room too. Do not set a CPU limit below 1 core, or compaction throttles.
+container memory and keep container >= limit + `otel.ingest.max_buffer_bytes` + 0.9 GiB.
+A 2 GiB container runs `1GB`, a `128MB` buffer and 4 threads, as compose does; 4 GiB runs
+`2GB`, `256MB` and 8. Do not set a CPU limit below 1 core, or compaction throttles.
 
 ## Health and monitoring
 
@@ -377,7 +382,8 @@ buffer needs room too. Do not set a CPU limit below 1 core, or compaction thrott
   telemetry flush state and the catalog.
 - `GET /metrics`: Prometheus metrics (no token). For this side watch
   `mallard_sentry_write_batch_seconds`, `mallard_sentry_ingest_rejected_total`,
-  `mallard_sentry_write_errors_total`, `mallard_sentry_maintenance_errors_total` and
+  `mallard_sentry_write_errors_total`, `mallard_sentry_write_memory_retries_total` (a batch waited
+  because memory was short), `mallard_sentry_maintenance_errors_total` and
   `mallard_sentry_issue_overflow_events_total`. Telemetry:
   [otel/operations.md](otel/operations.md).
 - `mallard status`: both sides. `mallard errors info` or `GET /sentry/v1/info`: queue

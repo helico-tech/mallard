@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { fnv1a, levelLabel, resample, severityName, windowSeconds } from "./domain";
+import { fnv1a, levelLabel, resample, severityName, windowSeconds, windowsWithin } from "./domain";
 
 describe("domain", () => {
+  it("presets are cut to the smallest limit a side reports", () => {
+    expect(windowsWithin([])).toEqual(["5m", "15m", "1h", "6h", "24h", "7d", "14d", "30d"]);
+    expect(windowsWithin([undefined, 366 * 86400])).toContain("30d");
+    expect(windowsWithin([366 * 86400, 7 * 86400]).at(-1)).toBe("7d");
+    expect(windowsWithin([60])).toEqual(["5m"]);
+  });
   it("severity names", () => {
     expect(severityName(9, "")).toBe("INFO");
     expect(severityName(24, "")).toBe("FATAL");

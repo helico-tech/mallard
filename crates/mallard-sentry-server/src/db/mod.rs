@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, oneshot};
+use tokio_util::sync::CancellationToken;
 pub use writer::{EventWrite, NewBundle, NewBundleFile, WriteCmd, WriteError};
 
 #[derive(Debug, Clone)]
@@ -155,6 +156,8 @@ pub struct Db {
     pub queue_capacity: usize,
     writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     maintainer: Maintainer,
+    /// Cancelled when the writer found the catalog invalidated.
+    pub catalog_lost: CancellationToken,
     /// When the projects were last read because of a miss.
     project_refresh: Mutex<Option<Instant>>,
 }
@@ -246,6 +249,7 @@ impl Db {
         conn: Connection,
         cfg: &Config,
         settings: maintenance::Maintenance,
+        commit_lock: mallard_duck::CommitLock,
         catalog_desc: String,
     ) -> Result<Db> {
         let ns = Ns::new(mallard_duck::CATALOG, crate::SCHEMA);
@@ -271,8 +275,18 @@ impl Db {
         let (tx, rx) = crossbeam_channel::bounded(cfg.ingest.queue_capacity.max(1));
         let (maint_tx, maint_rx) = crossbeam_channel::bounded(16);
         let inlined = Arc::new(AtomicUsize::new(0));
-        let w =
-            writer::Writer::new(writer_conn, ns.clone(), rx, caches.clone(), cfg, maint_tx.clone(), inlined.clone())?;
+        let catalog_lost = CancellationToken::new();
+        let w = writer::Writer::new(
+            writer_conn,
+            ns.clone(),
+            rx,
+            caches.clone(),
+            cfg,
+            maint_tx.clone(),
+            inlined.clone(),
+            commit_lock,
+            catalog_lost.clone(),
+        )?;
         let handle = std::thread::Builder::new().name("ducklake-writer".into()).spawn(move || w.run())?;
         let stopping = Arc::new(AtomicBool::new(false));
         let interrupt = maintenance_conn.interrupt_handle();
@@ -304,6 +318,7 @@ impl Db {
                 interrupt,
                 thread: Arc::new(Mutex::new(Some(maint_handle))),
             },
+            catalog_lost,
             project_refresh: Mutex::new(None),
         })
     }
@@ -331,6 +346,13 @@ impl Db {
         if let Err(e) = self.read(move |c, ns| writer::load_projects(c, ns, &caches)).await {
             tracing::warn!(error = format!("{e:#}"), "reading the projects failed");
         }
+    }
+
+    /// Read the projects from the catalog now, and say when that fails. `None`:
+    /// not done in time.
+    pub async fn load_projects(&self, timeout: Duration) -> Result<Option<()>> {
+        let caches = self.caches.clone();
+        self.read_for(timeout, move |c, ns| writer::load_projects(c, ns, &caches)).await
     }
 
     /// Stop maintenance, write what is queued, flush inlined data and stop
@@ -607,7 +629,7 @@ pub(crate) mod tests {
         };
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let settings = maintenance::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
-        Db::with_connection(conn, &cfg, settings, "test".into()).unwrap()
+        Db::with_connection(conn, &cfg, settings, Default::default(), "test".into()).unwrap()
     }
 
     /// Dropping without `shutdown()` stops the writer and waits for it
@@ -853,6 +875,120 @@ pub(crate) mod tests {
 
     async fn count_events(db: &Db) -> i64 {
         db.read(|c, ns| Ok(c.query_row(&ns.sql("SELECT count(*) FROM $S.events"), [], |r| r.get(0))?)).await.unwrap()
+    }
+
+    /// Issue 0132, with a real allocation error. Memory that comes back within the retries
+    /// costs no event; memory that stays short fails the batch once the retries run out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn short_memory_does_not_fail_a_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: dir.path().join("lake").display().to_string(),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let limits = conn.try_clone().unwrap();
+        let mut cfg = Config::default();
+        cfg.ingest.batch_window = Duration::from_millis(10);
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let db = Db::with_connection(conn, &cfg, settings, Default::default(), "test".into()).unwrap();
+        // The lowest limit DuckDB takes: about what it uses right now.
+        let short = || {
+            [4, 8, 16, 32, 64, 128]
+                .into_iter()
+                .find(|mb| limits.execute_batch(&format!("SET memory_limit = '{mb}MB'")).is_ok())
+                .expect("a limit near what is in use");
+        };
+        let enough = || limits.execute_batch("SET memory_limit = '1GB'").unwrap();
+
+        short();
+        let reply = queue_event(&db, "comes back", Utc::now());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        enough();
+        reply.await.unwrap().unwrap();
+        assert_eq!(count_events(&db).await, 1);
+
+        short();
+        let t0 = Instant::now();
+        let failed = queue_event(&db, "stays short", Utc::now()).await.unwrap();
+        let waited = t0.elapsed();
+        enough();
+        assert!(mallard_duck::is_out_of_memory(&failed.unwrap_err()));
+        assert!(waited >= Duration::from_secs(2), "tried again for about 2.5 s, not {waited:?}");
+        queue_event(&db, "later", Utc::now()).await.unwrap().unwrap();
+        assert_eq!(count_events(&db).await, 2);
+        db.shutdown().await;
+    }
+
+    /// Issue 0130, with DuckDB's own invalidation, as a failed checkpoint of the catalog causes
+    /// it (not through an out-of-memory error): the writer says so, without waiting for retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_writer_notices_an_invalidated_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: dir.path().join("lake").display().to_string(),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let other = conn.try_clone().unwrap();
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let db = Db::with_connection(conn, &Config::default(), settings, Default::default(), "test".into()).unwrap();
+        assert!(!db.catalog_lost.is_cancelled());
+        other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+
+        let t0 = Instant::now();
+        let failed = queue_event(&db, "not stored", Utc::now()).await.unwrap();
+        assert!(mallard_duck::is_invalidated(&failed.unwrap_err()));
+        assert!(t0.elapsed() < Duration::from_secs(2), "no retries: {:?}", t0.elapsed());
+        assert!(db.catalog_lost.is_cancelled());
+        db.shutdown().await;
+    }
+
+    /// With nothing to write, the regular read of what other processes wrote notices it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_writer_notices_an_invalidated_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: dir.path().join("lake").display().to_string(),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let other = conn.try_clone().unwrap();
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
+        let db = Db::with_connection(conn, &Config::default(), settings, Default::default(), "test".into()).unwrap();
+        other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+        // `SYNC_INTERVAL` is 100 ms in tests.
+        tokio::time::timeout(Duration::from_secs(30), db.catalog_lost.cancelled()).await.unwrap();
+        db.shutdown().await;
+    }
+
+    /// Issue 0144: events commit one at a time with the other side of the process.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_waits_for_a_commit_of_the_other_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: format!("{}/lake/", dir.path().display()),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let mut cfg = Config::default();
+        cfg.ingest.batch_window = Duration::from_millis(10);
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 0 };
+        let lock = mallard_duck::CommitLock::default();
+        let db = Db::with_connection(conn, &cfg, settings, lock.clone(), "test".into()).unwrap();
+        let other_side = lock.hold();
+        let mut rx = queue_event(&db, "waits", Utc::now());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(rx.try_recv().is_err(), "committed during a commit of the other side");
+        drop(other_side);
+        rx.await.unwrap().unwrap();
+        db.shutdown().await;
     }
 
     /// Sentry issue 0003: compaction and flushes run next to the writer. Events

@@ -118,8 +118,11 @@ impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             flush_interval: Duration::from_secs(300),
-            flush_rows: 50_000,
-            compact_interval: Duration::from_secs(3600),
+            // Both measured in 2 GiB at 300 events/s: flushing 50k events at once got the
+            // container killed, and merging 10 min of events ran out of memory
+            // (docs/otel/capacity.md).
+            flush_rows: 10_000,
+            compact_interval: Duration::from_secs(120),
         }
     }
 }
@@ -192,6 +195,8 @@ pub struct Host {
     /// DuckDB threads while compacting (`SET threads` is global). 0 = leave
     /// the setting alone; must be 0 on a shared connection.
     pub maintenance_threads: usize,
+    /// Shared with other writers on this DuckDB (ADR 0030).
+    pub commit_lock: mallard_duck::CommitLock,
 }
 
 /// Object storage for sourcemap bundles.
@@ -289,6 +294,7 @@ mod tests {
             artifacts: None,
             catalog_maintenance: None,
             maintenance_threads: 0,
+            commit_lock: Default::default(),
         };
         host("https://x.example/sentry").validate().unwrap();
         for bad in ["data:x", "localhost:8000", "/sentry"] {

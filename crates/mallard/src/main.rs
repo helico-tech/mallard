@@ -7,10 +7,12 @@
 //! live here. The old `errors …` / `telemetry …` paths stay as hidden
 //! aliases of the same commands.
 
+mod apps;
 mod errors;
 mod find;
 mod help;
 mod schema;
+mod scope;
 mod series;
 mod server;
 mod setup;
@@ -21,7 +23,8 @@ mod tui;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{FromArgMatches, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, FromArgMatches, Parser, Subcommand};
 use mallard_client::Client;
 use mallard_term::color::ColorChoice;
 use mallard_term::error::{Described, Kind};
@@ -47,6 +50,9 @@ struct Cli {
     /// Sentry project id or slug (issues, events, …); optional with one project.
     #[arg(short, long, env = "MALLARD_PROJECT", global = true)]
     project: Option<String>,
+    /// An app (see `mallard apps`): its project and services, in place of -p and -S.
+    #[arg(long, global = true, value_name = "SLUG")]
+    app: Option<String>,
     /// Output format: text, json (compact when piped) or ndjson (one item per line).
     #[arg(long, env = "MALLARD_FORMAT", value_enum, global = true)]
     format: Option<Format>,
@@ -76,6 +82,12 @@ enum Cmd {
     Status,
     /// Create a project if it does not exist; print its DSN and the OTLP env vars.
     Setup(setup::SetupArgs),
+    /// Apps: a project and the services with the same slug, or either alone (default window 24h).
+    Apps {
+        /// Services need data in this window; projects are always listed.
+        #[command(flatten)]
+        window: WindowArgs,
+    },
     /// What is this id (trace, event, issue or span)? Prints matches and the command to see more.
     Find {
         /// A trace or event id (32 hex) or an issue or span id (16 hex).
@@ -218,6 +230,8 @@ enum SchemaCmd {
 struct Run {
     client: Client,
     project: Option<String>,
+    /// From `--app`: commands without `-S` are scoped to these.
+    services: Vec<String>,
     output: Output,
 }
 
@@ -232,7 +246,13 @@ impl Run {
     fn otel(&self) -> mallard_otel_cli::Ctx {
         mallard_otel_cli::Ctx::new(self.client.otel.clone())
             .with_output(self.output.clone())
+            .with_services(self.services.clone())
             .with_error_lookup(std::sync::Arc::new(errors::SentryErrors(self.client.clone())))
+    }
+
+    /// What to send as `service`: the `-S` of the command, or the `--app`'s services.
+    fn services(&self, service: Option<String>) -> Vec<String> {
+        service.map_or_else(|| self.services.clone(), |s| vec![s])
     }
 }
 
@@ -251,7 +271,7 @@ async fn main() -> ExitCode {
 /// line on stderr, like every other error.
 fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Cli, ExitCode> {
     let args: Vec<std::ffi::OsString> = args.into_iter().collect();
-    let res = help::command().try_get_matches_from(&args).and_then(|m| Cli::from_arg_matches(&m));
+    let res = help::command().try_get_matches_from(&args).and_then(|m| cli_from(&m));
     match res {
         Ok(cli) => Ok(cli),
         // --help and --version.
@@ -271,6 +291,34 @@ fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Cli, Exi
             Err(ExitCode::from(Kind::Usage.exit_code()))
         }
     }
+}
+
+/// The arguments as a [`Cli`]. `--app` replaces `-p`, so both on the command line is a
+/// usage error; `MALLARD_PROJECT` is only a default, and gives way to the flag. An empty
+/// `--app` means no app, as in the web UI ("All apps"). `-p` on a command without a project
+/// is a usage error as well; `MALLARD_PROJECT` is harmless there, and so is an empty `-p`.
+fn cli_from(m: &ArgMatches) -> Result<Cli, clap::Error> {
+    let mut cli = Cli::from_arg_matches(m)?;
+    cli.app = cli.app.filter(|a| !a.trim().is_empty());
+    let flag = matches!(m.value_source("project"), Some(ValueSource::CommandLine));
+    if flag
+        && cli.project.as_deref().is_some_and(|p| !p.trim().is_empty())
+        && let Some(why) = scope::project_flag_problem(&cli.cmd)
+    {
+        return Err(clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, why));
+    }
+    if cli.app.is_some() {
+        match m.value_source("project") {
+            Some(ValueSource::CommandLine) => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--app already chooses the project: use --app or -p, not both\n",
+                ));
+            }
+            _ => cli.project = None,
+        }
+    }
+    Ok(cli)
 }
 
 /// Whether the raw arguments (or `MALLARD_FORMAT`) ask for JSON output.
@@ -293,11 +341,16 @@ async fn run(cli: Cli) -> Result<()> {
         cmd => cmd,
     };
     let client = Client::new(&cli.url, cli.token.as_deref()).map_err(|e| described(e, &cli.url))?;
-    let r = Run { client, project: cli.project, output };
+    let scope = match &cli.app {
+        Some(slug) => scope::resolve(&client, slug, &cmd).await?,
+        None => scope::Scope { project: cli.project, services: vec![] },
+    };
+    let r = Run { client, project: scope.project, services: scope.services, output };
     match cmd {
         Cmd::Server(_) => unreachable!("handled above"),
         Cmd::Status => status::run(&r).await,
         Cmd::Setup(a) => setup::run(&r, a).await,
+        Cmd::Apps { window } => apps::run(&r, &window).await,
         Cmd::Find { id, window, wait } => find::run(&r, &id, &window, &wait).await,
         Cmd::Issues(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Issues(c), &r.sentry()).await,
         Cmd::Events(c) => mallard_sentry_cli::run(mallard_sentry_cli::Command::Events(c), &r.sentry()).await,
@@ -370,7 +423,7 @@ mod tests {
 
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
         let args: Vec<&str> = std::iter::once("mallard").chain(args.iter().copied()).collect();
-        help::command().try_get_matches_from(args).and_then(|m| Cli::from_arg_matches(&m))
+        help::command().try_get_matches_from(args).and_then(|m| cli_from(&m))
     }
 
     #[test]
@@ -383,6 +436,8 @@ mod tests {
         for args in [
             &["status"][..],
             &["setup", "checkout", "--platform", "node"],
+            &["apps"],
+            &["apps", "--since", "7d"],
             &["find", "0af7651916cd43dd8448eb211c80319c"],
             &["issues", "list", "--new", "--first-release", "web@1", "--since", "1h"],
             &["issues", "list", "--from", "2h", "--to", "1h", "--sort", "count", "-n", "10"],
@@ -485,6 +540,82 @@ mod tests {
         let cli = parse_ok(&["logs", "--format", "ndjson", "--raw"]);
         assert_eq!((cli.format, cli.raw), (Some(Format::Ndjson), true));
         assert!(try_parse(&["logs", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn app_replaces_project_and_services() {
+        for args in [
+            &["--app", "web", "issues", "list"][..],
+            &["issues", "list", "--app", "web"],
+            &["logs", "--app", "web", "--since", "5m"],
+            &["tui", "--app", "web"],
+        ] {
+            assert_eq!(parse_ok(args).app.as_deref(), Some("web"), "{args:?}");
+        }
+        assert_eq!(parse_ok(&["--app", "", "-p", "x", "issues", "list"]).app, None, "empty: no app");
+        for args in [&["--app", "web", "-p", "x", "issues", "list"][..], &["issues", "list", "-p", "x", "--app", "web"]]
+        {
+            let e = try_parse(args).err().expect("a conflict");
+            assert!(e.to_string().contains("--app or -p"), "{e}");
+        }
+    }
+
+    #[test]
+    fn project_flag_only_where_there_is_a_project() {
+        let id = "0af7651916cd43dd8448eb211c80319c";
+        for args in [
+            &["services", "-p", "web"][..],
+            &["-p", "web", "logs"],
+            &["traces", "list", "-p", "web"],
+            &["trace", id, "-p", "web"],
+            &["status", "-p", "web"],
+            &["projects", "list", "-p", "web"],
+            &["projects", "show", "web", "-p", "other"],
+            &["sql", "SELECT 1", "-p", "web"],
+            &["series", "spans", "-p", "web"],
+            &["telemetry", "services", "-p", "web"],
+            &["errors", "projects", "list", "-p", "web"],
+        ] {
+            let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
+            assert!(e.to_string().contains("-p does not apply to this command"), "{args:?}: {e}");
+        }
+        for args in
+            [&["events", "list", "--trace", id, "-p", "web"][..], &["errors", "events", "list", "-t", id, "-p", "web"]]
+        {
+            let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
+            assert!(e.to_string().contains("searched across all projects"), "{args:?}: {e}");
+        }
+        for args in [
+            &["issues", "list", "-p", "web"][..],
+            &["events", "list", "-p", "web"],
+            &["events", "show", "e", "-p", "web"],
+            &["releases", "list", "-p", "web"],
+            &["sourcemaps", "list", "-p", "web"],
+            &["find", id, "-p", "web"],
+            &["series", "errors", "-p", "web"],
+            &["tui", "-p", "web"],
+            &["errors", "stats", "-p", "web"],
+            &["services", "-p", ""],
+            &["projects", "show", "web"],
+            &["errors", "projects", "show", "web"],
+        ] {
+            parse_ok(args);
+        }
+    }
+
+    #[tokio::test]
+    async fn app_is_a_usage_error_where_it_cannot_apply() {
+        for args in [
+            &["--url", "http://127.0.0.1:9", "--app", "web", "status"][..],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "services"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "logs", "-S", "x"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "ops", "-S", "x"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "events", "list", "--trace", "abc"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "telemetry", "health"],
+        ] {
+            let res = run(parse_ok(args)).await;
+            assert_eq!(mallard_term::error::exit_code(&res), 2, "{args:?}");
+        }
     }
 
     #[test]

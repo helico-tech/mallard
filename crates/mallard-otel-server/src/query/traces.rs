@@ -10,9 +10,12 @@ use mallard_otel_api::{
 use serde::Deserialize;
 
 use super::{
-    Cursor, Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, parse_span_id, parse_trace_id,
-    span_hex, trace_hex,
+    Counted, Cursor, Filter, QResult, QueryError, Window, bad, enum_col, from_micros, json_col, parse_span_id,
+    parse_trace_id, span_hex, trace_hex,
 };
+
+/// Most spans read for one trace.
+const MAX_TRACE_SPANS: u32 = 100_000;
 
 /// Entry spans: where requests enter a service.
 const ENTRY: &str = "(kind IN ('SERVER', 'CONSUMER') OR parent_span_id IS NULL)";
@@ -65,14 +68,12 @@ pub fn services(conn: &Connection, w: &Window, entry_only: bool) -> QResult<Vec<
 pub fn operations(
     conn: &Connection,
     w: &Window,
-    service: Option<&str>,
+    service: &[String],
     entry_only: bool,
 ) -> QResult<Vec<OperationSummary>> {
     let mut f = Filter::default();
     f.window("start_time", w);
-    if let Some(s) = service {
-        f.add("service_name = ?", [Value::Text(s.into())]);
-    }
+    f.services(service);
     if entry_only {
         f.add(ENTRY, []);
     }
@@ -92,15 +93,13 @@ pub fn span_series(
     conn: &Connection,
     w: &Window,
     step: u64,
-    service: Option<&str>,
+    service: &[String],
     operation: Option<&str>,
     entry_only: bool,
 ) -> QResult<SpanSeries> {
     let mut f = Filter::default();
     f.window("start_time", w);
-    if let Some(s) = service {
-        f.add("service_name = ?", [Value::Text(s.into())]);
-    }
+    f.services(service);
     if let Some(o) = operation {
         f.add("name = ?", [Value::Text(o.into())]);
     }
@@ -138,7 +137,7 @@ pub fn span_series(
 }
 
 pub struct TraceSearch<'a> {
-    pub service: Option<&'a str>,
+    pub service: &'a [String],
     pub operation: Option<&'a str>,
     pub errors_only: bool,
     pub min_duration_ms: Option<f64>,
@@ -157,9 +156,7 @@ pub struct TraceSearch<'a> {
 pub fn search(conn: &Connection, w: &Window, q: &TraceSearch) -> QResult<(Vec<TraceSummary>, Option<String>)> {
     let mut f = Filter::default();
     f.window("start_time", w);
-    if let Some(s) = q.service {
-        f.add("service_name = ?", [Value::Text(s.into())]);
-    }
+    f.services(q.service);
     if let Some(o) = q.operation {
         f.add("name = ?", [Value::Text(o.into())]);
     }
@@ -320,7 +317,7 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
     let tid = parse_trace_id(trace_id)?;
     let sql = format!(
         "SELECT {} FROM spans WHERE trace_id = ?::UUID AND start_time >= ? AND start_time < ? \
-         ORDER BY start_time, span_id LIMIT 100000",
+         ORDER BY start_time, span_id LIMIT {MAX_TRACE_SPANS}",
         span_select("")
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -331,6 +328,21 @@ pub fn get(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Trace> {
         return Err(QueryError::NotFound(format!("trace {tid} not found in the time window")));
     }
     Ok(Trace { trace_id: tid, spans })
+}
+
+/// The spans of one trace in the window: how many (up to what [`get`] returns)
+/// and when the first one started, without reading them.
+pub fn count(conn: &Connection, w: &Window, trace_id: &str) -> QResult<Counted> {
+    let tid = parse_trace_id(trace_id)?;
+    let sql = format!(
+        "SELECT count(*), epoch_us(min(start_time)) FROM (SELECT start_time FROM spans \
+         WHERE trace_id = ?::UUID AND start_time >= ? AND start_time < ? LIMIT {MAX_TRACE_SPANS})"
+    );
+    let (count, first) =
+        conn.query_row(&sql, params_from_iter([Value::Text(tid), super::ts(w.from), super::ts(w.to)]), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+        })?;
+    Ok(Counted { count: count as u64, first: first.map(from_micros) })
 }
 
 /// The newest span with this id in the window (span ids are unique in

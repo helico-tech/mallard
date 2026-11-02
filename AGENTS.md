@@ -21,17 +21,18 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build
 
 Web UI: `crates/mallard-web/README.md` (`npm run dev|test|e2e` in `crates/mallard-web/ui`).
 JS end-to-end tests with real Sentry SDKs against `mallard serve`: `e2e/sentry/README.md`.
-After API changes: `UPDATE_OPENAPI=1 cargo test -p mallard-otel-server -p mallard-sentry-server --test openapi`
-rewrites `docs/otel/openapi.json` and `docs/sentry/openapi.json` (tests check them).
+After API changes: `UPDATE_OPENAPI=1 cargo test -p mallard-otel-server -p mallard-sentry-server -p mallard-server --test openapi`
+rewrites `docs/otel/openapi.json`, `docs/sentry/openapi.json` and `docs/openapi.json` (tests check them).
 The compose stack end to end, with restart: `deploy/compose/test.sh <image:tag>` (CI runs it).
 
 ## Map
 
 | path | what |
 |---|---|
-| `crates/mallard` | the `mallard` binary: one flat tree (`status`, `setup`, `find`, `issues`, `traces`, `logs`, `web`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases; feature `server` (default) adds `serve`, `check`, `maintenance`, `install-extensions` (ADR 0023) |
+| `crates/mallard` | the `mallard` binary: one flat tree (`status`, `setup`, `apps`, `find`, `issues`, `traces`, `logs`, `web`, …; ADR 0008); `errors …`/`telemetry …` are hidden aliases; feature `server` (default) adds `serve`, `check`, `maintenance`, `install-extensions` (ADR 0023) |
 | `crates/mallard-web` | the Web UI behind `mallard web`: React + Kumo in `ui/`, compiled in, with a same-origin proxy to the server (ADR 0016) |
-| `crates/mallard-server` | library behind `mallard serve`: embeds both sides on one DuckLake connection; config, routes, readiness, shutdown, `commands` (what the server commands run); `src/bridge/`: Sentry transactions and streamed spans → OTel spans, OTel exceptions → issues (ADR 0009, 0013, 0021) |
+| `crates/mallard-server` | library behind `mallard serve`: embeds both sides on one DuckLake connection; config, routes, readiness, shutdown, `commands` (what the server commands run); `src/api.rs`: `/api/v1/apps` and `/api/v1/find` (ADR 0027); `src/bridge/`: Sentry transactions and streamed spans → OTel spans, OTel exceptions → issues (ADR 0009, 0013, 0021) |
+| `crates/mallard-api` | the types of `/api/v1/...`, shared by the server and the slim CLI |
 | `crates/mallard-common` | shared by both sides: durations, sizes, windows, `ApiError`; feature `server`: config loader, tokens, HTTP helpers, logging, signals, Prometheus (ADR 0005) |
 | `crates/mallard-duck` | the only `duckdb` dependency: storage/DuckDB config, `open_connection`, extensions, secrets, quoting, redaction, maintenance lease |
 | `crates/mallard-client` | one client for both APIs + trace correlation |
@@ -68,7 +69,8 @@ Only `mallard` is built as a product binary (plus the load generators
   use `Q`/`J` extractors so bad input gets that body too.
 - One DuckDB connection is shared: catalog `lake`, schemas `sentry` and
   `otel` (ADR 0001). Libraries never change global DuckDB settings on a
-  shared connection; `mallard-server` owns `[duckdb]`.
+  shared connection; `mallard-server` owns `[duckdb]`. A writer that commits
+  to the lake holds the shared `mallard_duck::CommitLock` around `COMMIT` (ADR 0030).
 - All timestamps are UTC `TIMESTAMP` (bundled DuckDB has no ICU).
 - Tables are append-only. Sentry: write rows only on the writer thread
   (`mallard-sentry-server/src/db/writer.rs`), flush and compact on the maintenance thread

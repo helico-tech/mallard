@@ -6,11 +6,13 @@
 //! - `/api/0/...`   sentry-cli's API again (it only accepts a URL root)
 //! - `/otel/...`    telemetry query API (`/otel/api/v1/...`, `/otel/docs`)
 //! - `/v1/traces|logs|metrics`  OTLP/HTTP (also on `server.otlp_http_addr`)
+//! - `/api/v1/apps`, `/api/v1/find`  what spans both sides (ADR 0027)
 //! - `/healthz`, `/readyz`, `/metrics` (on `server.metrics_addr` instead
 //!   when that is set)
 //!
 //! OTLP/gRPC is served on `server.otlp_grpc_addr`.
 
+pub mod api;
 pub mod bridge;
 pub mod commands;
 pub mod config;
@@ -25,13 +27,19 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::server::TcpIncoming;
 use tower_http::{catch_panic::CatchPanicLayer, compression::CompressionLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 
 pub use config::Config;
 use config::{OTEL_PREFIX, SENTRY_PREFIX};
 
 /// Path of the sentry-cli API.
 const SENTRY_CLI_PREFIX: &str = "/api/0";
+
+/// How long a stop waits for requests in flight. A client holding one open must not hold up
+/// the final flush, or the exit (issue 0152). Well below the 60 s `docs/deployment.md` asks for
+/// on `SIGTERM`, so the flush still has time.
+const RECEIVERS_GRACE: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(500) } else { std::time::Duration::from_secs(20) };
 
 /// sentry-cli (Rust, 2.x and 3.x) refuses a `--url` with a path ("not on URL
 /// root"), so its API is served on the root as well as under `/sentry`.
@@ -70,10 +78,17 @@ pub struct Platform {
     metrics: Option<PrometheusHandle>,
 }
 
+/// What each side gets on one connection: they commit one at a time (ADR 0030).
+fn sides_on_one_connection(cfg: &Config) -> (mallard_otel_server::config::Config, mallard_sentry_server::Host) {
+    let (mut otel, sentry) = (cfg.otel_config(), cfg.sentry_host());
+    otel.commit_lock = sentry.commit_lock.clone();
+    (otel, sentry)
+}
+
 impl Platform {
     /// Open the shared DuckLake catalog and start both libraries on it.
     pub async fn new(cfg: Config) -> Result<Platform> {
-        let ocfg = cfg.otel_config();
+        let (ocfg, host) = sides_on_one_connection(&cfg);
         let (st, db) = (cfg.storage.clone(), cfg.duckdb.clone());
         let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
             .await?
@@ -81,7 +96,7 @@ impl Platform {
         let otel = Arc::new(
             mallard_otel_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?,
         );
-        let sentry = mallard_sentry_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
+        let sentry = mallard_sentry_server::Server::with_connection(cfg.sentry.clone(), host, conn)
             .await
             .context("starting sentry")?;
         let bridge = bridge::install(&cfg.bridge, &sentry, &otel).context("starting the bridge")?;
@@ -109,7 +124,9 @@ impl Platform {
     /// Everything served on `server.http_addr`.
     pub fn http_router(&self) -> Router {
         let (sentry, otel) = (self.sentry.clone(), self.otel.clone());
+        let api_state = Arc::new(api::ApiState { otel: self.otel.clone(), sentry: self.sentry.clone() });
         let mut r = Router::new()
+            .merge(api::router(api_state, &self.cfg.server.api_tokens))
             .nest(SENTRY_PREFIX, self.sentry.router())
             .nest_service(SENTRY_CLI_PREFIX, sentry_cli_at_root(self.sentry.router()))
             .nest(OTEL_PREFIX, self.otel.api_router())
@@ -216,13 +233,24 @@ impl Platform {
             shutdown.cancel();
             r
         };
+        let aborts = [t1.abort_handle(), t2.abort_handle(), t3.abort_handle(), t4.abort_handle()];
         let receivers = async {
-            let (a, b, c, d) = tokio::join!(t1, t2, t3, t4);
+            let all = async { tokio::join!(t1, t2, t3, t4) };
+            let give_up = async {
+                shutdown.cancelled().await;
+                tokio::time::sleep(RECEIVERS_GRACE).await;
+                warn!("requests still open after the grace period; stopping without them");
+                aborts.iter().for_each(|a| a.abort());
+                std::future::pending::<()>().await;
+            };
+            let (a, b, c, d) = tokio::select! { all = all => all, () = give_up => unreachable!() };
             receivers_down.cancel();
-            a??;
-            b??;
-            c??;
-            d??;
+            for r in [a, b, c, d] {
+                match r {
+                    Err(e) if e.is_cancelled() => {}
+                    r => r??,
+                }
+            }
             anyhow::Ok(())
         };
         let (r, o, s, (), ()) = tokio::join!(receivers, otel_bg, sentry_bg, transactions_bg, exceptions_bg);
@@ -303,6 +331,12 @@ async fn bind(addr: &str) -> Result<TcpListener> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn both_sides_share_one_commit_lock() {
+        let (otel, sentry) = super::sides_on_one_connection(&super::Config::default());
+        assert!(otel.commit_lock.is_shared_with(&sentry.commit_lock));
+    }
+
     use super::*;
 
     /// If a background job cannot start, the receivers stop and `serve_on` returns
@@ -343,6 +377,107 @@ mod tests {
         .await
         .expect("serve_on must return when a background job fails");
         assert!(r.is_err());
+    }
+
+    /// Issue 0130, with DuckDB's own invalidation of the catalog (not through an out-of-memory
+    /// error): the first data that cannot be stored stops the server, with an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invalidated_catalog_stops_the_server_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["t".into()];
+        cfg.storage.catalog = dir.path().join("catalog.ducklake").display().to_string();
+        cfg.storage.data_path = format!("{}/lake/", dir.path().display());
+        let conn = mallard_duck::open_connection(&cfg.storage, &cfg.duckdb).unwrap();
+        let otel = Arc::new(
+            mallard_otel_server::Server::with_connection(cfg.otel_config(), conn.try_clone().unwrap()).await.unwrap(),
+        );
+        let sentry = mallard_sentry_server::Server::with_connection(
+            cfg.sentry.clone(),
+            cfg.sentry_host(),
+            conn.try_clone().unwrap(),
+        )
+        .await
+        .unwrap();
+        let bridge = bridge::install(&cfg.bridge, &sentry, &otel).unwrap();
+        let platform = Platform { cfg: Arc::new(cfg), otel, sentry, bridge, metrics: None };
+        let bound = || TcpListener::bind("127.0.0.1:0");
+        let listeners = Listeners {
+            http: bound().await.unwrap(),
+            otlp_http: bound().await.unwrap(),
+            otlp_grpc: bound().await.unwrap(),
+            metrics: None,
+        };
+        let otlp = listeners.otlp_http.local_addr().unwrap();
+        let serving = tokio::spawn(platform.serve_on(listeners, CancellationToken::new()));
+
+        let send_a_log = || async {
+            let body = r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"x"}}]}]}]}"#;
+            let to = format!("http://{otlp}/v1/logs");
+            let client = reqwest::Client::new();
+            client.post(to).header("content-type", "application/json").body(body).send().await.unwrap().status()
+        };
+
+        // Flushed: the server runs, so what follows is not a failure to start.
+        assert_eq!(send_a_log().await, 200);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let n: i64 = conn.query_row("SELECT count(*) FROM lake.otel.logs", [], |r| r.get(0)).unwrap();
+            if n == 1 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the first log was not flushed");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        conn.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+        conn.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+        assert_eq!(send_a_log().await, 200);
+
+        let r = tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+            .await
+            .expect("serve_on must return when the catalog is invalidated")
+            .unwrap();
+        assert!(r.unwrap_err().to_string().contains("invalidated"));
+    }
+
+    /// Issue 0152: a client in the middle of a request does not hold up the stop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_held_open_does_not_hold_up_the_stop() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.api_tokens = vec!["t".into()];
+        cfg.storage.catalog = dir.path().join("catalog.ducklake").display().to_string();
+        cfg.storage.data_path = format!("{}/lake/", dir.path().display());
+        let platform = Platform::new(cfg).await.unwrap();
+        let bound = || TcpListener::bind("127.0.0.1:0");
+        let listeners = Listeners {
+            http: bound().await.unwrap(),
+            otlp_http: bound().await.unwrap(),
+            otlp_grpc: bound().await.unwrap(),
+            metrics: None,
+        };
+        let otlp = listeners.otlp_http.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let serving = tokio::spawn(platform.serve_on(listeners, shutdown.clone()));
+
+        // Headers and only part of the body: the handler waits for the rest.
+        let mut held = tokio::net::TcpStream::connect(otlp).await.unwrap();
+        held.write_all(
+            b"POST /v1/logs HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{",
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+            .await
+            .expect("serve_on must return while the request is still open")
+            .unwrap()
+            .unwrap();
+        drop(held);
     }
 
     #[tokio::test]

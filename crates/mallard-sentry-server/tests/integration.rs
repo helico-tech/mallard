@@ -48,6 +48,7 @@ impl TestServer {
             }),
             catalog_maintenance: Some(Duration::from_secs(3600)),
             maintenance_threads: 1,
+            commit_lock: Default::default(),
         };
         let server = Server::with_connection(cfg, host, conn).await.unwrap();
         Self::serve(server, listener, dir).await
@@ -674,6 +675,38 @@ async fn host_hooks_and_in_process_events() {
     t.stop().await;
 }
 
+/// A name without a slug means the app of that name. A project with that slug under the slug
+/// rule already is that app, and a second one would take its services (issue 0149).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_name_without_a_slug_compares_through_the_slug_rule() {
+    let t = TestServer::start().await;
+    let post = |body: Value| t.api(reqwest::Method::POST, "/v1/projects", Some(body));
+    let (s, mine) = post(json!({"name": "x", "slug": "my_app"})).await;
+    assert_eq!(s, 201, "`_` stays allowed in a slug: {mine}");
+
+    for name in ["my_app", "my-app", "My App", "my__app"] {
+        let (s, v) = post(json!({"name": name})).await;
+        assert_eq!(s, 409, "{name}: {v}");
+        assert_eq!(v["error"], "conflict", "{v}");
+        assert!(v["message"].as_str().unwrap().contains("\"my_app\""), "says which one: {v}");
+    }
+    let (s, v) = post(json!({"name": "my_app two"})).await;
+    assert_eq!((s, v["slug"].as_str()), (201, Some("my-app-two")), "another name is another app: {v}");
+
+    // A slug that was asked for is taken as is, also next to such a project (issue 0150).
+    let (s, v) = post(json!({"name": "x", "slug": "my-app"})).await;
+    assert_eq!((s, v["slug"].as_str()), (201, Some("my-app")), "{v}");
+    let (s, v) = post(json!({"name": "x", "slug": "my_app"})).await;
+    assert_eq!(s, 409, "the same slug twice: {v}");
+
+    // Bad names say the same as before.
+    assert_eq!(post(json!({"name": "42"})).await.0, 400, "numeric slug");
+    assert_eq!(post(json!({"name": "!!"})).await.0, 400, "empty slug");
+    let slugs: Vec<_> = t.get("/v1/projects").await.as_array().unwrap().iter().map(|p| p["slug"].clone()).collect();
+    assert_eq!(slugs, ["my_app", "my-app-two", "my-app"]);
+    t.stop().await;
+}
+
 /// Build an artifact bundle like sentry-cli does (SYSB header + zip).
 fn bundle(debug_id: &str, minified: &str, map: &str) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -838,6 +871,7 @@ async fn embedded_with_shared_connection_and_clean_shutdown() {
         artifacts: None,
         catalog_maintenance: None,
         maintenance_threads: 0,
+        commit_lock: Default::default(),
     };
     let server = Server::with_connection(cfg, host, conn).await.unwrap();
     // ...and mounts us below a prefix.
@@ -978,4 +1012,36 @@ async fn envelope_sent_at_corrects_the_client_clock() {
     let off = (first_seen - (now - chrono::Duration::minutes(10))).num_seconds().abs();
     assert!(off < 30, "first seen {first_seen} is {off} s off");
     t.stop().await;
+}
+
+/// Issue 0130, with DuckDB's own invalidation of the catalog (not through an out-of-memory
+/// error): the event is refused and `run_background` ends with an error, so the process exits.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invalidated_catalog_ends_the_background_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = mallard_duck::StorageConfig {
+        catalog: dir.path().join("catalog.ducklake").display().to_string(),
+        data_path: dir.path().join("lake").display().to_string(),
+        ..Default::default()
+    };
+    let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+    let other = conn.try_clone().unwrap();
+    let host = Host {
+        public_url: "http://localhost/sentry".into(),
+        api_tokens: vec![TOKEN.into()],
+        artifacts: None,
+        catalog_maintenance: None,
+        maintenance_threads: 0,
+        commit_lock: Default::default(),
+    };
+    let server = Server::with_connection(Config::default(), host, conn).await.unwrap();
+    let project = server.create_project("web", "web", None).await.unwrap();
+
+    other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
+    other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
+    assert!(server.ingest_event(project, json!({"message": "not stored"})).await.is_err());
+
+    let never = std::future::pending();
+    let ended = tokio::time::timeout(Duration::from_secs(30), server.run_background(never)).await.unwrap();
+    assert!(ended.unwrap_err().to_string().contains("invalidated"));
 }

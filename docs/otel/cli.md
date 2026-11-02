@@ -26,7 +26,8 @@ mallard sql "SELECT name, count(*) FROM spans WHERE start_time > now()::TIMESTAM
 
 ## TUI
 
-`mallard tui` opens both sides as tabs; F2 is this one, with five views. It refreshes
+`mallard tui` opens both sides as tabs, with one app picker (`p`) and one time window
+([cli.md](../cli.md)); F2 is this one, with five views. It refreshes
 itself (every 5 s, the log tail every 2 s) and keeps your selection across refreshes.
 
 | view | shows |

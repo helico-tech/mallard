@@ -3,7 +3,8 @@
 use super::*;
 
 pub(super) fn render_issues(f: &mut Frame, area: Rect, app: &mut App) {
-    let stats_h = if area.height >= 22 { 7 } else { 0 };
+    // With no project there are no stats to load.
+    let stats_h = if area.height >= 22 && (app.project.is_some() || !app.hosted) { 7 } else { 0 };
     let [stats, filters, table] =
         Layout::vertical([Constraint::Length(stats_h), Constraint::Length(1), Constraint::Min(0)]).areas(area);
     if stats_h > 0 {
@@ -101,7 +102,10 @@ fn render_filters(f: &mut Frame, area: Rect, app: &App) {
     let mut right = vec![];
     if !app.query.is_empty() {
         right.push(Span::styled("/ ", th::key()));
-        right.push(Span::styled(format!("{} ", fmt::truncate(&app.query, 24)), Style::new().fg(th::YELLOW)));
+        right.push(Span::styled(
+            format!("{} ", fmt::truncate(&fmt::clean(&app.query), 24)),
+            Style::new().fg(th::YELLOW),
+        ));
         right.push(Span::styled("(esc clears)  ", th::faint()));
     }
     right.push(Span::styled("sort ", th::faint()));
@@ -125,7 +129,21 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
 
     let window = app.window.since();
     if app.issues.is_empty() {
-        let lines = if let Some(e) = &app.issues_error {
+        let lines = if let Some(slug) = &app.no_project {
+            let slug = fmt::clean(slug);
+            vec![
+                Line::from(Span::styled(format!("App {slug} has no project, so no errors here"), th::bold())),
+                Line::from(Span::styled(
+                    format!("{} setup {slug} gives it a DSN · p picks another app", app.hints.command),
+                    th::dim(),
+                )),
+            ]
+        } else if app.hosted && app.project.is_none() && app.issues_error.is_none() {
+            vec![
+                Line::from(Span::styled("Pick an app to see its errors", th::bold())),
+                Line::from(Span::styled("errors are per project: press p to choose", th::dim())),
+            ]
+        } else if let Some(e) = &app.issues_error {
             vec![
                 Line::from(Span::styled(format!("✗ {e}"), Style::new().fg(th::RED).bold())),
                 Line::from(Span::styled("R retries", th::dim())),
@@ -143,13 +161,21 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
         } else {
             let what =
                 if app.status == StatusFilter::All { String::new() } else { format!("{} ", app.status.as_str()) };
-            let q = if app.query.is_empty() { String::new() } else { format!(" matching \"{}\"", app.query) };
+            let q =
+                if app.query.is_empty() { String::new() } else { format!(" matching \"{}\"", fmt::clean(&app.query)) };
             vec![
                 Line::from(Span::styled(
                     format!("✓ No {what}issues{q} in the last {window}"),
                     Style::new().fg(th::GREEN).bold(),
                 )),
-                Line::from(Span::styled("t widens the time window · tab switches status · / searches", th::dim())),
+                Line::from(Span::styled(
+                    if app.offers_day() {
+                        "d: show last 24h · t widens the time window · tab switches status · / searches"
+                    } else {
+                        "t widens the time window · tab switches status · / searches"
+                    },
+                    th::dim(),
+                )),
             ]
         };
         let y = inner.y + inner.height.saturating_sub(u16_sat(lines.len())) / 2;

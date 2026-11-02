@@ -2255,10 +2255,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mallard-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mallard-common",
+ "serde",
+ "serde_json",
+ "utoipa",
+]
+
+[[package]]
 name = "mallard-client"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mallard-api",
  "mallard-otel-client",
  "mallard-sentry-client",
  "serde",
@@ -2396,6 +2408,7 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "url",
  "utoipa",
  "utoipa-axum",
  "uuid",
@@ -2516,6 +2529,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http 0.7.1",
  "tracing",
@@ -2536,6 +2550,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "mallard-api",
  "mallard-client",
  "mallard-common",
  "mallard-duck",
@@ -2558,6 +2573,8 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "utoipa",
+ "utoipa-axum",
  "uuid",
  "xxhash-rust",
 ]

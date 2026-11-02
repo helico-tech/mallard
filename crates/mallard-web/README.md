@@ -23,6 +23,8 @@ this machine it needs HTTPS: the session cookie is `Secure`, so put TLS in front
 Signing in keeps the token in memory (12 hours, or until a restart); the cookie holds
 only a random id.
 
+One app and one time window hold for every screen, in the address (`?app=&w=`, ADR 0028).
+
 The compose stack (`deploy/compose/docker-compose.yml`) runs it as the `web` service,
 in sign-in mode, on http://localhost:8088.
 

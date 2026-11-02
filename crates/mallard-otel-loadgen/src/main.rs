@@ -718,6 +718,7 @@ impl Sender {
             };
             this.c.bytes.fetch_add(body.len() as u64, Relaxed);
             let mut backoff = Duration::from_millis(250);
+            let mut last = String::new();
             for _ in 0..8 {
                 let mut r = this
                     .http
@@ -741,6 +742,7 @@ impl Sender {
                         return;
                     }
                     Ok(resp) if resp.status() == 429 || resp.status() == 503 => {
+                        last = format!("HTTP {}", resp.status());
                         this.c.throttled.fetch_add(1, Relaxed);
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(Duration::from_secs(5));
@@ -755,11 +757,13 @@ impl Sender {
                     Err(e) => {
                         // Retried below; only counted as failed when we give up.
                         eprintln!("{path}: {e} (retrying)");
+                        last = e.to_string();
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(Duration::from_secs(5));
                     }
                 }
             }
+            eprintln!("{path}: gave up after 8 tries, the last: {last}");
             this.c.failed.fetch_add(1, Relaxed);
         });
     }

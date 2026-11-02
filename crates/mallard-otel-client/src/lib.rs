@@ -132,6 +132,19 @@ impl Client {
         Self::send(self.req(reqwest::Method::GET, path).query(q)).await
     }
 
+    /// A request with one `service` parameter per value, which the query structs
+    /// can't carry.
+    fn scoped<Q: Serialize + ?Sized>(&self, path: &str, q: &Q, services: &[String]) -> reqwest::RequestBuilder {
+        let services: Vec<(&str, &str)> = services.iter().map(|s| ("service", s.as_str())).collect();
+        self.req(reqwest::Method::GET, path).query(q).query(&services)
+    }
+
+    /// GET any JSON path under the base URL, with the token and these errors.
+    /// For the server's API next to the telemetry one (`mallard-client`).
+    pub async fn get_json<T: DeserializeOwned, Q: Serialize + ?Sized>(&self, path: &str, q: &Q) -> Result<T> {
+        self.get(path, q).await
+    }
+
     pub async fn health(&self) -> Result<Health> {
         self.get("/api/v1/health", &()).await
     }
@@ -142,18 +155,18 @@ impl Client {
         self.get("/api/v1/services", q).await
     }
     pub async fn operations(&self, q: &OperationQuery) -> Result<Vec<OperationSummary>> {
-        self.get("/api/v1/operations", q).await
+        Self::send(self.scoped("/api/v1/operations", q, &q.service)).await
     }
     pub async fn span_series(&self, q: &SpanSeriesQuery) -> Result<SpanSeries> {
-        self.get("/api/v1/spans/series", q).await
+        Self::send(self.scoped("/api/v1/spans/series", q, &q.service)).await
     }
     pub async fn traces(&self, q: &TraceQuery) -> Result<Vec<TraceSummary>> {
-        self.get("/api/v1/traces", q).await
+        Self::send(self.scoped("/api/v1/traces", q, &q.service)).await
     }
     /// [`Client::traces`] and the cursor of the next page (`None` on the
     /// last page); pass it back as `q.cursor`.
     pub async fn traces_page(&self, q: &TraceQuery) -> Result<(Vec<TraceSummary>, Option<String>)> {
-        Self::send_page(self.req(reqwest::Method::GET, "/api/v1/traces").query(q)).await
+        Self::send_page(self.scoped("/api/v1/traces", q, &q.service)).await
     }
     /// `span_id`: 16 hex characters.
     pub async fn span(&self, span_id: &str, q: &TraceGetQuery) -> Result<Span> {
@@ -171,24 +184,24 @@ impl Client {
         self.get(&format!("/api/v1/traces/{id}"), q).await
     }
     pub async fn logs(&self, q: &LogQuery) -> Result<Vec<LogRecord>> {
-        self.get("/api/v1/logs", q).await
+        Self::send(self.scoped("/api/v1/logs", q, &q.service)).await
     }
     /// [`Client::logs`] and the cursor of the next page (`None` on the last
     /// page); pass it back as `q.cursor`.
     pub async fn logs_page(&self, q: &LogQuery) -> Result<(Vec<LogRecord>, Option<String>)> {
-        Self::send_page(self.req(reqwest::Method::GET, "/api/v1/logs").query(q)).await
+        Self::send_page(self.scoped("/api/v1/logs", q, &q.service)).await
     }
     pub async fn log_series(&self, q: &LogSeriesQuery) -> Result<LogSeries> {
-        self.get("/api/v1/logs/series", q).await
+        Self::send(self.scoped("/api/v1/logs/series", q, &q.service)).await
     }
     pub async fn metrics(&self, q: &MetricListQuery) -> Result<Vec<MetricInfo>> {
-        self.get("/api/v1/metrics", q).await
+        Self::send(self.scoped("/api/v1/metrics", q, &q.service)).await
     }
     pub async fn metric_query(&self, q: &MetricQuery) -> Result<MetricQueryResult> {
-        self.get("/api/v1/metrics/query", q).await
+        Self::send(self.scoped("/api/v1/metrics/query", q, &q.service)).await
     }
     pub async fn attributes(&self, q: &AttributeQuery) -> Result<AttributeStats> {
-        self.get("/api/v1/attributes", q).await
+        Self::send(self.scoped("/api/v1/attributes", q, &q.service)).await
     }
     pub async fn schema(&self) -> Result<Schema> {
         self.get("/api/v1/schema", &()).await

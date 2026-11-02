@@ -51,3 +51,6 @@ Node SDKs send no `ingest_settings` and no `infer_ip`, so nothing changes for th
 `infer_ip` of metric and log items is not read, because those items are not stored.
 `docs/sentry/compatibility.md` has the rule. The new fixtures are raw captures; nothing
 had to be removed.
+
+Decision by the owner, 2026-11-02: follow the SDK, with no server switch (option A of three: also a server
+off switch; off by default). So an SDK that asks for it gets the address stored.

@@ -85,7 +85,9 @@ Symbolication runs **before** grouping, so a JS issue survives rebuilds.
 
 - **One writer thread** (`ducklake-writer`, a plain OS thread) owns the write
   connection. Row writes from anywhere else are bugs. This rules out DuckLake
-  write conflicts inside the process and makes batching natural.
+  write conflicts inside this side and makes batching natural. Its commits take
+  a `mallard_duck::CommitLock` shared with the OTLP flusher, so they do not starve it
+  on a shared connection ([ADR 0030](../adr/0030-one-lake-commit-at-a-time.md)).
 - **One maintenance thread** (`ducklake-maintenance`, own connection) flushes
   inlined data and compacts, next to the writer. Retention runs on the writer
   thread: its `DELETE` conflicts with concurrent inserts

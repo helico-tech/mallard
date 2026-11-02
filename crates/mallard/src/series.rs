@@ -70,6 +70,17 @@ pub(crate) struct ErrorArgs {
     step: Option<String>,
 }
 
+impl SeriesCmd {
+    /// The window and `-S` of a telemetry series; `None` for the errors series.
+    pub(crate) fn scope(&self) -> Option<(&WindowArgs, Option<&String>)> {
+        match self {
+            SeriesCmd::Spans(a) => Some((&a.w, a.service.as_ref())),
+            SeriesCmd::Logs(a) => Some((&a.w, a.service.as_ref())),
+            SeriesCmd::Errors(_) => None,
+        }
+    }
+}
+
 /// One bucket of Sentry events.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ErrorPoint {
@@ -90,7 +101,7 @@ pub(crate) async fn run(r: &Run, cmd: SeriesCmd) -> Result<()> {
                 from: Some(w.from),
                 to: Some(w.to),
                 since: None,
-                service: a.service,
+                service: r.services(a.service),
                 operation: a.operation,
                 step: a.step,
                 entry_only: Some(!a.all_spans),
@@ -113,7 +124,7 @@ pub(crate) async fn run(r: &Run, cmd: SeriesCmd) -> Result<()> {
                 from: Some(w.from),
                 to: Some(w.to),
                 since: None,
-                service: a.service,
+                service: r.services(a.service),
                 q: a.query,
                 step: a.step,
             };

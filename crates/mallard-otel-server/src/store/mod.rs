@@ -23,6 +23,7 @@ pub struct Lake {
     pub schema: String,
     pub catalog_kind: CatalogKind,
     pub data_path: String,
+    pub(crate) commit_lock: mallard_duck::CommitLock,
 }
 
 /// True when `e` is DuckLake's transaction conflict with a concurrent
@@ -66,6 +67,7 @@ impl Lake {
             schema: SCHEMA.into(),
             catalog_kind: cfg.storage.catalog_kind(),
             data_path: cfg.storage.data_path.clone(),
+            commit_lock: cfg.commit_lock.clone(),
         };
         lake.migrate()?;
         Ok(lake)

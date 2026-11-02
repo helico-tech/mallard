@@ -69,6 +69,18 @@ impl Window {
         Ok(Self { from, to })
     }
 
+    /// The newest part of the window, growing: its last 1 hour, 6 hours, 1 day and
+    /// 1 week, as far as those are shorter than the window, and the whole window.
+    /// For suggestions, which need a sample rather than every row: stop at the
+    /// first part with enough rows, and the cost no longer grows with the window.
+    pub fn newest_first(&self) -> Vec<Window> {
+        let parts = [1, 6, 24, 7 * 24].into_iter().filter_map(|hours| {
+            let from = self.to.checked_sub_signed(TimeDelta::hours(hours))?;
+            (from > self.from).then_some(Window { from, to: self.to })
+        });
+        parts.chain([*self]).collect()
+    }
+
     /// Length in seconds.
     pub fn secs(&self) -> f64 {
         (self.to - self.from).num_microseconds().unwrap_or(i64::MAX) as f64 / 1e6
@@ -158,6 +170,22 @@ mod tests {
         let w = Window::resolve(Some(t), Some(t + TimeDelta::minutes(5)), Some("1h"), HOUR, HOUR).unwrap();
         assert_eq!(w.secs(), 300.0, "from wins over since");
         assert!(Window::resolve(Some(t), Some(t + TimeDelta::hours(2)), None, HOUR, HOUR).is_err());
+    }
+
+    #[test]
+    fn newest_first_grows_up_to_the_window() {
+        let t = Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap();
+        let lengths = |days: i64| {
+            let w = Window { from: t - TimeDelta::days(days), to: t };
+            let parts = w.newest_first();
+            assert!(parts.iter().all(|p| p.to == t));
+            assert_eq!(parts.last(), Some(&w));
+            parts.iter().map(|p| (p.to - p.from).num_hours()).collect::<Vec<_>>()
+        };
+        assert_eq!(lengths(30), [1, 6, 24, 168, 720]);
+        assert_eq!(lengths(7), [1, 6, 24, 168], "no empty step at the end");
+        let short = Window { from: t - TimeDelta::minutes(5), to: t };
+        assert_eq!(short.newest_first(), [short]);
     }
 
     #[test]

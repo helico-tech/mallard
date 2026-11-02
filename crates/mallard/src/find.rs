@@ -1,5 +1,5 @@
-//! `mallard find <id>`: what is this id? 32 hex characters can be a trace
-//! or a Sentry event (both are tried), 16 hex characters an issue (every
+//! `mallard find <id>`: what is this id? `GET /api/v1/find` knows: 32 hex
+//! characters can be a trace or a Sentry event, 16 hex characters an issue (every
 //! project is tried) or a span. Each match says how to see more (`next`).
 //! No match is exit code 4. Free values (request ids, user ids) are not
 //! searched yet.
@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use mallard_client::mallard_api::{FindId, FindMatch, FindQuery};
 use mallard_term::error::{Described, Kind, usage};
 use mallard_term::output::List;
 use mallard_term::text::clean;
@@ -28,6 +29,40 @@ pub(crate) enum Match {
     Span { span_id: String, trace_id: String, service: String, name: String, next: String },
 }
 
+/// What the server found, with the command to see more.
+impl From<FindMatch> for Match {
+    fn from(m: FindMatch) -> Match {
+        match m {
+            FindMatch::Trace { trace_id, spans, errors, logs, .. } => Match::Trace {
+                next: format!("mallard trace {trace_id}"),
+                trace_id,
+                spans: spans as usize,
+                errors: errors as usize,
+                logs: logs as usize,
+            },
+            FindMatch::Event { event_id, issue_id, project_id, title, trace_id, .. } => Match::Event {
+                next: format!("mallard events show {event_id} --issue {issue_id} -p {project_id}"),
+                event_id,
+                issue_id,
+                project_id,
+                title,
+                trace_id,
+            },
+            FindMatch::Issue { issue_id, project, title, status, count, .. } => Match::Issue {
+                next: format!("mallard issues show {issue_id} -p {project}"),
+                issue_id,
+                project,
+                title,
+                status,
+                count,
+            },
+            FindMatch::Span { span_id, trace_id, service, name, .. } => {
+                Match::Span { next: format!("mallard trace {trace_id}"), span_id, trace_id, service, name }
+            }
+        }
+    }
+}
+
 impl Match {
     fn line(&self) -> String {
         match self {
@@ -45,44 +80,29 @@ impl Match {
     }
 }
 
-/// What kind of id this can be.
-#[derive(Debug, PartialEq, Eq)]
-enum IdKind {
-    /// Trace id or Sentry event id.
-    Hex32(String),
-    /// Issue id or span id.
-    Hex16(String),
-}
-
-fn kind_of(id: &str) -> Option<IdKind> {
-    let hex: String = id.trim().chars().filter(|c| *c != '-').collect::<String>().to_ascii_lowercase();
-    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    match hex.len() {
-        32 => Some(IdKind::Hex32(hex)),
-        16 => Some(IdKind::Hex16(hex)),
-        _ => None,
-    }
-}
-
 pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs, wait: &WaitArgs) -> Result<()> {
-    let kind = kind_of(id).ok_or_else(|| {
+    let hex = FindId::parse(id).ok_or_else(|| {
         usage(format!(
             "{:?} is not an id mallard can look up: use a trace or event id (32 hex) or an issue or span id (16 hex)",
             clean(id)
         ))
     })?;
+    let (FindId::Hex32(hex) | FindId::Hex16(hex)) = hex;
     // The window is resolved on every try: with --wait it moves along.
     let fetch = || async {
         let w = window.resolve(WINDOW)?;
-        let matches = match &kind {
-            IdKind::Hex32(id) => hex32(r, id, w.from, w.to).await?,
-            IdKind::Hex16(id) => hex16(r, id, w.from, w.to).await?,
-        };
-        anyhow::Ok((w, matches))
+        let q =
+            FindQuery { id: hex.clone(), project: r.project.clone(), from: Some(w.from), to: Some(w.to), since: None };
+        let found = r.client.find(&q).await.map_err(|e| crate::described(e, r.client.base_url()))?;
+        let (matches, warnings) = found.map_or_else(Default::default, |f| (f.matches, f.warnings));
+        let matches: Vec<Match> = matches.into_iter().map(Match::from).collect();
+        anyhow::Ok((w, matches, warnings))
     };
-    let ((w, matches), waited) = until(&r.output, wait, fetch, |(_, m)| !m.is_empty()).await?.split();
+    let ((w, matches, warnings), waited) = until(&r.output, wait, fetch, |(_, m, _)| !m.is_empty()).await?.split();
+    // A source that failed next to a match: the list may be incomplete.
+    for warning in &warnings {
+        eprintln!("warning: {}", clean(warning));
+    }
     let list = List::new(matches).window(w);
     if r.output.text() {
         for m in &list.items {
@@ -101,124 +121,43 @@ pub(crate) async fn run(r: &Run, id: &str, window: &WindowArgs, wait: &WaitArgs)
     Ok(())
 }
 
-async fn hex32(
-    r: &Run,
-    id: &str,
-    from: chrono::DateTime<chrono::Utc>,
-    to: chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<Match>> {
-    let c = &r.client;
-    let (trace, event) = tokio::join!(c.trace_overview_in(id, from, to), c.sentry.find_event(id));
-    let mut out = Vec::new();
-    let mut errors = Vec::new();
-    match trace {
-        Ok(t) if !(t.spans.is_empty() && t.errors.is_empty() && t.logs.is_empty()) => out.push(Match::Trace {
-            trace_id: t.trace_id.to_string(),
-            spans: t.spans.len(),
-            errors: t.errors.len(),
-            logs: t.logs.len(),
-            next: format!("mallard trace {}", t.trace_id),
-        }),
-        Ok(_) => {}
-        Err(e) => errors.push(crate::described(e, c.base_url())),
-    }
-    match event {
-        Ok(e) => out.push(Match::Event {
-            next: format!(
-                "mallard events show {} --issue {} -p {}",
-                e.summary.event_id, e.summary.issue_id, e.summary.project_id
-            ),
-            event_id: e.summary.event_id,
-            issue_id: e.summary.issue_id,
-            project_id: e.summary.project_id,
-            title: e.summary.title,
-            trace_id: e.summary.trace_id,
-        }),
-        Err(e) if e.is_not_found() => {}
-        Err(e) => errors.push(crate::described(mallard_client::Error::Sentry(e), c.base_url())),
-    }
-    // Report a failure only when it may have hidden the answer.
-    match errors.into_iter().next() {
-        Some(e) if out.is_empty() => Err(e),
-        _ => Ok(out),
-    }
-}
-
-/// An issue id (in every project, or the one of `-p`) and a span id, at
-/// the same time.
-async fn hex16(
-    r: &Run,
-    id: &str,
-    from: chrono::DateTime<chrono::Utc>,
-    to: chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<Match>> {
-    let q = mallard_client::mallard_otel_client::api::TraceGetQuery { from: Some(from), to: Some(to), since: None };
-    let (issues, span) = tokio::join!(issues(r, id), r.client.otel.span(id, &q));
-    let mut out = Vec::new();
-    let mut errors = Vec::new();
-    match issues {
-        Ok(m) => out.extend(m),
-        Err(e) => errors.push(e),
-    }
-    match span {
-        Ok(s) => out.push(Match::Span {
-            next: format!("mallard trace {}", s.trace_id),
-            span_id: s.span_id,
-            trace_id: s.trace_id,
-            service: s.service_name,
-            name: s.name,
-        }),
-        Err(e) if e.is_not_found() => {}
-        Err(e) => errors.push(crate::described(mallard_client::Error::Otel(e), r.client.base_url())),
-    }
-    // Report a failure only when it may have hidden the answer.
-    match errors.into_iter().next() {
-        Some(e) if out.is_empty() => Err(e),
-        _ => Ok(out),
-    }
-}
-
-async fn issues(r: &Run, id: &str) -> Result<Vec<Match>> {
-    let c = &r.client.sentry;
-    let err = |e| crate::described(mallard_client::Error::Sentry(e), r.client.base_url());
-    let projects = match &r.project {
-        Some(p) => vec![c.project(p).await.map_err(err)?],
-        None => c.projects().await.map_err(err)?,
-    };
-    let lookups = projects.iter().map(|p| async move {
-        let q = mallard_client::mallard_sentry_client::types::WindowQuery::default();
-        (p, c.issue(&p.slug, id, &q).await)
-    });
-    let mut out = Vec::new();
-    for (p, res) in futures::future::join_all(lookups).await {
-        match res {
-            Ok(d) => out.push(Match::Issue {
-                next: format!("mallard issues show {} -p {}", d.summary.id, p.slug),
-                issue_id: d.summary.id,
-                project: p.slug.clone(),
-                title: d.summary.title,
-                status: d.summary.status.to_string(),
-                count: d.summary.count,
-            }),
-            Err(e) if e.is_not_found() => {}
-            Err(e) => return Err(err(e)),
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ids_by_length() {
-        let t = "0af7651916cd43dd8448eb211c80319c";
-        assert_eq!(kind_of(t), Some(IdKind::Hex32(t.into())));
-        assert_eq!(kind_of("0AF76519-16CD-43DD-8448-EB211C80319C"), Some(IdKind::Hex32(t.into())));
-        assert_eq!(kind_of("85fede14250ec6be"), Some(IdKind::Hex16("85fede14250ec6be".into())));
-        assert_eq!(kind_of("req-7f3a"), None);
-        assert_eq!(kind_of("85fede14250ec6bz"), None);
+    fn the_next_command_of_each_match() {
+        use chrono::DateTime;
+        let time = DateTime::UNIX_EPOCH;
+        let next = |m: FindMatch| match Match::from(m) {
+            Match::Trace { next, .. }
+            | Match::Event { next, .. }
+            | Match::Issue { next, .. }
+            | Match::Span { next, .. } => next,
+        };
+        let t = FindMatch::Trace { trace_id: "t".into(), time, spans: 1, errors: 0, logs: 0 };
+        assert_eq!(next(t), "mallard trace t");
+        let e = FindMatch::Event {
+            event_id: "e".into(),
+            issue_id: "i".into(),
+            project: "web".into(),
+            project_id: 3,
+            title: "x".into(),
+            trace_id: None,
+        };
+        assert_eq!(next(e), "mallard events show e --issue i -p 3");
+        let i = FindMatch::Issue {
+            issue_id: "i".into(),
+            project: "web".into(),
+            project_id: 3,
+            title: "x".into(),
+            status: "unresolved".into(),
+            count: 1,
+        };
+        assert_eq!(next(i), "mallard issues show i -p web");
+        let s =
+            FindMatch::Span { span_id: "s".into(), trace_id: "t".into(), service: "a".into(), name: "b".into(), time };
+        assert_eq!(next(s), "mallard trace t");
     }
 
     #[test]

@@ -573,6 +573,38 @@ async fn otel_exceptions_become_issues_once() {
     srv.stop().await;
 }
 
+/// A project slug may hold `_`, which the slug rule turns into `-`. Its service's
+/// exceptions go to that project and open no project `my-app` (issue 0142).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn otel_exceptions_find_a_project_with_an_underscore() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| {
+        c.bridge.dedupe_window = Duration::from_millis(100);
+        c.bridge.default_project = "catch-all".into();
+    })
+    .await;
+    let client = Client::new(&srv.url, Some(TOKEN)).unwrap();
+    let req = CreateProject { name: "Mine".into(), slug: Some("my_app".into()), platform: None };
+    let mine = client.sentry.create_project(&req).await.unwrap();
+
+    let span = otel_span("5bf92f3577b34da6a3ce929d0e0e4738", "000000000000000a", "work", Some("ValueError"));
+    let spans = json!({"resourceSpans": [{
+        "resource": {"attributes": [kv("service.name", "my_app")]},
+        "scopeSpans": [{"spans": [span]}]}]});
+    let http = reqwest::Client::new();
+    assert!(http.post(format!("{}/v1/traces", srv.otlp_url)).json(&spans).send().await.unwrap().status().is_success());
+
+    let issues = eventually("the issue in project my_app", || async {
+        let list = client.sentry.issues("my_app", &IssueQuery::default()).await.ok()?;
+        (!list.issues.is_empty()).then_some(list.issues)
+    })
+    .await;
+    assert_eq!(issues[0].project_id, mine.id);
+    let slugs: Vec<String> = client.sentry.projects().await.unwrap().into_iter().map(|p| p.slug).collect();
+    assert_eq!(slugs, ["my_app"], "no second project, and not the default one");
+    srv.stop().await;
+}
+
 /// An app on @sentry/node 8+ that also exports OTLP sends its root span and
 /// one child both ways (same ids); its db span only goes to Sentry. Each
 /// span is stored once, the OTLP copy where there is one, whichever copy

@@ -47,9 +47,12 @@ pub(super) fn render(f: &mut Frame, area: Rect, app: &mut App) {
         View::Trace => render_trace(f, body, app),
     }
     render_footer(f, footer, app);
+    if app.input.is_some() {
+        app.suggest.render(f, body, footer);
+    }
     match app.overlay {
         Overlay::None => {}
-        Overlay::Help => render_help(f, area),
+        Overlay::Help => render_help(f, area, app.hosted),
         Overlay::Projects { selected } => render_projects(f, area, app, selected),
     }
 }
@@ -110,7 +113,15 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
                 th::dim(),
             ));
         }
-        None => left.push(Span::styled(app.project.clone().unwrap_or_else(|| "no project".into()), th::dim())),
+        None => {
+            let name = match (&app.project, &app.no_project) {
+                (Some(p), _) => p.clone(),
+                (None, Some(slug)) => fmt::clean(slug).into_owned(),
+                (None, None) if app.hosted => "no app chosen".into(),
+                (None, None) => "no project".into(),
+            };
+            left.push(Span::styled(name, th::dim()));
+        }
     }
     let view = match app.view() {
         View::Issues => "",
@@ -163,9 +174,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let line = if let Some(input) = &app.input {
         Line::from(vec![
             Span::styled(" / ", th::tab_active()),
-            Span::styled(format!(" {input}"), Style::new().fg(th::YELLOW)),
+            // A suggestion puts a name in as the server has it, so it shows cleaned.
+            Span::styled(format!(" {}", fmt::clean(input)), Style::new().fg(th::YELLOW)),
             Span::styled("█", Style::new().fg(th::YELLOW).add_modifier(Modifier::SLOW_BLINK)),
-            Span::styled("   enter search · esc cancel · ctrl-u clear", th::dim()),
+            Span::styled("   key=value is a tag · enter search · esc cancel · ctrl-u clear", th::dim()),
         ])
     } else if let Some(t) = &app.toast {
         let c = if t.error { th::RED } else { th::GREEN };
@@ -177,6 +189,15 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         ])
     } else {
         let pairs: &[(&str, &str)] = match app.view() {
+            View::Issues if app.offers_day() => &[
+                ("d", "show last 24h"),
+                ("t", "window"),
+                ("tab", "status"),
+                ("/", "search"),
+                ("p", "app"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
             View::Issues => &[
                 ("↑↓", "move"),
                 ("⏎", "open"),
@@ -184,7 +205,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ("/", "search"),
                 ("s", "sort"),
                 ("t", "window"),
-                ("p", "project"),
+                ("p", if app.hosted { "app" } else { "project" }),
                 ("R/I/U", "resolve/ignore/unresolve"),
                 ("r", "refresh"),
                 ("?", "help"),
@@ -439,7 +460,8 @@ mod tests {
         let s = draw(&mut app, 120, 40);
         assert!(s.contains("Keys") && s.contains("older / newer event"), "{s}");
         // The shared keys (the same list as on the telemetry tab) and the time zone.
-        for (_, what) in mallard_term::tui::keys::SHARED {
+        // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
+        for (_, what) in mallard_term::tui::keys::SHARED.iter().filter(|(k, _)| *k != "p") {
             assert!(s.contains(what), "missing {what:?} in\n{s}");
         }
         assert!(s.contains("All times are UTC."), "{s}");

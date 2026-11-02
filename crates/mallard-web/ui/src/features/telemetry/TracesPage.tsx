@@ -7,12 +7,15 @@ import { otel } from "@/api/otel";
 import { sentry } from "@/api/sentry";
 import type { TraceSummary } from "@/api/types";
 import { useInterval } from "@/app/settings";
-import { useParam, useWindow } from "@/app/window";
+import { useParam, useScope, useWindow } from "@/app/window";
+import { OutsideApp } from "@/components/scope-states";
+import { traceSuggestions } from "@/components/suggestions";
 import { useListNav } from "@/components/list";
 import { DataTable, EmptyState, ErrorState, Page, SearchField, Section, Service, StaleNote, TableSkeleton } from "@/components/ui-bits";
 import { windowSeconds } from "@/lib/domain";
 import { compact, dayTime, ms, timeMs } from "@/lib/format";
 import { parseTraceFilter, setToken, tokens } from "@/lib/query";
+import { serviceParam } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 
 function toggleErrors(filter: string, on: boolean): string {
@@ -22,7 +25,8 @@ function toggleErrors(filter: string, on: boolean): string {
 }
 
 export function TracesPage() {
-  const { w } = useWindow("telemetry");
+  const { w } = useWindow();
+  const { services, apps } = useScope();
   const [f, setF] = useParam("f");
   const navigate = useNavigate();
   const refetchInterval = useInterval(5000);
@@ -30,8 +34,10 @@ export function TracesPage() {
 
   const parsed = parseTraceFilter(f);
   const filter = "error" in parsed ? { errorsOnly: false, attributes: [] as string[] } : parsed;
+  const filterService = "service" in filter ? filter.service : undefined;
+  const scoped = serviceParam(filterService, services);
   const params = {
-    service: "service" in filter ? filter.service : undefined,
+    service: scoped?.service,
     operation: "operation" in filter ? filter.operation : undefined,
     errors_only: filter.errorsOnly,
     min_duration_ms: "minMs" in filter ? filter.minMs : undefined,
@@ -40,7 +46,8 @@ export function TracesPage() {
   };
 
   const q = useInfiniteQuery({
-    queryKey: ["otel", "traces", w, f],
+    queryKey: ["otel", "traces", w, f, services],
+    enabled: scoped !== null,
     queryFn: async ({ signal, pageParam }) => {
       const at = Date.now();
       const page = await otel.traces(
@@ -96,6 +103,10 @@ export function TracesPage() {
     },
   });
   const { selectedId, select } = nav;
+  const suggest = useMemo(
+    () => traceSuggestions(w, services ?? undefined, services ?? [...new Set(apps.flatMap((a) => a.services))]),
+    [w, services, apps],
+  );
 
   return (
     <Page>
@@ -106,6 +117,7 @@ export function TracesPage() {
           mono
           label="Filter traces"
           placeholder='service=api op="GET /x" min=200ms errors http.route=/y'
+          suggest={suggest}
           validate={(v) => {
             const p = parseTraceFilter(v);
             return "error" in p ? p.error : null;
@@ -116,7 +128,9 @@ export function TracesPage() {
       </div>
       <Section className="min-h-0 flex-1 shrink!" title="Traces" right={q.data ? `${errorsQ.isError ? "Sentry errors unavailable, " : ""}${compact(items.length)} newest${q.hasNextPage ? ", more below" : ""}` : undefined}>
         {q.isError && q.data && <StaleNote error={q.error} />}
-        {q.isError && !q.data ? (
+        {scoped === null ? (
+          <OutsideApp service={filterService!} onClear={() => setF("")} />
+        ) : q.isError && !q.data ? (
           <ErrorState error={q.error} onRetry={() => void q.refetch()} title="Could not load traces" />
         ) : q.isPending ? (
           <TableSkeleton />

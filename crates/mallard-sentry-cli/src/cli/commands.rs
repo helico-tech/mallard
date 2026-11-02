@@ -133,25 +133,40 @@ pub(super) async fn projects(ctx: &Ctx, cmd: ProjectsCmd) -> Result<()> {
     }
 }
 
-/// The project with this slug (derived from the name when not given),
-/// created when it does not exist. `true` when it was created.
+/// The project with this slug, created when it does not exist. `true` when it was
+/// created. Without a slug the server derives it from the name and answers 409 when a project
+/// has it under the slug rule, so the project `my_app` is the one `setup my_app` gets.
 pub async fn create_or_get(
     ctx: &Ctx,
     name: &str,
     slug: Option<String>,
     platform: Option<String>,
 ) -> Result<(Project, bool)> {
-    let slug = slug.unwrap_or_else(|| slugify(name));
-    match ctx.client.project(&slug).await {
-        Ok(p) => return Ok((p, false)),
+    let wanted = slug.clone().unwrap_or_else(|| slugify(name));
+    match ctx.client.project(&wanted).await {
+        Ok(p) if p.slug == wanted => return Ok((p, false)),
+        // The route also takes an id: a number found another project. Creating answers that a
+        // number is no slug (issue 0151).
+        Ok(_) => {}
         Err(e) if e.is_not_found() => {}
         Err(e) => return Err(ctx.err(e)),
     }
-    let req = CreateProject { name: name.to_string(), slug: Some(slug.clone()), platform };
+    let given = slug.is_some();
+    let req = CreateProject { name: name.to_string(), slug, platform };
     match ctx.client.create_project(&req).await {
         Ok(p) => Ok((p, true)),
         // Created by someone else in between.
-        Err(e) if e.status() == Some(409) => Ok((ctx.client.project(&slug).await.map_err(|e| ctx.err(e))?, false)),
+        Err(e) if e.status() == Some(409) && given => {
+            Ok((ctx.client.project(&wanted).await.map_err(|e| ctx.err(e))?, false))
+        }
+        Err(e) if e.status() == Some(409) => {
+            let projects = ctx.client.projects().await.map_err(|e| ctx.err(e))?;
+            let id = app_projects(projects.iter().map(|p| (p.id, p.slug.as_str()))).get(&wanted).map(|(id, _)| *id);
+            match projects.into_iter().find(|p| Some(p.id) == id) {
+                Some(p) => Ok((p, false)),
+                None => Err(ctx.err(e)),
+            }
+        }
         Err(e) => Err(ctx.err(e)),
     }
 }

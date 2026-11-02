@@ -391,3 +391,206 @@ fn shared_keys_mean_the_same_as_on_the_telemetry_tab() {
     assert!(!matches!(app.on_key(key('t')).1, Outcome::Jump(_)), "t is not the jump key");
     assert!(matches!(app.on_key(key('x')).1, Outcome::Jump(_)));
 }
+
+fn hosted_app() -> App {
+    let mut app = App::new("http://x", None);
+    app.hosted = true;
+    app.start();
+    app.on_response(Resp::Projects(Ok(projects())));
+    app
+}
+
+fn app_scope(slug: &str, project: Option<&str>) -> Scope {
+    Scope::App { slug: slug.into(), project: project.map(str::to_string), services: vec![] }
+}
+
+#[test]
+fn in_a_host_no_choice_means_no_project() {
+    let mut app = App::new("http://x", None);
+    app.hosted = true;
+    assert_eq!(app.start(), vec![Req::Info, Req::Projects]);
+    let r = app.on_response(Resp::Projects(Ok(projects())));
+    assert_eq!((app.project.as_deref(), r.len()), (None, 0), "All apps asks; it does not pick the first");
+    assert!(on_tick_lists_nothing(&mut app));
+    // -p stays the first choice.
+    let mut app = App::new("http://x", Some("1".into()));
+    app.hosted = true;
+    app.start();
+    let r = app.on_response(Resp::Projects(Ok(projects())));
+    assert_eq!(app.project.as_deref(), Some("web"), "an id becomes its slug");
+    assert!(matches!(r.as_slice(), [Req::Stats { .. }, Req::Issues(_)]));
+}
+
+fn on_tick_lists_nothing(app: &mut App) -> bool {
+    let later = Instant::now() + REFRESH_EVERY * 2;
+    !app.on_tick(later).iter().any(|r| matches!(r, Req::Issues(_) | Req::Stats { .. }))
+}
+
+#[test]
+fn the_host_chooses_the_project() {
+    let mut app = hosted_app();
+    let r = app.set_scope(&app_scope("web", Some("web")));
+    assert!(matches!(r.as_slice(), [Req::Stats { project, .. }, Req::Issues(_)] if project == "web"));
+    assert!(app.toast.as_ref().is_some_and(|t| t.text.starts_with("switched to ")));
+    app.on_response(Resp::Issues(
+        app.issues_key().unwrap(),
+        Ok(IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None }),
+    ));
+    assert!(!app.issues.is_empty());
+    assert!(app.set_scope(&app_scope("web", Some("web"))).is_empty(), "the same app changes nothing");
+    // An open screen stays when the same app comes again, and goes with another.
+    app.show_trace("abc");
+    assert!(app.set_scope(&app_scope("web", Some("web"))).is_empty());
+    assert_eq!(app.view(), View::Trace);
+    let r = app.set_scope(&app_scope("api", Some("api")));
+    assert_eq!(app.view(), View::Issues);
+    assert!(app.issues.is_empty(), "nothing of the old project stays");
+    assert_eq!(r.len(), 2);
+    // An app without a project, then All apps: nothing to load.
+    assert!(app.set_scope(&app_scope("worker", None)).is_empty());
+    assert_eq!(app.project, None);
+    assert_eq!(app.no_project.as_deref(), Some("worker"));
+    assert!(app.set_scope(&Scope::All).is_empty());
+    assert_eq!(app.no_project, None);
+}
+
+/// Standalone `errors tui` keeps its own keys; in a host they are the host's.
+#[test]
+fn window_and_picker_keys_belong_to_the_host() {
+    let mut app = loaded_app();
+    assert_eq!(app.on_key(key('t')).1, Outcome::Consumed);
+    assert_eq!(app.window, Window::Week);
+    assert_eq!(app.on_key(key('T')).1, Outcome::Consumed);
+    assert_eq!(app.on_key(key('p')).1, Outcome::Consumed);
+    let _ = app.on_key(KeyEvent::from(KeyCode::Esc));
+    app.hosted = true;
+    for c in ['t', 'T', 'p'] {
+        assert_eq!(app.on_key(key(c)), (vec![], Outcome::Ignored), "{c}");
+    }
+    assert_eq!(app.overlay, Overlay::None);
+    // Text in the search box stays text.
+    let _ = app.on_key(key('/'));
+    for c in ['t', 'p'] {
+        assert_eq!(app.on_key(key(c)).1, Outcome::Consumed);
+    }
+    assert_eq!(app.input.as_deref(), Some("tp"));
+}
+
+#[test]
+fn the_hosts_window_reloads_what_is_shown() {
+    let mut app = loaded_app();
+    let r = app.set_window(Window::parse("6h").unwrap());
+    assert!(matches!(&r[0], Req::Stats { window: Window::SixHours, .. }));
+    assert!(matches!(&r[1], Req::Issues(k) if k.query().since.as_deref() == Some("6h")));
+    assert!(app.set_window(Window::SixHours).is_empty(), "the same window");
+    for since in ["5m", "15m", "1h", "6h", "24h", "7d", "14d", "30d"] {
+        assert_eq!(Window::parse(since).map(Window::since), Some(since), "the host's presets");
+        assert!(Window::parse(since).unwrap().interval().ends_with(['s', 'm', 'h']));
+    }
+    assert_eq!(Window::parse("2d"), None);
+}
+
+/// 1h is the host's default, and an app with older issues must not look empty.
+#[test]
+fn an_empty_list_offers_a_day() {
+    let mut app = hosted_app();
+    app.set_scope(&app_scope("web", Some("web")));
+    app.set_window(Window::Hour);
+    assert!(!app.offers_day(), "not while it loads");
+    assert_eq!(app.on_key(key('d')).1, Outcome::Ignored);
+    app.on_response(Resp::Issues(
+        app.issues_key().unwrap(),
+        Ok(IssueList { issues: vec![], window_start: now(), window_end: now(), next_cursor: None }),
+    ));
+    assert!(app.offers_day());
+    assert_eq!(app.on_key(key('d')).1, Outcome::SetWindow("24h"));
+    app.set_window(Window::Day);
+    assert!(!app.offers_day(), "a day is what it offers");
+    assert_eq!(app.on_key(key('d')).1, Outcome::Ignored);
+    // Not on its own, not with no app.
+    let mut app = loaded_app();
+    app.window = Window::Hour;
+    app.issues.clear();
+    assert!(!app.offers_day());
+}
+
+#[test]
+fn key_value_words_are_tag_filters() {
+    let f = |s: &str| split_filter(s);
+    assert_eq!(f(""), (None, vec![]));
+    assert_eq!(f("connection refused"), (Some("connection refused".into()), vec![]));
+    assert_eq!(f("url=/a boom"), (Some("boom".into()), vec!["url:/a".to_string()]));
+    assert_eq!(f("url=/a=b user=\"a b\""), (None, vec!["url:/a=b".to_string(), "user:a b".to_string()]));
+    assert_eq!(f("\"a=b\""), (None, vec!["a:b".to_string()]), "like the web UI: a=b is always a tag");
+    assert_eq!(f("=x"), (Some("=x".into()), vec![]));
+    let key = IssuesKey {
+        project: "web".into(),
+        status: StatusFilter::All,
+        sort: SortBy::LastSeen,
+        window: Window::Day,
+        query: "url=/a boom".into(),
+    };
+    let q = key.query();
+    assert_eq!((q.query.as_deref(), q.tag.as_slice()), (Some("boom"), &["url:/a".to_string()][..]));
+}
+
+const LATER: Duration = Duration::from_millis(300);
+
+/// The search bar: keys and values from the project's tags, Tab accepts.
+#[test]
+fn the_search_bar_suggests_tags() {
+    let mut app = loaded_app();
+    press(&mut app, key('/'));
+    assert!(app.on_tick(Instant::now()).iter().all(|r| !matches!(r, Req::Suggest { .. })), "debounced");
+    let reqs = app.on_tick(Instant::now() + LATER);
+    let Some(Req::Suggest { project, window, scope, want }) =
+        reqs.into_iter().find(|r| matches!(r, Req::Suggest { .. }))
+    else {
+        panic!("no fetch")
+    };
+    assert_eq!((project.as_str(), window, want.key.clone()), ("web", Window::Day, None));
+    assert!(!app.pending.contains_key(&Kind::Suggest), "no spinner");
+    let items = Some(vec![("url".to_string(), 7), ("user\x1b[2J".to_string(), 1)]);
+    app.on_response(Resp::Suggest { scope: scope.clone(), want, items });
+    let labels: Vec<_> = app.suggest.items().iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, ["url=", "user\\u{1b}[2J="], "cleaned");
+    press(&mut app, KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.input.as_deref(), Some("url="));
+    let reqs = app.on_tick(Instant::now() + LATER);
+    let Some(Req::Suggest { want, .. }) = reqs.into_iter().find(|r| matches!(r, Req::Suggest { .. })) else {
+        panic!("no fetch for the values")
+    };
+    assert_eq!(want.key.as_deref(), Some("url"));
+    app.on_response(Resp::Suggest { scope, want, items: Some(vec![("/a".into(), 5), ("/b c".into(), 2)]) });
+    press(&mut app, KeyEvent::from(KeyCode::Down));
+    press(&mut app, KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.input.as_deref(), Some("url=\"/b c\" "));
+    let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(&r[1], Req::Issues(k) if k.query().tag == ["url:/b c"]));
+    assert!(!app.suggest.has_items(), "closed");
+}
+
+/// A failed fetch changes nothing but a small note: no offline banner, no toast.
+#[test]
+fn a_failed_suggestion_stays_quiet() {
+    let mut app = loaded_app();
+    press(&mut app, key('/'));
+    press(&mut app, key('x'));
+    let reqs = app.on_tick(Instant::now() + LATER);
+    let Some(Req::Suggest { scope, want, .. }) = reqs.into_iter().find(|r| matches!(r, Req::Suggest { .. })) else {
+        panic!("no fetch")
+    };
+    app.on_response(Resp::Suggest { scope, want, items: None });
+    assert_eq!(app.input.as_deref(), Some("x"));
+    assert_eq!(app.offline, None);
+    assert!(app.toast.is_none());
+    assert_eq!(app.suggest.note(), Some("suggestions unavailable"));
+    // Nor does it say the server is back.
+    app.offline = Some("down".into());
+    app.on_response(Resp::Suggest {
+        scope: app.suggest.scope().to_string(),
+        want: Want { key: None, prefix: String::new() },
+        items: Some(vec![]),
+    });
+    assert_eq!(app.offline.as_deref(), Some("down"));
+}
