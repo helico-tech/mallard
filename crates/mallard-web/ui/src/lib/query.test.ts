@@ -62,6 +62,7 @@ describe("filter language", () => {
     expect(parseIssueFilter('"a=b"')).toEqual({ tags: [], query: "a=b" });
     expect(parseIssueFilter('"a=b c" x')).toEqual({ tags: [], query: "a=b c x" });
     expect(parseIssueFilter('"a"=b')).toEqual({ tags: [], query: "a=b" });
+    expect(parseIssueFilter("a:b=c")).toEqual({ tags: [], query: "a:b=c" });
     expect(parseIssueFilter('"a=b" c=d')).toEqual({ tags: ["c:d"], query: "a=b" });
     expect(parseIssueFilter('a="b=c"')).toEqual({ tags: ["a:b=c"] });
   });

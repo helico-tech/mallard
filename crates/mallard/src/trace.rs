@@ -2,35 +2,48 @@
 //! record shown under the span it happened in. Every string from the server
 //! goes through `mallard_term::text::clean` (review 1.M1); times are UTC.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 use std::time::Duration;
 
 use anyhow::Result;
-use mallard_client::TraceOverview;
+use mallard_client::{Error, TraceOverview};
 use mallard_term::fmt::ms;
 use mallard_term::text::clean;
 use mallard_term::wait::{WaitArgs, until};
-use mallard_term::window::WindowArgs;
+use mallard_term::window::{Window, WindowArgs};
 use serde_json::{Map, Value};
 
 use crate::Run;
 
 /// Default window of `mallard trace`.
 const WINDOW: Duration = Duration::from_secs(7 * 86_400);
+/// Its window on a server whose `otel.query.max_window` is below that.
+const SHORT_WINDOW: Duration = Duration::from_secs(86_400);
 
 /// `mallard trace <id>` / `traces show <id>`. Not found anywhere: exit 4
 /// (with `--wait`: exit 8 when nothing arrived in time).
 pub(crate) async fn run(r: &Run, trace_id: &str, window: &WindowArgs, wait: &WaitArgs) -> Result<()> {
     // The window is resolved on every try: with --wait it moves along.
+    let default_window = window.since.is_none() && window.from.is_none();
+    let short = Cell::new(false);
     let fetch = || async {
-        let w = window.resolve(WINDOW)?;
-        let t = r
-            .client
-            .trace_overview_in(trace_id, w.from, w.to)
-            .await
-            .map_err(|e| crate::described(e, r.client.base_url()))?;
-        anyhow::Ok((w, t))
+        let get = |w: Window| r.client.trace_overview_in(trace_id, w.from, w.to);
+        let mut w = window.resolve(if short.get() { SHORT_WINDOW } else { WINDOW })?;
+        let mut t = get(w).await;
+        let refused = match &t {
+            Ok(t) => t.window_refused,
+            Err(Error::Otel(e)) => e.is_window_too_large(),
+            Err(_) => false,
+        };
+        if default_window && !short.get() && refused {
+            r.output.note("the server does not allow a window of 7d; searching the last 24h");
+            short.set(true);
+            w = window.resolve(SHORT_WINDOW)?;
+            t = get(w).await;
+        }
+        anyhow::Ok((w, t.map_err(|e| crate::described(e, r.client.base_url()))?))
     };
     let ((w, t), waited) = until(&r.output, wait, fetch, |(_, t)| !is_empty(t)).await?.split();
     let empty = is_empty(&t);
@@ -284,6 +297,7 @@ mod tests {
             logs: vec![l],
             logs_truncated: false,
             warnings: vec![],
+            window_refused: false,
         };
         let v = concise(&t, false).unwrap();
         assert!(v["spans"].as_array().unwrap().iter().all(|s| s.get("resource_attributes").is_none()));
@@ -325,6 +339,7 @@ mod tests {
             logs: vec![],
             logs_truncated: false,
             warnings: vec![],
+            window_refused: false,
         };
         for raw in [false, true] {
             let v = concise(&t, raw).unwrap();
@@ -347,6 +362,7 @@ mod tests {
             logs: vec![],
             logs_truncated: false,
             warnings: vec![],
+            window_refused: false,
         }
     }
 
@@ -380,6 +396,7 @@ mod tests {
             logs: vec![log(Some("1")), log(None)],
             logs_truncated: false,
             warnings: vec![EVIL.into()],
+            window_refused: false,
         };
         let out = render(&t);
         let bad: Vec<char> = out.chars().filter(|c| (c.is_control() && *c != '\n') || *c == '\u{202e}').collect();

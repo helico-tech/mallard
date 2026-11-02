@@ -108,6 +108,10 @@ pub struct TraceOverview {
     pub logs_truncated: bool,
     /// Sources that could not be read, e.g. `"spans: otel: 400: window too large"`.
     pub warnings: Vec<String>,
+    /// The telemetry side refused the window as above its `otel.query.max_window`, so
+    /// the spans and logs say nothing about this trace.
+    #[serde(skip)]
+    pub window_refused: bool,
 }
 
 impl Client {
@@ -206,13 +210,14 @@ impl Client {
             (Err(e), Err(_), Err(_)) => return Err(e),
             all => all,
         };
+        let window_refused = matches!(&spans, Err(Error::Otel(e)) if e.is_window_too_large());
         let mut warnings = Vec::new();
         let spans = or_warn(spans, "spans", &mut warnings);
         let errors = or_warn(errors, "errors", &mut warnings);
         let mut logs = or_warn(logs, "logs", &mut warnings);
         let logs_truncated = logs.len() > TRACE_LOG_LIMIT as usize;
         logs.truncate(TRACE_LOG_LIMIT as usize);
-        Ok(TraceOverview { trace_id: id, spans, errors, logs, logs_truncated, warnings })
+        Ok(TraceOverview { trace_id: id, spans, errors, logs, logs_truncated, warnings, window_refused })
     }
 }
 

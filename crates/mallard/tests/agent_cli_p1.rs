@@ -70,6 +70,30 @@ fn sum(v: &Value, key: &str) -> u64 {
     v["items"].as_array().unwrap().iter().map(|p| p[key].as_u64().unwrap()).sum()
 }
 
+/// Issue 0186: on a server with a short `max_window`, the default window of `mallard trace` falls back
+/// to 24 hours and says so, and finds the trace. A window that was asked for stays refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn trace_falls_back_from_a_default_window_the_server_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_with(dir.path(), |c| c.otel.query.max_window = Duration::from_secs(2 * 86_400)).await;
+    let url = srv.url.as_str();
+    send_otlp(&reqwest::Client::new(), &srv.otlp_url, 0).await;
+    let (id, _) = ids(0);
+
+    let o = eventually("the trace", || async {
+        let o = mallard(url, &["trace", &id, "--json"]).await;
+        (o.code == 0).then_some(o)
+    })
+    .await;
+    assert!(!o.json()["spans"].as_array().unwrap().is_empty(), "{}", o.stdout);
+    assert!(o.stderr.contains("searching the last 24h"), "{}", o.stderr);
+
+    let o = mallard(url, &["trace", &id, "--since", "7d", "--json"]).await;
+    assert!(o.stdout.contains("max_window") || o.stderr.contains("max_window"), "{} {}", o.stdout, o.stderr);
+    assert!(!o.stderr.contains("searching the last 24h"), "{}", o.stderr);
+    srv.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn agent_cli_p1_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
