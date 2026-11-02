@@ -182,7 +182,7 @@ export function parseIssueFilter(s: string): IssueFilter | { error: string } {
   const words: string[] = [];
   for (const t of rawTokens(s)) {
     const pair = splitPair(t);
-    if (pair && !pair[0].includes('"')) tags.push(`${pair[0]}:${unquote(pair[1])}`);
+    if (pair && !/[":]/.test(pair[0])) tags.push(`${pair[0]}:${unquote(pair[1])}`);
     else words.push(unquote(t));
   }
   if (tags.length > 10) return { error: "at most 10 tag filters" };

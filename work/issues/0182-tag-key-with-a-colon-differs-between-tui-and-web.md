@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-02
 ---
@@ -15,3 +15,6 @@ Search issues for `a:b=c` in both. Seen in `split_filter` and `parseIssueFilter`
 ## Notes
 Found while doing issue 0180. The likely fix is the TUI's rule in `parseIssueFilter`. A tag key with a `:`
 cannot be asked for through `key:value` either way.
+
+## Fixed (2026-11-02)
+The likely fix was right: `parseIssueFilter` now has the TUI's rule, so `a:b=c` is text in both. Unit test only; not run in a browser.
