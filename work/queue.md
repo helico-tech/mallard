@@ -8,3 +8,4 @@
 6. [issue 0182 a:b=c differs between TUI and web UI](issues/0182-tag-key-with-a-colon-differs-between-tui-and-web.md)
 7. [issue 0184 text views only the old paths had](issues/0184-text-views-only-the-old-paths-had.md)
 8. [issue 0185 TUI components keep a mode without a host](issues/0185-tui-components-keep-a-mode-without-a-host.md)
+9. [issue 0186 mallard trace default window above the server limit](issues/0186-trace-default-window-above-server-limit.md)
