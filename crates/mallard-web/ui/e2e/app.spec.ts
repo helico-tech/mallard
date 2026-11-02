@@ -820,10 +820,12 @@ test.describe("a long list", () => {
     await page.route(/\/issues\?/, async (route) => {
       const url = new URL(route.request().url());
       reads++;
-      const res = await route.fetch();
+      const second = url.searchParams.has("cursor");
+      url.searchParams.delete("cursor"); // The server would refuse this made-up cursor.
+      const res = await route.fetch({ url: url.toString() });
       const body = await res.json();
-      body.next_cursor = url.searchParams.get("cursor") ? null : "more";
-      if (url.searchParams.get("cursor")) body.issues = [];
+      body.next_cursor = second ? null : "more";
+      if (second) body.issues = [];
       await route.fulfill({ response: res, json: body });
     });
     await page.goto("/errors/web");
