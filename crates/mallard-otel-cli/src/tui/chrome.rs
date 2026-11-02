@@ -106,10 +106,7 @@ impl Embedded {
             return;
         }
         let mut spans = widgets::hints(&self.hints());
-        if self.hosted {
-            spans.extend(widgets::hints(&[("p", "app")]));
-        }
-        spans.extend(widgets::hints(&[("?", "help"), ("q", "quit")]));
+        spans.extend(widgets::hints(&[("p", "app"), ("?", "help"), ("q", "quit")]));
         let line = Line::from(spans);
         let mut hints_area = area;
         if let Some((msg, is_err, _)) = &self.flash {
@@ -182,7 +179,7 @@ impl Embedded {
 
     pub(super) fn draw_help(&self, f: &mut Frame, area: Rect) {
         // The keys every tab shares come first (mallard_term::tui::keys).
-        let mut rows: Vec<(&str, &str)> = keys::shared(self.hosted).copied().collect();
+        let mut rows: Vec<(&str, &str)> = keys::SHARED.to_vec();
         rows.extend([
             ("", ""),
             ("Overview", "↵ service → operations → traces"),

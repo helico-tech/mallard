@@ -321,7 +321,6 @@ impl Tab {
 pub(super) enum Overlay {
     None,
     Help,
-    Projects { selected: usize },
 }
 
 /// The screen in front, with its data. Esc returns to the screen behind
@@ -520,9 +519,6 @@ pub(super) struct App {
     pub started_at: Instant,
     /// The host's command name, for hints.
     pub hints: Hints,
-    /// In a host with one window and one app picker for its tabs: `t`, `T` and `p` are
-    /// the host's, and with no app chosen there is no project (no "first project").
-    pub hosted: bool,
     /// The host chose an app without a project: its slug.
     pub no_project: Option<String>,
     /// The search bar's list.
@@ -563,7 +559,6 @@ impl App {
             last_info: Instant::now(),
             started_at: Instant::now(),
             hints: crate::HINTS,
-            hosted: false,
             no_project: None,
             suggest: Suggest::new(&[]),
         }
@@ -634,11 +629,10 @@ impl App {
         }
     }
 
-    /// The empty list offers a wider window when a host has one window for all tabs: 1h
-    /// is its default, and older issues must not look like no issues.
+    /// The empty list offers a wider window: 1h is the host's default, and older issues
+    /// must not look like no issues.
     pub(super) fn offers_day(&self) -> bool {
-        self.hosted
-            && self.project.is_some()
+        self.project.is_some()
             && self.issues_loaded
             && self.issues.is_empty()
             && self.issues_error.is_none()

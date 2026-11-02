@@ -490,7 +490,6 @@ fn is_find_key(k: &KeyEvent) -> bool {
 /// errors tab can answer it) and Sentry errors marked on traces and spans.
 fn telemetry_pane(client: &Client) -> mallard_otel_cli::Embedded {
     let mut pane = mallard_otel_cli::Embedded::new(client.otel.clone());
-    pane.set_hosted(true);
     pane.set_errors_enabled(true);
     pane.set_error_lookup(std::sync::Arc::new(crate::errors::SentryErrors(client.clone())));
     pane
@@ -499,7 +498,6 @@ fn telemetry_pane(client: &Client) -> mallard_otel_cli::Embedded {
 /// The errors TUI, with no choice of its own: the host's app and window.
 fn errors_pane(client: &Client, project: Option<String>, since: &str) -> mallard_sentry_cli::Embedded {
     let mut pane = mallard_sentry_cli::Embedded::new(client.sentry.clone(), project);
-    pane.set_hosted(true);
     pane.set_window(since);
     pane
 }

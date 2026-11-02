@@ -292,7 +292,7 @@ impl Embedded {
         if let Some(scroll) = self.logs.detail {
             match k.code {
                 // The app picker works on every screen; the popup goes with what it shows.
-                KeyCode::Char(keys::APP_PICKER) if self.hosted => {
+                KeyCode::Char(keys::APP_PICKER) => {
                     return None;
                 }
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.logs.detail = None,

@@ -519,7 +519,7 @@ fn the_last_row_of_a_full_trace_list_reads_more() {
     e.set_trace_filter("errors");
     assert_eq!(e.traces.limit(), 200);
     e.traces.pages = 1;
-    let _ = e.handle_event(&ch('t'));
+    e.set_since("6h").unwrap();
     assert_eq!(e.traces.limit(), 200, "another window too");
 }
 
@@ -593,11 +593,6 @@ fn global_keys() {
     assert_eq!(e.view, View::Traces);
     assert_eq!(e.handle_event(&key(KeyCode::BackTab)), Outcome::Consumed);
     assert_eq!(e.view, View::Overview);
-    let before = e.since().to_string();
-    let _ = e.handle_event(&ch('t'));
-    assert_ne!(e.since(), before);
-    let _ = e.handle_event(&ch('T'));
-    assert_eq!(e.since(), before);
     let _ = e.handle_event(&ch('?'));
     assert!(e.help);
     let s = render(&mut e, 120, 40);
@@ -610,7 +605,8 @@ fn global_keys() {
 
 #[test]
 fn open_trace_and_since() {
-    let mut e = Embedded::with_since(Client::new("http://127.0.0.1:9", None).unwrap(), "2d").unwrap();
+    let mut e = Embedded::new(Client::new("http://127.0.0.1:9", None).unwrap());
+    e.set_since("2d").unwrap();
     assert_eq!(e.since(), "2d");
     assert_eq!(e.window_secs(), 172_800.0);
     e.open_trace("0AF7-6519-16cd43dd8448eb211c80319c");
@@ -651,7 +647,8 @@ async fn settle(e: &mut Embedded) {
 #[ignore]
 async fn live_snapshot() {
     let url = std::env::var("MALLARD_TEST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-    let mut e = Embedded::with_since(Client::new(&url, None).unwrap(), "15m").unwrap();
+    let mut e = Embedded::new(Client::new(&url, None).unwrap());
+    e.set_since("15m").unwrap();
     for (k, name) in [('1', "overview"), ('2', "traces"), ('3', "logs"), ('4', "metrics"), ('5', "status")] {
         let _ = e.handle_event(&ch(k));
         settle(&mut e).await;
@@ -776,8 +773,7 @@ fn shared_keys_mean_the_same_as_on_the_errors_tab() {
     let since = e.since().to_string();
     assert_eq!(e.handle_event(&ch('w')), Outcome::Ignored);
     assert_eq!(e.since(), since);
-    let _ = e.handle_event(&ch('t'));
-    assert_ne!(e.since(), since, "t is the time window");
+    assert_eq!(e.handle_event(&ch('t')), Outcome::Ignored, "t is the time window, and that is the host's");
     let _ = e.handle_event(&key(KeyCode::Enter));
     assert!(e.traces.detail.is_some());
     assert_eq!(e.handle_event(&ch('q')), Outcome::Consumed, "q goes back from the waterfall");
@@ -786,11 +782,9 @@ fn shared_keys_mean_the_same_as_on_the_errors_tab() {
 
     let _ = e.handle_event(&ch('?'));
     let s = render(&mut e, 140, 50);
-    // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
-    for (_, what) in mallard_term::tui::keys::shared(false) {
+    for (_, what) in mallard_term::tui::keys::SHARED {
         assert!(s.contains(what), "missing {what:?} in\n{s}");
     }
-    assert!(!s.contains("choose the app"), "{s}");
     assert!(s.contains("All times are UTC."), "{s}");
 }
 
@@ -1057,8 +1051,6 @@ fn p_is_the_hosts_on_the_log_detail_too() {
     let mut e = fixture();
     e.view = View::Logs;
     e.logs.detail = Some(0);
-    assert_eq!(e.handle_event(&ch('p')), Outcome::Consumed, "on its own: the popup's");
-    e.set_hosted(true);
     assert_eq!(e.handle_event(&ch('p')), Outcome::Ignored);
     assert_eq!(e.logs.detail, Some(0), "the popup stays until the choice changes something");
 }
@@ -1067,7 +1059,6 @@ fn p_is_the_hosts_on_the_log_detail_too() {
 async fn an_app_scopes_every_query() {
     let (client, seen) = recording_server().await;
     let mut e = Embedded::new(client);
-    e.set_hosted(true);
     e.set_scope(&app_scope(&["a", "b"]));
     for view in [View::Overview, View::Traces, View::Logs, View::Metrics] {
         e.view = view;
@@ -1115,7 +1106,6 @@ async fn without_an_app_queries_are_as_before() {
 async fn an_app_without_telemetry_says_so_instead_of_showing_everything() {
     let (client, seen) = recording_server().await;
     let mut e = Embedded::new(client);
-    e.set_hosted(true);
     e.set_scope(&app_scope(&[]));
     e.tick();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1136,24 +1126,18 @@ async fn an_app_without_telemetry_says_so_instead_of_showing_everything() {
 
 /// In a host, `t`, `T` and `p` are the host's; on its own the tab keeps them.
 #[tokio::test]
-async fn hosted_window_and_picker_keys_go_to_the_host() {
+async fn window_and_picker_keys_go_to_the_host() {
     for view in [View::Overview, View::Traces, View::Logs, View::Metrics, View::Status] {
         let mut e = fixture();
         e.view = view;
         let since = e.since().to_string();
-        assert_eq!(e.handle_event(&ch('p')), Outcome::Ignored, "{view:?}");
-        e.set_hosted(true);
         for c in ['t', 'T', 'p'] {
             assert_eq!(e.handle_event(&ch(c)), Outcome::Ignored, "{view:?} {c}");
         }
         assert_eq!(e.since(), since, "the host sets it");
-        e.set_hosted(false);
-        assert_eq!(e.handle_event(&ch('t')), Outcome::Consumed, "{view:?}: standalone keeps t");
-        assert_ne!(e.since(), since);
     }
     // In a filter these are text.
     let mut e = fixture();
-    e.set_hosted(true);
     e.view = View::Traces;
     let _ = e.handle_event(&ch('/'));
     typed(&mut e, "tTp");
@@ -1195,11 +1179,9 @@ fn the_services_list_is_limited_to_the_app() {
 
 /// Help shows the picker only where it works.
 #[test]
-fn help_names_the_app_key_when_hosted() {
+fn help_names_the_app_key() {
     let mut e = fixture();
     let _ = e.handle_event(&ch('?'));
-    assert!(!draw_to_string(&mut e, 120, 40).contains("choose the app"));
-    e.set_hosted(true);
     assert!(draw_to_string(&mut e, 120, 40).contains("choose the app"));
 }
 

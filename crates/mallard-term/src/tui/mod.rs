@@ -102,11 +102,6 @@ pub mod keys {
         ("ctrl-c", "quit"),
     ];
 
-    /// [`SHARED`] for a help screen. What only the host does is left out of a tab on its own.
-    pub fn shared(hosted: bool) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
-        SHARED.iter().filter(move |(k, _)| hosted || !matches!(*k, "p" | "ctrl-k"))
-    }
-
     /// Shown under the keys in help screens.
     pub const TIMES: &str = "All times are UTC.";
 }

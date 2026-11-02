@@ -154,7 +154,7 @@ pub(super) fn info() -> ServerInfo {
 
 /// App with projects, issues and stats loaded, as after startup.
 pub(super) fn loaded_app() -> App {
-    let mut app = App::new("http://127.0.0.1:8000", None);
+    let mut app = App::new("http://127.0.0.1:8000", Some("web".into()));
     app.start();
     app.on_response(Resp::Projects(Ok(projects())));
     app.on_response(Resp::Info(Ok(ServerInfo {

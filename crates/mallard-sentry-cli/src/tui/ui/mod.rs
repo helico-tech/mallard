@@ -21,7 +21,7 @@ mod trace;
 
 use detail::render_detail;
 use issues::render_issues;
-use overlays::{render_help, render_projects};
+use overlays::render_help;
 use trace::render_trace;
 
 /// `n` as a terminal coordinate, saturating instead of wrapping.
@@ -52,8 +52,7 @@ pub(super) fn render(f: &mut Frame, area: Rect, app: &mut App) {
     }
     match app.overlay {
         Overlay::None => {}
-        Overlay::Help => render_help(f, area, app.hosted),
-        Overlay::Projects { selected } => render_projects(f, area, app, selected),
+        Overlay::Help => render_help(f, area),
     }
 }
 
@@ -117,8 +116,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             let name = match (&app.project, &app.no_project) {
                 (Some(p), _) => p.clone(),
                 (None, Some(slug)) => fmt::clean(slug).into_owned(),
-                (None, None) if app.hosted => "no app chosen".into(),
-                (None, None) => "no project".into(),
+                (None, None) => "no app chosen".into(),
             };
             left.push(Span::styled(name, th::dim()));
         }
@@ -205,7 +203,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ("/", "search"),
                 ("s", "sort"),
                 ("t", "window"),
-                ("p", if app.hosted { "app" } else { "project" }),
+                ("p", "app"),
                 ("R/I/U", "resolve/ignore/unresolve"),
                 ("r", "refresh"),
                 ("?", "help"),
@@ -311,7 +309,7 @@ mod tests {
 
     #[test]
     fn escape_sequences_from_events_never_reach_the_buffer() {
-        let mut app = App::new("http://x", None);
+        let mut app = App::new("http://x", Some("web".into()));
         app.start();
         app.on_response(Resp::Projects(Ok(projects())));
         let mut list = issues();
@@ -354,16 +352,6 @@ mod tests {
         assert!(app.issues_error.is_some() && app.stats_error.is_some());
         let s = draw(&mut app, 120, 30);
         assert!(s.contains("project not found") && !s.contains("offline"), "{s}");
-    }
-
-    #[test]
-    fn no_projects_hint_names_the_host_command() {
-        let mut app = App::new("http://x", None);
-        app.hints.command = "host";
-        app.start();
-        app.on_response(Resp::Projects(Ok(vec![])));
-        let s = draw(&mut app, 120, 30);
-        assert!(s.contains("create one with: host projects create <name>"), "{s}");
     }
 
     #[test]
@@ -460,15 +448,10 @@ mod tests {
         let s = draw(&mut app, 120, 40);
         assert!(s.contains("Keys") && s.contains("older / newer event"), "{s}");
         // The shared keys (the same list as on the telemetry tab) and the time zone.
-        // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
-        for (_, what) in mallard_term::tui::keys::shared(false) {
+        for (_, what) in mallard_term::tui::keys::SHARED {
             assert!(s.contains(what), "missing {what:?} in\n{s}");
         }
         assert!(s.contains("All times are UTC."), "{s}");
-        press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Char('p'));
-        let s = draw(&mut app, 120, 40);
-        assert!(s.contains("Projects") && s.contains("api"), "{s}");
         press(&mut app, KeyCode::Esc);
 
         app.show_trace("b7644661850f40e69380d8c9ea253e84");

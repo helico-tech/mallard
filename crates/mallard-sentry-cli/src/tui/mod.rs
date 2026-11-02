@@ -82,12 +82,6 @@ impl Embedded {
         self
     }
 
-    /// The host owns the time window and the app picker: `t`, `T` and `p` come back
-    /// [`Outcome::Ignored`], and with no app chosen this tab asks for one.
-    pub fn set_hosted(&mut self, hosted: bool) {
-        self.app.hosted = hosted;
-    }
-
     /// The host's one window for all tabs. A window the errors side does not know
     /// changes nothing.
     pub fn set_window(&mut self, since: &str) {
@@ -394,7 +388,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let mut ui = Embedded::new(Client::new(&url, Some("t")).unwrap(), Some("web".into()));
-        ui.set_hosted(true);
         ui.tick();
         let started = Instant::now();
         assert_eq!(ui.handle_event(&key(KeyCode::Char('/'))), Outcome::Consumed);
@@ -537,7 +530,6 @@ mod tests {
     async fn an_empty_scope_says_what_to_do() {
         let client = Client::new("http://127.0.0.1:9", Some("t")).unwrap();
         let mut ui = Embedded::new(client, None);
-        ui.set_hosted(true);
         ui.set_window("1h");
         assert_eq!(ui.app.window, Window::Hour, "before the start: only the field");
         let mut term = Terminal::new(TestBackend::new(120, 36)).unwrap();

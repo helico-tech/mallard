@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-02
 ---
@@ -15,3 +15,9 @@ Left out of 0183 because their tests also check the keys and screens in a host. 
 those tests one by one.
 
 Also for this issue: `keys::shared(hosted)` in `mallard-term` (help screens); it can lose its argument with the mode.
+
+## Fixed (2026-11-02)
+`App::hosted`, both `set_hosted`, `Embedded::with_since` and `keys::shared` are gone, and so is what only the other mode could reach: the
+tabs' own `t`/`T`, the project picker overlay, "the first project", and the `No projects yet` text. `mallard tui` looks and works as before.
+Tests of the removed mode went with it; tests that relied on it by default now choose an app, as the host does.
+

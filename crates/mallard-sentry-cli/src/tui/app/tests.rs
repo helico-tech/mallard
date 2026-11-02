@@ -12,16 +12,6 @@ fn press(app: &mut App, k: KeyEvent) -> Vec<Req> {
 }
 
 #[test]
-fn startup_picks_first_project_and_loads_list() {
-    let mut app = App::new("http://x", None);
-    let r = app.start();
-    assert_eq!(r, vec![Req::Info, Req::Projects]);
-    let r = app.on_response(Resp::Projects(Ok(projects())));
-    assert_eq!(app.project.as_deref(), Some("web"));
-    assert!(matches!(r.as_slice(), [Req::Stats { .. }, Req::Issues(_)]));
-}
-
-#[test]
 fn stale_issue_lists_are_dropped() {
     let mut app = loaded_app();
     let old = app.issues_key().unwrap();
@@ -45,10 +35,6 @@ fn filters_and_search_produce_requests() {
     let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
     assert_eq!(app.query, "boom");
     assert!(matches!(&r[1], Req::Issues(k) if k.query == "boom" && k.query().query.as_deref() == Some("boom")));
-    let r = press(&mut app, key('t'));
-    assert!(matches!(&r[0], Req::Stats { window: Window::Week, .. }));
-    let r = press(&mut app, key('T'));
-    assert!(matches!(&r[0], Req::Stats { window: Window::Day, .. }));
     press(&mut app, KeyEvent::from(KeyCode::BackTab));
     assert_eq!(app.status, StatusFilter::Unresolved);
     press(&mut app, KeyEvent::from(KeyCode::BackTab));
@@ -363,17 +349,6 @@ fn every_api_type_survives_sanitize() {
     cleaned(event_detail()).unwrap();
 }
 
-#[test]
-fn project_switcher() {
-    let mut app = loaded_app();
-    press(&mut app, key('p'));
-    assert_eq!(app.overlay, Overlay::Projects { selected: 0 });
-    press(&mut app, key('j'));
-    let r = press(&mut app, KeyEvent::from(KeyCode::Enter));
-    assert_eq!(app.project.as_deref(), Some("api"));
-    assert!(matches!(&r[1], Req::Issues(k) if k.project == "api"));
-}
-
 /// Review 2.O: `r` means refresh on both tabs; writes are capitals; the
 /// jump to the other tab is `x`, and `t` is the time window everywhere.
 #[test]
@@ -392,9 +367,8 @@ fn shared_keys_mean_the_same_as_on_the_telemetry_tab() {
     assert!(matches!(app.on_key(key('x')).1, Outcome::Jump(_)));
 }
 
-fn hosted_app() -> App {
+fn app_without_a_choice() -> App {
     let mut app = App::new("http://x", None);
-    app.hosted = true;
     app.start();
     app.on_response(Resp::Projects(Ok(projects())));
     app
@@ -407,14 +381,12 @@ fn app_scope(slug: &str, project: Option<&str>) -> Scope {
 #[test]
 fn in_a_host_no_choice_means_no_project() {
     let mut app = App::new("http://x", None);
-    app.hosted = true;
     assert_eq!(app.start(), vec![Req::Info, Req::Projects]);
     let r = app.on_response(Resp::Projects(Ok(projects())));
     assert_eq!((app.project.as_deref(), r.len()), (None, 0), "All apps asks; it does not pick the first");
     assert!(on_tick_lists_nothing(&mut app));
     // -p stays the first choice.
     let mut app = App::new("http://x", Some("1".into()));
-    app.hosted = true;
     app.start();
     let r = app.on_response(Resp::Projects(Ok(projects())));
     assert_eq!(app.project.as_deref(), Some("web"), "an id becomes its slug");
@@ -428,7 +400,7 @@ fn on_tick_lists_nothing(app: &mut App) -> bool {
 
 #[test]
 fn the_host_chooses_the_project() {
-    let mut app = hosted_app();
+    let mut app = app_without_a_choice();
     let r = app.set_scope(&app_scope("web", Some("web")));
     assert!(matches!(r.as_slice(), [Req::Stats { project, .. }, Req::Issues(_)] if project == "web"));
     assert!(app.toast.as_ref().is_some_and(|t| t.text.starts_with("switched to ")));
@@ -454,16 +426,9 @@ fn the_host_chooses_the_project() {
     assert_eq!(app.no_project, None);
 }
 
-/// Without a host it keeps its own keys; in a host they are the host's.
 #[test]
 fn window_and_picker_keys_belong_to_the_host() {
     let mut app = loaded_app();
-    assert_eq!(app.on_key(key('t')).1, Outcome::Consumed);
-    assert_eq!(app.window, Window::Week);
-    assert_eq!(app.on_key(key('T')).1, Outcome::Consumed);
-    assert_eq!(app.on_key(key('p')).1, Outcome::Consumed);
-    let _ = app.on_key(KeyEvent::from(KeyCode::Esc));
-    app.hosted = true;
     for c in ['t', 'T', 'p'] {
         assert_eq!(app.on_key(key(c)), (vec![], Outcome::Ignored), "{c}");
     }
@@ -493,7 +458,7 @@ fn the_hosts_window_reloads_what_is_shown() {
 /// 1h is the host's default, and an app with older issues must not look empty.
 #[test]
 fn an_empty_list_offers_a_day() {
-    let mut app = hosted_app();
+    let mut app = app_without_a_choice();
     app.set_scope(&app_scope("web", Some("web")));
     app.set_window(Window::Hour);
     assert!(!app.offers_day(), "not while it loads");
@@ -507,10 +472,9 @@ fn an_empty_list_offers_a_day() {
     app.set_window(Window::Day);
     assert!(!app.offers_day(), "a day is what it offers");
     assert_eq!(app.on_key(key('d')).1, Outcome::Ignored);
-    // Not on its own, not with no app.
-    let mut app = loaded_app();
+    // Not with no app.
     app.window = Window::Hour;
-    app.issues.clear();
+    app.project = None;
     assert!(!app.offers_day());
 }
 
