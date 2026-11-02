@@ -12,6 +12,7 @@
 //!     artifacts: None,
 //!     catalog_maintenance: None,
 //!     maintenance_threads: 0,
+//!     commit_lock: Default::default(),
 //! };
 //! let server = Server::with_connection(Config::default(), host, conn).await?;
 //! let app = axum::Router::new().nest("/sentry", server.router());
@@ -86,6 +87,7 @@ impl Server {
         let maintenance =
             db::maintenance::Maintenance { catalog_wide: host.catalog_maintenance, threads: host.maintenance_threads };
         let artifacts = host.artifacts.clone();
+        let commit_lock = host.commit_lock.clone();
         // Both create directories and open files: keep them off async threads.
         let (db, storage) = tokio::task::spawn_blocking(move || {
             let storage = artifacts.map(|a| Storage::new(&a.url, &a.options)).transpose()?;
@@ -98,7 +100,8 @@ impl Server {
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            anyhow::Ok((Db::with_connection(conn, &c, maintenance, mallard_duck::redact(&catalog))?, storage))
+            let db = Db::with_connection(conn, &c, maintenance, commit_lock, mallard_duck::redact(&catalog))?;
+            anyhow::Ok((db, storage))
         })
         .await??;
         if host.api_tokens.iter().all(|t| t.trim().is_empty()) {

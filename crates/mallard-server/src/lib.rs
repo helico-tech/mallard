@@ -78,10 +78,17 @@ pub struct Platform {
     metrics: Option<PrometheusHandle>,
 }
 
+/// What each side gets on one connection: they commit one at a time (ADR 0030).
+fn sides_on_one_connection(cfg: &Config) -> (mallard_otel_server::config::Config, mallard_sentry_server::Host) {
+    let (mut otel, sentry) = (cfg.otel_config(), cfg.sentry_host());
+    otel.commit_lock = sentry.commit_lock.clone();
+    (otel, sentry)
+}
+
 impl Platform {
     /// Open the shared DuckLake catalog and start both libraries on it.
     pub async fn new(cfg: Config) -> Result<Platform> {
-        let ocfg = cfg.otel_config();
+        let (ocfg, host) = sides_on_one_connection(&cfg);
         let (st, db) = (cfg.storage.clone(), cfg.duckdb.clone());
         let conn = tokio::task::spawn_blocking(move || mallard_duck::open_connection(&st, &db))
             .await?
@@ -89,7 +96,7 @@ impl Platform {
         let otel = Arc::new(
             mallard_otel_server::Server::with_connection(ocfg, conn.try_clone()?).await.context("starting otel")?,
         );
-        let sentry = mallard_sentry_server::Server::with_connection(cfg.sentry.clone(), cfg.sentry_host(), conn)
+        let sentry = mallard_sentry_server::Server::with_connection(cfg.sentry.clone(), host, conn)
             .await
             .context("starting sentry")?;
         let bridge = bridge::install(&cfg.bridge, &sentry, &otel).context("starting the bridge")?;
@@ -324,6 +331,12 @@ async fn bind(addr: &str) -> Result<TcpListener> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn both_sides_share_one_commit_lock() {
+        let (otel, sentry) = super::sides_on_one_connection(&super::Config::default());
+        assert!(otel.commit_lock.is_shared_with(&sentry.commit_lock));
+    }
+
     use super::*;
 
     /// If a background job cannot start, the receivers stop and `serve_on` returns

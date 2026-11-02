@@ -36,7 +36,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
-use mallard_duck::duckdb::Connection;
+use mallard_duck::{CommitLock, duckdb::Connection};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -230,7 +230,12 @@ fn is_permanent(e: &FlushError) -> bool {
 
 /// Append all batches in one transaction. A panic in the DuckDB or Arrow
 /// code is returned as an error, so the flusher thread keeps running.
-fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Result<(), FlushError> {
+fn write(
+    conn: &Connection,
+    schema: &str,
+    commit_lock: &CommitLock,
+    tables: &[Vec<RecordBatch>; N],
+) -> Result<(), FlushError> {
     let tx_err = |error| FlushError { table: None, error };
     let tx = conn.unchecked_transaction().map_err(|e| tx_err(e.into()))?;
     for id in TableId::ALL {
@@ -243,7 +248,10 @@ fn write(conn: &Connection, schema: &str, tables: &[Vec<RecordBatch>; N]) -> Res
             .unwrap_or_else(|p| Err(anyhow::anyhow!("appending to {} panicked: {}", id.def().name, panic_message(&*p))))
             .map_err(|error| FlushError { table: Some(id), error })?;
     }
-    catch_unwind(AssertUnwindSafe(|| tx.commit().map_err(anyhow::Error::from)))
+    let one_at_a_time = commit_lock.hold();
+    let committed = catch_unwind(AssertUnwindSafe(|| tx.commit().map_err(anyhow::Error::from)));
+    drop(one_at_a_time);
+    committed
         .unwrap_or_else(|p| Err(anyhow::anyhow!("commit panicked: {}", panic_message(&*p))))
         .context("committing DuckLake snapshot")
         .map_err(tx_err)
@@ -273,7 +281,14 @@ pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> &str {
 /// transaction. Batches that fail permanently again are dropped; batches
 /// that fail transiently stay in `taken`. Returns what is left and the rows
 /// written.
-fn isolate_table(conn: &Connection, schema: &str, mut taken: Taken, table: TableId, stats: &Stats) -> (Taken, u64) {
+fn isolate_table(
+    conn: &Connection,
+    schema: &str,
+    commit_lock: &CommitLock,
+    mut taken: Taken,
+    table: TableId,
+    stats: &Stats,
+) -> (Taken, u64) {
     let i = table as usize;
     let name = table.def().name;
     let mut written = 0u64;
@@ -281,7 +296,7 @@ fn isolate_table(conn: &Connection, schema: &str, mut taken: Taken, table: Table
         let (rows, bytes) = batch_size(&b);
         let mut one: [Vec<RecordBatch>; N] = Default::default();
         one[i].push(b);
-        match write(conn, schema, &one) {
+        match write(conn, schema, commit_lock, &one) {
             Ok(()) => written += rows,
             Err(e) if is_permanent(&e) => {
                 let msg = super::redact(&format!("{:#}", e.error));
@@ -308,10 +323,11 @@ impl Flusher {
     pub fn start(lake: &Lake, buffer: Arc<WriteBuffer>, interval: Duration, stats: Arc<Stats>) -> Result<Self> {
         let conn = lake.connect()?;
         let schema = lake.schema.clone();
+        let commit_lock = lake.commit_lock.clone();
         let buf = buffer.clone();
         let handle = std::thread::Builder::new()
             .name("otel-flusher".into())
-            .spawn(move || run(conn, schema, buf, interval, stats))?;
+            .spawn(move || run(conn, schema, commit_lock, buf, interval, stats))?;
         Ok(Self { handle: Some(handle), buffer })
     }
 
@@ -330,7 +346,14 @@ impl Drop for Flusher {
     }
 }
 
-fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Duration, stats: Arc<Stats>) {
+fn run(
+    conn: Connection,
+    schema: String,
+    commit_lock: CommitLock,
+    buf: Arc<WriteBuffer>,
+    interval: Duration,
+    stats: Arc<Stats>,
+) {
     let mut failures: u32 = 0;
     // Attempts after shutdown started (failures before that don't count).
     let mut shutdown_attempts: u32 = 0;
@@ -348,7 +371,7 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
             continue;
         }
         let t0 = Instant::now();
-        match write(&conn, &schema, &taken.tables) {
+        match write(&conn, &schema, &commit_lock, &taken.tables) {
             Ok(()) => {
                 failures = 0;
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -380,7 +403,7 @@ fn run(conn: Connection, schema: String, buf: Arc<WriteBuffer>, interval: Durati
                             error = %msg,
                             "flush failed with a permanent error for one table; writing its batches one by one"
                         );
-                        let (left, written) = isolate_table(&conn, &schema, taken, t, &stats);
+                        let (left, written) = isolate_table(&conn, &schema, &commit_lock, taken, t, &stats);
                         if written > 0 {
                             stats.flush_ok(written, t0.elapsed().as_secs_f64() * 1000.0);
                         }
@@ -582,6 +605,40 @@ mod tests {
         }
         // Commit errors are never pinned on a table: always retried.
         assert!(!is_permanent(&e(None, "Conversion Error: during commit")));
+    }
+
+    /// Issue 0144: a flush next to a writer that commits all the time, as the Sentry side does at
+    /// full speed. If both commit at once, the larger commit loses on the snapshot id every time,
+    /// until DuckLake gives up after 8-11 s.
+    #[test]
+    fn a_flush_is_not_starved_by_small_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let small_commits = {
+            let (c, stop, commit_lock) = (lake.connect().unwrap(), stop.clone(), lake.commit_lock.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    c.execute_batch("BEGIN TRANSACTION; INSERT INTO meta VALUES ('k', 'v', make_timestamp(0))")
+                        .unwrap();
+                    let _one_at_a_time = commit_lock.hold();
+                    c.execute_batch("COMMIT").unwrap();
+                }
+            })
+        };
+        let conn = lake.connect().unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(50), stats.clone()).unwrap();
+        buf.push(logs(20_000)).unwrap();
+        wait_for(
+            || format!("logs={}", count(&conn, "logs")),
+            || count(&conn, "logs") == 20_000 || stats.ingest(0).flush_errors > 0,
+        );
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        small_commits.join().unwrap();
+        assert_eq!(stats.ingest(0).flush_errors, 0, "{:?}", stats.ingest(0).last_flush_error);
+        flusher.stop();
     }
 
     /// Issue 0131, with a real allocation error: nothing is dropped, and the rows are

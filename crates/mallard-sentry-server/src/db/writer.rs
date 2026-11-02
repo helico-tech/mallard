@@ -117,6 +117,7 @@ pub struct Writer {
     inlined: Arc<AtomicUsize>,
     new_issues: NewIssueCount,
     sync: Tick,
+    commit_lock: mallard_duck::CommitLock,
     /// Cancelled when the catalog was invalidated: the process must exit.
     catalog_lost: CancellationToken,
 }
@@ -309,6 +310,7 @@ impl Writer {
         cfg: &Config,
         maintainer: Sender<MaintCmd>,
         inlined: Arc<AtomicUsize>,
+        commit_lock: mallard_duck::CommitLock,
         catalog_lost: CancellationToken,
     ) -> Result<Self> {
         conn.execute_batch(&ns.sql("ATTACH IF NOT EXISTS ':memory:' AS $T"))?;
@@ -325,6 +327,7 @@ impl Writer {
             inlined,
             new_issues: NewIssueCount::default(),
             sync: Tick::new(SYNC_INTERVAL),
+            commit_lock,
             catalog_lost,
         })
     }
@@ -487,7 +490,11 @@ impl Writer {
         self.conn.execute_batch("BEGIN TRANSACTION")?;
         match f(&self.conn) {
             Ok(v) => {
-                if let Err(e) = self.conn.execute_batch("COMMIT") {
+                let committed = {
+                    let _one_at_a_time = self.commit_lock.hold();
+                    self.conn.execute_batch("COMMIT")
+                };
+                if let Err(e) = committed {
                     let _ = self.conn.execute_batch("ROLLBACK");
                     return Err(e.into());
                 }
