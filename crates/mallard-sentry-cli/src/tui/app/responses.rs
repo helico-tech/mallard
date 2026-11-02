@@ -125,9 +125,8 @@ impl App {
                 let p = clean(before.as_deref().unwrap_or_default());
                 self.issues_error = Some(format!("project {p:?} not found (press p to pick one)"));
             }
-            // In a host the app picker decides; no choice means no project.
-            None if self.hosted => {}
-            None => self.project = self.projects.first().map(|p| p.slug.clone()),
+            // The app picker decides; no choice means no project.
+            None => {}
         }
         // Also when an id (`-p 1`) became its slug: loads made with the old
         // string are dropped as stale, so start new ones.

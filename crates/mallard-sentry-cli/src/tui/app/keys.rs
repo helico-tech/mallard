@@ -61,7 +61,6 @@ impl App {
                 self.overlay = Overlay::None;
                 return done(vec![]);
             }
-            Overlay::Projects { selected } => return done(self.on_key_projects(k, selected)),
             Overlay::None => {}
         }
         if self.input.is_some() {
@@ -155,34 +154,6 @@ impl App {
         reqs
     }
 
-    fn on_key_projects(&mut self, k: KeyEvent, selected: usize) -> Vec<Req> {
-        let n = self.projects.len();
-        match k.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => self.overlay = Overlay::None,
-            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
-                self.overlay = Overlay::Projects { selected: (selected + 1).min(n - 1) }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.overlay = Overlay::Projects { selected: selected.saturating_sub(1) }
-            }
-            KeyCode::Enter => {
-                self.overlay = Overlay::None;
-                if let Some(p) = self.projects.get(selected) {
-                    let slug = p.slug.clone();
-                    if self.project.as_deref() != Some(slug.as_str()) {
-                        self.toast(format!("switched to {}", p.name), false);
-                        self.switch_project(slug);
-                        self.screen = Screen::Issues;
-                        self.back.clear();
-                        return self.reload_list();
-                    }
-                }
-            }
-            _ => {}
-        }
-        vec![]
-    }
-
     fn on_key_search(&mut self, k: KeyEvent) -> Vec<Req> {
         let now = Instant::now();
         let Some(input) = self.input.as_mut() else {
@@ -269,20 +240,6 @@ impl App {
             KeyCode::Char('s') => {
                 self.sort = cycle(&SortBy::ALL, self.sort, 1);
                 self.reload_list()
-            }
-            KeyCode::Char(keys::WINDOW_NEXT) if !self.hosted => {
-                self.window = cycle(&Window::ALL, self.window, 1);
-                self.reload_list()
-            }
-            KeyCode::Char(keys::WINDOW_PREV) if !self.hosted => {
-                self.window = cycle(&Window::ALL, self.window, -1);
-                self.reload_list()
-            }
-            KeyCode::Char('p') if !self.hosted => {
-                let selected =
-                    self.current_project().and_then(|c| self.projects.iter().position(|p| p.id == c.id)).unwrap_or(0);
-                self.overlay = Overlay::Projects { selected };
-                vec![Req::Projects]
             }
             // Writes are capitals, so a refresh (`r`) can never change data.
             KeyCode::Char('R') => self.set_selected_status(IssueStatus::Resolved),

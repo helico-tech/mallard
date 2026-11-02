@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn render_issues(f: &mut Frame, area: Rect, app: &mut App) {
     // With no project there are no stats to load.
-    let stats_h = if area.height >= 22 && (app.project.is_some() || !app.hosted) { 7 } else { 0 };
+    let stats_h = if area.height >= 22 && app.project.is_some() { 7 } else { 0 };
     let [stats, filters, table] =
         Layout::vertical([Constraint::Length(stats_h), Constraint::Length(1), Constraint::Min(0)]).areas(area);
     if stats_h > 0 {
@@ -141,7 +141,7 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
                     th::dim(),
                 )),
             ]
-        } else if app.hosted && app.project.is_none() && app.issues_error.is_none() {
+        } else if app.project.is_none() && app.issues_error.is_none() {
             vec![
                 Line::from(Span::styled("Pick an app to see its errors", th::bold())),
                 Line::from(Span::styled("errors are per project: press p to choose", th::dim())),
@@ -150,14 +150,6 @@ fn render_issue_table(f: &mut Frame, area: Rect, app: &mut App) {
             vec![
                 Line::from(Span::styled(format!("✗ {e}"), Style::new().fg(th::RED).bold())),
                 Line::from(Span::styled("R retries", th::dim())),
-            ]
-        } else if app.projects_loaded && app.projects.is_empty() {
-            vec![
-                Line::from(Span::styled("No projects yet", th::bold())),
-                Line::from(Span::styled(
-                    format!("create one with: {} projects create <name>", app.hints.command),
-                    th::dim(),
-                )),
             ]
         } else if !app.issues_loaded {
             vec![Line::from(Span::styled(format!("{} loading issues…", spinner(app)), th::dim()))]

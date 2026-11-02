@@ -117,9 +117,6 @@ pub struct Embedded {
     errors: Option<Arc<dyn crate::ErrorLookup>>,
     /// Kinds whose last load failed: only the first failure flashes.
     failing: HashSet<Kind>,
-    /// In a host with one window and one app picker for its tabs: `t`, `T` and `p` are
-    /// the host's (they return [`Outcome::Ignored`]).
-    hosted: bool,
     /// The host's app; everything but a trace opened by id is limited to its services.
     scope: Scope,
     trace_suggest: Suggest,
@@ -192,16 +189,10 @@ impl Embedded {
             errors_enabled: false,
             errors: None,
             failing: HashSet::new(),
-            hosted: false,
             scope: Scope::All,
             trace_suggest: Suggest::new(suggestions::TRACE_KEYS),
             log_suggest: Suggest::new(suggestions::LOG_KEYS),
         }
-    }
-
-    /// The host owns the time window and the app picker (see the field).
-    pub fn set_hosted(&mut self, hosted: bool) {
-        self.hosted = hosted;
     }
 
     /// The server's longest window, once it has said so.
@@ -277,13 +268,6 @@ impl Embedded {
     /// such a span returns [`Outcome::JumpEvent`].
     pub fn set_error_lookup(&mut self, lookup: Arc<dyn crate::ErrorLookup>) {
         self.errors = Some(lookup);
-    }
-
-    /// Start with a given time window (e.g. `15m`, `6h`, `2d`, `1h30m`).
-    pub fn with_since(client: Client, since: &str) -> Result<Self> {
-        let mut e = Self::new(client);
-        e.set_since(since)?;
-        Ok(e)
     }
 
     /// Change the time window (e.g. `15m`). An invalid window is an error
@@ -496,14 +480,6 @@ impl Embedded {
         self.help = false;
     }
 
-    fn cycle_window(&mut self, forward: bool) {
-        let n = self.windows.len();
-        self.win = if forward { (self.win + 1) % n } else { (self.win + n - 1) % n };
-        self.traces.pages = 0;
-        self.invalidate();
-        self.flash(format!("time window: last {}", self.since()));
-    }
-
     /// Handle a terminal event.
     pub fn handle_event(&mut self, ev: &Event) -> Outcome {
         let Event::Key(k) = ev else {
@@ -554,14 +530,6 @@ impl Embedded {
                 let n = VIEWS.len();
                 let j = if k.code == KeyCode::Tab { (i + 1) % n } else { (i + n - 1) % n };
                 self.set_view(VIEWS[j].0);
-                Outcome::Consumed
-            }
-            KeyCode::Char(keys::WINDOW_NEXT) if !self.hosted => {
-                self.cycle_window(true);
-                Outcome::Consumed
-            }
-            KeyCode::Char(keys::WINDOW_PREV) if !self.hosted => {
-                self.cycle_window(false);
                 Outcome::Consumed
             }
             KeyCode::Char(keys::REFRESH) => {
