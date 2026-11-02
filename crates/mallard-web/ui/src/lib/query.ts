@@ -17,13 +17,13 @@ export interface LogFilter {
   attributes: string[];
 }
 
-/** The words as typed, with their quotes: splits on spaces outside `"double quotes"`. */
+/** The words as typed, with their quotes: splits on whitespace outside `"double quotes"`. */
 function rawTokens(s: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quoted = false;
   for (const ch of s) {
-    if (ch === " " && !quoted) {
+    if (/\s/.test(ch) && !quoted) {
       if (cur) out.push(cur);
       cur = "";
     } else {
@@ -37,14 +37,14 @@ function rawTokens(s: string): string[] {
 
 const unquote = (t: string) => t.replaceAll('"', "");
 
-/** Splits on spaces, `"double quotes"` keep spaces. */
+/** Splits on whitespace, `"double quotes"` keep it. */
 export function tokens(s: string): string[] {
   return rawTokens(s).map(unquote);
 }
 
 /** `250` (ms), `250ms`, `1.5s`, `2m`, `100us`, in ms. */
 export function parseDurationMs(s: string): number | null {
-  const m = /^(\d+(?:\.\d+)?)(us|µs|ms|s|m)?$/.exec(s.trim());
+  const m = /^(\d+\.?\d*|\.\d+)(us|µs|ms|s|m)?$/.exec(s.trim());
   if (!m) return null;
   const n = Number(m[1]);
   switch (m[2]) {
@@ -87,7 +87,7 @@ export function parseTraceFilter(s: string): TraceFilter | { error: string } {
       return { error: `unknown filter "${t}"; use service=, op=, min=, max=, errors or key=value` };
     }
     const [k, v] = pair;
-    switch (k.toLowerCase()) {
+    switch (k) {
       case "service":
       case "svc":
       case "s":
@@ -105,13 +105,13 @@ export function parseTraceFilter(s: string): TraceFilter | { error: string } {
       case "max_ms": {
         const d = parseDurationMs(v);
         if (d === null) return { error: `not a duration: ${v}` };
-        if (k.toLowerCase().startsWith("min")) f.minMs = d;
+        if (k.startsWith("min")) f.minMs = d;
         else f.maxMs = d;
         break;
       }
       case "errors":
       case "error":
-        f.errorsOnly = TRUE.has(v.toLowerCase());
+        f.errorsOnly = TRUE.has(v);
         break;
       default:
         f.attributes.push(`${k}=${v}`);
@@ -142,7 +142,7 @@ export function parseLogFilter(s: string): LogFilter | { error: string } {
       continue;
     }
     const [k, v] = pair;
-    switch (k.toLowerCase()) {
+    switch (k) {
       case "service":
       case "svc":
       case "s":

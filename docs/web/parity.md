@@ -65,7 +65,7 @@ changed in the browser, because the seeded data has no such case.
 | `age` | `now` under 5 s | Same | ok |
 | `timestamp` | `2026-10-31 20:59:13` | Same | ok |
 | `uptime`, time formats per window | `%m-%d %H:%M:%S` over 24h, else `%H:%M:%S%.3f` | Same | ok |
-| Severity names | `ERR…` text is ERROR; number over 24 falls back to the text | Text must start with `ERROR`; over 24 gives `-` (code) | **differs** |
+| Severity names | `ERR…` text is ERROR; number over 24 falls back to the text | Same | ok |
 
 ## Errors: issue list
 
@@ -93,7 +93,7 @@ changed in the browser, because the seeded data has no such case.
 | Filter suggestions | The list shows while typing; Tab takes the selected row, the first unless you moved; ↑↓ choose; ↵ applies what is typed | The list opens while typing or on ↓; nothing is taken until you move to it, then Enter or Tab takes it. Otherwise Tab moves the focus, as in a browser | intended |
 | Issue search | Text, and `tag=value`; `"a=b"` in quotes is text | Same | ok |
 | Find an id | `ctrl-k`, `↵` looks up; one match with no warning lands, else a list (issue 0191) | Cmd-K looks up while typing; one match lands | intended |
-| Find an id, with a warning | Shows the warning and a list, because a side could not be read | One match lands at once, the warning goes unseen (issue 0192) | **differs** |
+| Find an id, with a warning | Shows the warning and a list, because a side could not be read | Same | ok |
 | Choose an app in search | `p` is the picker; `ctrl-k` is ids only | Cmd-K also lists the apps | intended |
 | App home page | Overview stays telemetry, errors are one key away (F1); a page across both sides costs more than it gives | Overview of an app also shows new issues, events and worst operations (story 0004/05) | intended |
 | Pause all auto refresh | None; `space` pauses the log follow | A button on every screen | intended |
@@ -162,10 +162,10 @@ changed in the browser, because the seeded data has no such case.
 | Bad filter | Flash, old filter stays, prompt closes | Inline message, old filter stays, box stays open | **differs** |
 | `E` with toast | Toggles errors-only | Same, also for `error=on` | ok |
 | `c` clear | Yes | Yes | ok |
-| Parser details | Any whitespace; `.5s` ok; keys case-sensitive | Spaces only; `.5s` refused; keys any case (code) | **differs** |
+| Parser details | Any whitespace; `.5s` ok; keys case-sensitive | Same | ok |
 | Cadence | 5 s | 5 s | ok |
 | Sentry column refresh | One lookup after every list load | Every 5 s with the list | ok |
-| Sentry lookup fails | Flash, keeps last markers | Keeps last markers; `–` if none yet; no message | **differs** |
+| Sentry lookup fails | Flash, keeps last markers | Keeps last markers; `–` if none yet; the list's title says `Sentry errors unavailable` | intended |
 | Selection by id | Yes | Yes (mock: reversed list) | ok |
 
 ## Telemetry: Trace detail

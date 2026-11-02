@@ -19,6 +19,11 @@ Worth doing first, because they can mislead:
 
 Small, seen in the README screenshots: the trace page says "1 Sentry errors".
 
+## Done: the ones that could mislead (2026-11-02)
+All made the same as the TUI, and "1 Sentry error" reads right: Cmd-K stays open on one match with a warning, severity names, the
+parser details. The failed Sentry lookup already had a message (the list's title), so that row is now marked intended.
+The other **differs** rows in `docs/web/parity.md` are still open; they are small and need a decision each.
+
 ## Done: deep lists hold still
 `useInfiniteQuery` with `refetchInterval` read every loaded page again every 5 s, with no end to how
 many. Counted in a browser on 2026-11-02 on the demo data, requests to `/traces` in 11 s: one page 2

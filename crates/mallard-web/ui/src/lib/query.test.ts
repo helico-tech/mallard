@@ -13,6 +13,9 @@ describe("filter language", () => {
     expect(parseDurationMs("1.5s")).toBe(1500);
     expect(parseDurationMs("2m")).toBe(120000);
     expect(parseDurationMs("100us")).toBe(0.1);
+    expect(parseDurationMs(".5s")).toBe(500);
+    expect(parseDurationMs("5.")).toBe(5);
+    expect(parseDurationMs(".")).toBeNull();
     expect(parseDurationMs("soon")).toBeNull();
   });
   it("trace filters", () => {
@@ -63,6 +66,10 @@ describe("filter language", () => {
     expect(parseIssueFilter('"a=b c" x')).toEqual({ tags: [], query: "a=b c x" });
     expect(parseIssueFilter('"a"=b')).toEqual({ tags: [], query: "a=b" });
     expect(parseIssueFilter("a:b=c")).toEqual({ tags: [], query: "a:b=c" });
+    // As in the TUI: any whitespace, and keys are case-sensitive.
+    expect(parseIssueFilter("a=b\tc=d")).toEqual({ tags: ["a:b", "c:d"] });
+    expect(parseTraceFilter("Service=x")).toEqual({ errorsOnly: false, attributes: ["Service=x"] });
+    expect(parseLogFilter("Level=error")).toEqual({ attributes: ["Level=error"] });
     expect(parseIssueFilter('"a=b" c=d')).toEqual({ tags: ["c:d"], query: "a=b" });
     expect(parseIssueFilter('a="b=c"')).toEqual({ tags: ["a:b=c"] });
   });
