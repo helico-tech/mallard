@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: bug
 created: 2026-11-02
 ---
@@ -24,3 +24,6 @@ Found while fixing issue 0151, which did not change it. Probably the positional 
 has the same clap id as the global flag, and `crates/mallard/src/scope.rs` asks whether that id came from the
 command line. Rename the id, and add `projects show` to a test: `project_flag_only_where_there_is_a_project` tests
 only that `-p` is refused.
+
+Done: the positional has its own clap id, `show_project`. Covered by the parse test and, through a real server, by
+`a_number_does_not_get_the_project_with_that_id`.

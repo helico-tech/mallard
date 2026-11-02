@@ -88,7 +88,11 @@ pub enum ProjectsCmd {
         if_not_exists: bool,
     },
     /// One project, with its DSN.
-    Show { project: String },
+    Show {
+        // Its own id: the global `-p` is `project`, and `-p` is refused on this command.
+        #[arg(id = "show_project", value_name = "PROJECT")]
+        project: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
