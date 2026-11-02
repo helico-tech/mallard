@@ -52,6 +52,14 @@ fn locate(url: &str) -> Result<Location> {
         });
     };
     let (bucket, prefix) = split(rest);
+    // Azure container names have no dots, so this is `az://<account>.blob.core.windows.net/...`
+    // or `az://<container>@<account>...`. Taken as a container, it would fail only at the first upload.
+    if kind == Kind::Azure && bucket.contains('.') {
+        bail!(
+            "{bucket:?} in storage url {url:?} is not a container name; use az://<container>/<prefix>, \
+             with the account in the azure secret's connection_string (AccountName=...)"
+        );
+    }
     Ok(Location { kind, root: format!("{scheme}://{bucket}/{}", with_slash(&prefix)), bucket, prefix })
 }
 
@@ -133,6 +141,19 @@ impl Storage {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Write and delete a small object, the requests the server needs, so a wrong key or a
+    /// missing container fails now. The client's own retries can take minutes, hence `limit`.
+    pub async fn check_reachable(&self, limit: std::time::Duration) -> Result<()> {
+        let key = format!("mallard-check-{}", uuid::Uuid::new_v4());
+        let round_trip = async {
+            self.put(&key, Bytes::from_static(b"ok")).await.context("writing a test object")?;
+            self.delete(&key).await.context("deleting the test object")
+        };
+        tokio::time::timeout(limit, round_trip)
+            .await
+            .with_context(|| format!("no answer within {} seconds", limit.as_secs_f32()))?
     }
 
     /// `a/b/c` keys -> nested object path below `artifacts/`.
@@ -223,6 +244,34 @@ mod tests {
         assert!(text.contains("Azure") && !text.contains("not base64!!"), "{text}");
     }
 
+    /// The account belongs in the secret. Container names have no dots, so this is never one.
+    #[test]
+    fn an_azure_account_in_the_url_says_where_it_belongs() {
+        for url in ["az://acct.blob.core.windows.net/c/x", "azure://c@acct.dfs.core.windows.net/x"] {
+            let err = Storage::new(url, &azure_opts("acct", "aGVsbG8=")).err().unwrap().to_string();
+            assert!(err.contains("az://<container>/<prefix>") && err.contains("AccountName"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_reachability_check_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::new(dir.path().to_str().unwrap(), &ObjectStoreOptions::default()).unwrap();
+        s.check_reachable(std::time::Duration::from_secs(5)).await.unwrap();
+        assert_eq!(std::fs::read_dir(dir.path().join("artifacts")).unwrap().count(), 0);
+    }
+
+    /// Nothing listens on port 1: the check ends at its limit, without showing the key.
+    #[tokio::test]
+    async fn the_reachability_check_fails_on_a_store_that_does_not_answer() {
+        let opts =
+            ObjectStoreOptions { endpoint: Some("http://127.0.0.1:1/acct".into()), ..azure_opts("acct", "aGVsbG8=") };
+        let s = Storage::new("az://c/x", &opts).unwrap();
+        let err = s.check_reachable(std::time::Duration::from_millis(200)).await.unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("aGVsbG8="), "{text}");
+    }
+
     /// `r2://` and `abfss://` work for the lake but not here; the error says what does.
     #[test]
     fn unsupported_schemes_name_the_ones_that_work() {
@@ -250,6 +299,12 @@ mod tests {
         assert_eq!(s.get("chunks/abc").await.unwrap().unwrap(), Bytes::from_static(b"hi"));
         s.delete("chunks/abc").await.unwrap();
         assert!(s.get("chunks/abc").await.unwrap().is_none());
+        let limit = std::time::Duration::from_secs(10);
+        s.check_reachable(limit).await.unwrap();
+        // A container that does not exist is a failure, not an empty store.
+        let missing = "az://no-such-container/test";
+        let m = Storage::new(missing, &mallard_duck::object_store_options(&st, missing)).unwrap();
+        assert!(m.check_reachable(limit).await.is_err());
     }
 
     #[tokio::test]

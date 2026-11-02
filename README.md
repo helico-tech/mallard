@@ -140,8 +140,8 @@ key can be overridden with `MALLARD_<SECTION>__<KEY>`, e.g.
 `MALLARD_OTEL__RETENTION__TRACES=0` or `MALLARD_SERVER__API_TOKENS=a,b`
 (text settings keep the value as is; lists may be comma separated).
 `${NAME}` inside a text value is replaced by environment variable `NAME`.
-`mallard check -c mallard.toml --connect` validates a file and opens the
-catalog.
+`mallard check -c mallard.toml --connect` validates a file, opens the catalog
+and writes a small test file to storage.
 
 ## More
 

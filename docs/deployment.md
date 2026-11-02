@@ -183,10 +183,14 @@ read, write and delete on `<prefix>/*`. These examples show both locations, with
 what sourcemap storage needs; [otel/storage-backends.md](otel/storage-backends.md)
 has more on the data path. `artifacts_path` takes a local path, `s3://`, `gs://` or
 `az://`, and must not be inside `data_path`. It does not take `r2://` or `abfss://`, which
-work for `data_path` only; for R2, use `s3://` as shown below. `mallard check --connect`
-fails with exit 2 on a location the server could not start with. It builds the store from
-the config and does not contact it, so a wrong key or a missing bucket shows up at the
-first upload.
+work for `data_path` only; for R2, use `s3://` as shown below.
+
+`mallard check --connect` fails with exit 2 on a location the server could not start with,
+and with exit 1 on storage it cannot use, such as a wrong key or a missing bucket. It writes
+`mallard-check.parquet` to `data_path` and reads it back. DuckDB cannot delete it, so each
+check overwrites that one file and orphan cleanup removes it after a day. In the sourcemap
+store it writes a small object and deletes it, within 30 seconds. So it needs the same write
+access as the server.
 
 ### AWS S3
 
@@ -253,6 +257,10 @@ artifacts_path = "az://my-container/artifacts"
 type = "azure"
 connection_string = "${AZURE_STORAGE_CONNECTION_STRING}"   # DefaultEndpointsProtocol=https;AccountName=...
 ```
+
+The path names only the container, and the account comes from the connection string. An
+`artifacts_path` such as `az://<account>.blob.core.windows.net/...` is refused at start-up
+and by `mallard check`.
 
 The one secret covers the lake and the sourcemap store, if its `scope` covers both
 (or it has none). The store reads `AccountName`, `AccountKey` and `BlobEndpoint` from the

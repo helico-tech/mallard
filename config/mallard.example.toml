@@ -28,7 +28,8 @@ data_path = "data/lake/"          # local path, s3://, gs://, az://, r2:// ...
 # Sentry sourcemap bundles (empty = sourcemap upload answers 501). A local
 # path, s3://, gs:// or az://, outside data_path (not r2:// or abfss://; for R2
 # use s3:// with its endpoint). Credentials come from the [[storage.secrets]]
-# entry of that type whose scope covers it (azure: its connection_string).
+# entry of that type whose scope covers it (azure: its connection_string, which
+# also names the account, so the path is az://<container>/<prefix>).
 artifacts_path = ""               # e.g. "data/artifacts" or "s3://my-bucket/artifacts"
 data_inlining_row_limit = 1000
 target_file_size = "128MB"
