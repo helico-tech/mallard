@@ -17,6 +17,7 @@ mod lease;
 pub mod sql;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result, bail};
 pub use config::{CatalogKind, DuckDbConfig, SecretConfig, StorageConfig};
@@ -239,6 +240,27 @@ fn create_secrets(conn: &Connection, st: &StorageConfig) -> Result<()> {
 pub fn is_conflict(e: &anyhow::Error) -> bool {
     let text = format!("{e:#}").to_ascii_lowercase();
     text.contains("conflict") || text.contains("maximum retry count") || text.contains("database is locked")
+}
+
+/// One lake commit at a time on a DuckDB instance: its writers [`hold`](Self::hold) one clone of this
+/// around `COMMIT`.
+///
+/// Every DuckLake commit takes the next snapshot id, and of two at once one fails on the
+/// catalog's primary key and tries again. A large commit takes longer than the gap between small
+/// ones, so next to a writer committing all the time it never wins (ADR 0030). This does nothing
+/// for other processes on the catalog: for those the retries stay.
+#[derive(Clone, Debug, Default)]
+pub struct CommitLock(Arc<Mutex<()>>);
+
+impl CommitLock {
+    pub fn hold(&self) -> MutexGuard<'_, ()> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether both are clones of one lock.
+    pub fn is_shared_with(&self, other: &CommitLock) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// What DuckDB says when memory is short (its buffer manager and allocator). Some paths, such as

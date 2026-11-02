@@ -74,7 +74,9 @@ flowchart LR
   instead of losing data or running out of memory.
 - One flusher thread wakes every `flush_interval` or when `flush_rows` is
   reached. It appends all batches with DuckDB's Arrow appender in one
-  transaction: one DuckLake snapshot per flush.
+  transaction: one DuckLake snapshot per flush. Its `COMMIT` holds a
+  `mallard_duck::CommitLock` shared with the Sentry writer, so Sentry's commits do not starve it
+  ([ADR 0030](../adr/0030-one-lake-commit-at-a-time.md)).
 - A failed flush is either transient or permanent (`is_permanent` in
   `store/writer.rs`):
   - **Transient** (the default): the batches go back to the front of the

@@ -249,6 +249,7 @@ impl Db {
         conn: Connection,
         cfg: &Config,
         settings: maintenance::Maintenance,
+        commit_lock: mallard_duck::CommitLock,
         catalog_desc: String,
     ) -> Result<Db> {
         let ns = Ns::new(mallard_duck::CATALOG, crate::SCHEMA);
@@ -283,6 +284,7 @@ impl Db {
             cfg,
             maint_tx.clone(),
             inlined.clone(),
+            commit_lock,
             catalog_lost.clone(),
         )?;
         let handle = std::thread::Builder::new().name("ducklake-writer".into()).spawn(move || w.run())?;
@@ -627,7 +629,7 @@ pub(crate) mod tests {
         };
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let settings = maintenance::Maintenance { catalog_wide: Some(Duration::from_secs(3600)), threads: 1 };
-        Db::with_connection(conn, &cfg, settings, "test".into()).unwrap()
+        Db::with_connection(conn, &cfg, settings, Default::default(), "test".into()).unwrap()
     }
 
     /// Dropping without `shutdown()` stops the writer and waits for it
@@ -890,7 +892,7 @@ pub(crate) mod tests {
         let mut cfg = Config::default();
         cfg.ingest.batch_window = Duration::from_millis(10);
         let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
-        let db = Db::with_connection(conn, &cfg, settings, "test".into()).unwrap();
+        let db = Db::with_connection(conn, &cfg, settings, Default::default(), "test".into()).unwrap();
         // The lowest limit DuckDB takes: about what it uses right now.
         let short = || {
             [4, 8, 16, 32, 64, 128]
@@ -932,7 +934,7 @@ pub(crate) mod tests {
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let other = conn.try_clone().unwrap();
         let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
-        let db = Db::with_connection(conn, &Config::default(), settings, "test".into()).unwrap();
+        let db = Db::with_connection(conn, &Config::default(), settings, Default::default(), "test".into()).unwrap();
         assert!(!db.catalog_lost.is_cancelled());
         other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
         other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
@@ -957,11 +959,35 @@ pub(crate) mod tests {
         let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
         let other = conn.try_clone().unwrap();
         let settings = maintenance::Maintenance { catalog_wide: None, threads: 1 };
-        let db = Db::with_connection(conn, &Config::default(), settings, "test".into()).unwrap();
+        let db = Db::with_connection(conn, &Config::default(), settings, Default::default(), "test".into()).unwrap();
         other.execute_batch("SET debug_checkpoint_abort = 'before_header_non_fatal'").unwrap();
         other.execute_batch("CHECKPOINT __ducklake_metadata_lake").unwrap_err();
         // `SYNC_INTERVAL` is 100 ms in tests.
         tokio::time::timeout(Duration::from_secs(30), db.catalog_lost.cancelled()).await.unwrap();
+        db.shutdown().await;
+    }
+
+    /// Issue 0144: events commit one at a time with the other side of the process.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_waits_for_a_commit_of_the_other_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = mallard_duck::StorageConfig {
+            catalog: dir.path().join("catalog.ducklake").display().to_string(),
+            data_path: format!("{}/lake/", dir.path().display()),
+            ..Default::default()
+        };
+        let conn = mallard_duck::open_connection(&st, &Default::default()).unwrap();
+        let mut cfg = Config::default();
+        cfg.ingest.batch_window = Duration::from_millis(10);
+        let settings = maintenance::Maintenance { catalog_wide: None, threads: 0 };
+        let lock = mallard_duck::CommitLock::default();
+        let db = Db::with_connection(conn, &cfg, settings, lock.clone(), "test".into()).unwrap();
+        let other_side = lock.hold();
+        let mut rx = queue_event(&db, "waits", Utc::now());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(rx.try_recv().is_err(), "committed during a commit of the other side");
+        drop(other_side);
+        rx.await.unwrap().unwrap();
         db.shutdown().await;
     }
 

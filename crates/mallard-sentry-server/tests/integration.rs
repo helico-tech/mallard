@@ -48,6 +48,7 @@ impl TestServer {
             }),
             catalog_maintenance: Some(Duration::from_secs(3600)),
             maintenance_threads: 1,
+            commit_lock: Default::default(),
         };
         let server = Server::with_connection(cfg, host, conn).await.unwrap();
         Self::serve(server, listener, dir).await
@@ -870,6 +871,7 @@ async fn embedded_with_shared_connection_and_clean_shutdown() {
         artifacts: None,
         catalog_maintenance: None,
         maintenance_threads: 0,
+        commit_lock: Default::default(),
     };
     let server = Server::with_connection(cfg, host, conn).await.unwrap();
     // ...and mounts us below a prefix.
@@ -1030,6 +1032,7 @@ async fn an_invalidated_catalog_ends_the_background_job() {
         artifacts: None,
         catalog_maintenance: None,
         maintenance_threads: 0,
+        commit_lock: Default::default(),
     };
     let server = Server::with_connection(Config::default(), host, conn).await.unwrap();
     let project = server.create_project("web", "web", None).await.unwrap();
