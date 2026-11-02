@@ -4,22 +4,15 @@
 [docs/agents.md](../agents.md) has recipes. This page adds what is only true for
 this side.
 
-## `mallard telemetry`
+## Commands
 
-The flat commands (`services`, `ops`, `traces`, `trace`, `logs`, `metrics`, `sql`,
-`schema`) cover daily use. A hidden alias, `mallard telemetry` (or `otel`), keeps the
-command set of this side. Some of it has no flat form:
-
-| command | what |
-|---|---|
-| `mallard telemetry health` | is the server up (no token needed); exit 6 if not |
-| `mallard telemetry status` | ingest counters, buffer, flushes, storage per table, last maintenance |
-| `mallard telemetry trace <id> [-A]` | waterfall of one trace (`-A`: attributes and events) |
-| `mallard telemetry schema` | the tables and columns SQL can query, this side only |
-| `mallard telemetry tui [-s 1h]` | the TUI with only this side, in its own terminal |
+The flat commands (`services`, `ops`, `traces`, `trace`, `logs`, `metrics`, `sql`, `schema`) cover
+this side, with `mallard health` for "is the server up" without a token. `mallard status --json` has
+the details of this side under `otel.info`: ingest counters, buffer, flushes, storage per table, last
+maintenance. `mallard trace --json` has each span's attributes and events.
 
 ```sh
-mallard telemetry trace 0af7651916cd43dd8448eb211c80319c -A
+mallard trace 0af7651916cd43dd8448eb211c80319c --json | jq '.spans[].attributes'
 mallard traces list -e --json | jq -r '.items[].trace_id'
 mallard sql "SELECT name, count(*) FROM spans WHERE start_time > now()::TIMESTAMP - INTERVAL 1 HOUR GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
 ```

@@ -4,8 +4,7 @@
 //! One flat command tree (ADR 0008): `issues`, `events`, `traces`, `logs`,
 //! … The commands come from the two libraries (`mallard-sentry-cli`, `mallard-otel-cli`);
 //! `status`, `setup`, `find`, `trace` and `help agents` span both sides and
-//! live here. The old `errors …` / `telemetry …` paths stay as hidden
-//! aliases of the same commands.
+//! live here.
 
 mod apps;
 mod errors;
@@ -80,6 +79,8 @@ struct Cli {
 enum Cmd {
     /// Health of both sides and what the server allows; exit code 6 when a side is down.
     Status,
+    /// Is the server up? Needs no token; exit code 6 if not.
+    Health,
     /// Create a project if it does not exist; print its DSN and the OTLP env vars.
     Setup(setup::SetupArgs),
     /// Apps: a project and the services with the same slug, or either alone (default window 24h).
@@ -104,6 +105,14 @@ enum Cmd {
     /// Error events: list, show.
     #[command(subcommand)]
     Events(mallard_sentry_cli::EventsCmd),
+    /// Totals and event counts over time for one project (default window 24h).
+    Stats {
+        #[command(flatten)]
+        window: WindowArgs,
+        /// Bucket size, e.g. 1h (default: window / 24).
+        #[arg(long)]
+        interval: Option<String>,
+    },
     /// Sentry projects: list, show, create.
     #[command(subcommand)]
     Projects(mallard_sentry_cli::ProjectsCmd),
@@ -143,6 +152,9 @@ enum Cmd {
         #[arg(long, default_value = "send-test: hello from the mallard CLI")]
         message: String,
     },
+    /// Ask the running server to flush, compact and expire error data now. (`maintenance` works
+    /// without a server, on the catalog itself.)
+    Flush,
     /// Terminal UI: F1 errors, F2 telemetry.
     Tui,
     /// Web UI: the same screens and keys as `tui`, in a browser. With a token it
@@ -158,18 +170,6 @@ enum Cmd {
     Help {
         /// A command (e.g. `issues list`) or `agents`.
         topic: Vec<String>,
-    },
-    /// The Sentry-side commands under their old name (also `sentry`).
-    #[command(hide = true, alias = "sentry")]
-    Errors {
-        #[command(subcommand)]
-        cmd: mallard_sentry_cli::Command,
-    },
-    /// The OpenTelemetry-side commands under their old name (also `otel`).
-    #[command(hide = true, alias = "otel")]
-    Telemetry {
-        #[command(subcommand)]
-        cmd: mallard_otel_cli::Command,
     },
 }
 
@@ -349,6 +349,11 @@ async fn run(cli: Cli) -> Result<()> {
     match cmd {
         Cmd::Server(_) => unreachable!("handled above"),
         Cmd::Status => status::run(&r).await,
+        Cmd::Health => mallard_otel_cli::run(mallard_otel_cli::Command::Health, &r.otel()).await,
+        Cmd::Stats { window, interval } => {
+            mallard_sentry_cli::run(mallard_sentry_cli::Command::Stats { window, interval }, &r.sentry()).await
+        }
+        Cmd::Flush => mallard_sentry_cli::run(mallard_sentry_cli::Command::Maintenance, &r.sentry()).await,
         Cmd::Setup(a) => setup::run(&r, a).await,
         Cmd::Apps { window } => apps::run(&r, &window).await,
         Cmd::Find { id, window, wait } => find::run(&r, &id, &window, &wait).await,
@@ -386,8 +391,6 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Tui => tui::run(&r.client, r.project.clone()).await,
         Cmd::Web { addr } => mallard_web::run(r.client.base_url(), r.client.token(), &addr).await,
         Cmd::Help { topic } => help::run(&topic, &r.output),
-        Cmd::Errors { cmd } => mallard_sentry_cli::run(cmd, &r.sentry()).await,
-        Cmd::Telemetry { cmd } => mallard_otel_cli::run(cmd, &r.otel()).await,
     }
 }
 
@@ -489,6 +492,9 @@ mod tests {
             &["series", "spans", "-S", "checkout", "-O", "POST /pay", "--since", "6h", "--step", "5m"],
             &["series", "logs", "-S", "checkout", "-q", "timeout"],
             &["series", "errors", "--since", "1d", "--step", "1h"],
+            &["stats", "--since", "1h", "--interval", "5m"],
+            &["flush"],
+            &["health"],
             &["setup", "checkout", "--sentry-cli"],
             &["--quiet", "issues", "list"],
             &["serve"],
@@ -503,26 +509,25 @@ mod tests {
         }
     }
 
+    /// ADR 0032. `series errors` and the URL prefixes keep their names.
     #[test]
-    fn old_paths_are_hidden_aliases_of_the_same_commands() {
+    fn the_old_paths_are_gone() {
         for args in [
-            &["errors", "issues", "list", "-s", "1h"][..],
+            &["errors"][..],
+            &["errors", "issues", "list", "-s", "1h"],
             &["sentry", "events", "list", "-t", "abc", "-n", "3"],
             &["errors", "stats", "--since", "1h"],
             &["errors", "maintenance"],
-            &["errors", "projects", "create", "web"],
             &["telemetry", "traces", "-n", "5"],
             &["otel", "logs", "-f"],
-            &["telemetry", "trace", "0af7651916cd43dd8448eb211c80319c"],
-            &["telemetry", "metric", "x", "-g", "p95"],
             &["telemetry", "health"],
         ] {
-            if let Err(e) = try_parse(args) {
-                panic!("{args:?}: {e}");
-            }
+            let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
+            assert_eq!(e.kind(), clap::error::ErrorKind::InvalidSubcommand, "{args:?}");
         }
+        assert!(matches!(parse_ok(&["series", "errors"]).cmd, Cmd::Series(_)));
         let help = help::command().render_help().to_string();
-        assert!(!help.contains("  errors") && !help.contains("  telemetry"), "hidden: {help}");
+        assert!(!help.contains("  errors") && !help.contains("  telemetry"), "{help}");
         assert!(help.contains("issues") && help.contains("logs"), "{help}");
     }
 
@@ -531,7 +536,7 @@ mod tests {
         for args in [
             &["-p", "web", "issues", "list"][..],
             &["issues", "list", "-p", "web"],
-            &["errors", "issues", "list", "--project", "web"],
+            &["issues", "list", "--project", "web"],
         ] {
             assert_eq!(parse_ok(args).project.as_deref(), Some("web"), "{args:?}");
         }
@@ -573,15 +578,13 @@ mod tests {
             &["projects", "show", "web", "-p", "other"],
             &["sql", "SELECT 1", "-p", "web"],
             &["series", "spans", "-p", "web"],
-            &["telemetry", "services", "-p", "web"],
-            &["errors", "projects", "list", "-p", "web"],
+            &["health", "-p", "web"],
+            &["flush", "-p", "web"],
         ] {
             let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
             assert!(e.to_string().contains("-p does not apply to this command"), "{args:?}: {e}");
         }
-        for args in
-            [&["events", "list", "--trace", id, "-p", "web"][..], &["errors", "events", "list", "-t", id, "-p", "web"]]
-        {
+        for args in [&["events", "list", "--trace", id, "-p", "web"][..], &["events", "list", "-t", id, "-p", "web"]] {
             let e = try_parse(args).err().unwrap_or_else(|| panic!("{args:?}"));
             assert!(e.to_string().contains("searched across all projects"), "{args:?}: {e}");
         }
@@ -594,10 +597,9 @@ mod tests {
             &["find", id, "-p", "web"],
             &["series", "errors", "-p", "web"],
             &["tui", "-p", "web"],
-            &["errors", "stats", "-p", "web"],
+            &["stats", "-p", "web"],
             &["services", "-p", ""],
             &["projects", "show", "web"],
-            &["errors", "projects", "show", "web"],
         ] {
             parse_ok(args);
         }
@@ -611,7 +613,8 @@ mod tests {
             &["--url", "http://127.0.0.1:9", "--app", "web", "logs", "-S", "x"],
             &["--url", "http://127.0.0.1:9", "--app", "web", "ops", "-S", "x"],
             &["--url", "http://127.0.0.1:9", "--app", "web", "events", "list", "--trace", "abc"],
-            &["--url", "http://127.0.0.1:9", "--app", "web", "telemetry", "health"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "health"],
+            &["--url", "http://127.0.0.1:9", "--app", "web", "flush"],
         ] {
             let res = run(parse_ok(args)).await;
             assert_eq!(mallard_term::error::exit_code(&res), 2, "{args:?}");
@@ -688,7 +691,7 @@ mod tests {
             &["--url", "http://127.0.0.1:9", "issues", "list", "-p", "web"][..],
             &["--url", "http://127.0.0.1:9", "services"],
             &["--url", "http://127.0.0.1:9", "trace", "0af7651916cd43dd8448eb211c80319c"],
-            &["--url", "http://127.0.0.1:9", "errors", "-p", "web", "issues", "list"],
+            &["--url", "http://127.0.0.1:9", "-p", "web", "issues", "list"],
         ] {
             let res = run(parse_ok(args)).await;
             assert_eq!(mallard_term::error::exit_code(&res), 6, "{args:?}");

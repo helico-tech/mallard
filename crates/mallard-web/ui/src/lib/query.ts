@@ -17,27 +17,29 @@ export interface LogFilter {
   attributes: string[];
 }
 
-/** Splits on spaces, `"double quotes"` keep spaces. */
-export function tokens(s: string): string[] {
+/** The words as typed, with their quotes: splits on spaces outside `"double quotes"`. */
+function rawTokens(s: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quoted = false;
-  let has = false;
   for (const ch of s) {
-    if (ch === '"') {
-      quoted = !quoted;
-      has = true;
-    } else if (ch === " " && !quoted) {
-      if (has) out.push(cur);
+    if (ch === " " && !quoted) {
+      if (cur) out.push(cur);
       cur = "";
-      has = false;
     } else {
+      if (ch === '"') quoted = !quoted;
       cur += ch;
-      has = true;
     }
   }
-  if (has) out.push(cur);
+  if (cur) out.push(cur);
   return out;
+}
+
+const unquote = (t: string) => t.replaceAll('"', "");
+
+/** Splits on spaces, `"double quotes"` keep spaces. */
+export function tokens(s: string): string[] {
+  return rawTokens(s).map(unquote);
 }
 
 /** `250` (ms), `250ms`, `1.5s`, `2m`, `100us`, in ms. */
@@ -173,14 +175,15 @@ export interface IssueFilter {
 }
 
 /** The search box of the issue list: `key=value` is a tag, other words search the
- *  title and culprit. The server takes at most 10 tags. */
+ *  title and culprit. So does a word with its `=` in quotes: `"a=b"` is text, while
+ *  `a="b c"` is a tag. The server takes at most 10 tags. */
 export function parseIssueFilter(s: string): IssueFilter | { error: string } {
   const tags: string[] = [];
   const words: string[] = [];
-  for (const t of tokens(s)) {
+  for (const t of rawTokens(s)) {
     const pair = splitPair(t);
-    if (pair) tags.push(`${pair[0]}:${pair[1]}`);
-    else words.push(t);
+    if (pair && !pair[0].includes('"')) tags.push(`${pair[0]}:${unquote(pair[1])}`);
+    else words.push(unquote(t));
   }
   if (tags.length > 10) return { error: "at most 10 tag filters" };
   return { tags, query: words.length ? words.join(" ") : undefined };

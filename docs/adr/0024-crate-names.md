@@ -1,7 +1,7 @@
 # 0024 — One naming scheme for crates, metrics and test switches
 
 ## Status
-accepted
+accepted; `mallard errors …` and `mallard telemetry …` are removed by 0032
 
 ## Context
 The repo joined two codebases (ADR 0004). Their crates kept the prefixes of the

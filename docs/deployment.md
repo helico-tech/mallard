@@ -394,9 +394,9 @@ A 2 GiB container runs `1GB`, a `128MB` buffer and 4 threads, as compose does; 4
   because memory was short), `mallard_sentry_maintenance_errors_total` and
   `mallard_sentry_issue_overflow_events_total`. Telemetry:
   [otel/operations.md](otel/operations.md).
-- `mallard status`: both sides. `mallard errors info` or `GET /sentry/v1/info`: queue
-  depth.
-- `POST /sentry/v1/maintenance` (token) or `mallard errors maintenance`: flush inlined
+- `mallard status`: both sides. `mallard status --json` (`sentry.info`) or `GET
+  /sentry/v1/info`: queue depth.
+- `POST /sentry/v1/maintenance` (token) or `mallard flush`: flush inlined
   data and compact now.
 - `mallard maintenance [--full]` (no server running with a DuckDB-file or SQLite
   catalog): both sides' maintenance once, then exit. `--full` only changes the

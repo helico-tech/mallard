@@ -32,4 +32,4 @@ for r in $RATES; do
   printf "rate %5s traces/s  spans/s %7s  cpu avg %4s%% max %6s%%  mem max %9s  throttled %s failed %s\n" \
     "$r" "$spans" "$avgcpu" "$maxcpu" "$maxmem" "$thr" "$failed"
 done
-docker exec mallard-bench mallard --token bench telemetry status | sed -n '/Storage/,$p'
+docker exec mallard-bench mallard --token bench status --json | jq '.otel.info.storage'

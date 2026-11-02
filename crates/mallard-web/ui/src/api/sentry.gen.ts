@@ -314,9 +314,9 @@ export interface components {
             name: string;
             platform?: string | null;
             /**
-             * @description URL-safe identifier. Derived from `name` when omitted; then a project that has that
-             *     slug under the slug rule (`my_app` for the name `my-app`) is a 409, because a second
-             *     project would take its services.
+             * @description URL-safe identifier. Derived from `name` when omitted. A project that has the same
+             *     slug under the slug rule (`my_app` next to `my-app`) is a 409, also for a slug that was
+             *     asked for, because a second project would take its services.
              */
             slug?: string | null;
         };

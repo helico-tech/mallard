@@ -10,7 +10,7 @@ import { useInterval } from "@/app/settings";
 import { useParam, useScope, useWindow } from "@/app/window";
 import { OutsideApp } from "@/components/scope-states";
 import { traceSuggestions } from "@/components/suggestions";
-import { useListNav } from "@/components/list";
+import { DeepListNote, firstPageOnly, isDeep, useListNav } from "@/components/list";
 import { DataTable, EmptyState, ErrorState, Page, SearchField, Section, Service, StaleNote, TableSkeleton } from "@/components/ui-bits";
 import { windowSeconds } from "@/lib/domain";
 import { compact, dayTime, ms, timeMs } from "@/lib/format";
@@ -58,7 +58,7 @@ export function TracesPage() {
     },
     initialPageParam: null as null | { cursor: string; from: string; to: string },
     getNextPageParam: (last) => (last.nextCursor ? { cursor: last.nextCursor, from: last.window.from, to: last.window.to } : undefined),
-    refetchInterval,
+    refetchInterval: firstPageOnly(refetchInterval),
     placeholderData: keepPreviousData,
   });
 
@@ -78,7 +78,7 @@ export function TracesPage() {
       return sentry.errorsByTrace(ids, new Date(to.getTime() - windowSeconds(w) * 1000).toISOString(), to.toISOString(), signal);
     },
     enabled: ids.length > 0,
-    refetchInterval,
+    refetchInterval: isDeep(q.data) ? false : refetchInterval,
     placeholderData: keepPreviousData,
   });
   // Unknown is not zero: when Sentry cannot be read the column says so.
@@ -186,6 +186,7 @@ export function TracesPage() {
                 })}
               </Table.Body>
             </DataTable>
+            {isDeep(q.data) && <DeepListNote />}
             {q.hasNextPage ? (
               <div className="flex justify-center px-4 py-3"><Button variant="secondary" loading={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>Load more</Button></div>
             ) : (

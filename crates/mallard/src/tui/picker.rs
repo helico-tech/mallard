@@ -200,6 +200,11 @@ impl Shared {
     }
 
     /// The picker over `area`: which side each app has, so a missing one is no surprise.
+    /// The longest window that no side refuses.
+    pub fn longest_window(&self) -> &'static str {
+        self.windows.last().map_or(DEFAULT_WINDOW, |(name, _)| *name)
+    }
+
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let Some(row) = self.picker else { return };
         let note = self.error.iter().chain(&self.warnings).next().map(|w| clean(w).into_owned());

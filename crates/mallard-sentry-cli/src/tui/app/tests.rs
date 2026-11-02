@@ -454,7 +454,7 @@ fn the_host_chooses_the_project() {
     assert_eq!(app.no_project, None);
 }
 
-/// Standalone `errors tui` keeps its own keys; in a host they are the host's.
+/// Without a host it keeps its own keys; in a host they are the host's.
 #[test]
 fn window_and_picker_keys_belong_to_the_host() {
     let mut app = loaded_app();
@@ -521,7 +521,11 @@ fn key_value_words_are_tag_filters() {
     assert_eq!(f("connection refused"), (Some("connection refused".into()), vec![]));
     assert_eq!(f("url=/a boom"), (Some("boom".into()), vec!["url:/a".to_string()]));
     assert_eq!(f("url=/a=b user=\"a b\""), (None, vec!["url:/a=b".to_string(), "user:a b".to_string()]));
-    assert_eq!(f("\"a=b\""), (None, vec!["a:b".to_string()]), "like the web UI: a=b is always a tag");
+    assert_eq!(f("\"a=b\""), (Some("a=b".into()), vec![]), "quoted is text, like the web UI");
+    assert_eq!(f("\"a=b c\" x"), (Some("a=b c x".into()), vec![]));
+    assert_eq!(f("\"a\"=b"), (Some("a=b".into()), vec![]), "the key has a quote");
+    assert_eq!(f("\"a=b\" c=d"), (Some("a=b".into()), vec!["c:d".to_string()]), "each word on its own");
+    assert_eq!(f("a=\"b=c\""), (None, vec!["a:b=c".to_string()]), "only the value is quoted");
     assert_eq!(f("=x"), (Some("=x".into()), vec![]));
     let key = IssuesKey {
         project: "web".into(),
@@ -529,9 +533,12 @@ fn key_value_words_are_tag_filters() {
         sort: SortBy::LastSeen,
         window: Window::Day,
         query: "url=/a boom".into(),
+        limit: ISSUE_PAGE,
     };
     let q = key.query();
     assert_eq!((q.query.as_deref(), q.tag.as_slice()), (Some("boom"), &["url:/a".to_string()][..]));
+    let q = IssuesKey { query: "\"url=/a\"".into(), ..key }.query();
+    assert_eq!((q.query.as_deref(), q.tag.as_slice()), (Some("url=/a"), &[][..]), "what is sent to the server");
 }
 
 const LATER: Duration = Duration::from_millis(300);
@@ -593,4 +600,100 @@ fn a_failed_suggestion_stays_quiet() {
         items: Some(vec![]),
     });
     assert_eq!(app.offline.as_deref(), Some("down"));
+}
+
+fn issue_list(n: usize) -> IssueList {
+    let proto = issues()[0].clone();
+    let issues = (0..n).map(|i| IssueSummary { id: format!("i{i}"), ..proto.clone() }).collect();
+    IssueList { issues, window_start: now(), window_end: now(), next_cursor: None }
+}
+
+/// The app on a list with `n` issues, the first row selected.
+fn on_list(n: usize) -> App {
+    let mut app = loaded_app();
+    let key = app.issues_key().unwrap();
+    app.on_response(Resp::Issues(key, Ok(issue_list(n))));
+    app
+}
+
+#[test]
+fn the_last_row_of_a_full_list_reads_more() {
+    let mut app = on_list(ISSUE_PAGE as usize);
+    let (r, _) = app.on_key(KeyEvent::from(KeyCode::Down));
+    assert!(r.is_empty(), "not on the last row yet");
+    let (r, _) = app.on_key(KeyEvent::from(KeyCode::Char('G')));
+    let [Req::Issues(k)] = r.as_slice() else { panic!("{r:?}") };
+    assert_eq!(k.query().limit, Some(400));
+
+    // The answer keeps the selection and the older answer no longer counts.
+    let old = IssuesKey { limit: ISSUE_PAGE, ..k.clone() };
+    app.on_response(Resp::Issues(old, Ok(issue_list(1))));
+    assert_eq!(app.issues.len(), ISSUE_PAGE as usize);
+    let k = k.clone();
+    app.on_response(Resp::Issues(k, Ok(issue_list(400))));
+    assert_eq!(app.issues.len(), 400);
+    assert_eq!(app.issues_state.selected(), Some(ISSUE_PAGE as usize - 1));
+}
+
+#[test]
+fn a_grown_list_holds_still_until_r() {
+    let mut app = on_list(ISSUE_PAGE as usize);
+    let later = Instant::now() + REFRESH_EVERY * 2;
+    assert!(app.on_tick(later).iter().any(|r| matches!(r, Req::Issues(_))), "one page stays live");
+    app.pending.clear();
+
+    press(&mut app, key('G'));
+    app.pending.clear();
+    let key_now = app.issues_key().unwrap();
+    app.on_response(Resp::Issues(key_now, Ok(issue_list(400))));
+    app.pending.clear();
+    let r = app.on_tick(later + REFRESH_EVERY * 2);
+    assert!(!r.iter().any(|q| matches!(q, Req::Issues(_))), "past it: no auto refresh: {r:?}");
+    assert!(r.iter().any(|q| matches!(q, Req::Stats { .. })), "the rest stays live: {r:?}");
+    app.pending.clear();
+
+    let r = press(&mut app, key('r'));
+    assert!(r.iter().any(|q| matches!(q, Req::Issues(k) if k.limit == 400)), "r reads the whole list: {r:?}");
+}
+
+#[test]
+fn a_list_that_is_not_full_has_no_more() {
+    let mut app = on_list(3);
+    let (r, _) = app.on_key(KeyEvent::from(KeyCode::Char('G')));
+    assert!(r.is_empty());
+    assert_eq!(app.issue_limit, ISSUE_PAGE);
+}
+
+#[test]
+fn the_cap_of_the_server_is_said() {
+    let mut app = on_list(ISSUE_PAGE as usize);
+    app.issue_limit = ISSUE_CAP;
+    let key = app.issues_key().unwrap();
+    app.on_response(Resp::Issues(key, Ok(issue_list(ISSUE_CAP as usize))));
+    let (r, _) = app.on_key(KeyEvent::from(KeyCode::Char('G')));
+    assert!(r.is_empty());
+    assert!(app.toast.as_ref().is_some_and(|t| t.text.contains("first 500")));
+}
+
+#[test]
+fn another_sort_starts_again_at_one_page() {
+    let mut app = on_list(ISSUE_PAGE as usize);
+    press(&mut app, key('G'));
+    assert_eq!(app.issue_limit, 400);
+    let (r, _) = app.on_key(KeyEvent::from(KeyCode::Char('s')));
+    assert_eq!(app.issue_limit, ISSUE_PAGE);
+    assert!(r.iter().any(|q| matches!(q, Req::Issues(k) if k.limit == ISSUE_PAGE)), "{r:?}");
+}
+
+#[test]
+fn an_issue_opens_by_id_in_its_project() {
+    let mut app = loaded_app();
+    let r = app.show_issue("other", "abc", Some("e1"));
+    assert_eq!(app.project.as_deref(), Some("other"));
+    let Screen::Detail(d) = &app.screen else { panic!("not on the issue") };
+    assert_eq!((d.id.as_str(), d.event_id.as_deref(), d.tab), ("abc", Some("e1"), Some(Tab::Stack)));
+    assert!(r.iter().any(|q| matches!(q, Req::Issues(k) if k.project == "other")), "the list behind it: {r:?}");
+    assert!(r.iter().any(|q| matches!(q, Req::Event { event_id, .. } if event_id == "e1")), "{r:?}");
+    press(&mut app, KeyEvent::from(KeyCode::Esc));
+    assert_eq!(app.view(), View::Issues);
 }

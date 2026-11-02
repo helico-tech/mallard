@@ -359,11 +359,11 @@ mod tests {
     #[test]
     fn no_projects_hint_names_the_host_command() {
         let mut app = App::new("http://x", None);
-        app.hints.command = "mallard errors";
+        app.hints.command = "host";
         app.start();
         app.on_response(Resp::Projects(Ok(vec![])));
         let s = draw(&mut app, 120, 30);
-        assert!(s.contains("create one with: mallard errors projects create <name>"), "{s}");
+        assert!(s.contains("create one with: host projects create <name>"), "{s}");
     }
 
     #[test]
@@ -461,7 +461,7 @@ mod tests {
         assert!(s.contains("Keys") && s.contains("older / newer event"), "{s}");
         // The shared keys (the same list as on the telemetry tab) and the time zone.
         // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
-        for (_, what) in mallard_term::tui::keys::SHARED.iter().filter(|(k, _)| *k != "p") {
+        for (_, what) in mallard_term::tui::keys::shared(false) {
             assert!(s.contains(what), "missing {what:?} in\n{s}");
         }
         assert!(s.contains("All times are UTC."), "{s}");

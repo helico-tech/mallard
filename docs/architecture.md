@@ -24,7 +24,7 @@
 
 | crate | role |
 |---|---|
-| `mallard` | The one product binary (ADR 0023): one flat command tree (ADR 0008) mounting `mallard-sentry-cli` and `mallard-otel-cli` commands, plus `status`, `setup`, `apps`, `find`, `trace`, `series`, `help agents`, `tui` (the host holds the app picker and the one time window of both tabs); `--app` is worked out once in `scope.rs`; `errors …`/`telemetry …` are hidden aliases. These speak HTTP only. Feature `server` (on by default) adds `serve`, `check`, `maintenance`, `install-extensions` from `mallard-server`; with `--no-default-features` the same CLI and TUI build with no DuckDB (CI checks `cargo tree`). |
+| `mallard` | The one product binary (ADR 0023): one flat command tree (ADR 0008) mounting `mallard-sentry-cli` and `mallard-otel-cli` commands, plus `status`, `setup`, `apps`, `find`, `trace`, `series`, `help agents`, `tui` (the host holds the app picker and the one time window of both tabs); `--app` is worked out once in `scope.rs`. These speak HTTP only. Feature `server` (on by default) adds `serve`, `check`, `maintenance`, `install-extensions` from `mallard-server`; with `--no-default-features` the same CLI and TUI build with no DuckDB (CI checks `cargo tree`). |
 | `mallard-web` | The Web UI behind `mallard web` (ADR 0016): the React app built in, plus a same-origin proxy that holds the token or a signed-in user's session and passes only what the TUI uses. HTTP only, like the TUI; no DuckDB, no server code. |
 | `mallard-server` | A library, run by `mallard serve`. Loads config, opens the shared catalog (`mallard_duck::open_connection`), builds both sides on it, mounts their routers, `/api/v1/apps`, `/api/v1/find` (`src/api.rs`), `/healthz`, `/readyz` (both sides) and `/metrics`, runs their background jobs and the shutdown order. The bridge (`src/bridge/`, ADR 0009, 0013, 0021) turns Sentry transactions and streamed spans into OTel spans and OTel exceptions into Sentry events through the libraries' hooks. `commands` is what the server commands run, and the only place that installs logging and the Prometheus recorder (`mallard-common`). |
 | `mallard-api` | The types of `/api/v1/...`, shared by `mallard-server` and the CLI, so the slim build needs no server crate. |
@@ -82,8 +82,9 @@
   itself: which project and services are one app (ADR 0027, `service_slug` in
   `mallard-sentry-api` is the one slug rule, also the bridge's, and project slugs go through it
   too, so `my_app` joins the service `my_app`; with several such projects `app_projects` picks
-  one, and `POST /v1/projects` without a slug and `mallard setup` find that one instead of opening a
-  second), and what an id points at. Document:
+  one; `POST /v1/projects` refuses a second with a 409, with or without a slug, `mallard setup`
+  without `--slug` finds that one, and `bridge.default_project` uses it, ADR 0031), and what an id
+  points at. Document:
   `docs/openapi.json`. It calls the libraries' `Server` methods (`service_names`,
   `projects`, `find_event`, …), which run on each side's read path with its limits,
   so it never depends on their table layout. A side that fails adds to `warnings`;

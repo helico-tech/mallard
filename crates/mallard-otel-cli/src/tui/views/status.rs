@@ -135,6 +135,19 @@ fn draw_ingest(f: &mut Frame, area: Rect, s: &Stats, rate: Option<f64>) {
     if let Some(e) = &i.last_flush_error {
         lines.push(Line::from(Span::styled(format!("last error: {e}"), theme::error())));
     }
+    if let Some(c) = &s.capabilities {
+        let on_off = |on: bool, yes: &'static str, no: &'static str| if on { yes } else { no };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "ad-hoc SQL {} · longest window {} · ingest token {} · new data after about {}s",
+                on_off(c.sql, "on", "off"),
+                uptime(c.max_window_secs),
+                on_off(c.ingest_auth, "yes", "no"),
+                c.flush_interval_secs,
+            ),
+            theme::dim(),
+        )));
+    }
     f.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }), info_area);
 }
 

@@ -3,8 +3,8 @@
 Errors, traces, logs and metrics in one place, stored in a
 [DuckLake](https://ducklake.select) (DuckDB catalog + Parquet files on disk
 or object storage). One binary: `mallard serve` runs the server; the `mallard`
-CLI and terminal UI talk to it over HTTP. Need only the client? A slim build
-has the same CLI and TUI with no server and no DuckDB.
+CLI, the terminal UI and the Web UI talk to it over HTTP. Need only the client? A
+slim build has the same CLI and TUI with no server and no DuckDB.
 
 - **Errors**: point any Sentry SDK at mallard by changing only the DSN.
   Issues, grouping, releases, sourcemaps (`sentry-cli` uploads work).
@@ -24,8 +24,8 @@ has the same CLI and TUI with no server and no DuckDB.
 ## The terminal UI
 
 `mallard tui`: errors on F1, telemetry on F2, and `x` jumps between them by
-trace id. One app picker (`p`) and one time window (`t`) for both, and filters
-that suggest keys and values while you type.
+trace id. One app picker (`p`) and one time window (`t`) for both, filters
+that suggest keys and values while you type, and `ctrl-k` to paste any id and land on it.
 
 **An issue, with the trace of the request that failed** — open an issue,
 press `x`, and the telemetry tab shows that request's spans with the failing
@@ -47,7 +47,32 @@ one in red:
 
 <img src="docs/screenshots/telemetry-logs.png" alt="Logs filtered to the trace: placing order, card declined" width="49%">
 
-Screenshots come from the real TUI and demo data (`scripts/screenshots.sh`).
+## The Web UI
+
+`mallard web`: the same screens and keys in a browser, on http://127.0.0.1:8088.
+
+**The same failed request**: the issue, and its trace (`x`):
+
+<p>
+  <img src="docs/screenshots/web-issue.png" alt="Issue detail in the browser: PaymentDeclinedError with its trend and the event's trace id" width="49%">
+  <img src="docs/screenshots/web-trace.png" alt="Waterfall of the trace in the browser, with the failed checkout-api and payments spans in red" width="49%">
+</p>
+
+**The home page of an app, and its issues**:
+
+<p>
+  <img src="docs/screenshots/web-home.png" alt="Overview of the app web: error rate, p95 latency, requests, new issues, charts and worst operations" width="49%">
+  <img src="docs/screenshots/web-issues.png" alt="Issue list in the browser: unresolved issues with event and user counts and a trend" width="49%">
+</p>
+
+**Logs of the trace, and search** (`Cmd-K`: pick an app, or paste any id and land on it):
+
+<p>
+  <img src="docs/screenshots/web-logs.png" alt="Logs filtered to the trace: placing order, card declined" width="49%">
+  <img src="docs/screenshots/web-search.png" alt="The search box open over the page, listing the apps" width="49%">
+</p>
+
+Screenshots come from the real TUI and Web UI with demo data (`scripts/screenshots.sh`).
 
 ## Quick start (Docker)
 

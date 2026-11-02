@@ -11,7 +11,7 @@ import { useParam, useScope, useWindow } from "@/app/window";
 import { NoErrors, WidenButton } from "@/components/scope-states";
 import { issueSuggestions } from "@/components/suggestions";
 import { StackedBars } from "@/components/charts";
-import { useListNav } from "@/components/list";
+import { DeepListNote, firstPageOnly, isDeep, useListNav } from "@/components/list";
 import { Ago, DataTable, EmptyState, ErrorState, Level, Page, SearchField, Section, StaleNote, Stat, Status, TableSkeleton } from "@/components/ui-bits";
 import { Sparkline } from "@/components/charts";
 import { clean } from "@/lib/clean";
@@ -197,7 +197,7 @@ export function IssuesPage() {
     queryFn: ({ signal, pageParam }) => sentry.issues(project, { status, query: filter.query, tag: filter.tags, since: w, sort, cursor: pageParam }, signal),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    refetchInterval,
+    refetchInterval: firstPageOnly(refetchInterval),
     placeholderData: keepPreviousData,
   });
   const items = useMemo(() => issues.data?.pages.flatMap((p) => p.issues) ?? [], [issues.data]);
@@ -332,6 +332,7 @@ export function IssuesPage() {
                 ))}
               </Table.Body>
             </DataTable>
+            {isDeep(issues.data) && <DeepListNote />}
             {hasMore ? (
               <div className="flex justify-center px-4 py-3">
                 <Button variant="secondary" loading={issues.isFetchingNextPage} onClick={() => void issues.fetchNextPage()}>Load more</Button>

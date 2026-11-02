@@ -478,6 +478,91 @@ fn status_renders() {
 }
 
 #[test]
+fn status_says_what_the_server_allows() {
+    let mut e = fixture();
+    let _ = e.handle_event(&ch('5'));
+    e.stats.as_mut().unwrap().capabilities = Some(mallard_otel_client::api::Capabilities {
+        sql: false,
+        max_window_secs: 7 * 86_400,
+        retention_secs: mallard_otel_client::api::RetentionSecs { traces: 0, logs: 0, metrics: 0 },
+        flush_interval_secs: 5.0,
+        ingest_auth: true,
+    });
+    all_sizes(&mut e);
+    let s = render(&mut e, 140, 40);
+    for needle in ["ad-hoc SQL off", "longest window 7d", "ingest token yes", "new data after about 5s"] {
+        assert!(s.contains(needle), "missing {needle:?} in\n{s}");
+    }
+}
+
+#[test]
+fn the_last_row_of_a_full_trace_list_reads_more() {
+    let mut e = fixture();
+    let _ = e.handle_event(&ch('2'));
+    let t = e.traces.list[0].clone();
+    e.traces.set_list(vec![t.clone(); 3]);
+    let _ = e.handle_event(&ch('G'));
+    assert_eq!(e.traces.limit(), 200, "a short list is all there is");
+    e.traces.set_list(vec![t.clone(); 200]);
+    let _ = e.handle_event(&ch('k'));
+    assert_eq!(e.traces.limit(), 200, "not on the last row");
+    let _ = e.handle_event(&ch('G'));
+    assert_eq!(e.traces.limit(), 400);
+    // The server's cap is said, not hidden.
+    e.traces.pages = 4;
+    e.traces.set_list(vec![t.clone(); 1000]);
+    let _ = e.handle_event(&ch('k'));
+    let _ = e.handle_event(&ch('G'));
+    assert_eq!(e.traces.limit(), 1000);
+    assert!(render(&mut e, 140, 40).contains("the first 1000 traces"));
+    // Another list starts again at one page.
+    e.set_trace_filter("errors");
+    assert_eq!(e.traces.limit(), 200);
+    e.traces.pages = 1;
+    let _ = e.handle_event(&ch('t'));
+    assert_eq!(e.traces.limit(), 200, "another window too");
+}
+
+/// With a runtime, because `refreshed` only moves when a load starts.
+#[tokio::test]
+async fn a_grown_trace_list_holds_still_until_r() {
+    let mut e = fixture();
+    let _ = e.handle_event(&ch('2'));
+    let long_ago = Instant::now() - Duration::from_secs(60);
+    e.traces.refreshed = Some(long_ago);
+    e.refresh_traces(false);
+    assert_ne!(e.traces.refreshed, Some(long_ago), "one page stays live");
+    assert!(!render(&mut e, 140, 40).contains("paused"));
+
+    e.traces.pages = 1;
+    e.traces.refreshed = Some(long_ago);
+    e.refresh_traces(false);
+    assert_eq!(e.traces.refreshed, Some(long_ago), "past it: no auto refresh");
+    assert!(render(&mut e, 140, 40).contains("paused, r refreshes"));
+
+    let _ = e.handle_event(&ch('r'));
+    assert_eq!(e.traces.pages, 1, "r keeps the rows");
+    e.refresh_traces(false);
+    assert!(e.traces.refreshed.is_some_and(|t| t != long_ago), "r reads the whole list");
+    let then = e.traces.refreshed;
+    e.refresh_traces(false);
+    assert_eq!(e.traces.refreshed, then, "once");
+}
+
+#[test]
+fn a_trace_opens_near_a_time_on_a_span() {
+    let mut e = fixture();
+    let t = trace_fixture();
+    let time = chrono::Utc::now() - chrono::TimeDelta::days(20);
+    let span = t.spans.last().unwrap().span_id.clone();
+    assert!(e.open_trace_at(&t.trace_id, Some(time), Some(&span)));
+    assert_eq!(e.traces.detail.as_ref().unwrap().hint, Some(time));
+    e.traces.set_trace(t);
+    let d = e.traces.detail.as_ref().unwrap();
+    assert_eq!(d.selected_span().map(|s| s.span_id.as_str()), Some(span.as_str()));
+}
+
+#[test]
 fn status_shows_throttled_requests_in_every_layout() {
     let mut e = fixture();
     let _ = e.handle_event(&ch('5'));
@@ -702,7 +787,7 @@ fn shared_keys_mean_the_same_as_on_the_errors_tab() {
     let _ = e.handle_event(&ch('?'));
     let s = render(&mut e, 140, 50);
     // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
-    for (_, what) in mallard_term::tui::keys::SHARED.iter().filter(|(k, _)| *k != "p") {
+    for (_, what) in mallard_term::tui::keys::shared(false) {
         assert!(s.contains(what), "missing {what:?} in\n{s}");
     }
     assert!(!s.contains("choose the app"), "{s}");

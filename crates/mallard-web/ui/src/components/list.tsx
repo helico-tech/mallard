@@ -72,3 +72,21 @@ export function useListNav<T>(opts: {
 
   return { selected, selectedId: currentId, select, index };
 }
+
+/** More than the first page is loaded. */
+export function isDeep(data: { pages: unknown[] } | undefined): boolean {
+  return (data?.pages.length ?? 0) > 1;
+}
+
+/**
+ * `refetchInterval` of a list with "Load more". Past the first page it holds still, as in the
+ * TUI: rows stay put while someone reads them, and every loaded page is not read again every
+ * few seconds on the server's shared connection. `r` still reads all pages (issue 0192).
+ */
+export function firstPageOnly(interval: number | false) {
+  return (query: { state: { data: { pages: unknown[] } | undefined } }): number | false => (isDeep(query.state.data) ? false : interval);
+}
+
+export function DeepListNote() {
+  return <p className="px-4 pt-3 text-center text-xs text-kumo-subtle">Past the first page this list does not refresh by itself. Press r to refresh all of it.</p>;
+}

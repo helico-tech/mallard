@@ -2,16 +2,21 @@
 //! F1 errors (mallard-sentry-cli), F2 telemetry (mallard-otel-cli). Jumps between
 //! them go by trace id. The host holds what is one for all tabs: the app (`p`, the
 //! picker) and the time window (`t`, `T`). The tabs return those keys as `Ignored`.
+//! `ctrl-k` opens [`find`], above whatever a tab shows.
 
+mod find;
 mod picker;
 
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use chrono::{DateTime, Utc};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use find::{Find, FindKey};
 use futures::StreamExt;
 use mallard_client::Client;
-use mallard_client::mallard_api::{AppList, AppsQuery};
+use mallard_client::mallard_api::{AppList, AppsQuery, FindMatch, FindQuery, FindResult};
 use mallard_term::tui::{Outcome, Scope, keys, theme};
 use picker::{PickerKey, Shared};
 use ratatui::{
@@ -35,6 +40,10 @@ trait Pane {
     fn open_trace_event(&mut self, trace_id: &str, _event_id: &str) {
         self.open_trace(trace_id)
     }
+    /// A trace found by id, near `time`, on `span` if given. Only the telemetry tab has it.
+    fn open_trace_at(&mut self, _trace_id: &str, _time: DateTime<Utc>, _span: Option<&str>) {}
+    /// An issue found by id; with an event, that event. Only the errors tab has it.
+    fn open_issue(&mut self, _project: &str, _issue: &str, _event: Option<&str>) {}
     /// An internal error (a panicked background load) after `tick`.
     fn take_fatal(&mut self) -> Option<String> {
         None
@@ -72,6 +81,9 @@ impl Pane for mallard_sentry_cli::Embedded {
     fn open_trace_event(&mut self, trace_id: &str, event_id: &str) {
         mallard_sentry_cli::Embedded::open_trace_event(self, trace_id, event_id)
     }
+    fn open_issue(&mut self, project: &str, issue: &str, event: Option<&str>) {
+        mallard_sentry_cli::Embedded::open_issue(self, project, issue, event)
+    }
     fn take_fatal(&mut self) -> Option<String> {
         mallard_sentry_cli::Embedded::take_fatal(self)
     }
@@ -106,6 +118,9 @@ impl Pane for mallard_otel_cli::Embedded {
         // An invalid id is shown in the tab itself.
         let _ = mallard_otel_cli::Embedded::open_trace(self, trace_id);
     }
+    fn open_trace_at(&mut self, trace_id: &str, time: DateTime<Utc>, span: Option<&str>) {
+        let _ = mallard_otel_cli::Embedded::open_trace_at(self, trace_id, Some(time), span);
+    }
     fn set_window(&mut self, since: &str) {
         // The presets are valid windows.
         let _ = mallard_otel_cli::Embedded::set_since(self, since);
@@ -125,6 +140,9 @@ const APPS_RETRY: Duration = Duration::from_secs(5);
 /// One read of the list: its window, and the answer or the message.
 type AppsAnswer = (&'static str, Result<AppList, String>);
 
+/// One lookup of `ctrl-k`: the id, its window, and the answer or the message.
+type FindAnswer = (String, &'static str, Result<Option<FindResult>, String>);
+
 struct Host {
     tabs: Vec<Box<dyn Pane>>,
     active: usize,
@@ -139,6 +157,11 @@ struct Host {
     apps_task: Option<tokio::task::AbortHandle>,
     /// When to read the list next.
     apps_at: Option<Instant>,
+    /// `ctrl-k`, while it is open.
+    find: Option<Find>,
+    find_tx: std::sync::mpsc::Sender<FindAnswer>,
+    find_rx: std::sync::mpsc::Receiver<FindAnswer>,
+    find_task: Option<tokio::task::AbortHandle>,
 }
 
 const ERRORS: usize = 0;
@@ -148,6 +171,7 @@ impl Host {
     /// `wanted` is the first choice of the picker (`-p`, `--app`).
     fn new(tabs: Vec<Box<dyn Pane>>, base_url: String, client: Option<Client>, wanted: Option<String>) -> Self {
         let (apps_tx, apps_rx) = std::sync::mpsc::channel();
+        let (find_tx, find_rx) = std::sync::mpsc::channel();
         Host {
             tabs,
             active: ERRORS,
@@ -159,6 +183,10 @@ impl Host {
             apps_rx,
             apps_task: None,
             apps_at: Some(Instant::now()),
+            find: None,
+            find_tx,
+            find_rx,
+            find_task: None,
         }
     }
 
@@ -264,6 +292,85 @@ impl Host {
         true
     }
 
+    /// A key while `ctrl-k` is open: the tabs get none. Returns false to quit.
+    fn find_event(&mut self, ev: &Event) -> bool {
+        let (Event::Key(k), Some(find)) = (ev, &mut self.find) else { return true };
+        if k.kind == KeyEventKind::Release {
+            return true;
+        }
+        if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            match k.code {
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return false,
+                KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => find.clear(),
+                KeyCode::Char(keys::FIND_CTRL) if k.modifiers.contains(KeyModifiers::CONTROL) => self.close_find(),
+                _ => {}
+            }
+            return true;
+        }
+        match find.key(k.code) {
+            FindKey::Stay => {}
+            FindKey::Close => self.close_find(),
+            FindKey::Look(id) => self.look_up(id),
+            FindKey::Land(m) => self.land(&m),
+        }
+        true
+    }
+
+    fn close_find(&mut self) {
+        self.find = None;
+        if let Some(task) = self.find_task.take() {
+            task.abort();
+        }
+    }
+
+    /// Look in the longest window there is, as the web UI: an id says what it wants.
+    fn look_up(&mut self, id: String) {
+        let (Some(client), Ok(rt)) = (self.client.clone(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        let since = self.shared.longest_window();
+        let tx = self.find_tx.clone();
+        let base = self.base_url.clone();
+        let task = rt.spawn(async move {
+            let q = FindQuery { id: id.clone(), project: None, from: None, to: None, since: Some(since.to_string()) };
+            let answer = client.find(&q).await.map_err(|e| crate::classify(&e, &base).to_string());
+            let _ = tx.send((id, since, answer));
+        });
+        if let Some(old) = self.find_task.replace(task.abort_handle()) {
+            old.abort();
+        }
+    }
+
+    fn apply_find(&mut self, id: &str, since: &str, answer: Result<Option<FindResult>, String>) {
+        if let Some(m) = self.find.as_mut().and_then(|find| find.answered(id, since, answer)) {
+            self.land(&m);
+        }
+    }
+
+    /// Open what was found, on the tab of its side.
+    fn land(&mut self, m: &FindMatch) {
+        self.close_find();
+        match m {
+            FindMatch::Trace { trace_id, time, .. } => {
+                self.tabs[TELEMETRY].open_trace_at(trace_id, *time, None);
+                self.active = TELEMETRY;
+            }
+            FindMatch::Span { trace_id, span_id, time, .. } => {
+                self.tabs[TELEMETRY].open_trace_at(trace_id, *time, Some(span_id));
+                self.active = TELEMETRY;
+            }
+            FindMatch::Event { project, issue_id, event_id, .. } => {
+                self.tabs[ERRORS].open_issue(project, issue_id, Some(event_id));
+                self.active = ERRORS;
+            }
+            FindMatch::Issue { project, issue_id, .. } => {
+                self.tabs[ERRORS].open_issue(project, issue_id, None);
+                self.active = ERRORS;
+            }
+        }
+        self.follow_project();
+    }
+
     fn draw(&mut self, f: &mut Frame) {
         let [bar, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(f.area());
         let mut spans = vec![Span::styled(" mallard ", theme::tab_active())];
@@ -285,12 +392,25 @@ impl Host {
         f.render_widget(Paragraph::new(Line::from(spans)), bar);
         self.tabs[self.active].draw(f, body);
         self.shared.render(f, body);
+        if let Some(find) = &self.find {
+            find.render(f, body);
+        }
     }
 
     /// Returns false to quit.
     fn on_event(&mut self, ev: &Event) -> bool {
         if self.shared.picker.is_some() {
             return self.picker_event(ev);
+        }
+        if self.find.is_some() {
+            return self.find_event(ev);
+        }
+        // Before the tabs: it works on every screen, also while a filter is being typed.
+        if let Event::Key(k) = ev
+            && is_find_key(k)
+        {
+            self.find = Some(Find::new());
+            return true;
         }
         if let Event::Key(k) = ev
             && k.kind != KeyEventKind::Release
@@ -333,6 +453,9 @@ impl Host {
         while let Ok((since, answer)) = self.apps_rx.try_recv() {
             self.apply_apps(since, answer);
         }
+        while let Ok((id, since, answer)) = self.find_rx.try_recv() {
+            self.apply_find(&id, since, answer);
+        }
         // The smaller of what the sides report: a preset one refuses is no choice.
         let limit = self.tabs.iter().filter_map(|t| t.max_window_secs()).min();
         if self.shared.set_limit(limit) {
@@ -357,6 +480,10 @@ impl Host {
         }
         true
     }
+}
+
+fn is_find_key(k: &KeyEvent) -> bool {
+    k.kind != KeyEventKind::Release && k.code == KeyCode::Char(keys::FIND_CTRL) && k.modifiers == KeyModifiers::CONTROL
 }
 
 /// The otel TUI, with its "x: errors of this trace" jump enabled (the
@@ -385,11 +512,17 @@ fn host(client: &Client, project: Option<String>) -> Host {
 }
 
 pub async fn run(client: &Client, project: Option<String>) -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!("mallard tui needs an interactive terminal (stdin and stdout must be a TTY)");
+    }
     // Fail fast with a clear message instead of an empty screen.
     client.sentry.info().await.map_err(|e| crate::described(mallard_client::Error::Sentry(e), client.base_url()))?;
     let mut host = host(client, project);
 
-    let mut term = ratatui::init();
+    let mut term = ratatui::try_init().map_err(|e| {
+        ratatui::restore();
+        anyhow::anyhow!("cannot set up the terminal: {e}")
+    })?;
     let result = event_loop(&mut term, &mut host).await;
     ratatui::restore();
     result
@@ -452,6 +585,12 @@ mod tests {
         }
         fn open_trace_event(&mut self, trace_id: &str, event_id: &str) {
             self.opened.push(format!("{trace_id}/{event_id}"))
+        }
+        fn open_trace_at(&mut self, trace_id: &str, time: DateTime<Utc>, span: Option<&str>) {
+            self.opened.push(format!("{trace_id}@{} {span:?}", time.timestamp()))
+        }
+        fn open_issue(&mut self, project: &str, issue: &str, event: Option<&str>) {
+            self.opened.push(format!("{project}/{issue} {event:?}"))
         }
         fn take_fatal(&mut self) -> Option<String> {
             self.fatal.take()
@@ -635,6 +774,178 @@ mod tests {
         let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         h.on_event(&key(KeyCode::Char('p')));
         assert!(!h.on_event(&ctrl_c), "ctrl-c quits from the picker too");
+    }
+
+    const TRACE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn ctrl(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    /// `ctrl-k`, the trace id and Enter; the host now waits for the answer.
+    fn looking(h: &mut Host) {
+        h.on_event(&ctrl('k'));
+        for c in TRACE_ID.chars() {
+            h.on_event(&key(KeyCode::Char(c)));
+        }
+        h.on_event(&key(KeyCode::Enter));
+    }
+
+    fn big_screen(h: &mut Host) -> String {
+        let mut t = Terminal::new(TestBackend::new(90, 14)).unwrap();
+        t.draw(|f| h.draw(f)).unwrap();
+        t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn found_trace() -> FindMatch {
+        FindMatch::Trace {
+            trace_id: TRACE_ID.into(),
+            time: DateTime::from_timestamp(1000, 0).unwrap(),
+            spans: 3,
+            errors: 1,
+            logs: 2,
+        }
+    }
+
+    fn found_event() -> FindMatch {
+        FindMatch::Event {
+            event_id: TRACE_ID.into(),
+            issue_id: "4803bf4f1add995d".into(),
+            project: "api".into(),
+            project_id: 1,
+            title: "Boom\x1b[31m".into(),
+            trace_id: None,
+        }
+    }
+
+    #[test]
+    fn one_match_lands_on_it_on_the_tab_of_its_side() {
+        let mut h = host();
+        looking(&mut h);
+        assert_eq!(h.active, ERRORS, "not before the answer");
+        h.apply_find(TRACE_ID, "30d", Ok(Some(FindResult { matches: vec![found_trace()], warnings: vec![] })));
+        assert_eq!(h.active, TELEMETRY);
+        assert!(h.find.is_none());
+        assert!(screen(&mut h).contains(&format!("Telemetry body {TRACE_ID}@1000 None")), "{}", screen(&mut h));
+
+        looking(&mut h);
+        h.apply_find(TRACE_ID, "30d", Ok(Some(FindResult { matches: vec![found_event()], warnings: vec![] })));
+        assert_eq!(h.active, ERRORS);
+        assert!(screen(&mut h).contains(r#"Errors body api/4803bf4f1add995d Some("0123"#), "{}", screen(&mut h));
+    }
+
+    #[test]
+    fn a_span_opens_its_trace_on_that_span() {
+        let mut h = host();
+        h.on_event(&ctrl('k'));
+        for c in "0123456789abcdef".chars() {
+            h.on_event(&key(KeyCode::Char(c)));
+        }
+        h.on_event(&key(KeyCode::Enter));
+        let span = FindMatch::Span {
+            span_id: "0123456789abcdef".into(),
+            trace_id: TRACE_ID.into(),
+            service: "api".into(),
+            name: "op".into(),
+            time: DateTime::from_timestamp(1000, 0).unwrap(),
+        };
+        h.apply_find("0123456789abcdef", "30d", Ok(Some(FindResult { matches: vec![span], warnings: vec![] })));
+        assert_eq!(h.active, TELEMETRY);
+        let mut big = big_screen(&mut h);
+        big.retain(|c| c != ' ');
+        assert!(big.contains(r#"@1000Some("0123456789abcdef")"#), "{big}");
+    }
+
+    #[test]
+    fn several_matches_are_a_choice() {
+        let mut h = host();
+        looking(&mut h);
+        h.apply_find(
+            TRACE_ID,
+            "30d",
+            Ok(Some(FindResult { matches: vec![found_trace(), found_event()], warnings: vec![] })),
+        );
+        assert!(h.find.is_some());
+        let s = big_screen(&mut h);
+        assert!(s.contains("3 spans, 1 errors, 2 logs") && s.contains("event in api"), "{s}");
+        assert!(!s.contains('\x1b'), "server text is cleaned: {s}");
+        h.on_event(&key(KeyCode::Down));
+        h.on_event(&key(KeyCode::Enter));
+        assert_eq!(h.active, ERRORS);
+        assert!(h.find.is_none());
+    }
+
+    /// Something could not be read, so one match may not be the only one: say so, and do
+    /// not go there at once.
+    #[test]
+    fn a_warning_is_shown_before_landing() {
+        let mut h = host();
+        looking(&mut h);
+        h.apply_find(
+            TRACE_ID,
+            "30d",
+            Ok(Some(FindResult { matches: vec![found_trace()], warnings: vec!["errors could not be read".into()] })),
+        );
+        assert!(h.find.is_some());
+        assert!(big_screen(&mut h).contains("errors could not be read"));
+        h.on_event(&key(KeyCode::Enter));
+        assert_eq!(h.active, TELEMETRY);
+    }
+
+    /// A failed read is not "nothing found" (issue 0143).
+    #[test]
+    fn not_found_and_a_failure_read_differently() {
+        let mut h = host();
+        looking(&mut h);
+        h.apply_find(TRACE_ID, "30d", Ok(None));
+        let s = big_screen(&mut h);
+        assert!(s.contains("Nothing found") && s.contains("last 30d"), "{s}");
+        h.on_event(&key(KeyCode::Enter));
+        h.apply_find(TRACE_ID, "30d", Err("server is busy".into()));
+        let s = big_screen(&mut h);
+        assert!(s.contains("Could not look this up: server is busy") && !s.contains("Nothing found"), "{s}");
+    }
+
+    #[test]
+    fn an_answer_for_older_text_is_dropped() {
+        let mut h = host();
+        looking(&mut h);
+        h.on_event(&key(KeyCode::Backspace));
+        h.apply_find(TRACE_ID, "30d", Ok(Some(FindResult { matches: vec![found_trace()], warnings: vec![] })));
+        assert_eq!(h.active, ERRORS);
+        assert!(h.find.is_some());
+    }
+
+    #[test]
+    fn a_wrong_length_says_what_an_id_is() {
+        let mut h = host();
+        h.on_event(&ctrl('k'));
+        h.on_event(&key(KeyCode::Char('a')));
+        h.on_event(&key(KeyCode::Enter));
+        assert!(big_screen(&mut h).contains("32 hex characters"), "{}", big_screen(&mut h));
+    }
+
+    /// While it is open the tab gets no keys; the keys of a text box work.
+    #[test]
+    fn find_holds_the_keys_until_it_closes() {
+        let mut h = host();
+        h.on_event(&ctrl('k'));
+        h.on_event(&key(KeyCode::Char('x')));
+        assert_eq!(h.active, ERRORS, "x is no jump here, and no text: not hex");
+        h.on_event(&key(KeyCode::Char('a')));
+        h.on_event(&ctrl('u'));
+        assert_eq!(h.find.as_ref().unwrap().input, "");
+        h.on_event(&ctrl('a'));
+        assert_eq!(h.find.as_ref().unwrap().input, "", "a modified key is no text");
+        h.on_event(&key(KeyCode::F(2)));
+        assert_eq!(h.active, ERRORS);
+        h.on_event(&key(KeyCode::Esc));
+        assert!(h.find.is_none());
+        h.on_event(&ctrl('k'));
+        h.on_event(&ctrl('k'));
+        assert!(h.find.is_none(), "the same key closes it");
+        h.on_event(&ctrl('k'));
+        assert!(!h.on_event(&ctrl('c')), "ctrl-c quits from here too");
     }
 
     /// Ctrl-p is no picker: only plain keys are the host's.
