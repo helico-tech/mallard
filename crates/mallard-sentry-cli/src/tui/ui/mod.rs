@@ -461,7 +461,7 @@ mod tests {
         assert!(s.contains("Keys") && s.contains("older / newer event"), "{s}");
         // The shared keys (the same list as on the telemetry tab) and the time zone.
         // On its own this tab has no app picker; in a host it does (`mallard tui`'s test).
-        for (_, what) in mallard_term::tui::keys::SHARED.iter().filter(|(k, _)| *k != "p") {
+        for (_, what) in mallard_term::tui::keys::shared(false) {
             assert!(s.contains(what), "missing {what:?} in\n{s}");
         }
         assert!(s.contains("All times are UTC."), "{s}");

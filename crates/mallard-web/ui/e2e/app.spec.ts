@@ -580,6 +580,20 @@ test.describe("one app and one window", () => {
     expect((await seen).url()).not.toContain("service=");
   });
 
+  test("the logs of a trace show in an app without telemetry", async ({ page }) => {
+    // The seeded project `api` has no service of that name; its traces run through checkout-api.
+    await page.goto("/errors/api");
+    await page.locator("table tbody tr", { hasText: "PaymentDeclinedError" }).first().click();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: "Trace" })).toBeVisible();
+    await page.keyboard.press("x");
+    await expect(page.getByRole("grid", { name: "Spans of the trace" })).toBeVisible();
+    await page.keyboard.press("l");
+    await expect(page.getByText("card declined").first()).toBeVisible();
+    await page.keyboard.press("c");
+    await expect(page.getByRole("heading", { name: "api has no telemetry" })).toBeVisible();
+  });
+
   test("two service names with one slug are one app, and both are read", async ({ page, request }) => {
     const now = Date.now();
     for (const name of ["Two Names", "two-names"]) {
@@ -774,6 +788,56 @@ test.describe("search with Cmd-K", () => {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/app=checkout-api/);
     await expect(page.getByRole("dialog")).toBeHidden();
+  });
+});
+
+test.describe("a long list", () => {
+  test("traces hold still past the first page, until r", async ({ page }) => {
+    const reads: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/otel/api/v1/traces?")) reads.push(r.url());
+    });
+    await page.goto("/telemetry/traces");
+    const note = page.getByText("does not refresh by itself");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await expect(note).toHaveCount(0);
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(note).toBeVisible();
+    reads.length = 0;
+    await page.waitForTimeout(6000);
+    expect(reads).toEqual([]);
+    await page.keyboard.press("r");
+    await expect.poll(() => reads.length).toBe(2);
+    expect(reads.filter((u) => u.includes("cursor="))).toHaveLength(1);
+    // Another filter is another list: one page, and live again.
+    await page.keyboard.press("E");
+    await expect(note).toHaveCount(0);
+  });
+
+  test("issues hold still past the first page, until r", async ({ page }) => {
+    // The demo data has too few issues for a second page.
+    let reads = 0;
+    await page.route(/\/issues\?/, async (route) => {
+      const url = new URL(route.request().url());
+      reads++;
+      const second = url.searchParams.has("cursor");
+      url.searchParams.delete("cursor"); // The server would refuse this made-up cursor.
+      const res = await route.fetch({ url: url.toString() });
+      const body = await res.json();
+      body.next_cursor = second ? null : "more";
+      if (second) body.issues = [];
+      await route.fulfill({ response: res, json: body });
+    });
+    await page.goto("/errors/web");
+    const note = page.getByText("does not refresh by itself");
+    await expect(page.locator("table tbody tr").first()).toBeVisible();
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(note).toBeVisible();
+    reads = 0;
+    await page.waitForTimeout(6000);
+    expect(reads).toBe(0);
+    await page.keyboard.press("r");
+    await expect.poll(() => reads).toBe(2);
   });
 });
 

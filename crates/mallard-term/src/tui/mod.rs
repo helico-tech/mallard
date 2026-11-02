@@ -83,6 +83,8 @@ pub mod keys {
     /// The app picker, on every screen. The tabs on their own have no picker (the errors
     /// tab has a list of projects under this key), so they leave it out of their help.
     pub const APP_PICKER: char = 'p';
+    /// With ctrl: find an id. The tabs on their own do not have it either.
+    pub const FIND_CTRL: char = 'k';
 
     /// The shared keys as (keys, what they do), for help screens and docs.
     pub const SHARED: &[(&str, &str)] = &[
@@ -93,11 +95,17 @@ pub mod keys {
         ("/", "filter or search"),
         ("t T", "next / prev time window"),
         ("p", "choose the app"),
+        ("ctrl-k", "find an id"),
         ("r", "refresh now"),
         ("x", "same trace, other tab"),
         ("?", "help"),
         ("ctrl-c", "quit"),
     ];
+
+    /// [`SHARED`] for a help screen. What only the host does is left out of a tab on its own.
+    pub fn shared(hosted: bool) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+        SHARED.iter().filter(move |(k, _)| hosted || !matches!(*k, "p" | "ctrl-k"))
+    }
 
     /// Shown under the keys in help screens.
     pub const TIMES: &str = "All times are UTC.";

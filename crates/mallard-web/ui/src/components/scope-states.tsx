@@ -54,9 +54,10 @@ export function OutsideApp({ service, onClear }: { service: string; onClear: () 
 }
 
 /** A telemetry screen: only once the app's services are known, and only if it has any. */
-export function TelemetryScope({ children }: { children: ReactNode }) {
+export function TelemetryScope({ byId = false, children }: { byId?: boolean; children: ReactNode }) {
   const { app, services, loading, error } = useScope();
-  if (!app) return <>{children}</>;
+  // What is asked for by id does not depend on the app having services.
+  if (!app || byId) return <>{children}</>;
   if (loading) return <Page><TableSkeleton /></Page>;
   if (error && !services?.length) return <Page><ErrorState error={error} title="Could not load the apps" /></Page>;
   if (!services?.length) return <Page><Section><NoTelemetry /></Section></Page>;

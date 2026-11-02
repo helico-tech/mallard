@@ -7,10 +7,13 @@
 # fills it with scripts/demo-seed.py, renders the real TUI into SVG via the
 # ignored `screenshots` test, and converts the SVGs to PNG with rsvg-convert
 # (brew install librsvg). Ports 8080, 4317 and 4318 must be free.
+# Then the Web UI, with Playwright and its own server (e2e/setup.ts; needs
+# `npm ci` in crates/mallard-web/ui and `npx playwright install chromium`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 command -v rsvg-convert >/dev/null || { echo "needs rsvg-convert (brew install librsvg)" >&2; exit 1; }
+(cd crates/mallard-web/ui && npm run build --silent)
 cargo build -q -p mallard
 
 data=$(mktemp -d)
@@ -32,4 +35,5 @@ for svg in "$out"/*.svg; do
   rsvg-convert --zoom 2 "$svg" -o "${svg%.svg}.png"
   rm "$svg"
 done
+(cd crates/mallard-web/ui && MALLARD_SCREENSHOT_DIR="$OLDPWD/$out" npx playwright test screenshots)
 ls -la "$out"

@@ -93,7 +93,14 @@ pub(super) struct IssuesKey {
     pub sort: SortBy,
     pub window: Window,
     pub query: String,
+    pub limit: u32,
 }
+
+/// Rows of the issue list at first, and how many more the last row asks for.
+pub(super) const ISSUE_PAGE: u32 = 200;
+/// The most the server gives in one answer. The list reads as one answer so that `r`
+/// brings all of it up to date.
+pub(super) const ISSUE_CAP: u32 = 500;
 
 /// The search bar's text, read like the web UI's box: a `key=value` word is a tag filter, the
 /// other words search the text. So does a word with its `=` in quotes: `"a=b"` is text, while
@@ -122,7 +129,7 @@ impl IssuesKey {
             tag,
             since: Some(self.window.since().into()),
             sort: Some(self.sort.as_str().into()),
-            limit: Some(200),
+            limit: Some(self.limit),
             ..Default::default()
         }
     }
@@ -487,6 +494,7 @@ pub(super) struct App {
     pub issues: Vec<IssueSummary>,
     pub issues_loaded: bool,
     pub issues_state: TableState,
+    pub issue_limit: u32,
     pub stats: Option<ProjectStats>,
     pub screen: Screen,
     /// Screens behind `screen`, the last one is shown on Esc.
@@ -537,6 +545,7 @@ impl App {
             issues: vec![],
             issues_loaded: false,
             issues_state: TableState::default(),
+            issue_limit: ISSUE_PAGE,
             stats: None,
             screen: Screen::Issues,
             back: vec![],
@@ -717,6 +726,7 @@ impl App {
     /// Another project: forget its list, stats and open screens.
     fn switch_project(&mut self, slug: String) {
         self.project = Some(slug);
+        self.issue_limit = ISSUE_PAGE;
         self.issues.clear();
         self.issues_loaded = false;
         self.stats = None;
@@ -734,6 +744,7 @@ impl App {
             sort: self.sort,
             window: self.window,
             query: self.query.clone(),
+            limit: self.issue_limit,
         })
     }
 
@@ -760,6 +771,12 @@ impl App {
     }
 
     /// Periodic tick: spinner, clock, toast expiry, auto refresh.
+    /// Past the first page there is no auto refresh: rows hold still while someone reads
+    /// them, and a deep list is not read again every few seconds on the shared connection.
+    pub(crate) fn list_paused(&self) -> bool {
+        self.issue_limit > ISSUE_PAGE
+    }
+
     pub(super) fn on_tick(&mut self, now: Instant) -> Vec<Req> {
         self.spinner = (now.duration_since(self.started_at).as_millis() / 100) as usize;
         self.now = Utc::now();
@@ -776,7 +793,13 @@ impl App {
             if !self.projects_loaded && !self.in_flight(Kind::Projects) {
                 reqs.push(Req::Projects);
             }
-            reqs.extend(self.list_requests().into_iter().filter(|r| !self.in_flight(r.kind())));
+            // A list grown past one page holds still: `r` reads it again.
+            let paused = self.list_paused();
+            reqs.extend(
+                self.list_requests()
+                    .into_iter()
+                    .filter(|r| !self.in_flight(r.kind()) && !(paused && matches!(r, Req::Issues(_)))),
+            );
             reqs.extend(self.detail_requests().into_iter().filter(|r| !self.in_flight(r.kind())));
         }
         self.track(reqs)
@@ -805,6 +828,7 @@ impl App {
 
     /// Filters changed: reload the list from the top.
     fn reload_list(&mut self) -> Vec<Req> {
+        self.issue_limit = ISSUE_PAGE;
         self.issues_state.select(if self.issues.is_empty() { None } else { Some(0) });
         self.last_refresh = Instant::now();
         self.list_requests()

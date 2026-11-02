@@ -34,6 +34,7 @@ use std::{
 };
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mallard_otel_client::{Client, api::Stats};
 use ratatui::{
@@ -215,6 +216,7 @@ impl Embedded {
             return;
         }
         self.scope = scope.clone();
+        self.traces.pages = 0;
         if !self.traces.filter.service.as_ref().is_none_or(|s| self.in_scope(s)) {
             self.traces.filter.service = None;
         }
@@ -298,6 +300,7 @@ impl Embedded {
                 self.win = self.windows.len() - 1;
             }
         }
+        self.traces.pages = 0;
         self.invalidate();
         Ok(())
     }
@@ -314,6 +317,11 @@ impl Embedded {
     /// Jump to a trace (and its logs). Returns false, and shows why, when
     /// `trace_id` is not 32 hex characters (dashes are ignored).
     pub fn open_trace(&mut self, trace_id: &str) -> bool {
+        self.open_trace_at(trace_id, None, None)
+    }
+
+    /// [`Embedded::open_trace`] of a trace known to be near `time`, on `span` if given.
+    pub fn open_trace_at(&mut self, trace_id: &str, time: Option<DateTime<Utc>>, span: Option<&str>) -> bool {
         let id: String = trace_id.trim().chars().filter(|c| *c != '-').collect::<String>().to_lowercase();
         if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             self.flash_error(format!("not a trace id: {trace_id}"));
@@ -323,7 +331,10 @@ impl Embedded {
         self.help = false;
         self.prompt = None;
         self.logs.detail = None;
-        self.open_trace_detail(id);
+        match time {
+            Some(_) => self.show_trace_detail(id, time, span.map(str::to_string)),
+            None => self.open_trace_detail(id),
+        }
         true
     }
 
@@ -488,6 +499,7 @@ impl Embedded {
     fn cycle_window(&mut self, forward: bool) {
         let n = self.windows.len();
         self.win = if forward { (self.win + 1) % n } else { (self.win + n - 1) % n };
+        self.traces.pages = 0;
         self.invalidate();
         self.flash(format!("time window: last {}", self.since()));
     }

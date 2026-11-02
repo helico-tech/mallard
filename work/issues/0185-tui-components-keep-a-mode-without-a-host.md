@@ -13,3 +13,5 @@ tests reach the other mode.
 ## Notes
 Left out of 0183 because their tests also check the keys and screens in a host. Removing them means going through
 those tests one by one.
+
+Also for this issue: `keys::shared(hosted)` in `mallard-term` (help screens); it can lose its argument with the mode.
