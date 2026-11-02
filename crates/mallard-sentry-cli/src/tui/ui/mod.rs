@@ -359,11 +359,11 @@ mod tests {
     #[test]
     fn no_projects_hint_names_the_host_command() {
         let mut app = App::new("http://x", None);
-        app.hints.command = "mallard errors";
+        app.hints.command = "host";
         app.start();
         app.on_response(Resp::Projects(Ok(vec![])));
         let s = draw(&mut app, 120, 30);
-        assert!(s.contains("create one with: mallard errors projects create <name>"), "{s}");
+        assert!(s.contains("create one with: host projects create <name>"), "{s}");
     }
 
     #[test]

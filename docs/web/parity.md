@@ -91,13 +91,13 @@ changed in the browser, because the seeded data has no such case.
 | Errors with All apps | Asks to pick an app: issues are per project (ADR 0028) | Same | ok |
 | A side the app lacks | Says so, with `mallard setup <app>` | Same | ok |
 | Filter suggestions | The list shows while typing; Tab takes the selected row, the first unless you moved; ↑↓ choose; ↵ applies what is typed | The list opens while typing or on ↓; nothing is taken until you move to it, then Enter or Tab takes it. Otherwise Tab moves the focus, as in a browser | intended |
-| Issue search | Text, and `tag=value` | Same | ok |
+| Issue search | Text, and `tag=value`; `"a=b"` in quotes is text | Same | ok |
 | Find an id | `ctrl-k`, `↵` looks up; one match with no warning lands, else a list (issue 0191) | Cmd-K looks up while typing; one match lands | intended |
 | Find an id, with a warning | Shows the warning and a list, because a side could not be read | One match lands at once, the warning goes unseen (issue 0192) | **differs** |
 | Choose an app in search | `p` is the picker; `ctrl-k` is ids only | Cmd-K also lists the apps | intended |
 | App home page | Overview stays telemetry, errors are one key away (F1); a page across both sides costs more than it gives | Overview of an app also shows new issues, events and worst operations (story 0004/05) | intended |
 | Pause all auto refresh | None; `space` pauses the log follow | A button on every screen | intended |
-| Load more issues | The last row reads 200 more, up to 500 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next page with a cursor, no end; all pages stay live | **differs** (issue 0192) |
+| Load more issues | The last row reads 200 more, up to 500 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next page with a cursor, no end; past one page no auto refresh, `r` reads it all | intended |
 | Project picker reloads projects | Yes | Only with `r` (code) | **differs** |
 | Project switch | Toast "switched to X", keeps filters | Same | ok |
 
@@ -156,7 +156,7 @@ changed in the browser, because the seeded data has no such case.
 |---|---|---|---|
 | Columns | start, root, duration, bar, spans, errors, sentry, services | Same | ok |
 | Call | `limit=200, since, service, operation, errors_only, min/max, attributes` | Same | ok |
-| Load more | The last row reads 200 more, up to 1000 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next 200 with cursor, from and to; a new window starts again at 200; all pages stay live | **differs** (issue 0192) |
+| Load more | The last row reads 200 more, up to 1000 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next 200 with cursor, from and to; a new window starts again at 200; past one page no auto refresh, `r` reads it all | intended |
 | Move, Enter, `→`, `l`, `x` | Yes | Yes | ok |
 | `/` and `f`, tokens, quotes, `>200`, attributes | Yes | Yes | ok |
 | Bad filter | Flash, old filter stays, prompt closes | Inline message, old filter stays, box stays open | **differs** |

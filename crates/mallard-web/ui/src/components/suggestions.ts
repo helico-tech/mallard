@@ -26,7 +26,8 @@ export interface SuggestSource {
   remote: (t: Token, signal: AbortSignal) => Promise<Remote> | null;
 }
 
-export function useSuggestions(source: SuggestSource | undefined, token: Token, open: boolean) {
+export function useSuggestions(source: SuggestSource | undefined, token: Token, listOpen: boolean) {
+  const open = listOpen && !token.free;
   const [settled, setSettled] = useState(token);
   useEffect(() => {
     const id = setTimeout(() => setSettled(token), DEBOUNCE_MS);

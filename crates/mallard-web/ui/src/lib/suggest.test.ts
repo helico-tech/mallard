@@ -7,6 +7,13 @@ describe("tokenAt", () => {
     expect(tokenAt("errors ser", 10)).toEqual({ start: 7, end: 10, key: null, text: "ser" });
     expect(tokenAt("errors ", 7)).toEqual({ start: 7, end: 7, key: null, text: "" });
   });
+  it("a quoted word is free text: no key, nothing to suggest", () => {
+    expect(tokenAt('"a=b', 4)).toEqual({ start: 0, end: 4, key: null, text: "a=b", free: true });
+    expect(tokenAt('"a=b" x', 2)).toEqual({ start: 0, end: 5, key: null, text: "a", free: true });
+    expect(tokenAt('"a"=b', 5)).toEqual({ start: 0, end: 5, key: null, text: "a=b", free: true });
+    expect(tokenAt('"a=b" x', 7)).toEqual({ start: 6, end: 7, key: null, text: "x" });
+    expect(tokenAt('a="b', 4)).toEqual({ start: 0, end: 4, key: "a", text: "b" });
+  });
   it("splits key and value, up to the caret", () => {
     expect(tokenAt("service=che", 11)).toEqual({ start: 0, end: 11, key: "service", text: "che" });
     expect(tokenAt("service=checkout errors", 11)).toEqual({ start: 0, end: 16, key: "service", text: "che" });

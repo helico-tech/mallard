@@ -209,24 +209,12 @@ pub struct SqlArgs {
 pub enum Command {
     /// Check that the server is up (no token needed); exit code 6 if not.
     Health,
-    /// Server health, ingest counters and storage size.
-    Status,
     /// Services with request rate, error rate and latency.
     Services(ServiceArgs),
     /// Operations (span names) with RED metrics.
     Ops(OpsArgs),
     /// Search traces.
     Traces(TraceListArgs),
-    /// Show one trace as a waterfall.
-    Trace {
-        trace_id: String,
-        /// Look-back window for the lookup.
-        #[arg(short, long, default_value = "7d", value_parser = check_window)]
-        since: String,
-        /// Show span attributes.
-        #[arg(short = 'A', long)]
-        attributes: bool,
-    },
     /// Search or follow logs.
     Logs(LogArgs),
     /// List metrics.
@@ -235,16 +223,8 @@ pub enum Command {
     Metric(MetricArgs),
     /// Run a read-only SQL query (server must enable it).
     Sql(SqlArgs),
-    /// Tables and columns that SQL can query.
-    Schema,
     /// Attribute keys with counts, or the top values of one key (sampled).
     Attrs(AttrArgs),
-    /// Interactive terminal UI.
-    Tui {
-        /// Initial time window.
-        #[arg(short, long, default_value = "1h", value_parser = check_window)]
-        since: String,
-    },
 }
 
 /// Parse a time window such as `15m`, `2d` or `1h30m`, as the server does.
@@ -254,11 +234,6 @@ pub(crate) fn parse_window(s: &str) -> Result<Duration> {
         bail!("invalid time window {s:?}: must be longer than zero");
     }
     Ok(d)
-}
-
-/// clap value parser: a valid window, kept as typed (the server parses it).
-fn check_window(s: &str) -> Result<String> {
-    parse_window(s).map(|_| s.trim().to_string())
 }
 
 /// The window as the API takes it (`from`, `to`, `since`): always
@@ -407,10 +382,6 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             let h = c.health().await?;
             print(ctx, &h, |h| format!("{} {}", clean(&h.status), clean(&h.version)))
         }
-        Command::Status => {
-            let s = c.stats().await?;
-            print(ctx, &s, |s| stats_text(s, c.base_url()))
-        }
         Command::Services(ServiceArgs { w, all_spans }) => {
             let (win, (from, to, since)) = window(&w)?;
             let v = c.services(&ServiceQuery { from, to, since, entry_only: Some(!all_spans) }).await?;
@@ -481,23 +452,6 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             ctx.output.list(&List { items, count, limit, truncated, next_cursor, window })?;
             waited
         }
-        Command::Trace { trace_id, since, attributes } => {
-            let id = &trace_id;
-            let get = |since: String| async move {
-                c.trace(id, &TraceGetQuery { since: Some(since), ..Default::default() }).await
-            };
-            let t = match get(since.clone()).await {
-                // The server's otel.query.max_window is smaller than the window
-                // asked for: fall back to one day.
-                Err(e) if e.is_window_too_large() && since != "24h" => {
-                    ctx.output
-                        .note(format!("--since {since} is larger than the server allows; searching the last 24h"));
-                    get("24h".into()).await?
-                }
-                r => r?,
-            };
-            print(ctx, &t, |t| trace_lines(t, attributes).join("\n"))
-        }
         Command::Logs(a) => logs(ctx, a).await,
         Command::Metrics(MetricListArgs { w, service, query }) => {
             let (win, (from, to, since)) = window(&w)?;
@@ -527,10 +481,6 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             let r = c.sql(&query, Some(limit)).await?;
             print(ctx, &r, sql_text)
         }
-        Command::Schema => {
-            let s = c.schema().await?;
-            print_list(ctx, List::new(s.tables), schema_text)
-        }
         Command::Attrs(a) => {
             let (win, (from, to, since)) = window(&a.w)?;
             let key = a.key.clone();
@@ -558,7 +508,6 @@ async fn run_inner(cmd: Command, ctx: &Ctx) -> Result<()> {
             }
             ctx.output.list(&list)
         }
-        Command::Tui { since } => tui::run_standalone(c.clone(), &since).await,
     }
 }
 

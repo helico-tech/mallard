@@ -1,7 +1,7 @@
 # 0011 — Read-only SQL over the error tables
 
 ## Status
-accepted
+accepted; `mallard errors sql` is removed by 0032
 
 ## Context
 Agents use ad-hoc SQL for questions the fixed endpoints don't answer

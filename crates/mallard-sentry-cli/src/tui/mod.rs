@@ -1,9 +1,8 @@
-//! `mallard errors tui`: interactive dashboard.
+//! The errors tab of `mallard tui`.
 //!
 //! [`Embedded`] is the whole TUI as a component without terminal setup, so
 //! a host program (e.g. mallard) can draw it inside its own screen and
-//! event loop. [`run`] is `mallard errors tui`: terminal setup, event
-//! loop and panic-safe restore around `Embedded`.
+//! event loop.
 
 mod app;
 #[cfg(test)]
@@ -23,9 +22,8 @@ use mallard_term::tui::suggest::{FETCH_TIMEOUT, LIMIT};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use std::future::Future;
-use std::io::IsTerminal;
 use std::panic::AssertUnwindSafe;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -290,57 +288,6 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
     }
 }
 
-/// `mallard errors tui`.
-pub(crate) async fn run(ctx: &crate::cli::Ctx) -> anyhow::Result<()> {
-    use futures::StreamExt;
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        anyhow::bail!("{} tui needs an interactive terminal (stdin and stdout must be a TTY)", ctx.hints.command);
-    }
-    // Fail fast with a friendly message instead of an empty dashboard.
-    ctx.client.info().await.map_err(|e| ctx.err(e))?;
-    let mut ui = Embedded::new(ctx.client.clone(), ctx.project.clone()).with_hints(ctx.hints);
-    // `try_init` enters raw mode + alternate screen and installs a panic
-    // hook that restores the terminal before printing the panic.
-    let mut terminal = match ratatui::try_init() {
-        Ok(t) => t,
-        Err(e) => {
-            ratatui::restore();
-            anyhow::bail!("cannot set up the terminal: {e}");
-        }
-    };
-    let mut events = crossterm::event::EventStream::new();
-    let mut ticker = tokio::time::interval(Duration::from_millis(100));
-    // After a stall, tick once instead of a burst of ticks and redraws.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let result: anyhow::Result<()> = async {
-        loop {
-            terminal.draw(|f| ui.draw(f, f.area()))?;
-            tokio::select! {
-                ev = events.next() => match ev {
-                    Some(Ok(ev)) => match ui.handle_event(&ev) {
-                        Outcome::Quit => break,
-                        Outcome::Jump(t) => ui.open_trace(&t),
-                        Outcome::JumpEvent { trace_id, event_id } => ui.open_trace_event(&trace_id, &event_id),
-                        Outcome::Consumed | Outcome::Ignored | Outcome::SetWindow(_) => {}
-                    },
-                    Some(Err(e)) => return Err(e.into()),
-                    None => break,
-                },
-                _ = ticker.tick() => ui.tick(),
-            }
-            if let Some(msg) = ui.take_fatal() {
-                // The panic hook has already restored the terminal; stop
-                // drawing on the normal screen and exit with the message.
-                anyhow::bail!("internal error in a background load: {msg}");
-            }
-        }
-        Ok(())
-    }
-    .await;
-    ratatui::restore();
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::fixtures::screen;
@@ -348,6 +295,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::time::Duration;
 
     fn key(c: KeyCode) -> Event {
         Event::Key(KeyEvent::from(c))

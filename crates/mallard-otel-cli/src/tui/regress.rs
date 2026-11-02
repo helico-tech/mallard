@@ -308,19 +308,6 @@ fn waterfall_wide_names_align() {
     assert_eq!(x1, x2, "duration columns misaligned");
 }
 
-// 13: `mallard telemetry trace` shows every span, also with parent loops; empty traces don't panic.
-#[test]
-fn cli_trace_shows_cycles() {
-    let a = span("0000000000000001", Some("0000000000000002"), 0, 10);
-    let b = span("0000000000000002", Some("0000000000000001"), 1, 5);
-    let c = span("0000000000000003", Some("0000000000000003"), 2, 1);
-    let t = Trace { trace_id: TID.into(), spans: vec![a, b, c] };
-    let lines = crate::fmt::trace_lines(&t, false);
-    assert_eq!(lines.len(), 4, "header + 3 spans: {lines:#?}");
-    let empty = Trace { trace_id: TID.into(), spans: vec![] };
-    assert_eq!(crate::fmt::trace_lines(&empty, true).len(), 1);
-}
-
 // 14: huge durations don't overflow.
 #[test]
 fn huge_durations_saturate() {
@@ -331,8 +318,6 @@ fn huge_durations_saturate() {
     let (rows, total) = crate::waterfall::layout(&[a.clone(), b.clone()]);
     assert_eq!(rows.len(), 2);
     assert_eq!(total, i64::MAX);
-    let t = Trace { trace_id: TID.into(), spans: vec![a, b] };
-    assert_eq!(crate::fmt::trace_lines(&t, false).len(), 3);
 }
 
 // 7: ANSI stripping for non-terminal output.
