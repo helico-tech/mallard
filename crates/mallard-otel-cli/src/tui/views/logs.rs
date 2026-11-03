@@ -23,7 +23,7 @@ use crate::{
         Embedded, Outcome, PromptTarget, due,
         loader::{Data, Kind},
         nav,
-        query::{LogFilter, parse_log_filter, tokenize},
+        query::{LogFilter, pair, parse_log_filter, words},
         theme, widgets,
     },
 };
@@ -90,20 +90,16 @@ impl Default for State {
 /// Next severity filter in the cycle all → info → warn → error → all,
 /// rewriting the `level=` token of the query.
 pub fn cycle_level(query: &str) -> (String, Option<u8>) {
-    let toks = tokenize(query);
-    let is_level = |t: &str| t.split_once('=').is_some_and(|(k, _)| matches!(k, "level" | "lvl" | "severity" | "sev"));
-    let cur = toks.iter().find(|t| is_level(t)).and_then(|t| crate::severity::parse(t.split_once('=').unwrap().1));
+    let toks = words(query);
+    let is_level = |w: &str| pair(w).is_some_and(|(k, _)| matches!(k, "level" | "lvl" | "severity" | "sev"));
+    let cur = toks.iter().find(|w| is_level(w)).and_then(|w| crate::severity::parse(&pair(w)?.1));
     let next = match cur {
         None => Some(("info", 9)),
         Some(n) if n < 13 => Some(("warn", 13)),
         Some(n) if n < 17 => Some(("error", 17)),
         Some(_) => None,
     };
-    let mut rest: Vec<String> = toks
-        .into_iter()
-        .filter(|t| !is_level(t))
-        .map(|t| if t.contains(char::is_whitespace) { quote(&t) } else { t })
-        .collect();
+    let mut rest: Vec<String> = toks.into_iter().filter(|w| !is_level(w)).map(str::to_string).collect();
     if let Some((name, _)) = next {
         rest.insert(0, format!("level={name}"));
     }
@@ -112,20 +108,8 @@ pub fn cycle_level(query: &str) -> (String, Option<u8>) {
 
 /// The query without its `service=` token (the picker changed).
 pub fn without_service(query: &str) -> String {
-    let is_service = |t: &str| t.split_once('=').is_some_and(|(k, _)| matches!(k, "service" | "svc" | "s"));
-    tokenize(query)
-        .into_iter()
-        .filter(|t| !is_service(t))
-        .map(|t| if t.contains(char::is_whitespace) { quote(&t) } else { t })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn quote(t: &str) -> String {
-    match t.split_once('=') {
-        Some((k, v)) => format!("{k}=\"{v}\""),
-        None => format!("\"{t}\""),
-    }
+    let is_service = |w: &str| pair(w).is_some_and(|(k, _)| matches!(k, "service" | "svc" | "s"));
+    words(query).into_iter().filter(|w| !is_service(w)).collect::<Vec<_>>().join(" ")
 }
 
 impl State {
@@ -603,5 +587,15 @@ mod tests {
         assert_eq!((q.as_str(), l), ("service=api boom", None));
         let (q, _) = cycle_level(r#"op="a b""#);
         assert_eq!(q, r#"level=info op="a b""#);
+    }
+
+    /// Issue 0181: rewriting a query keeps a quoted word as typed, or it turns into a filter.
+    #[test]
+    fn rewriting_keeps_quoted_words() {
+        let (q, l) = cycle_level(r#""level=warn" "a=b" boom"#);
+        assert_eq!((q.as_str(), l), (r#"level=info "level=warn" "a=b" boom"#, Some(9)));
+        let (q, l) = cycle_level(&q);
+        assert_eq!((q.as_str(), l), (r#"level=warn "level=warn" "a=b" boom"#, Some(13)));
+        assert_eq!(without_service(r#""service=a" service=b "c d" e="f g""#), r#""service=a" "c d" e="f g""#);
     }
 }

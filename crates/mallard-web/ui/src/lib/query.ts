@@ -18,7 +18,7 @@ export interface LogFilter {
 }
 
 /** The words as typed, with their quotes: splits on whitespace outside `"double quotes"`. */
-function rawTokens(s: string): string[] {
+export function rawTokens(s: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quoted = false;
@@ -36,11 +36,6 @@ function rawTokens(s: string): string[] {
 }
 
 const unquote = (t: string) => t.replaceAll('"', "");
-
-/** Splits on whitespace, `"double quotes"` keep it. */
-export function tokens(s: string): string[] {
-  return rawTokens(s).map(unquote);
-}
 
 /** `250` (ms), `250ms`, `1.5s`, `2m`, `100us`, in ms. */
 export function parseDurationMs(s: string): number | null {
@@ -62,17 +57,20 @@ export function parseDurationMs(s: string): number | null {
 
 const TRUE = new Set(["1", "true", "yes", "on"]);
 
+/** A word's key and unquoted value, or null for a bare word. A quote before the `=` makes
+ *  a bare word: `"a=b"` is text (an error on traces), while `a="b c"` is a filter. */
 function splitPair(t: string): [string, string] | null {
   const i = t.indexOf("=");
-  return i > 0 ? [t.slice(0, i), t.slice(i + 1)] : null;
+  return i > 0 && !t.slice(0, i).includes('"') ? [t.slice(0, i), unquote(t.slice(i + 1))] : null;
 }
 
 /** A bad filter returns an error and the caller keeps the old one, as in the TUI. */
 export function parseTraceFilter(s: string): TraceFilter | { error: string } {
   const f: TraceFilter = { errorsOnly: false, attributes: [] };
-  for (const t of tokens(s)) {
-    const pair = splitPair(t);
+  for (const raw of rawTokens(s)) {
+    const pair = splitPair(raw);
     if (!pair) {
+      const t = unquote(raw);
       const lower = t.toLowerCase();
       if (["errors", "error", "err"].includes(lower)) {
         f.errorsOnly = true;
@@ -135,10 +133,10 @@ export function parseSeverity(s: string): number | null {
 export function parseLogFilter(s: string): LogFilter | { error: string } {
   const f: LogFilter = { attributes: [] };
   const words: string[] = [];
-  for (const t of tokens(s)) {
-    const pair = splitPair(t);
+  for (const raw of rawTokens(s)) {
+    const pair = splitPair(raw);
     if (!pair) {
-      words.push(t);
+      words.push(unquote(raw));
       continue;
     }
     const [k, v] = pair;
@@ -182,29 +180,39 @@ export function parseIssueFilter(s: string): IssueFilter | { error: string } {
   const words: string[] = [];
   for (const t of rawTokens(s)) {
     const pair = splitPair(t);
-    if (pair && !/[":]/.test(pair[0])) tags.push(`${pair[0]}:${unquote(pair[1])}`);
+    if (pair && !pair[0].includes(":")) tags.push(`${pair[0]}:${pair[1]}`);
     else words.push(unquote(t));
   }
   if (tags.length > 10) return { error: "at most 10 tag filters" };
   return { tags, query: words.length ? words.join(" ") : undefined };
 }
 
-const LEVEL = /(^|\s)(level|lvl|severity|sev)=\S*/gi;
+const isKey = (word: string, keys: string[]) => {
+  const key = splitPair(word)?.[0].toLowerCase();
+  return key !== undefined && keys.includes(key);
+};
+const LEVEL_KEYS = ["level", "lvl", "severity", "sev"];
 
 /** `s` on the logs screen: all → info → warn → error → all, rewriting the `level=` token. */
 export function cycleLevel(filter: string): string {
-  const cur = /(?:^|\s)(?:level|lvl|severity|sev)=(\S*)/i.exec(filter)?.[1];
-  const n = cur ? parseSeverity(cur) : null;
+  const words = rawTokens(filter);
+  const cur = words.find((w) => isKey(w, LEVEL_KEYS));
+  const n = cur ? parseSeverity(splitPair(cur)![1]) : null;
   const next = n === null ? "info" : n < 13 ? "warn" : n < 17 ? "error" : "";
-  const rest = filter.replace(LEVEL, " ").trim().replace(/\s+/g, " ");
+  const rest = words.filter((w) => !isKey(w, LEVEL_KEYS)).join(" ");
   return next ? `level=${next}${rest ? ` ${rest}` : ""}` : rest;
+}
+
+/** `E` on the traces screen. `on`: errors-only is on now, so take it out. */
+export function toggleErrors(filter: string, on: boolean): string {
+  const rest = rawTokens(filter).filter((t) => !/^"?(errors?|err)"?$|^(errors?|err)=/i.test(t)).join(" ");
+  return on ? rest : `errors${rest ? ` ${rest}` : ""}`;
 }
 
 /** Sets a key=value token, replacing an earlier one with that key. */
 export function setToken(filter: string, key: string, value: string): string {
-  const kept = tokens(filter).filter((t) => !t.toLowerCase().startsWith(`${key.toLowerCase()}=`));
-  const quote = (t: string) => (t.includes(" ") ? t.replace(/=(.*)$/, '="$1"') : t);
-  return [...kept.map(quote), quote(`${key}=${value}`)].join(" ");
+  const kept = rawTokens(filter).filter((w) => !isKey(w, [key.toLowerCase()]));
+  return [...kept, value.includes(" ") ? `${key}="${value}"` : `${key}=${value}`].join(" ");
 }
 
 /** What `mallard find` can look up: 32 hex (trace, event) or 16 hex (issue, span). */

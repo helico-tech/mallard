@@ -5,7 +5,8 @@
 //! - logs:   `service=api level=warn trace=0af7... payment failed`
 //!
 //! Unknown `key=value` tokens become attribute filters. Bare words are the
-//! text search (logs) or, for traces, `errors`/`err`.
+//! text search (logs) or, for traces, `errors`/`err`. A word with a quote before its `=`
+//! is a bare word: `"a=b"` is text in logs and an error in traces, `a="b c"` is a filter.
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TraceFilter {
@@ -26,7 +27,18 @@ pub struct LogFilter {
     pub attrs: Vec<String>,
 }
 
-pub use mallard_term::tui::suggest::tokenize;
+use mallard_term::tui::suggest::word_ranges;
+
+/// The words of a filter as typed, with their quotes.
+pub fn words(s: &str) -> Vec<&str> {
+    word_ranges(s).into_iter().map(|r| &s[r]).collect()
+}
+
+/// A word's key and unquoted value, or `None` for a bare word (see the top of this file).
+pub fn pair(word: &str) -> Option<(&str, String)> {
+    let (k, v) = word.split_once('=')?;
+    (!k.contains('"')).then(|| (k, v.replace('"', "")))
+}
 
 /// `250` (ms), `250ms`, `1.5s`, `2m`, `100us`.
 pub fn parse_ms(s: &str) -> Option<f64> {
@@ -46,14 +58,15 @@ pub fn parse_ms(s: &str) -> Option<f64> {
 
 pub fn parse_trace_filter(s: &str) -> Result<TraceFilter, String> {
     let mut f = TraceFilter::default();
-    for tok in tokenize(s) {
-        match tok.split_once('=') {
+    for word in words(s) {
+        let tok = word.replace('"', "");
+        match pair(word) {
             Some((k, v)) => match k {
-                "service" | "svc" | "s" => f.service = Some(v.to_string()),
-                "op" | "operation" | "name" | "o" => f.operation = Some(v.to_string()),
-                "min" | "min_ms" => f.min_ms = Some(parse_ms(v).ok_or(format!("bad duration {v:?}"))?),
-                "max" | "max_ms" => f.max_ms = Some(parse_ms(v).ok_or(format!("bad duration {v:?}"))?),
-                "errors" | "error" => f.errors_only = matches!(v, "1" | "true" | "yes" | "on"),
+                "service" | "svc" | "s" => f.service = Some(v),
+                "op" | "operation" | "name" | "o" => f.operation = Some(v),
+                "min" | "min_ms" => f.min_ms = Some(parse_ms(&v).ok_or(format!("bad duration {v:?}"))?),
+                "max" | "max_ms" => f.max_ms = Some(parse_ms(&v).ok_or(format!("bad duration {v:?}"))?),
+                "errors" | "error" => f.errors_only = matches!(v.as_str(), "1" | "true" | "yes" | "on"),
                 "" => return Err(format!("missing key in {tok:?}")),
                 _ => f.attrs.push(format!("{k}={v}")),
             },
@@ -71,22 +84,22 @@ pub fn parse_trace_filter(s: &str) -> Result<TraceFilter, String> {
 
 pub fn parse_log_filter(s: &str) -> Result<LogFilter, String> {
     let mut f = LogFilter::default();
-    let mut words = Vec::new();
-    for tok in tokenize(s) {
-        match tok.split_once('=') {
+    let mut text = Vec::new();
+    for word in words(s) {
+        match pair(word) {
             Some((k, v)) if !k.is_empty() => match k {
-                "service" | "svc" | "s" => f.service = Some(v.to_string()),
+                "service" | "svc" | "s" => f.service = Some(v),
                 "level" | "lvl" | "severity" | "sev" => {
-                    f.level = Some(crate::severity::parse(v).ok_or(format!("unknown level {v:?}"))?)
+                    f.level = Some(crate::severity::parse(&v).ok_or(format!("unknown level {v:?}"))?)
                 }
-                "trace" | "trace_id" => f.trace = Some(v.to_string()),
+                "trace" | "trace_id" => f.trace = Some(v),
                 _ => f.attrs.push(format!("{k}={v}")),
             },
-            _ => words.push(tok),
+            _ => text.push(word.replace('"', "")),
         }
     }
-    if !words.is_empty() {
-        f.text = Some(words.join(" "));
+    if !text.is_empty() {
+        f.text = Some(text.join(" "));
     }
     Ok(f)
 }
@@ -114,7 +127,10 @@ impl TraceFilter {
             parts.push(format!("max={m}ms"));
         }
         for a in &self.attrs {
-            parts.push(a.clone());
+            parts.push(match a.split_once('=') {
+                Some((k, v)) => format!("{k}={}", q(v)),
+                None => a.clone(),
+            });
         }
         parts.join(" ")
     }
@@ -125,9 +141,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tokenizes_quotes() {
-        assert_eq!(tokenize(r#"op="GET /cart" errors"#), vec!["op=GET /cart", "errors"]);
-        assert_eq!(tokenize("  a   b "), vec!["a", "b"]);
+    fn words_keep_their_quotes() {
+        assert_eq!(words(r#"op="GET /cart" errors"#), vec![r#"op="GET /cart""#, "errors"]);
+        assert_eq!(words("  a   b "), vec!["a", "b"]);
+    }
+
+    /// Issue 0181: the same rule as the issue search (issue 0180).
+    #[test]
+    fn a_quote_before_the_equals_sign_makes_a_bare_word() {
+        let f = parse_log_filter(r#""a=b" boom "level=nope" c="d e" level="warn""#).unwrap();
+        assert_eq!(f.text.as_deref(), Some("a=b boom level=nope"));
+        assert_eq!(f.attrs, vec!["c=d e"]);
+        assert_eq!(f.level, Some(13));
+        assert_eq!(parse_log_filter(r#""a"=b"#).unwrap().text.as_deref(), Some("a=b"));
+
+        for bare in [r#""a=b""#, r#""a"=b"#, r#""service=x""#, r#""=b""#] {
+            let e = parse_trace_filter(bare).unwrap_err();
+            assert!(e.contains("unknown filter"), "{bare}: {e}");
+        }
+        let attr = parse_trace_filter(r#"a="b c""#).unwrap();
+        assert_eq!(attr.attrs, vec!["a=b c"]);
+        assert_eq!(parse_trace_filter(&attr.to_query()).unwrap(), attr, "the prompt opens with this");
+        assert_eq!(parse_trace_filter(r#"service="a b""#).unwrap().service.as_deref(), Some("a b"));
     }
 
     #[test]

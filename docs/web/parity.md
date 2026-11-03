@@ -158,7 +158,7 @@ changed in the browser, because the seeded data has no such case.
 | Call | `limit=200, since, service, operation, errors_only, min/max, attributes` | Same | ok |
 | Load more | The last row reads 200 more, up to 1000 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next 200 with cursor, from and to; a new window starts again at 200; past one page no auto refresh, `r` reads it all | intended |
 | Move, Enter, `→`, `l`, `x` | Yes | Yes | ok |
-| `/` and `f`, tokens, quotes, `>200`, attributes | Yes | Yes | ok |
+| `/` and `f`, tokens, quotes, `>200`, attributes; `"a=b"` in quotes is an error | Yes | Yes | ok |
 | Bad filter | Flash, old filter stays, prompt closes | Inline message, old filter stays, box stays open | **differs** |
 | `E` with toast | Toggles errors-only | Same, also for `error=on` | ok |
 | `c` clear | Yes | Yes | ok |
