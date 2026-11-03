@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { cycleLevel, parseDurationMs, parseFindId, parseIssueFilter, parseLogFilter, parseSeverity, parseTraceFilter, parseTraceId, setToken, tokens } from "./query";
+import { cycleLevel, parseDurationMs, parseFindId, parseIssueFilter, parseLogFilter, parseSeverity, parseTraceFilter, parseTraceId, rawTokens, setToken, toggleErrors } from "./query";
 
 describe("filter language", () => {
-  it("tokens keep quotes together", () => {
-    expect(tokens('a "b c" d=e  f="g h"')).toEqual(["a", "b c", "d=e", "f=g h"]);
-    expect(tokens("")).toEqual([]);
-    expect(tokens('"" a')).toEqual(["", "a"]);
+  it("words keep quotes together", () => {
+    expect(rawTokens('a "b c" d=e  f="g h"')).toEqual(["a", '"b c"', "d=e", 'f="g h"']);
+    expect(rawTokens("")).toEqual([]);
+    expect(rawTokens('"" a')).toEqual(['""', "a"]);
   });
   it("durations", () => {
     expect(parseDurationMs("250")).toBe(250);
@@ -44,6 +44,26 @@ describe("filter language", () => {
     expect(cycleLevel("level=error s=api")).toBe("s=api");
     expect(cycleLevel("level=debug")).toBe("level=warn");
     expect(cycleLevel("level=fatal")).toBe("");
+  });
+  it("a quote before the = makes a bare word (issue 0181)", () => {
+    expect(parseLogFilter('"a=b" boom "level=nope" c="d e" level="warn"')).toEqual({
+      attributes: ["c=d e"],
+      minSeverity: 13,
+      q: "a=b boom level=nope",
+    });
+    expect(parseLogFilter('"a"=b')).toEqual({ attributes: [], q: "a=b" });
+    for (const bare of ['"a=b"', '"a"=b', '"service=x"', '"=b"']) {
+      expect(parseTraceFilter(bare)).toHaveProperty("error");
+    }
+    expect(parseTraceFilter('a="b c"')).toMatchObject({ attributes: ["a=b c"] });
+    expect(parseTraceFilter('service="a b"')).toMatchObject({ service: "a b" });
+  });
+  it("rewriting a filter keeps quoted words as typed (issue 0181)", () => {
+    expect(cycleLevel('"level=warn" "a=b" boom')).toBe('level=info "level=warn" "a=b" boom');
+    expect(cycleLevel('"x level=warn y" level=info')).toBe('level=warn "x level=warn y"');
+    expect(setToken('"trace=a" "b c" trace=d e="f g"', "trace", "x")).toBe('"trace=a" "b c" e="f g" trace=x');
+    expect(toggleErrors('"errors=1" "a=b" op="c d" errors', true)).toBe('"errors=1" "a=b" op="c d"');
+    expect(toggleErrors('"a=b"', false)).toBe('errors "a=b"');
   });
   it("setToken replaces", () => {
     expect(setToken("trace=a x", "trace", "b")).toBe("x trace=b");

@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: question
 created: 2026-11-02
 ---
@@ -13,3 +13,6 @@ attributes and events. `errors info` also showed the catalog and storage as text
 ## Notes
 A choice for the owner: fine as it is, because agents read JSON and people have the TUI; or more text on `status`,
 and a flag on `trace`. Not done now, because the rule for this change was no new options.
+
+**The owner decided (2026-11-03): fine as it is.** Agents read JSON and people have the TUI. Adding text later breaks nobody, so it can
+wait until someone asks.

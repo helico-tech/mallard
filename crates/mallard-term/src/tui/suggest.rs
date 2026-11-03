@@ -439,15 +439,15 @@ pub fn word_ranges(s: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// The words of `s` without their quotes. An empty `""` stays an empty word.
-pub fn tokenize(s: &str) -> Vec<String> {
-    word_ranges(s).into_iter().map(|r| s[r].replace('"', "")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// The words of `s` without their quotes. An empty `""` stays an empty word.
+    fn tokenize(s: &str) -> Vec<String> {
+        word_ranges(s).into_iter().map(|r| s[r].replace('"', "")).collect()
+    }
 
     const KEYS: &[Key] = &[
         Key { text: "service=", values: Values::Fetch },

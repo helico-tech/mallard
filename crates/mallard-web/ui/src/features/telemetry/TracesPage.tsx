@@ -14,15 +14,9 @@ import { DeepListNote, firstPageOnly, isDeep, useListNav } from "@/components/li
 import { DataTable, EmptyState, ErrorState, Page, SearchField, Section, Service, StaleNote, TableSkeleton } from "@/components/ui-bits";
 import { windowSeconds } from "@/lib/domain";
 import { compact, dayTime, ms, timeMs } from "@/lib/format";
-import { parseTraceFilter, setToken, tokens } from "@/lib/query";
+import { parseTraceFilter, setToken, toggleErrors } from "@/lib/query";
 import { serviceParam } from "@/lib/scope";
 import { cn } from "@/lib/utils";
-
-function toggleErrors(filter: string, on: boolean): string {
-  const rest = tokens(filter).filter((t) => !/^(errors?|err)(=.*)?$/i.test(t));
-  const quoted = rest.map((t) => (t.includes(" ") ? t.replace(/=(.*)$/, '="$1"') : t)).join(" ");
-  return on ? quoted : `errors${quoted ? ` ${quoted}` : ""}`;
-}
 
 export function TracesPage() {
   const { w } = useWindow();

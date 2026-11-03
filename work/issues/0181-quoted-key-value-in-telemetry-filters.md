@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: question
 created: 2026-11-02
 ---
@@ -19,3 +19,12 @@ In the logs filter, type `"a=b"`. The request has the attribute filter `a=b` and
 ## Notes
 A choice for the owner: the same rule for logs, and for traces an error like other words. `setToken` and
 `cycleLevel` also drop or ignore quotes, so they need the same look.
+
+**The owner decided (2026-11-03): the same rule as the issue search.** A word with a quote before its `=` is a bare word. In logs
+that is text, in traces an error like other words. `a="b c"` stays a filter.
+
+Changed in `tui/query.rs` and `tui/views/logs.rs`, and in `lib/query.ts`. What rewrites a filter (`cycle_level`, `without_service`,
+`cycleLevel`, `setToken`, `toggleErrors`) now keeps words as typed. It removed the quotes before, which would turn `"a=b"` into a
+filter on the next read, and `cycleLevel` also saw a `level=` inside a quoted phrase.
+
+Found on the way: `TraceFilter::to_query` wrote `a="b c"` as `a=b c`, so opening the prompt on it gave a filter that did not parse. Fixed too.
