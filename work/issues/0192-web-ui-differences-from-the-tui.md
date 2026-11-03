@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 type: debt
 created: 2026-11-02
 ---
@@ -29,3 +29,8 @@ The other **differs** rows in `docs/web/parity.md` are still open; they are smal
 many. Counted in a browser on 2026-11-02 on the demo data, requests to `/traces` in 11 s: one page 2
 reads, two pages 4 reads (2 with a cursor). The owner chose the TUI's rule (issue 0191): past the
 first page no auto refresh, and `r` reads all pages. `firstPageOnly` in `components/list.tsx`.
+
+## Done: the other rows (2026-11-03)
+The owner chose to mark them intended, each with a reason in `docs/web/parity.md`; any can change later if someone trips on it. Each was
+checked against the source first. Two no longer differed and are now **ok**: frame after `a` `w`, and back on after `F`. One had an old
+description: the project picker's list also reloads every 30 s.

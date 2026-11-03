@@ -50,7 +50,7 @@ changed in the browser, because the seeded data has no such case.
 | Failed refresh keeps data | Yes, says so | Yes on issues, traces, overview, logs, with a note that clears on recovery | ok |
 | Live state, errors tab | `● offline` after a failed load | "Offline" after the failed load and its one retry (within about 3 s), "Live" on recovery | ok |
 | Live state, telemetry tab | live under 20 s, then stale; offline if never loaded | Same | ok |
-| Header, errors tab | Project, slug, platform; queue always; version; URL | Queue only above 0; no platform; URL and version in the side nav | **differs** |
+| Header, errors tab | Project, slug, platform; queue always; version; URL | Queue only above 0; no platform; URL and version in the side nav | intended: the side nav has room for them, so the header stays short |
 | Header, telemetry tab | Ingest rate | Shown (`x/s ingest`) | ok |
 | Info poll | Every 2 s | Every 2 s | ok |
 
@@ -76,11 +76,11 @@ changed in the browser, because the seeded data has no such case.
 | `s` sort: last seen, first seen, events, users | Yes | Yes | ok |
 | `/` search, Enter, Esc cancels, Esc clears | Yes | Yes | ok |
 | After Enter in search | Prompt closes, keys act on the list | The box gives up focus, keys act on the list | ok |
-| `Ctrl-U` clear in search | Yes | Not bound (code) | **differs** |
+| `Ctrl-U` clear in search | Yes | Not bound (code) | intended: a browser's text field has its own editing keys |
 | Requests | `issues?status&since&sort&limit=200`, `stats?since&interval` | Same | ok |
 | Refresh cadence | 5 s | 5 s | ok |
 | Selection kept by id on refresh | Yes | Yes (mock: reversed list); row gone: nearest index | ok |
-| Selection after a filter change | Goes to the old top row | Stays on the same issue | **differs** |
+| Selection after a filter change | Goes to the old top row | Stays on the same issue | intended: it keeps your place in the list |
 | Columns | LEVEL ISSUE EVENTS USERS TREND LAST-SEEN AGE STATUS | Same, STATUS when the card is wide enough | ok |
 | KPI tiles and peak | Events x/h, issues, new, users; "peak n per 30m" | Same values; "Events per 30m" and "peak n" | ok |
 | R I U on the list | Optimistic status in the row, toast, PATCH, reload | Same; rollback with a toast on error | ok |
@@ -98,7 +98,7 @@ changed in the browser, because the seeded data has no such case.
 | App home page | Overview stays telemetry, errors are one key away (F1); a page across both sides costs more than it gives | Overview of an app also shows new issues, events and worst operations (story 0004/05) | intended |
 | Pause all auto refresh | None; `space` pauses the log follow | A button on every screen | intended |
 | Load more issues | The last row reads 200 more, up to 500 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next page with a cursor, no end; past one page no auto refresh, `r` reads it all | intended |
-| Project picker reloads projects | Yes | Only with `r` (code) | **differs** |
+| Project picker reloads projects | Yes | With `r` and every 30 s unless paused, not on opening (code) | intended: the list is at most 30 s old |
 | Project switch | Toast "switched to X", keeps filters | Same | ok |
 
 ## Errors: issue detail
@@ -111,7 +111,7 @@ changed in the browser, because the seeded data has no such case.
 | Requests | `issues/{id}?since`, `events?issue&limit=50`, `events/{id}?issue` | Same | ok |
 | Refresh cadence | Issue every 5 s, events and event once | Same | ok |
 | Overview facts | Status to last release, trend, shown event, contexts, request, activity, tags | All there | ok |
-| Overview Events and Users | Exact number | Compact | **differs** |
+| Overview Events and Users | Exact number | Compact | intended: fits the page |
 | R I U on detail | Optimistic, toast, activity updates | Same; failed write rolls back with a toast | ok |
 | `x` | Jump to the trace; toast when none | Same; also passes a time hint (±1 h) | ok |
 | `[` `]` | Older / newer, next page past the end, toasts at both ends | Same (across pages) | ok |
@@ -119,7 +119,7 @@ changed in the browser, because the seeded data has no such case.
 | Stack: j k PgUp PgDn g G | Yes | Yes | ok |
 | Stack: exception chain, Caused by, mechanism, context | Yes | Yes (mock: seeded events have no chain) | ok |
 | `a` `w` toggles | Kept per issue, on any section | Same (`w` on raw frames: mock) | ok |
-| Frame after `a` `w` | Resets to the first in-app frame | Stays when the first in-app row keeps its id: G, `a` stays on the last frame | **differs** |
+| Frame after `a` `w` | Resets to the first in-app frame | Same (code) | ok |
 | `w` with no raw frames | Toast | Same | ok |
 | Event with a message and no stack | Message shown | Same | ok |
 | Breadcrumbs table, j k g G | Yes | Yes | ok |
@@ -136,14 +136,14 @@ changed in the browser, because the seeded data has no such case.
 | Enter opens the event | Yes | Yes | ok |
 | Esc from an event opened here | Back to this list | Same | ok |
 | Esc on a direct link | Issue list | Same | ok |
-| `x` | Ignored | Opens the trace | **differs** |
+| `x` | Ignored | Opens the trace | intended: a shortcut that takes nothing away |
 
 ## Telemetry: Overview
 
 | Feature | TUI | Web | Status |
 |---|---|---|---|
 | Tiles | requests, errors, p95, logs, ingest buffer | Same values | ok |
-| Charts | Throughput, Latency, same time axis | Both, but Latency stops at the last bucket with data (code, screenshot) | **differs** |
+| Charts | Throughput, Latency, same time axis | Both, but Latency's axis follows its buckets with data (code) | intended: an empty bucket has no latency to draw |
 | Services table: move, Enter, `→`, `l` | Yes | Yes | ok |
 | Services table: long names | Name truncates, numbers stay | Same | ok |
 | Operations: move, Enter, Esc Bksp ← h q | Yes | Yes | ok |
@@ -159,7 +159,7 @@ changed in the browser, because the seeded data has no such case.
 | Load more | The last row reads 200 more, up to 1000 (one answer of the server), then says so; past one page no auto refresh, `r` reads it all (issue 0191) | Next 200 with cursor, from and to; a new window starts again at 200; past one page no auto refresh, `r` reads it all | intended |
 | Move, Enter, `→`, `l`, `x` | Yes | Yes | ok |
 | `/` and `f`, tokens, quotes, `>200`, attributes; `"a=b"` in quotes is an error | Yes | Yes | ok |
-| Bad filter | Flash, old filter stays, prompt closes | Inline message, old filter stays, box stays open | **differs** |
+| Bad filter | Flash, old filter stays, prompt closes | Inline message, old filter stays, box stays open | intended: the text stays there to correct |
 | `E` with toast | Toggles errors-only | Same, also for `error=on` | ok |
 | `c` clear | Yes | Yes | ok |
 | Parser details | Any whitespace; `.5s` ok; keys case-sensitive | Same | ok |
@@ -180,7 +180,7 @@ changed in the browser, because the seeded data has no such case.
 | `x` on another span | Events of the trace | Same | ok |
 | `l` | Logs of the trace in the current window | Same | ok |
 | Span events offset | `+x` from trace start | Same (non-zero offset: mock; seeded events sit at 0) | ok |
-| Scope, links, Sentry event id | `name version`; full ids | Name only; link 16 chars; event id 12 chars | **differs** |
+| Scope, links, Sentry event id | `name version`; full ids | Name only; link 16 chars; event id 12 chars | intended: short forms fit the page |
 | Header facts | Duration, spans, services, ✗, ⚠ sentry, logs | Same, as text and buttons | ok |
 | Marks on spans | ⚠ | Same | ok |
 | Trace not found | Shows the error, retries with back-off | "This trace has not arrived yet", retries with back-off | ok |
@@ -191,10 +191,10 @@ changed in the browser, because the seeded data has no such case.
 | Feature | TUI | Web | Status |
 |---|---|---|---|
 | Calls | `limit=1000&order=desc`, tail `from`, then `since=…ms`, `limit=500`; series 5 s; tail 2 s | Same | ok |
-| Tail start | Newest record's time | Time of the load (code) | **differs** |
+| Tail start | Newest record's time | Time just before the load (code) | intended: taken before the load, so nothing new is skipped |
 | Dedupe and append | Yes | Yes (mock) | ok |
 | Follow sticks to the end; moved up stays | Yes | Yes | ok |
-| Space, `F`, toast | Yes; back on selects the last row | Toggle and toast ok; selection not moved | **differs** |
+| Space, `F`, toast | Yes; back on selects the last row | Same (code) | ok |
 | Paused: no polls | Yes | Yes | ok |
 | Start state | Last row selected, no detail | Same | ok |
 | `o` | Opens the trace or says none | Same | ok |
@@ -207,7 +207,7 @@ changed in the browser, because the seeded data has no such case.
 | Volume title and legend | "service and text filter only" | Same | ok |
 | Time format, 400 char cut | Yes, with `…` | Yes, no `…` | ok |
 | Note after a failed tail | Cleared by the next good poll | Same | ok |
-| Gap row | Only with new records | Also with none (code) | **differs** |
+| Gap row | Only with new records | Also with none (code) | intended: a capped poll skipped rows either way, so it says so |
 
 ## Telemetry: Metrics
 
@@ -220,7 +220,7 @@ changed in the browser, because the seeded data has no such case.
 | `b` group by, kept across `a` | Yes | Yes | ok |
 | Esc Bksp ← h q | Yes | Yes | ok |
 | Chart cadence | 10 s | 10 s | ok |
-| Value formats by unit | `1`, `s`, `ms`, `By` | Same rules; percent check uses signed max (code) | **differs** |
+| Value formats by unit | `1`, `s`, `ms`, `By` | Same rules; percent check uses signed max (code) | intended: differs only with large negative values |
 | Reload or direct link of a chart | n/a | Works: a path outside `/assets/` is a screen of the app | ok |
 
 ## Telemetry: Status
