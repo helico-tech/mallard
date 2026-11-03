@@ -4,10 +4,16 @@
 accepted (by the owner, 2026-11-03). Supersedes the `maintenance_threads` consequence of ADR 0014.
 
 ## Context
-Changing `threads` while queries run can deadlock DuckDB 2.0 ([issue 0193](../../work/issues/0193-red-ci-after-0192.md)).
-`TaskScheduler::RelaunchThreads` holds the scheduler's `thread_lock` while it joins a worker it wants to remove. That worker
-waits for a scan of another connection, and that connection waits for `thread_lock`. Nothing moves again, and only killing the
-process ends it. 3 of 192 stress runs hung.
+Changing `threads` while another connection runs a query with a nested query in it (as a DuckLake scan has) can deadlock DuckDB
+([issue 0193](../../work/issues/0193-red-ci-after-0192.md)). 3 of 192 of our stress runs hung. A later reproduction without mallard
+code, with a small script, also hung on 1.4.5, 1.5.6, 2.0.0 and a 2.1.0 dev build of 2026-10-31. A hang left for 10 minutes never
+recovered. Not tested: DuckDB `main` after its PR 28204, Linux, other clients and other catalogs.
+
+`RelaunchThreads` holds the scheduler's `thread_lock` while it joins a worker it wants to remove, and it runs at the end of every
+query, nested ones too. So a nested query ending inside a scan waits for that lock, and the join cannot finish because of that
+scan. Four shapes of this were seen, and one hang can mix them: the worker in `ScanReadAhead::WaitForProgress`; the worker on a
+mutex under the scan; the worker itself in the nested query; or the nested query's thread doing the join while `SET threads` waits
+for the lock. It can also abort the process instead, with `thread::join failed: Invalid argument` (cause not worked out).
 
 Sentry's `maintenance_threads` did this around compaction. `mallard serve` always left it at 0, so only tests could hit it.
 
