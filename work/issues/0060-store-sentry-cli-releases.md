@@ -1,5 +1,5 @@
 ---
-status: todo
+status: in-progress
 type: idea
 created: 2026-11-01
 ---
@@ -25,3 +25,18 @@ Nothing needs it today: the deploy-tracking jobs agents have (new issues since a
 release, `issues list --new`, `--first-release`) work from events. The stubs
 are documented in `docs/sentry/compatibility.md`, `docs/agents.md` and
 `docs/cli.md`. Pick this up when someone needs deploy markers.
+
+## Design (2026-11-03)
+The owner wants this for 0.2.0. Decided: [ADR 0035](../../docs/adr/0035-stored-releases-and-deploys.md).
+
+What it changes in the notes above: a new table needs no migration tool, since `db::migrate` creates tables at each start. And
+`sentry-cli releases new` does name its projects, in the body; `finalize` and `deploys` do not, so those rows have no project.
+
+## Plan
+1. Tables, `WriteCmd`s and reads in `db/`, with tests.
+2. The stubs in `api.rs` store for real; new `GET`s for the release and deploy lists. The merged list.
+3. `Release` API fields, regenerated OpenAPI types, `mallard releases list`.
+4. The e2e suite with real `sentry-cli` 3.x and 2.x, and the Vite plugin.
+5. Docs. Measure the list on many events.
+
+## Progress log
