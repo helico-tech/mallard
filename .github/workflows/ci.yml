@@ -16,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Test binaries link all of DuckDB; with full debug info they filled the runner's disk once
+  # ("No space left on device"). Line tables keep the line numbers in a backtrace.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   rust:
@@ -37,6 +40,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Disk left
+        if: always()
+        run: df -h . && du -sh target
       # The slim build: the same CLI and TUI with no server and no DuckDB (ADR 0023).
       - name: Without the server
         run: |
