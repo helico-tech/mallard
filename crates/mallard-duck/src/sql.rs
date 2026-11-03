@@ -333,6 +333,8 @@ mod tests {
         assert!(ok("WITH x AS (SELECT * FROM spans) SELECT * FROM x, range(3)").is_ok());
         assert!(ok("SELECT * FROM range(10)").is_ok());
         assert!(ok("DELETE FROM spans").is_err());
+        assert!(ok("SET threads = 1").is_err(), "can deadlock DuckDB (ADR 0034)");
+        assert!(ok("SELECT 1; SET threads = 1").is_err());
         assert!(ok("SELECT 1; SELECT 2").is_err());
         assert!(ok("SELECT * FROM '/etc/passwd'").is_err());
         assert!(ok("SELECT * FROM read_csv('/etc/passwd')").is_err());

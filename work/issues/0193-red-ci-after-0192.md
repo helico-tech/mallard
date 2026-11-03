@@ -41,7 +41,7 @@ connection. Only the tests set 1. So the tests ran a path the product does not, 
 **Fix:** `Host::maintenance_threads` and the `SET threads` around compaction are gone. They also went against the rule
 that libraries do not change global settings on a shared connection. After that: 0 hangs in 960 runs at 48 at once.
 
-This is a DuckDB bug and has not been reported to them: a report goes out under the owner's name, so that is their call.
+This is a DuckDB bug. The owner chose not to report it, so the workaround stays: [ADR 0034](../../docs/adr/0034-duckdb-threads-only-at-startup.md).
 
 ### The flush conflict
 `Maintainer::run_now` now tries the flush up to 3 times after a conflict, unless the server is stopping. The periodic

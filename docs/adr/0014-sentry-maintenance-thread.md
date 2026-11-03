@@ -1,7 +1,7 @@
 # 0014 — Sentry maintenance runs next to the writer, retention stays on it
 
 ## Status
-accepted
+accepted; the `maintenance_threads` consequence is superseded by 0034 (the setting is gone)
 
 ## Context
 Flush, compaction, retention and snapshot expiry ran on the single Sentry

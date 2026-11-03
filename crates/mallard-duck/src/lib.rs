@@ -124,6 +124,8 @@ pub fn install_extensions(duckdb: &DuckDbConfig, names: &[impl AsRef<str>]) -> R
 }
 
 /// Global DuckDB settings. Only for a connection this process owns.
+///
+/// Only here, before any other query: `SET threads` while queries run can deadlock DuckDB (ADR 0034).
 fn configure(conn: &Connection, d: &DuckDbConfig) -> Result<()> {
     let mut sql = String::new();
     if d.threads > 0 {
