@@ -274,6 +274,31 @@ interval (5-minute runs were fine), many queries at once, OTLP/gRPC (a gRPC requ
 (compose ran RustFS on the same machine). Compressed OTLP/HTTP at 2,800 spans/s was checked for 2 minutes
 with a 128MB buffer: 0 throttled. Each setting ran once.
 
+### The DuckLake extension's own allocator
+
+The DuckLake extension has its own copy of jemalloc, separate from the process's glibc heaps. Its freed pages count in the
+process's memory but not in `duckdb.memory_limit`: about 300 MiB in one instrumented run. The image sets
+`DUCKDB_JE_MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0`, so they go back at once. Outside the image, set it yourself.
+
+Peak RSS, paired runs of 30 minutes on `main` at 18cc063, arm64, DuckDB-file catalog on a local volume. "Medium" is 300 events/s +
+2,800 spans/s on 1GB + 128MB and 4 threads; "heavy" is 1,000 events/s + 11,200 spans/s on 2GB + 256MB and 8 threads:
+
+| Container and load | Round | Without | With |
+|---|---|---|---|
+| 2 GiB, medium | 1 | 1.75 GiB | 1.50 GiB |
+| 2 GiB, medium | 2 | 1.75 GiB | 1.60 GiB |
+| 2 GiB, medium, `flush_rows` 50000 | 1 | killed at 2.6 min | 1.90 GiB |
+| 2 GiB, medium, `flush_rows` 50000 | 2 | killed at 2.7 min | 1.67 GiB |
+| 4 GiB, heavy | 1 | 2.86 GiB | 2.74 GiB |
+
+No cost showed in these runs: stored rows within 0.2%, the same Sentry latency percentiles apart from small differences, all
+compactions done, nothing rejected or throttled. CPU use was not measured.
+
+It lowers the base, not the jumps: a run has about as many jumps of 0.4 GiB or more in 2 s with it as without. So the rule stays
+limit + buffer + 0.9 GiB, and `flush_rows` stays 10000: 1.90 GiB of 2 is too close. Not measured on the compose stack (Postgres + RustFS).
+
+More in [issue 0133](../../work/issues/0133-rss-spikes-above-duckdb-limit.md).
+
 ## Both sides at full speed
 
 Measured on `mallard` on 2026-11-02, for [issue 0144](../../work/issues/0144-otel-flush-conflicts-with-sentry-ingest.md).
