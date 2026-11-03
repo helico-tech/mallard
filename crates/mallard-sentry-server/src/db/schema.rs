@@ -8,7 +8,7 @@
 
 /// Bump when the schema changes. Stored in `meta` at startup; there are
 /// no migrations yet.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// The group of events over the limit of new issues per hour ("too many
 /// issues"), one per project. A fixed value; a real group hash is an xxh3.
@@ -17,6 +17,28 @@ pub const OVERFLOW_TITLE: &str = "Too many new issues";
 
 pub const CREATE: &[&str] = &[
     "CREATE SCHEMA IF NOT EXISTS $S",
+    // Releases and deploys from sentry-cli (ADR 0035). Only `new` names projects, so the
+    // other two go by version: a version belongs to the organization.
+    "CREATE TABLE IF NOT EXISTS $S.releases (
+        project_id INTEGER NOT NULL,
+        version VARCHAR NOT NULL,
+        date_created TIMESTAMP NOT NULL
+    )",
+    // The latest row per version wins.
+    "CREATE TABLE IF NOT EXISTS $S.release_activity (
+        version VARCHAR NOT NULL,
+        changed_at TIMESTAMP NOT NULL,
+        date_released TIMESTAMP NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS $S.deploys (
+        version VARCHAR NOT NULL,
+        environment VARCHAR NOT NULL,
+        name VARCHAR,
+        url VARCHAR,
+        date_started TIMESTAMP,
+        date_finished TIMESTAMP NOT NULL,
+        created_at TIMESTAMP NOT NULL
+    )",
     "CREATE TABLE IF NOT EXISTS $S.meta (key VARCHAR NOT NULL, value VARCHAR NOT NULL, updated_at TIMESTAMP NOT NULL)",
     "CREATE TABLE IF NOT EXISTS $S.projects (
         id INTEGER NOT NULL,
@@ -125,5 +147,8 @@ pub fn table_options() -> Vec<String> {
         "ALTER TABLE $S.issues SET (data_inlining_row_limit = 10000)".into(),
         "ALTER TABLE $S.issue_activity SET (data_inlining_row_limit = 10000)".into(),
         "ALTER TABLE $S.artifact_files SET (data_inlining_row_limit = 10000)".into(),
+        "ALTER TABLE $S.releases SET (data_inlining_row_limit = 10000)".into(),
+        "ALTER TABLE $S.release_activity SET (data_inlining_row_limit = 10000)".into(),
+        "ALTER TABLE $S.deploys SET (data_inlining_row_limit = 10000)".into(),
     ]
 }

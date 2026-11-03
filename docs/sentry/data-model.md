@@ -38,6 +38,9 @@ Design rules:
 | `projects` | one per project | on create | slug, DSN public key |
 | `artifact_bundles` | one per (bundle, project) | sourcemap upload | bundle object + release |
 | `artifact_files` | one per file in a bundle | sourcemap upload | debug-id / url lookup |
+| `releases` | one per project per `sentry-cli releases new` | `releases new` | grouped by project and version, earliest date wins |
+| `release_activity` | one per finalize | `releases finalize` | date released = newest row per version |
+| `deploys` | one per deploy | `deploys new` | a deploy of a version counts for each of its projects |
 | `meta` | a few | startup, project creation, maintenance | schema version; `project_seq` and `maintenance_lease` are replaced (ADR 0021) |
 
 ### `events`
@@ -120,6 +123,16 @@ so nothing is lost but the grouping; the next hour those groups get their own
 issue from their next event on. Known groups are never affected.
 `issues` and `issue_activity` rows stay after their events are past retention;
 an issue that comes back keeps its history.
+
+### Release tables
+
+See [ADR 0035](../adr/0035-stored-releases-and-deploys.md). Only `releases new` names projects, so the other two tables go by
+version. Retention leaves all three. The release list merges them with the `release` of events in the window, so:
+
+- A version named only by events older than the window is not listed, even with a deploy in the window: no row says which project it belongs to.
+- A deploy or finalize of a version nothing else names is stored, and shown only by that version's own deploy list.
+
+The list took about 20 ms on a lake filled at full speed for 150 s (389 MB). Larger lakes and a full 14 days were not measured.
 
 ### Sourcemap tables
 

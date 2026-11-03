@@ -29,7 +29,8 @@ use tokio::sync::oneshot;
 const MAX_COMPACTED_FILES: usize = 1000;
 
 /// Tables compacted by periodic maintenance.
-const COMPACTED_TABLES: &[&str] = &["events", "issues", "issue_activity", "artifact_files"];
+const COMPACTED_TABLES: &[&str] =
+    &["events", "issues", "issue_activity", "artifact_files", "releases", "release_activity", "deploys"];
 
 /// How often the inlined-rows counter is checked.
 const ROWS_CHECK_INTERVAL: Duration = Duration::from_secs(1);

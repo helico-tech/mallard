@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
-pub use writer::{EventWrite, NewBundle, NewBundleFile, WriteCmd, WriteError};
+pub use writer::{EventWrite, NewBundle, NewBundleFile, NewDeploy, WriteCmd, WriteError};
 
 #[derive(Debug, Clone)]
 pub struct ProjectRow {

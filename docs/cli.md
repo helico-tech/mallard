@@ -21,7 +21,7 @@ One flat tree (ADR 0008). For AI agents: [agents.md](agents.md), also
 | `mallard find <id>` | a trace or event id (32 hex) or an issue or span id (16 hex): what it is and the command to see more |
 | `mallard issues list\|show\|resolve\|ignore\|unresolve` | error issues; `list --new`, `--first-release`, `--tag k=v` (repeat), `--cursor`; status changes take `--reason` |
 | `mallard events list\|show` | error events; `list --tag k=v`, `--release`, `--env`, `-q`, `--cursor`; `show --json` is concise, `--raw` adds the Sentry payload |
-| `mallard releases list` | releases seen in error events: first/last seen, events, issues, new issues (derived from events; releases made with `sentry-cli releases new` are not stored) |
+| `mallard releases list` | releases named by error events, and those made with `sentry-cli releases new`: first/last seen, events, issues, new issues, when finalized, last deploy per environment. `first_seen` and `last_seen` are null with no events in the window |
 | `mallard stats [-p project \| --app slug] [--interval 1h]` | one project: total events, issues, new issues, affected users, and events per bucket (default window 24h; `series errors` has the buckets as a list) |
 | `mallard projects list\|show\|create [--if-not-exists]` | Sentry projects and their DSNs. A new slug that another project has under the slug rule is a conflict, exit 5, also with `--if-not-exists` |
 | `mallard traces list\|show`, `mallard trace <id>` | search traces (with a `sentry` error count per trace; `--cursor` for the next page); one trace with its spans, Sentry errors (`⚠ n` on the span) and logs |

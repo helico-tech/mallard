@@ -19,7 +19,7 @@ use super::schema::{OVERFLOW_GROUP, OVERFLOW_TITLE};
 use super::{Caches, IssueState, Ns, ProjectRow, Tick, us_to_dt};
 use crate::config::Config;
 use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use mallard_duck::duckdb::{Connection, params};
 use mallard_sentry_api::{IssueStatus, app_projects, service_slug};
@@ -70,6 +70,15 @@ pub struct NewBundle {
     pub files: Vec<NewBundleFile>,
 }
 
+pub struct NewDeploy {
+    pub version: String,
+    pub environment: String,
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub date_started: Option<DateTime<Utc>>,
+    pub date_finished: DateTime<Utc>,
+}
+
 pub enum WriteCmd {
     Event(Box<EventWrite>),
     CreateProject {
@@ -88,6 +97,17 @@ pub enum WriteCmd {
     },
     AddBundle {
         bundle: Box<NewBundle>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// `sentry-cli releases new` (with projects) or `finalize` (a date, no projects). ADR 0035.
+    WriteRelease {
+        version: String,
+        project_ids: Vec<u32>,
+        date_released: Option<DateTime<Utc>>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    AddDeploy {
+        deploy: Box<NewDeploy>,
         reply: oneshot::Sender<Result<()>>,
     },
     /// Run flush + compaction + retention now (used by tests and the CLI).
@@ -467,6 +487,12 @@ impl Writer {
             WriteCmd::AddBundle { bundle, reply } => {
                 let _ = reply.send(self.add_bundle(&bundle));
             }
+            WriteCmd::WriteRelease { version, project_ids, date_released, reply } => {
+                let _ = reply.send(self.write_release(&version, &project_ids, date_released));
+            }
+            WriteCmd::AddDeploy { deploy, reply } => {
+                let _ = reply.send(self.add_deploy(&deploy));
+            }
             WriteCmd::Shutdown { reply } => {
                 // Only reached while draining; run() handles the first one.
                 let _ = reply.send(());
@@ -814,6 +840,48 @@ impl Writer {
         })?;
         self.caches.issues.insert((project_id, group_hash), IssueState { status, changed_us });
         Ok(true)
+    }
+
+    fn write_release(&self, version: &str, project_ids: &[u32], date_released: Option<DateTime<Utc>>) -> Result<()> {
+        let ns = &self.ns;
+        let now = Utc::now().timestamp_micros();
+        self.in_tx(|c| {
+            for p in project_ids {
+                c.execute(
+                    &ns.sql("INSERT INTO $S.releases VALUES (?, ?, make_timestamp(?))"),
+                    params![*p as i32, version, now],
+                )?;
+            }
+            if let Some(d) = date_released {
+                c.execute(
+                    &ns.sql("INSERT INTO $S.release_activity VALUES (?, make_timestamp(?), make_timestamp(?))"),
+                    params![version, now, d.timestamp_micros()],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn add_deploy(&self, d: &NewDeploy) -> Result<()> {
+        let ns = &self.ns;
+        let now = Utc::now().timestamp_micros();
+        self.in_tx(|c| {
+            c.execute(
+                &ns.sql(
+                    "INSERT INTO $S.deploys VALUES (?, ?, ?, ?, make_timestamp(?), make_timestamp(?), make_timestamp(?))",
+                ),
+                params![
+                    d.version,
+                    d.environment,
+                    d.name,
+                    d.url,
+                    d.date_started.map(|t| t.timestamp_micros()),
+                    d.date_finished.timestamp_micros(),
+                    now
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn add_bundle(&self, b: &NewBundle) -> Result<()> {
