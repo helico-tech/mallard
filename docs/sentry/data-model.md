@@ -132,6 +132,8 @@ version. Retention leaves all three. The release list merges them with the `rele
 - A version named only by events older than the window is not listed, even with a deploy in the window: no row says which project it belongs to.
 - A deploy or finalize of a version nothing else names is stored, and shown only by that version's own deploy list.
 
+`GET /sentry/v1/deploys` gives what the charts mark: deploys finished in the window, of a project's versions or all of them. A telemetry chart reaches them through the app: a project and a service with one slug (ADR 0027). So with All apps a chart marks every deploy, and an app with no project marks none. A deploy is marked for its whole app, not per environment.
+
 The list took about 20 ms on a lake filled at full speed for 150 s (389 MB). Larger lakes and a full 14 days were not measured.
 
 ### Sourcemap tables

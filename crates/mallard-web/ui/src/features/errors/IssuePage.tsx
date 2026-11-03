@@ -9,7 +9,10 @@ import { sentry } from "@/api/sentry";
 import type { EventDetail, EventSummary, IssueDetail } from "@/api/types";
 import { useKeys } from "@/app/keys";
 import { useInterval } from "@/app/settings";
+import { DeployNote, useDeployMarks } from "@/app/deploys";
 import { useParam, useWindow, writeParams } from "@/app/window";
+import { windowSeconds } from "@/lib/domain";
+import { markFraction } from "@/lib/deploys";
 import { Sparkline } from "@/components/charts";
 import { useListNav } from "@/components/list";
 import { useBack, Ago, CopyId, DataTable, DetailHeader, EmptyState, ErrorState, Facts, KeyHint, Level, Pad, Page, Section, StaleNote, Status, TableSkeleton } from "@/components/ui-bits";
@@ -21,7 +24,13 @@ import { useSetStatus } from "./data";
 const SECTIONS = ["overview", "stack", "breadcrumbs", "events", "json"] as const;
 type SectionKey = (typeof SECTIONS)[number];
 
-function Overview({ issue, event, w }: { issue: IssueDetail; event?: EventDetail; w: string }) {
+function Overview({ issue, event, w, project }: { issue: IssueDetail; event?: EventDetail; w: string; project: string }) {
+  const deploys = useDeployMarks(w, project);
+  const span = windowSeconds(w) * 1000;
+  const trendMarks = deploys.marks.flatMap((m) => {
+    const at = markFraction(m.time, Date.now() - span, span);
+    return at === null ? [] : [{ at, title: `Deploy ${m.label}, ${m.detail}` }];
+  });
   const ctx = event ? contexts(event.payload) : [];
   const req = event ? request(event.payload) : undefined;
   return (
@@ -44,7 +53,7 @@ function Overview({ issue, event, w }: { issue: IssueDetail; event?: EventDetail
           </Pad>
         </Section>
         <Section title={`Trend, last ${w}`}>
-          <Pad><Sparkline fluid values={issue.trend} width={480} height={44} label={`Events in the last ${w}`} /></Pad>
+          <Pad><Sparkline fluid values={issue.trend} width={480} height={44} label={`Events in the last ${w}`} marks={trendMarks} /><DeployNote error={deploys.error} /></Pad>
         </Section>
         <Section title="Shown event">
           <Pad>
@@ -523,7 +532,7 @@ export function IssuePage() {
       <div ref={outerScroller} className="flex min-h-0 flex-1 flex-col overflow-auto">
         {issueQ.isError && <StaleNote error={issueQ.error} />}
         {eventQ.isError && !event && <ErrorState error={eventQ.error} onRetry={() => void eventQ.refetch()} title="Could not load this event" />}
-        {section === "overview" && <Overview issue={issue} event={event} w={w} />}
+        {section === "overview" && <Overview issue={issue} event={event} w={w} project={project} />}
         {section === "stack" && <StackTrace event={event} loading={eventQ.isPending} inAppOnly={inAppOnly} setInAppOnly={setInAppOnly} raw={raw} setRaw={setRaw} />}
         {section === "breadcrumbs" && <Breadcrumbs event={event} />}
         {section === "events" && (

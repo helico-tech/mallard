@@ -62,6 +62,12 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
             th::faint(),
         ));
     }
+    if !app.deploys.is_empty() {
+        title.push(Span::styled("┊ deploy ", th::dim()));
+    }
+    if let Some(e) = &app.deploys_error {
+        title.push(Span::styled(format!("deploys: {e} "), th::error()));
+    }
     let block = rounded(title);
     let inner = block.inner(chart);
     f.render_widget(block, chart);
@@ -76,6 +82,11 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
     }
     let data = fmt::resample(&events, plot.width as usize);
     f.render_widget(Sparkline::default().data(&data).style(Style::new().fg(th::ACCENT)), plot);
+    if let Some((first, last)) = s.and_then(|s| Some((s.buckets.first()?, s.buckets.last()?))) {
+        let end = last.start.timestamp() as f64 + s.map_or(0.0, |s| s.interval_seconds as f64);
+        let cols = mallard_term::tui::mark_columns(&app.deploys, first.start.timestamp() as f64, end, plot.width);
+        mallard_term::tui::draw_marks(f.buffer_mut(), plot, &cols, th::dim());
+    }
     let axis_line = Line::from(vec![
         Span::styled(format!("-{window}"), th::faint()),
         Span::raw(" ".repeat((axis.width as usize).saturating_sub(window.len() + 1 + 3))),

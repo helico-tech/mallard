@@ -8,6 +8,7 @@ import { otel } from "@/api/otel";
 import type { LogRecord } from "@/api/types";
 import { REFRESH_EVENT, useKeys } from "@/app/keys";
 import { useInterval, useSettings } from "@/app/settings";
+import { DeployNote, useDeployMarks } from "@/app/deploys";
 import { useParam, useScope, useWindow } from "@/app/window";
 import { OutsideApp } from "@/components/scope-states";
 import { logSuggestions } from "@/components/suggestions";
@@ -184,6 +185,7 @@ function RecordPanel({ r, onClose }: { r: LogRecord; onClose: () => void }) {
 
 export function LogsPage() {
   const { w } = useWindow();
+  const deploys = useDeployMarks(w);
   const { services, apps } = useScope();
   const [f, setF] = useParam("f");
   const navigate = useNavigate();
@@ -387,8 +389,10 @@ export function LogsPage() {
             ]}
             ariaLabel={`Log volume in the last ${w}: ${compact(totals.error)} errors, ${compact(totals.warn)} warnings`}
             stepLabel={(t) => `${timestamp(new Date(t))} UTC`}
+            marks={deploys.marks}
           />
         )}
+        <DeployNote error={deploys.error} />
         </div>
       </Section>
       <Section

@@ -40,6 +40,8 @@ pub enum Kind {
     LogTail,
     MetricList,
     MetricQuery,
+    /// Deploys for the charts' markers (the host's error lookup).
+    Deploys,
     /// Error events of the listed traces (the host's error lookup).
     TraceErrors,
     /// Error events of the open trace.
@@ -126,6 +128,7 @@ pub enum Data {
     MetricQuery(MetricQueryResult),
     /// From the host's error lookup, which fails in its own way.
     Errors(Result<crate::ErrorMap, String>),
+    Deploys(Result<Vec<f64>, String>),
     Suggest(Box<super::suggestions::Answer>),
 }
 
@@ -148,6 +151,8 @@ impl Data {
             Data::MetricList(v) => Data::MetricList(cleaned_rows(v)?),
             Data::MetricQuery(v) => Data::MetricQuery(sanitize(v, false)?),
             // The event and span ids are compared and handed to the host; the view cleans them.
+            // Numbers: nothing to clean.
+            d @ Data::Deploys(_) => d,
             Data::Errors(r) => Data::Errors(r.map(|mut map| {
                 for e in map.values_mut().flat_map(|t| &mut t.events) {
                     e.title = clean(&e.title).into_owned();

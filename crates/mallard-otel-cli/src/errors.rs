@@ -40,4 +40,10 @@ pub trait ErrorLookup: Send + Sync + std::fmt::Debug {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> BoxFuture<'static, anyhow::Result<ErrorMap>>;
+
+    /// When deploys finished in the window, in seconds since the epoch: of `project`'s
+    /// releases, or all of them. For markers on the charts.
+    fn deploys(&self, _project: Option<String>, _since: String) -> BoxFuture<'static, anyhow::Result<Vec<f64>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }

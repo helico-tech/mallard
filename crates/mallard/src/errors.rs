@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use mallard_client::Client;
+use mallard_client::mallard_sentry_client::types::DeployQuery;
 use mallard_client::mallard_sentry_client::types::WindowRange;
 use mallard_otel_cli::{ErrorEvent, ErrorMap, TraceErrors};
 
@@ -11,6 +12,19 @@ use mallard_otel_cli::{ErrorEvent, ErrorMap, TraceErrors};
 pub(crate) struct SentryErrors(pub Client);
 
 impl mallard_otel_cli::ErrorLookup for SentryErrors {
+    fn deploys(&self, project: Option<String>, since: String) -> BoxFuture<'static, anyhow::Result<Vec<f64>>> {
+        let c = self.0.clone();
+        Box::pin(async move {
+            let q = DeployQuery { project, since: Some(since), limit: None };
+            let r = c
+                .sentry
+                .deploys(&q)
+                .await
+                .map_err(|e| crate::described(mallard_client::Error::Sentry(e), c.base_url()))?;
+            Ok(r.deploys.iter().map(|d| d.date_finished.timestamp() as f64).collect())
+        })
+    }
+
     fn errors(
         &self,
         trace_ids: Vec<String>,

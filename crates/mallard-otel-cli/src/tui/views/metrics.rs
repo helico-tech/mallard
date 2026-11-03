@@ -379,7 +379,7 @@ impl Embedded {
         let chart_block = ratatui::widgets::Block::default();
         let now = chrono::Utc::now().timestamp() as f64;
         let bounds = Some([now - window_secs, now]);
-        widgets::time_chart(f, chart_area, chart_block, &shown, bounds, &fmt);
+        widgets::time_chart(f, chart_area, chart_block, &shown, bounds, &fmt, &self.deploys);
         if legend_h > 0 {
             let rows: Vec<Row> = series
                 .iter()

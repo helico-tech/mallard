@@ -7,6 +7,7 @@ import { sentry } from "@/api/sentry";
 import type { IssueSummary, ProjectStats } from "@/api/types";
 import { leaveMenu } from "@/app/keys";
 import { useInterval } from "@/app/settings";
+import { DeployNote, useDeployMarks } from "@/app/deploys";
 import { useParam, useScope, useWindow } from "@/app/window";
 import { NoErrors, WidenButton } from "@/components/scope-states";
 import { issueSuggestions } from "@/components/suggestions";
@@ -83,6 +84,7 @@ export function useProjectStats(project: string | null, w: string) {
 
 /** Events over the window, split by level. */
 export function EventBars({ stats, w }: { stats: ProjectStats | undefined; w: string }) {
+  const deploys = useDeployMarks(w);
   const buckets = useMemo(
     () => (stats?.buckets ?? []).map((b) => ({ time: Date.parse(b.start), values: { errors: b.errors, warnings: b.warnings, other: b.other } })),
     [stats],
@@ -105,7 +107,9 @@ export function EventBars({ stats, w }: { stats: ProjectStats | undefined; w: st
         axis={[`-${w}`, "now"]}
         ariaLabel={stats ? `Events in the last ${w}: ${compact(stats.total_events)} in total, peak ${compact(peak)}` : "Loading events"}
         stepLabel={(t) => `${timestamp(new Date(t))} UTC`}
+        marks={deploys.marks}
       />
+      <DeployNote error={deploys.error} />
     </>
   );
 }

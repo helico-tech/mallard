@@ -11,8 +11,8 @@ impl Resp {
             Resp::Info(r) => Resp::Info(r.and_then(cleaned)),
             Resp::Projects(r) => Resp::Projects(r.and_then(cleaned)),
             Resp::Issues(k, r) => Resp::Issues(k, r.and_then(cleaned)),
-            Resp::Stats { project, window, result } => {
-                Resp::Stats { project, window, result: result.and_then(cleaned) }
+            Resp::Stats { project, window, result, deploys } => {
+                Resp::Stats { project, window, result: result.and_then(cleaned), deploys }
             }
             Resp::Issue { id, result } => Resp::Issue { id, result: result.and_then(cleaned) },
             Resp::Events { issue, before, result } => Resp::Events { issue, before, result: result.and_then(cleaned) },
@@ -72,7 +72,7 @@ impl App {
             Resp::Info(r) => self.on_info(r),
             Resp::Projects(r) => self.on_projects(r),
             Resp::Issues(key, r) => self.on_issues(&key, r),
-            Resp::Stats { project, window, result } => self.on_stats(&project, window, result),
+            Resp::Stats { project, window, result, deploys } => self.on_stats(&project, window, result, deploys),
             Resp::Issue { id, result } => self.on_issue(&id, result),
             Resp::Events { issue, before, result } => self.on_events(&issue, before, result),
             Resp::Event { event_id, result } => self.on_event(&event_id, result),
@@ -154,9 +154,17 @@ impl App {
         vec![]
     }
 
-    fn on_stats(&mut self, project: &str, window: Window, r: Res<ProjectStats>) -> Vec<Req> {
+    fn on_stats(&mut self, project: &str, window: Window, r: Res<ProjectStats>, deploys: Res<Vec<f64>>) -> Vec<Req> {
         if self.project.as_deref() != Some(project) || window != self.window {
             return vec![];
+        }
+        match deploys {
+            Ok(d) => {
+                self.deploys = d;
+                self.deploys_error = None;
+            }
+            // The chart stands without its markers; it says they are missing.
+            Err(e) => self.deploys_error = Some(clean(&e.message).into_owned()),
         }
         match r {
             Ok(s) => {

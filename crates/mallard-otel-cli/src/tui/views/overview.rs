@@ -264,10 +264,11 @@ impl Embedded {
         widgets::time_chart(
             f,
             left,
-            widgets::panel_with("Throughput", widgets::legend(&throughput), false),
+            widgets::panel_with("Throughput", widgets::legend_with_deploys(&throughput, &self.deploys), false),
             &throughput,
             bounds,
             &compact,
+            &self.deploys,
         );
         let latency = [
             Series { name: "p50".into(), color: theme::GREEN, points: &p50 },
@@ -277,10 +278,11 @@ impl Embedded {
         widgets::time_chart(
             f,
             right,
-            widgets::panel_with("Latency", widgets::legend(&latency), false),
+            widgets::panel_with("Latency", widgets::legend_with_deploys(&latency, &self.deploys), false),
             &latency,
             bounds,
             &ms,
+            &self.deploys,
         );
     }
 

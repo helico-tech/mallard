@@ -306,6 +306,11 @@ impl Client {
         self.get2(&format!("/v1/projects/{}/releases", segment(project)?), q, w).await
     }
 
+    /// Deploys finished in the window, for markers on charts.
+    pub async fn deploys(&self, q: &DeployQuery) -> Result<DeployList, Error> {
+        self.get("/v1/deploys", q).await
+    }
+
     /// Tag keys with counts, or the top values of `q.key`, for a filter bar.
     pub async fn tags(&self, project: &str, q: &TagQuery) -> Result<TagStats, Error> {
         self.get(&format!("/v1/projects/{}/tags", segment(project)?), q).await

@@ -15,7 +15,7 @@ use app::{App, FetchError, Kind, Req, Resp, Window};
 use crossterm::event::{Event, KeyEventKind};
 use futures::FutureExt;
 use mallard_sentry_client::Client;
-use mallard_sentry_client::types::{EventQuery, TagQuery, WindowQuery};
+use mallard_sentry_client::types::{DeployQuery, EventQuery, TagQuery, WindowQuery};
 use mallard_term::error::Hints;
 use mallard_term::tui::Scope;
 use mallard_term::tui::suggest::{FETCH_TIMEOUT, LIMIT};
@@ -236,7 +236,13 @@ async fn fetch(c: Client, req: Req, hints: Hints) -> Resp {
         Req::Stats { project, window } => {
             let q = WindowQuery { since: Some(window.since().into()), interval: Some(window.interval().into()) };
             let result = c.stats(&project, &q).await.map_err(e);
-            Resp::Stats { project, window, result }
+            let dq = DeployQuery { project: Some(project.clone()), since: q.since.clone(), limit: None };
+            let deploys = c
+                .deploys(&dq)
+                .await
+                .map(|l| l.deploys.iter().map(|d| d.date_finished.timestamp() as f64).collect())
+                .map_err(e);
+            Resp::Stats { project, window, result, deploys }
         }
         Req::Issue { project, id, window } => {
             let q = WindowQuery { since: Some(window.since().into()), interval: None };

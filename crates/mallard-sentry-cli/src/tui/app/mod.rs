@@ -237,6 +237,8 @@ pub(super) enum Resp {
         project: String,
         window: Window,
         result: Res<ProjectStats>,
+        /// When deploys finished, in seconds since the epoch.
+        deploys: Res<Vec<f64>>,
     },
     Issue {
         id: String,
@@ -507,6 +509,9 @@ pub(super) struct App {
     /// Last failed load of the issue list / the stats panel.
     pub issues_error: Option<String>,
     pub stats_error: Option<String>,
+    /// When deploys finished, for markers on the events chart (issue 0195).
+    pub deploys: Vec<f64>,
+    pub deploys_error: Option<String>,
     /// A background load panicked; the host quits on this.
     pub fatal: Option<String>,
     /// Loads in flight, per kind. Every request gets exactly one response
@@ -551,6 +556,8 @@ impl App {
             global_error: None,
             issues_error: None,
             stats_error: None,
+            deploys: Vec::new(),
+            deploys_error: None,
             fatal: None,
             pending: HashMap::new(),
             spinner: 0,

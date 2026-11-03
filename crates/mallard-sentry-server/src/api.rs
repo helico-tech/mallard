@@ -103,6 +103,7 @@ fn v1_routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(get_event))
         .routes(routes!(project_stats))
         .routes(routes!(list_releases))
+        .routes(routes!(list_deploys))
         .routes(routes!(tag_stats))
         .routes(routes!(list_sourcemaps))
         .routes(routes!(run_maintenance))
@@ -515,6 +516,20 @@ async fn list_releases(
     let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
     let limit = q.limit.unwrap_or(50);
     Ok(Json(state.db.read(move |c, ns| read::list_releases(c, ns, pid, &w, limit)).await?))
+}
+
+#[utoipa::path(get, path = "/v1/deploys", params(DeployQuery, WindowRange),
+    description = "Deploys finished in the window (default 14d), newest first, for markers on charts. A deploy goes by \
+        version: with `project`, those of the versions made for that project or named by its events in the window.",
+    responses((status = 200, body = DeployList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
+async fn list_deploys(State(state): S, Q(q): Q<DeployQuery>, Q(r): Q<WindowRange>) -> ApiResult<DeployList> {
+    let pid = match &q.project {
+        Some(p) => Some(project(&state, p).await?.id),
+        None => None,
+    };
+    let w = window(&state, q.since.as_deref(), &r, 14 * DAY)?;
+    let limit = q.limit.unwrap_or(200);
+    Ok(Json(state.db.read(move |c, ns| read::deploys_in_window(c, ns, pid, &w, limit)).await?))
 }
 
 /// Longest a tag suggestion may take. Suggestions are asked for while someone

@@ -174,7 +174,12 @@ pub(super) fn loaded_app() -> App {
         key,
         Ok(IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None }),
     ));
-    app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
+    app.on_response(Resp::Stats {
+        project: "web".into(),
+        window: app.window,
+        result: Ok(stats()),
+        deploys: Ok(vec![]),
+    });
     assert!(!app.loading(), "{:?}", app.pending);
     app.now = now();
     app
