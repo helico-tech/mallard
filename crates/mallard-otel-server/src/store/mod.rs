@@ -4,11 +4,11 @@ pub mod maintenance;
 pub mod schema;
 pub mod writer;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result, bail};
 pub(crate) use mallard_duck::{CATALOG, redact, sql_str};
-use mallard_duck::{CatalogKind, duckdb::Connection};
+use mallard_duck::{CatalogKind, CommitLock, duckdb::Connection};
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -23,7 +23,37 @@ pub struct Lake {
     pub schema: String,
     pub catalog_kind: CatalogKind,
     pub data_path: String,
-    pub(crate) commit_lock: mallard_duck::CommitLock,
+    pub(crate) locks: Locks,
+}
+
+/// What the writers of this side hold. Replicas do not share these: there the loser tries again later.
+#[derive(Clone)]
+pub(crate) struct Locks {
+    next: Arc<Mutex<()>>,
+    held: Arc<Mutex<()>>,
+    commit: CommitLock,
+}
+
+impl Locks {
+    fn new(commit: CommitLock) -> Self {
+        Self { next: Default::default(), held: Default::default(), commit }
+    }
+
+    /// Flushes and retention's `DELETE`s take turns (issue 0155, ADR 0033). A `DELETE` that removes rows
+    /// conflicts with every insert into its table that commits while it runs, and the reverse (ADR 0014). So a
+    /// `DELETE` slower than the time between two flushes lost every time, and the rows stayed.
+    ///
+    /// Each in turn, or a flusher with a full buffer takes this again before the `DELETE` wakes up: who
+    /// waits for `held` keeps `next`, so the other one queues behind it.
+    pub(crate) fn turn(&self) -> MutexGuard<'_, ()> {
+        let _next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// One lake commit at a time on this DuckDB instance (ADR 0030).
+    pub(crate) fn commit(&self) -> MutexGuard<'_, ()> {
+        self.commit.hold()
+    }
 }
 
 /// True when `e` is DuckLake's transaction conflict with a concurrent
@@ -67,7 +97,7 @@ impl Lake {
             schema: SCHEMA.into(),
             catalog_kind: cfg.storage.catalog_kind(),
             data_path: cfg.storage.data_path.clone(),
-            commit_lock: cfg.commit_lock.clone(),
+            locks: Locks::new(cfg.commit_lock.clone()),
         };
         lake.migrate()?;
         Ok(lake)

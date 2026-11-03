@@ -1,7 +1,7 @@
 # 0030 — One lake commit at a time on a DuckDB instance
 
 ## Status
-accepted (by the owner, 2026-11-02)
+accepted (by the owner, 2026-11-02); amended by 0033 (OTel retention's `DELETE` takes the lock too)
 
 ## Context
 Both sides commit to one catalog from their own threads (ADR 0001). Every DuckLake commit takes the next

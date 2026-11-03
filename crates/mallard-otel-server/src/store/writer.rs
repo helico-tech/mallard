@@ -36,11 +36,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
-use mallard_duck::{CommitLock, duckdb::Connection};
+use mallard_duck::duckdb::Connection;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use super::{CATALOG, Lake, schema::TableId};
+use super::{CATALOG, Lake, Locks, schema::TableId};
 use crate::stats::Stats;
 
 const N: usize = TableId::ALL.len();
@@ -230,13 +230,9 @@ fn is_permanent(e: &FlushError) -> bool {
 
 /// Append all batches in one transaction. A panic in the DuckDB or Arrow
 /// code is returned as an error, so the flusher thread keeps running.
-fn write(
-    conn: &Connection,
-    schema: &str,
-    commit_lock: &CommitLock,
-    tables: &[Vec<RecordBatch>; N],
-) -> Result<(), FlushError> {
+fn write(conn: &Connection, schema: &str, locks: &Locks, tables: &[Vec<RecordBatch>; N]) -> Result<(), FlushError> {
     let tx_err = |error| FlushError { table: None, error };
+    let _no_delete_meanwhile = locks.turn();
     let tx = conn.unchecked_transaction().map_err(|e| tx_err(e.into()))?;
     for id in TableId::ALL {
         let batches = &tables[id as usize];
@@ -248,7 +244,7 @@ fn write(
             .unwrap_or_else(|p| Err(anyhow::anyhow!("appending to {} panicked: {}", id.def().name, panic_message(&*p))))
             .map_err(|error| FlushError { table: Some(id), error })?;
     }
-    let one_at_a_time = commit_lock.hold();
+    let one_at_a_time = locks.commit();
     let committed = catch_unwind(AssertUnwindSafe(|| tx.commit().map_err(anyhow::Error::from)));
     drop(one_at_a_time);
     committed
@@ -284,7 +280,7 @@ pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> &str {
 fn isolate_table(
     conn: &Connection,
     schema: &str,
-    commit_lock: &CommitLock,
+    locks: &Locks,
     mut taken: Taken,
     table: TableId,
     stats: &Stats,
@@ -296,7 +292,7 @@ fn isolate_table(
         let (rows, bytes) = batch_size(&b);
         let mut one: [Vec<RecordBatch>; N] = Default::default();
         one[i].push(b);
-        match write(conn, schema, commit_lock, &one) {
+        match write(conn, schema, locks, &one) {
             Ok(()) => written += rows,
             Err(e) if is_permanent(&e) => {
                 let msg = super::redact(&format!("{:#}", e.error));
@@ -323,11 +319,11 @@ impl Flusher {
     pub fn start(lake: &Lake, buffer: Arc<WriteBuffer>, interval: Duration, stats: Arc<Stats>) -> Result<Self> {
         let conn = lake.connect()?;
         let schema = lake.schema.clone();
-        let commit_lock = lake.commit_lock.clone();
+        let locks = lake.locks.clone();
         let buf = buffer.clone();
         let handle = std::thread::Builder::new()
             .name("otel-flusher".into())
-            .spawn(move || run(conn, schema, commit_lock, buf, interval, stats))?;
+            .spawn(move || run(conn, schema, locks, buf, interval, stats))?;
         Ok(Self { handle: Some(handle), buffer })
     }
 
@@ -346,14 +342,7 @@ impl Drop for Flusher {
     }
 }
 
-fn run(
-    conn: Connection,
-    schema: String,
-    commit_lock: CommitLock,
-    buf: Arc<WriteBuffer>,
-    interval: Duration,
-    stats: Arc<Stats>,
-) {
+fn run(conn: Connection, schema: String, locks: Locks, buf: Arc<WriteBuffer>, interval: Duration, stats: Arc<Stats>) {
     let mut failures: u32 = 0;
     // Attempts after shutdown started (failures before that don't count).
     let mut shutdown_attempts: u32 = 0;
@@ -371,7 +360,7 @@ fn run(
             continue;
         }
         let t0 = Instant::now();
-        match write(&conn, &schema, &commit_lock, &taken.tables) {
+        match write(&conn, &schema, &locks, &taken.tables) {
             Ok(()) => {
                 failures = 0;
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -403,7 +392,7 @@ fn run(
                             error = %msg,
                             "flush failed with a permanent error for one table; writing its batches one by one"
                         );
-                        let (left, written) = isolate_table(&conn, &schema, &commit_lock, taken, t, &stats);
+                        let (left, written) = isolate_table(&conn, &schema, &locks, taken, t, &stats);
                         if written > 0 {
                             stats.flush_ok(written, t0.elapsed().as_secs_f64() * 1000.0);
                         }
@@ -411,7 +400,7 @@ fn run(
                     }
                     None => {
                         if super::is_conflict(&e.error) {
-                            // e.g. retention or another replica touched the table; retried.
+                            // e.g. retention on another replica touched the table; retried.
                             warn!(rows, failures, error = %msg, "flush conflicted with another transaction; will retry");
                         } else {
                             error!(rows, failures, error = %msg, "flush failed; will retry");
@@ -449,6 +438,7 @@ fn run(
 
 #[cfg(test)]
 mod tests {
+    use super::super::maintenance::retention;
     use super::*;
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -616,12 +606,12 @@ mod tests {
         let lake = lake(&dir);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let small_commits = {
-            let (c, stop, commit_lock) = (lake.connect().unwrap(), stop.clone(), lake.commit_lock.clone());
+            let (c, stop, locks) = (lake.connect().unwrap(), stop.clone(), lake.locks.clone());
             std::thread::spawn(move || {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     c.execute_batch("BEGIN TRANSACTION; INSERT INTO meta VALUES ('k', 'v', make_timestamp(0))")
                         .unwrap();
-                    let _one_at_a_time = commit_lock.hold();
+                    let _one_at_a_time = locks.commit();
                     c.execute_batch("COMMIT").unwrap();
                 }
             })
@@ -639,6 +629,83 @@ mod tests {
         small_commits.join().unwrap();
         assert_eq!(stats.ingest(0).flush_errors, 0, "{:?}", stats.ingest(0).last_flush_error);
         flusher.stop();
+    }
+
+    /// `n` logs from 1970: past any retention.
+    fn old_logs(n: usize) -> Vec<(TableId, RecordBatch)> {
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest,
+            logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        };
+        let old = LogRecord { time_unix_nano: 1_000_000_000, ..Default::default() };
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs { log_records: vec![old; n], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        crate::otlp::convert::convert_logs(&req).batches
+    }
+
+    /// Issue 0155: flushes that come faster than a `DELETE` takes, each with rows past retention, as a
+    /// backfill at full speed. Without turns retention lost nearly every time, or the flush did.
+    #[test]
+    fn retention_and_flushes_take_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(1), stats.clone()).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ingest = {
+            let (buf, stop) = (buf.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    buf.push(old_logs(2_000)).unwrap();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        let (conn, cfg) = (lake.connect().unwrap(), crate::config::Config::default());
+        let (mut lost, mut deleted) = (vec![], false);
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(50));
+            match retention(&conn, &lake.schema, &lake.locks, &cfg.maintenance, &cfg.retention) {
+                Ok(detail) => deleted |= !detail.starts_with("deleted 0 "),
+                Err(e) => lost.push(format!("{e:#}")),
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        ingest.join().unwrap();
+        flusher.stop();
+        assert!(lost.is_empty(), "{} of 10 lost, the first: {}", lost.len(), lost[0]);
+        assert!(deleted, "no try had rows to delete");
+        assert_eq!(stats.ingest(0).flush_errors, 0, "{:?}", stats.ingest(0).last_flush_error);
+    }
+
+    /// Issue 0155: a `DELETE` commits one at a time with the other side of the process, or it loses on the
+    /// snapshot id as a flush did (ADR 0030), and holds up the flushes while it retries.
+    #[test]
+    fn retention_waits_for_a_commit_of_the_other_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let lake = lake(&dir);
+        let conn = lake.connect().unwrap();
+        let stats = Arc::new(Stats::default());
+        let buf = Arc::new(WriteBuffer::new(1 << 30, 1_000_000, stats.clone()));
+        let flusher = Flusher::start(&lake, buf.clone(), Duration::from_millis(1), stats.clone()).unwrap();
+        buf.push(old_logs(10)).unwrap();
+        wait_for(|| format!("logs={}", count(&conn, "logs")), || count(&conn, "logs") == 10);
+        flusher.stop();
+
+        let other_side = lake.locks.commit();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (locks, schema, cfg) = (lake.locks.clone(), lake.schema.clone(), crate::config::Config::default());
+        let c = lake.connect().unwrap();
+        std::thread::spawn(move || tx.send(retention(&c, &schema, &locks, &cfg.maintenance, &cfg.retention)));
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "committed during a commit of the other side");
+        drop(other_side);
+        let done = rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        assert!(done.starts_with("deleted 10 "), "{done}");
     }
 
     /// Issue 0131, with a real allocation error: nothing is dropped, and the rows are

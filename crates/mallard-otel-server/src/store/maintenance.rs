@@ -19,6 +19,7 @@
 //! the tasks (ADR 0021, issue 0051): each task due tries the lease first. It is
 //! valid for 3 of the shortest interval, so a stopped process is replaced soon.
 //! Overlapping runs stay safe (losers of a conflict retry next run), only wasteful.
+//! In one process retention's deletes and the flushes take turns ([`super::Locks::turn`]).
 //! The one-shot [`run_once`] ignores the lease.
 
 use std::{
@@ -37,7 +38,7 @@ use mallard_duck::duckdb::Connection;
 use mallard_otel_api::MaintenanceInfo;
 use tracing::{info, warn};
 
-use super::{CATALOG, Lake, schema::TABLES, sql_str};
+use super::{CATALOG, Lake, Locks, schema::TABLES, sql_str};
 use crate::{
     config::{MaintenanceConfig, RetentionConfig},
     stats::Stats,
@@ -51,12 +52,12 @@ pub struct Maintenance {
 impl Maintenance {
     pub fn start(lake: &Lake, m: MaintenanceConfig, r: RetentionConfig, stats: Arc<Stats>) -> Result<Self> {
         let conn = lake.connect()?;
-        let schema = lake.schema.clone();
+        let (schema, locks) = (lake.schema.clone(), lake.locks.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::Builder::new()
             .name("otel-maintenance".into())
-            .spawn(move || run(conn, schema, m, r, stats, stop2))?;
+            .spawn(move || run(conn, schema, locks, m, r, stats, stop2))?;
         Ok(Self { stop, handle: Some(handle) })
     }
 
@@ -79,6 +80,7 @@ impl Drop for Maintenance {
 fn run(
     conn: Connection,
     schema: String,
+    locks: Locks,
     s: MaintenanceConfig,
     r: RetentionConfig,
     stats: Arc<Stats>,
@@ -96,7 +98,7 @@ fn run(
         let now = Instant::now();
         if now >= next_retention {
             if leader() {
-                task(&stats, "retention", || retention(&conn, &schema, &s, &r));
+                task(&stats, "retention", || retention(&conn, &schema, &locks, &s, &r));
             }
             next_retention = Instant::now() + s.retention_interval;
         } else if now >= next_full {
@@ -166,6 +168,7 @@ fn task(stats: &Stats, name: &str, f: impl FnOnce() -> Result<String>) {
 pub fn run_once(
     conn: &Connection,
     schema: &str,
+    locks: &Locks,
     m: &MaintenanceConfig,
     r: &RetentionConfig,
     full: bool,
@@ -174,7 +177,7 @@ pub fn run_once(
     if full {
         done.push(format!("full compaction: {}", compact(conn, schema, None)?));
     }
-    done.push(format!("retention: {}", retention(conn, schema, m, r)?));
+    done.push(format!("retention: {}", retention(conn, schema, locks, m, r)?));
     Ok(done)
 }
 
@@ -231,7 +234,13 @@ pub fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> Option<DateT
     })
 }
 
-pub fn retention(conn: &Connection, schema: &str, s: &MaintenanceConfig, r: &RetentionConfig) -> Result<String> {
+pub fn retention(
+    conn: &Connection,
+    schema: &str,
+    locks: &Locks,
+    s: &MaintenanceConfig,
+    r: &RetentionConfig,
+) -> Result<String> {
     let now = Utc::now();
     let mut deleted = 0usize;
     for t in TABLES {
@@ -243,9 +252,12 @@ pub fn retention(conn: &Connection, schema: &str, s: &MaintenanceConfig, r: &Ret
             continue;
         };
         let cutoff = cutoff.naive_utc();
-        let n =
+        let _no_flush_meanwhile = locks.turn();
+        let tx = conn.unchecked_transaction()?;
+        deleted +=
             conn.execute(&format!("DELETE FROM {CATALOG}.{schema}.{} WHERE {} < ?", t.name, t.time_column), [cutoff])?;
-        deleted += n;
+        let _one_at_a_time = locks.commit();
+        tx.commit()?;
     }
     let mut detail = format!("deleted {deleted} expired rows");
     // Absolute instants (epoch seconds -> TIMESTAMPTZ), so the session
