@@ -122,10 +122,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     let compat = Router::new()
         .route("/api/0/organizations/{org}/chunk-upload/", get(chunk_options).post(chunk_upload))
         .route("/api/0/organizations/{org}/artifactbundle/assemble/", post(assemble))
-        .route("/api/0/organizations/{org}/releases/", post(release_upsert))
-        .route("/api/0/projects/{org}/{project}/releases/", post(release_upsert))
-        .route("/api/0/organizations/{org}/releases/{version}/", get(release_get).put(release_upsert_path))
-        .route("/api/0/organizations/{org}/releases/{version}/deploys/", post(release_deploy))
+        .route("/api/0/organizations/{org}/releases/", get(release_list_all).post(release_create))
+        .route(
+            "/api/0/projects/{org}/{project}/releases/",
+            get(release_list_in_project).post(release_create_in_project),
+        )
+        .route("/api/0/organizations/{org}/releases/{version}/", get(release_get).put(release_update))
+        .route("/api/0/organizations/{org}/releases/{version}/deploys/", get(release_deploys).post(release_deploy))
         .layer(axum::extract::DefaultBodyLimit::max(sourcemaps::MAX_REQUEST_SIZE + 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), require_token_sentry))
         .with_state(state);
@@ -500,8 +503,7 @@ async fn project_stats(
 }
 
 #[utoipa::path(get, path = "/v1/projects/{project}/releases", params(("project" = String, Path), ReleaseQuery, WindowRange),
-    description = "Releases named by the project's events in the window (default 14d), newest last event first. \
-        Derived from events: releases created with sentry-cli are not stored.",
+    description = "Releases of the project in the window (default 14d), newest first: those named by its events, and those made with `sentry-cli releases new` that were created, finalized or deployed in it. `first_seen` and `last_seen` are null with no events in the window.",
     responses((status = 200, body = ReleaseList), (status = 400, body = ApiError), (status = 404, body = ApiError)))]
 async fn list_releases(
     State(state): S,
@@ -705,33 +707,231 @@ async fn assemble(State(state): S, Json(req): Json<AssembleRequest>) -> Result<J
     Ok(Json(state.sourcemaps.assemble(&state.db, req).await?))
 }
 
-/// Releases are not stored; we answer so bundler plugins don't log errors.
-// Stubs: `sentry-cli releases new|finalize|deploys` succeed and nothing is
-// stored; `GET /v1/projects/{p}/releases` derives releases from events
-// (work/issues/0060).
-async fn release_upsert(Json(body): Json<serde_json::Value>) -> Response {
-    let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-    (StatusCode::CREATED, Json(release_info(&version))).into_response()
+/// `sentry-cli`'s release calls (ADR 0035). What it sends is in that ADR.
+const MAX_VERSION_LEN: usize = 200;
+const MAX_DEPLOY_FIELD_LEN: usize = 1024;
+/// Newest first, one page: the CLI follows no cursor when no `Link` header offers one.
+const COMPAT_RELEASE_LIMIT: u32 = 500;
+
+fn check_version(version: &str) -> Result<(), ApiErr> {
+    if version.is_empty() || version.len() > MAX_VERSION_LEN {
+        return Err(bad(format!("a release version has 1 to {MAX_VERSION_LEN} bytes")));
+    }
+    Ok(())
 }
 
-async fn release_upsert_path(Path((_org, version)): Path<(String, String)>) -> Response {
-    Json(release_info(&version)).into_response()
+#[derive(serde::Deserialize)]
+struct NewRelease {
+    version: String,
+    #[serde(default)]
+    projects: Vec<String>,
+    #[serde(rename = "dateReleased")]
+    date_released: Option<DateTime<Utc>>,
 }
 
-async fn release_get(Path((_org, version)): Path<(String, String)>) -> Response {
-    Json(release_info(&version)).into_response()
+#[derive(serde::Deserialize)]
+struct ReleaseUpdate {
+    #[serde(rename = "dateReleased")]
+    date_released: Option<DateTime<Utc>>,
+}
+
+#[derive(serde::Deserialize)]
+struct NewDeployBody {
+    environment: String,
+    name: Option<String>,
+    url: Option<String>,
+    #[serde(rename = "dateStarted")]
+    date_started: Option<DateTime<Utc>>,
+    #[serde(rename = "dateFinished")]
+    date_finished: Option<DateTime<Utc>>,
+}
+
+async fn store_release(state: &AppState, body: NewRelease, projects: Vec<ProjectRow>) -> Result<Response, ApiErr> {
+    let NewRelease { version, date_released, .. } = body;
+    check_version(&version)?;
+    let project_ids: Vec<u32> = projects.iter().map(|p| p.id).collect();
+    let v = version.clone();
+    state
+        .db
+        .call::<_, anyhow::Error>(|reply| WriteCmd::WriteRelease { version: v, project_ids, date_released, reply })
+        .await?;
+    let answer = release_info(&version, Some(Utc::now()), date_released, &projects);
+    Ok((StatusCode::CREATED, Json(answer)).into_response())
+}
+
+async fn release_create(State(state): S, Path(_org): Path<String>, J(body): J<NewRelease>) -> Result<Response, ApiErr> {
+    if body.projects.is_empty() {
+        return Err(bad("a release needs at least one project"));
+    }
+    let mut projects: Vec<ProjectRow> = Vec::new();
+    for slug in &body.projects {
+        let p = state.db.project_by_ref(slug).await.ok_or_else(|| bad(format!("unknown project {slug:?}")))?;
+        if !projects.iter().any(|known| known.id == p.id) {
+            projects.push(p);
+        }
+    }
+    store_release(&state, body, projects).await
+}
+
+async fn release_create_in_project(
+    State(state): S,
+    Path((_org, slug)): Path<(String, String)>,
+    J(body): J<NewRelease>,
+) -> Result<Response, ApiErr> {
+    let p = state.db.project_by_ref(&slug).await.ok_or_else(|| bad(format!("unknown project {slug:?}")))?;
+    store_release(&state, body, vec![p]).await
+}
+
+async fn release_update(
+    State(state): S,
+    Path((_org, version)): Path<(String, String)>,
+    J(body): J<ReleaseUpdate>,
+) -> Result<Response, ApiErr> {
+    check_version(&version)?;
+    if let Some(date_released) = body.date_released {
+        let v = version.clone();
+        state
+            .db
+            .call::<_, anyhow::Error>(|reply| WriteCmd::WriteRelease {
+                version: v,
+                project_ids: Vec::new(),
+                date_released: Some(date_released),
+                reply,
+            })
+            .await?;
+    }
+    Ok(Json(release_info(&version, None, body.date_released, &[])).into_response())
+}
+
+/// The window of what events can say about a release in the compatible answers.
+fn compat_window(state: &AppState) -> Result<Window, ApiErr> {
+    window(state, None, &WindowRange::default(), 14 * DAY)
+}
+
+async fn release_get(State(state): S, Path((_org, version)): Path<(String, String)>) -> Result<Response, ApiErr> {
+    let w = compat_window(&state)?;
+    let v = version.clone();
+    let row = state.db.read(move |c, ns| read::get_release(c, ns, &v, &w)).await?;
+    let row = row.ok_or_else(|| not_found("release"))?;
+    Ok(Json(release_row_info(&state, &row).await).into_response())
+}
+
+async fn release_list_all(State(state): S, Path(_org): Path<String>) -> Result<Response, ApiErr> {
+    let w = compat_window(&state)?;
+    let rows = state.db.read(move |c, ns| read::list_org_releases(c, ns, &w, COMPAT_RELEASE_LIMIT)).await?;
+    release_list_answer(&state, &rows).await
+}
+
+async fn release_list_in_project(
+    State(state): S,
+    Path((_org, slug)): Path<(String, String)>,
+) -> Result<Response, ApiErr> {
+    let pid = project(&state, &slug).await?.id;
+    let w = compat_window(&state)?;
+    let rows =
+        state.db.read(move |c, ns| read::list_project_release_rows(c, ns, pid, &w, COMPAT_RELEASE_LIMIT)).await?;
+    release_list_answer(&state, &rows).await
+}
+
+async fn release_list_answer(state: &AppState, rows: &[read::ReleaseRow]) -> Result<Response, ApiErr> {
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(release_row_info(state, r).await);
+    }
+    Ok(Json(out).into_response())
 }
 
 async fn release_deploy(
-    Path((_org, _version)): Path<(String, String)>,
-    Json(body): Json<serde_json::Value>,
-) -> Response {
-    let env = body.get("environment").cloned().unwrap_or(json!("production"));
-    (StatusCode::CREATED, Json(json!({"id": "1", "environment": env, "dateFinished": Utc::now()}))).into_response()
+    State(state): S,
+    Path((_org, version)): Path<(String, String)>,
+    J(body): J<NewDeployBody>,
+) -> Result<Response, ApiErr> {
+    check_version(&version)?;
+    if body.environment.is_empty() {
+        return Err(bad("a deploy needs an environment"));
+    }
+    for field in [Some(&body.environment), body.name.as_ref(), body.url.as_ref()].into_iter().flatten() {
+        if field.len() > MAX_DEPLOY_FIELD_LEN {
+            return Err(bad(format!("environment, name and url have at most {MAX_DEPLOY_FIELD_LEN} bytes")));
+        }
+    }
+    let date_finished = body.date_finished.unwrap_or_else(Utc::now);
+    let answer = json!({
+        "id": date_finished.timestamp_micros().to_string(),
+        "environment": body.environment,
+        "name": body.name,
+        "url": body.url,
+        "dateStarted": body.date_started,
+        "dateFinished": date_finished,
+    });
+    let deploy = crate::db::NewDeploy {
+        version,
+        environment: body.environment,
+        name: body.name,
+        url: body.url,
+        date_started: body.date_started,
+        date_finished,
+    };
+    state.db.call::<_, anyhow::Error>(|reply| WriteCmd::AddDeploy { deploy: Box::new(deploy), reply }).await?;
+    Ok((StatusCode::CREATED, Json(answer)).into_response())
 }
 
-fn release_info(version: &str) -> serde_json::Value {
-    json!({ "version": version, "dateCreated": Utc::now(), "projects": [], "newGroups": 0 })
+async fn release_deploys(State(state): S, Path((_org, version)): Path<(String, String)>) -> Result<Response, ApiErr> {
+    let rows = state.db.read(move |c, ns| read::list_deploys(c, ns, &version)).await?;
+    let out: Vec<_> = rows
+        .iter()
+        .map(|d| {
+            json!({
+                "id": d.created_us.to_string(),
+                "environment": d.environment,
+                "name": d.name,
+                "url": d.url,
+                "dateStarted": d.date_started,
+                "dateFinished": d.date_finished,
+            })
+        })
+        .collect();
+    Ok(Json(out).into_response())
+}
+
+async fn release_row_info(state: &AppState, row: &read::ReleaseRow) -> serde_json::Value {
+    let r = &row.release;
+    let mut projects = Vec::with_capacity(row.project_ids.len());
+    for id in &row.project_ids {
+        // A project id is its reference too.
+        if let Some(p) = state.db.project_by_ref(&id.to_string()).await {
+            projects.push(p);
+        }
+    }
+    let mut info = release_info(&r.version, r.date_created.or(r.first_seen), r.date_released, &projects);
+    info["firstEvent"] = json!(r.first_seen);
+    info["lastEvent"] = json!(r.last_seen);
+    info["newGroups"] = json!(r.new_issues);
+    info["deployCount"] = json!(row.deploy_count);
+    info["lastDeploy"] = json!(r.deploys.first().map(|d| json!({
+        "environment": d.environment,
+        "name": d.name,
+        "dateFinished": d.date_finished,
+    })));
+    info
+}
+
+/// The fields of a release that `sentry-cli` reads.
+fn release_info(
+    version: &str,
+    date_created: Option<DateTime<Utc>>,
+    date_released: Option<DateTime<Utc>>,
+    projects: &[ProjectRow],
+) -> serde_json::Value {
+    let projects: Vec<_> = projects.iter().map(|p| json!({"slug": p.slug, "name": p.name})).collect();
+    json!({
+        "version": version,
+        "dateCreated": date_created.unwrap_or_else(Utc::now),
+        "dateReleased": date_released,
+        "lastEvent": null,
+        "newGroups": 0,
+        "projects": projects,
+    })
 }
 
 #[cfg(test)]

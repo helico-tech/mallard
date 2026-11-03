@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 type: idea
 created: 2026-11-01
 ---
@@ -40,3 +40,17 @@ What it changes in the notes above: a new table needs no migration tool, since `
 5. Docs. Measure the list on many events.
 
 ## Progress log
+2026-11-03. Built as in the ADR. Every step of the plan is done.
+
+**Upgrade, checked with real binaries:** a lake written by `v0.1.0`, opened by this build, back to `v0.1.0` (still reads and writes, ignores the new
+tables), and this build again: nothing lost, no error lines. It was on a DuckDB-file catalog only, not Postgres or SQLite.
+
+**Real clients:** `tests/releases.test.mjs` with `sentry-cli` 3.8.2 and 2.x.
+
+**Speed:** about 20 ms for the list, on a lake filled at full speed for 150 s (389 MB). The number of events was not recorded, and a full 14 days was not measured.
+
+**On the way:** building `v0.1.0` in a worktree with the same `CARGO_TARGET_DIR` left old code in the cache, and later builds in the main checkout said
+`Finished` without rebuilding. An upgrade check that proves which binary runs caught it. `cargo clean -p` on the workspace's crates fixed it. Do not share a target
+directory between a worktree and the main checkout.
+
+Follow-up: [issue 0195](0195-deploy-markers-on-charts.md).

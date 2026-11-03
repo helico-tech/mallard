@@ -959,40 +959,208 @@ pub fn project_stats(
 /// Releases named by the project's events in the window, newest
 /// `last_seen` first. `new_issues` counts issues whose `first_release` is
 /// the version (not limited to the window: the issues table is small).
-pub fn list_releases(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, limit: u32) -> Result<ReleaseList> {
-    let mut stmt = conn.prepare(&ns.sql(
-        "WITH r AS (
-            SELECT release, epoch_us(min(timestamp)) AS first_us, epoch_us(max(timestamp)) AS last_us,
-                   count(*) AS events, count(DISTINCT group_hash) AS issues
+/// A release, with what only the Sentry-compatible answers need (ADR 0035).
+#[derive(Debug, Clone)]
+pub struct ReleaseRow {
+    pub release: Release,
+    pub project_ids: Vec<u32>,
+    pub deploy_count: u64,
+}
+
+/// One deploy of a release, for `sentry-cli deploys list`.
+#[derive(Debug, Clone)]
+pub struct DeployRow {
+    pub environment: String,
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub date_started: Option<chrono::DateTime<chrono::Utc>>,
+    pub date_finished: chrono::DateTime<chrono::Utc>,
+    pub created_us: i64,
+}
+
+/// Which releases [`query_releases`] looks for.
+enum ReleaseScope<'a> {
+    Project(u32),
+    Organization,
+    /// One version, of any project. Stored ones count whenever they were made.
+    Version(&'a str),
+}
+
+/// Stored releases and those named by events in the window, merged (ADR 0035). A version with
+/// only a finalize or a deploy is in no list: no row says which project it belongs to.
+fn query_releases(conn: &Connection, ns: &Ns, scope: ReleaseScope, w: &Window, limit: u32) -> Result<Vec<ReleaseRow>> {
+    let (from, to) = (start_us(w), end_us(w));
+    let project = match scope {
+        ReleaseScope::Project(p) => format!("project_id = {}", p as i32),
+        _ => "TRUE".to_string(),
+    };
+    let version = |column: &str| match scope {
+        ReleaseScope::Version(_) => format!("AND {column} = ?"),
+        _ => String::new(),
+    };
+    let stored_counts = match scope {
+        ReleaseScope::Version(_) => "x.created_us IS NOT NULL",
+        _ => "x.created_us BETWEEN ? AND ? OR a.released_us BETWEEN ? AND ? OR d.deployed_us IS NOT NULL",
+    };
+    let sql = format!(
+        "WITH e AS (
+            SELECT release AS version, epoch_us(min(timestamp)) AS first_us, epoch_us(max(timestamp)) AS last_us,
+                   count(*) AS events, count(DISTINCT group_hash) AS issues,
+                   string_agg(DISTINCT project_id::VARCHAR, ',') AS pids
             FROM $S.events
-            WHERE project_id = ? AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)
-              AND release IS NOT NULL
+            WHERE {project} AND timestamp >= make_timestamp(?) AND timestamp < make_timestamp(?)
+              AND release IS NOT NULL {e_version}
             GROUP BY release
+         ), s AS (
+            SELECT version, epoch_us(min(date_created)) AS created_us,
+                   string_agg(DISTINCT project_id::VARCHAR, ',') AS pids
+            FROM $S.releases WHERE {project} {s_version} GROUP BY version
+         ), x AS (
+            SELECT coalesce(e.version, s.version) AS version, e.first_us, e.last_us, e.events, e.issues,
+                   s.created_us, e.version IS NOT NULL AS has_events, concat_ws(',', e.pids, s.pids) AS pids
+            FROM e FULL JOIN s ON e.version = s.version
+         ), a AS (
+            SELECT version, epoch_us(max_by(date_released, changed_at)) AS released_us
+            FROM $S.release_activity GROUP BY version
+         ), d AS (
+            SELECT version, epoch_us(max(date_finished)) AS deployed_us FROM $S.deploys
+            WHERE date_finished >= make_timestamp(?) AND date_finished < make_timestamp(?) GROUP BY version
          ), n AS (
             -- Per group: two processes may each have written a row for one.
             SELECT first_release, count(*) AS new_issues
             FROM (SELECT arg_min(first_release, first_seen) AS first_release FROM $S.issues
-                  WHERE project_id = ? GROUP BY group_hash)
+                  WHERE {project} GROUP BY project_id, group_hash)
             WHERE first_release IS NOT NULL GROUP BY first_release
          )
-         SELECT r.release, r.first_us, r.last_us, r.events, r.issues, coalesce(n.new_issues, 0)
-         FROM r LEFT JOIN n ON n.first_release = r.release
-         ORDER BY r.last_us DESC, r.release
+         SELECT x.version, x.first_us, x.last_us, coalesce(x.events, 0), coalesce(x.issues, 0),
+                coalesce(n.new_issues, 0), x.created_us, a.released_us, x.pids
+         FROM x
+         LEFT JOIN a ON a.version = x.version
+         LEFT JOIN d ON d.version = x.version
+         LEFT JOIN n ON n.first_release = x.version
+         WHERE x.has_events OR {stored_counts}
+         ORDER BY greatest(x.last_us, x.created_us, a.released_us, d.deployed_us) DESC, x.version
          LIMIT ?",
-    ))?;
-    let pid = project_id as i32;
-    let limit = limit.clamp(1, 500) as i64;
-    let rows = stmt.query_map(params![pid, start_us(w), end_us(w), pid, limit], |r| {
-        Ok(Release {
-            version: r.get(0)?,
-            first_seen: us_to_dt(r.get(1)?),
-            last_seen: us_to_dt(r.get(2)?),
-            events: r.get::<_, i64>(3)? as u64,
-            issues: r.get::<_, i64>(4)? as u64,
-            new_issues: r.get::<_, i64>(5)? as u64,
+        e_version = version("release"),
+        s_version = version("version"),
+    );
+    let mut p: Vec<Box<dyn ToSql>> = vec![Box::new(from), Box::new(to)];
+    if let ReleaseScope::Version(v) = scope {
+        p.push(Box::new(v.to_string()));
+        p.push(Box::new(v.to_string()));
+    }
+    p.push(Box::new(from));
+    p.push(Box::new(to));
+    if !matches!(scope, ReleaseScope::Version(_)) {
+        for t in [from, to, from, to] {
+            p.push(Box::new(t));
+        }
+    }
+    p.push(Box::new(limit.clamp(1, 500) as i64));
+    let mut stmt = conn.prepare(&ns.sql(&sql))?;
+    let rows = stmt.query_map(params_from_iter(p.iter().map(|b| b.as_ref())), |r| {
+        let pids: Option<String> = r.get(8)?;
+        let mut project_ids: Vec<u32> = pids.unwrap_or_default().split(',').filter_map(|p| p.parse().ok()).collect();
+        project_ids.sort_unstable();
+        project_ids.dedup();
+        Ok(ReleaseRow {
+            release: Release {
+                version: r.get(0)?,
+                first_seen: r.get::<_, Option<i64>>(1)?.map(us_to_dt),
+                last_seen: r.get::<_, Option<i64>>(2)?.map(us_to_dt),
+                events: r.get::<_, i64>(3)? as u64,
+                issues: r.get::<_, i64>(4)? as u64,
+                new_issues: r.get::<_, i64>(5)? as u64,
+                date_created: r.get::<_, Option<i64>>(6)?.map(us_to_dt),
+                date_released: r.get::<_, Option<i64>>(7)?.map(us_to_dt),
+                deploys: Vec::new(),
+            },
+            project_ids,
+            deploy_count: 0,
         })
     })?;
-    Ok(ReleaseList { releases: rows.collect::<Result<_, _>>()?, window_start: w.from, window_end: w.to })
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    add_deploys(conn, ns, &mut rows)?;
+    Ok(rows)
+}
+
+/// The last deploy per environment of each row.
+fn add_deploys(conn: &Connection, ns: &Ns, rows: &mut [ReleaseRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let marks = vec!["?"; rows.len()].join(", ");
+    let mut stmt = conn.prepare(&ns.sql(&format!(
+        "SELECT version, environment, max_by(name, date_finished), epoch_us(max(date_finished)), count(*)
+         FROM $S.deploys WHERE version IN ({marks})
+         GROUP BY version, environment ORDER BY max(date_finished) DESC, environment"
+    )))?;
+    let found = stmt.query_map(params_from_iter(rows.iter().map(|r| r.release.version.as_str())), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            ReleaseDeploy { environment: r.get(1)?, name: r.get(2)?, date_finished: us_to_dt(r.get(3)?) },
+            r.get::<_, i64>(4)? as u64,
+        ))
+    })?;
+    let mut by_version: HashMap<String, (Vec<ReleaseDeploy>, u64)> = HashMap::new();
+    for f in found {
+        let (version, deploy, count) = f?;
+        let e = by_version.entry(version).or_default();
+        e.0.push(deploy);
+        e.1 += count;
+    }
+    for row in rows {
+        if let Some((deploys, count)) = by_version.remove(&row.release.version) {
+            row.release.deploys = deploys;
+            row.deploy_count = count;
+        }
+    }
+    Ok(())
+}
+
+pub fn list_releases(conn: &Connection, ns: &Ns, project_id: u32, w: &Window, limit: u32) -> Result<ReleaseList> {
+    let rows = query_releases(conn, ns, ReleaseScope::Project(project_id), w, limit)?;
+    Ok(ReleaseList { releases: rows.into_iter().map(|r| r.release).collect(), window_start: w.from, window_end: w.to })
+}
+
+/// One project, with what `GET /api/0/projects/{org}/{project}/releases/` needs.
+pub fn list_project_release_rows(
+    conn: &Connection,
+    ns: &Ns,
+    project_id: u32,
+    w: &Window,
+    limit: u32,
+) -> Result<Vec<ReleaseRow>> {
+    query_releases(conn, ns, ReleaseScope::Project(project_id), w, limit)
+}
+
+/// All projects, for `GET /api/0/organizations/{org}/releases/`.
+pub fn list_org_releases(conn: &Connection, ns: &Ns, w: &Window, limit: u32) -> Result<Vec<ReleaseRow>> {
+    query_releases(conn, ns, ReleaseScope::Organization, w, limit)
+}
+
+/// One version, if a stored release or an event in the window names it.
+pub fn get_release(conn: &Connection, ns: &Ns, version: &str, w: &Window) -> Result<Option<ReleaseRow>> {
+    Ok(query_releases(conn, ns, ReleaseScope::Version(version), w, 1)?.into_iter().next())
+}
+
+/// The deploys of a version, newest first. At most 500, as the release lists.
+pub fn list_deploys(conn: &Connection, ns: &Ns, version: &str) -> Result<Vec<DeployRow>> {
+    let mut stmt = conn.prepare(&ns.sql(
+        "SELECT environment, name, url, epoch_us(date_started), epoch_us(date_finished), epoch_us(created_at)
+         FROM $S.deploys WHERE version = ? ORDER BY date_finished DESC, created_at DESC LIMIT 500",
+    ))?;
+    let rows = stmt.query_map(params![version], |r| {
+        Ok(DeployRow {
+            environment: r.get(0)?,
+            name: r.get(1)?,
+            url: r.get(2)?,
+            date_started: r.get::<_, Option<i64>>(3)?.map(us_to_dt),
+            date_finished: us_to_dt(r.get(4)?),
+            created_us: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 /// Bucket size and count for a window of `span_us` (> 0): buckets of at

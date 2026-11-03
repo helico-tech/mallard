@@ -324,6 +324,124 @@ fn ids(v: &Value, list: &str, key: &str) -> Vec<String> {
 /// Agent CLI P1, sentry side: tag and event filters (S9), issue cursors
 /// (S10), releases (S14); SQL is off by default (S15).
 #[tokio::test(flavor = "multi_thread")]
+async fn releases_and_deploys_are_stored() {
+    use reqwest::Method;
+    let t = TestServer::start().await;
+    let web = t.create_project("web").await;
+    t.create_project("api").await;
+    let key = web["public_key"].as_str().unwrap();
+    let new = |body: Value| t.api(Method::POST, "/api/0/organizations/o/releases/", Some(body));
+
+    // What sentry-cli sends: ADR 0035. Unknown projects and no project are errors, by name.
+    let (s, v) = new(json!({"version": "bad", "projects": ["web", "nope"]})).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("nope"), "{v}");
+    let (s, v) = new(json!({"version": "bad", "projects": []})).await;
+    assert_eq!(s, 400, "{v}");
+    let (s, v) = new(json!({"version": "", "projects": ["web"]})).await;
+    assert_eq!(s, 400, "{v}");
+
+    // A release with no events, in two projects. Created twice, as a build may do.
+    for _ in 0..2 {
+        let body = json!({"version": "quiet@1", "projects": ["web", "api"], "dateStarted": "2026-01-01T00:00:00Z"});
+        let (s, v) = new(body).await;
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["version"], "quiet@1");
+    }
+    let quiet = "/api/0/organizations/o/releases/quiet@1/";
+    let (s, v) = t.api(Method::PUT, quiet, Some(json!({"dateReleased": "2026-01-01T00:00:00Z"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = t.api(Method::PUT, quiet, Some(json!({"dateReleased": "2026-02-02T00:00:00Z"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let deploys = format!("{quiet}deploys/");
+    for (env, name, at) in [
+        ("production", "d1", "2026-03-01T00:00:00Z"),
+        ("production", "d2", "2026-03-02T00:00:00Z"),
+        ("staging", "d3", "2026-03-03T00:00:00Z"),
+    ] {
+        let body = json!({"environment": env, "name": name, "url": null, "dateStarted": null, "dateFinished": at});
+        let (s, v) = t.api(Method::POST, &deploys, Some(body)).await;
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["environment"], env);
+    }
+    let (s, v) = t.api(Method::POST, &deploys, Some(json!({"environment": ""}))).await;
+    assert_eq!(s, 400, "{v}");
+
+    // A release from events only, and one with both.
+    let ev = |release: &str| json!({"message": "m", "level": "error", "release": release});
+    store(&t, key, ev("seen@1")).await;
+    store(&t, key, ev("both@1")).await;
+    let (s, v) = new(json!({"version": "both@1", "projects": ["web"]})).await;
+    assert_eq!(s, 201, "{v}");
+
+    let list = t.get("/v1/projects/web/releases?since=1h").await;
+    let mut names = ids(&list, "releases", "version");
+    names.sort();
+    assert_eq!(names, ["both@1", "quiet@1", "seen@1"], "{list}");
+    let find = |list: &Value, version: &str| {
+        list["releases"].as_array().unwrap().iter().find(|r| r["version"] == version).unwrap().clone()
+    };
+    let q = find(&list, "quiet@1");
+    assert!(q["first_seen"].is_null() && q["last_seen"].is_null(), "no events: {q}");
+    assert_eq!((&q["events"], &q["issues"]), (&json!(0), &json!(0)), "{q}");
+    assert!(q["date_created"].is_string(), "{q}");
+    assert!(q["date_released"].as_str().unwrap().starts_with("2026-02-02"), "the latest finalize: {q}");
+    let d = q["deploys"].as_array().unwrap();
+    assert_eq!(d.len(), 2, "one per environment: {q}");
+    assert_eq!((&d[0]["environment"], &d[0]["name"]), (&json!("staging"), &json!("d3")), "newest first: {q}");
+    assert_eq!((&d[1]["environment"], &d[1]["name"]), (&json!("production"), &json!("d2")), "{q}");
+    let s1 = find(&list, "seen@1");
+    assert!(s1["first_seen"].is_string() && s1["date_created"].is_null(), "{s1}");
+    assert_eq!(s1["deploys"], json!([]), "{s1}");
+    let b = find(&list, "both@1");
+    assert!(b["first_seen"].is_string() && b["date_created"].is_string(), "{b}");
+    assert_eq!(b["events"], 1, "{b}");
+
+    // The other project sees what names it, and not the events of this one.
+    let api = t.get("/v1/projects/api/releases?since=1h").await;
+    assert_eq!(ids(&api, "releases", "version"), ["quiet@1"], "{api}");
+
+    // A window before all of it.
+    let old = t.get("/v1/projects/api/releases?from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z").await;
+    assert_eq!(old["releases"], json!([]), "{old}");
+
+    // What sentry-cli reads.
+    let (s, all) = t.api(Method::GET, "/api/0/organizations/o/releases/", None).await;
+    assert_eq!(s, 200, "{all}");
+    assert_eq!(all.as_array().unwrap().len(), 3, "{all}");
+    let (s, one) = t.api(Method::GET, "/api/0/projects/o/api/releases/", None).await;
+    assert_eq!(s, 200, "{one}");
+    assert_eq!(one.as_array().unwrap().len(), 1, "{one}");
+    let (s, q) = t.api(Method::GET, quiet, None).await;
+    assert_eq!(s, 200, "{q}");
+    let mut slugs: Vec<_> = q["projects"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap()).collect();
+    slugs.sort();
+    assert_eq!(slugs, ["api", "web"], "{q}");
+    assert_eq!(q["deployCount"], 3, "{q}");
+    assert_eq!(q["lastDeploy"]["name"], "d3", "{q}");
+    let (s, v) = t.api(Method::GET, "/api/0/organizations/o/releases/seen@1/", None).await;
+    assert_eq!(s, 200, "named by an event: {v}");
+    assert!(v["lastEvent"].is_string(), "{v}");
+    let (s, v) = t.api(Method::GET, "/api/0/organizations/o/releases/nothing/", None).await;
+    assert_eq!(s, 404, "{v}");
+    let (s, d) = t.api(Method::GET, &deploys, None).await;
+    assert_eq!(s, 200, "{d}");
+    let names: Vec<_> = d.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["d3", "d2", "d1"], "{d}");
+
+    // A deploy of a version nothing else knows is stored, and in its own list.
+    let early = "/api/0/organizations/o/releases/early/deploys/";
+    let (s, v) = t.api(Method::POST, early, Some(json!({"environment": "production"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, d) = t.api(Method::GET, early, None).await;
+    assert_eq!((s, d.as_array().unwrap().len()), (200, 1), "{d}");
+
+    // The token is needed.
+    let r = t.http.get(format!("{}/api/0/organizations/o/releases/", t.base)).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn filters_cursors_and_releases() {
     let t = TestServer::start().await;
     let project = t.create_project("web").await;

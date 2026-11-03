@@ -394,22 +394,36 @@ pub fn parse_tag_filter(s: &str) -> Option<(&str, &str)> {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Release {
     pub version: String,
-    /// First event of the release in the window.
-    pub first_seen: DateTime<Utc>,
-    /// Last event of the release in the window.
-    pub last_seen: DateTime<Utc>,
+    /// First event of the release in the window; null with no events in it.
+    pub first_seen: Option<DateTime<Utc>>,
+    /// Last event of the release in the window; null with no events in it.
+    pub last_seen: Option<DateTime<Utc>>,
     /// Events in the window.
     pub events: u64,
     /// Distinct issues with events in the window.
     pub issues: u64,
     /// Issues first seen in this release (`first_release`), at any time.
     pub new_issues: u64,
+    /// When `sentry-cli releases new` made it; null if only events name it.
+    pub date_created: Option<DateTime<Utc>>,
+    /// The last `sentry-cli releases finalize`; null if not finalized.
+    pub date_released: Option<DateTime<Utc>>,
+    /// The last deploy per environment, newest first.
+    pub deploys: Vec<ReleaseDeploy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReleaseDeploy {
+    pub environment: String,
+    pub name: Option<String>,
+    pub date_finished: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct ReleaseList {
-    /// Newest `last_seen` first.
+    /// Newest first, by the latest of its event, creation, finalize and deploy in the window.
     pub releases: Vec<Release>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,

@@ -7,7 +7,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/v1/events": {
@@ -1027,7 +1027,7 @@
     },
     "/v1/projects/{project}/releases": {
       "get": {
-        "description": "Releases named by the project's events in the window (default 14d), newest last event first. Derived from events: releases created with sentry-cli are not stored.",
+        "description": "Releases of the project in the window (default 14d), newest first: those named by its events, and those made with `sentry-cli releases new` that were created, finalized or deployed in it. `first_seen` and `last_seen` are null with no events in the window.",
         "operationId": "list_releases",
         "parameters": [
           {
@@ -2046,13 +2046,35 @@
         "description": "A release, derived from the events that name it.",
         "required": [
           "version",
-          "first_seen",
-          "last_seen",
           "events",
           "issues",
-          "new_issues"
+          "new_issues",
+          "deploys"
         ],
         "properties": {
+          "date_created": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When `sentry-cli releases new` made it; null if only events name it."
+          },
+          "date_released": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last `sentry-cli releases finalize`; null if not finalized."
+          },
+          "deploys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseDeploy"
+            },
+            "description": "The last deploy per environment, newest first."
+          },
           "events": {
             "type": "integer",
             "format": "int64",
@@ -2060,9 +2082,12 @@
             "minimum": 0
           },
           "first_seen": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
-            "description": "First event of the release in the window."
+            "description": "First event of the release in the window; null with no events in it."
           },
           "issues": {
             "type": "integer",
@@ -2071,9 +2096,12 @@
             "minimum": 0
           },
           "last_seen": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
-            "description": "Last event of the release in the window."
+            "description": "Last event of the release in the window; null with no events in it."
           },
           "new_issues": {
             "type": "integer",
@@ -2083,6 +2111,28 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "ReleaseDeploy": {
+        "type": "object",
+        "required": [
+          "environment",
+          "date_finished"
+        ],
+        "properties": {
+          "date_finished": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2099,7 +2149,7 @@
             "items": {
               "$ref": "#/components/schemas/Release"
             },
-            "description": "Newest `last_seen` first."
+            "description": "Newest first, by the latest of its event, creation, finalize and deploy in the window."
           },
           "window_end": {
             "type": "string",

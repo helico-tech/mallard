@@ -99,7 +99,7 @@ These are served under `/sentry/api/0/...` and on the root, `/api/0/...`, becaus
 | `GET /api/0/organizations/{org}/chunk-upload/` | options: sha1, gzip, 8 MiB chunks |
 | `POST /api/0/organizations/{org}/chunk-upload/` | multipart chunks (`file`, `file_gzip`), checksums verified |
 | `POST /api/0/organizations/{org}/artifactbundle/assemble/` | `not_found` + missing chunks, then synchronous `ok` |
-| releases create / update / deploys | answered, not stored (stubs: `sentry-cli releases list` shows nothing; releases come from events, see `GET /sentry/v1/projects/{p}/releases`) |
+| releases create, finalize, list, info; deploys create, list | stored ([ADR 0035](../adr/0035-stored-releases-and-deploys.md)). The lists are one page of at most 500, newest first, and events count from the last 14 days. A project in `releases new` that does not exist is a 400. Not stored: commits (`set-commits`), `ref`, `url`; `releases delete` and `archive` have no route |
 
 Any `org` slug is accepted. Use one of `server.api_tokens` as the auth token. See
 [sourcemaps.md](sourcemaps.md).

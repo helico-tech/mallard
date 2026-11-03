@@ -680,19 +680,25 @@ pub(super) async fn releases(ctx: &Ctx, window: WindowArgs, limit: Option<u32>) 
     }
     let list = fmt::sanitize(list, true)?;
     if list.releases.is_empty() {
-        out!(o, "no releases in events (window {} .. now)", fmt::timestamp(list.window_start));
+        out!(o, "no releases (window {} .. now)", fmt::timestamp(list.window_start));
         return Ok(());
     }
     let now = Utc::now();
-    let mut t = table(&["RELEASE", "EVENTS", "ISSUES", "NEW ISSUES", "FIRST SEEN", "LAST SEEN"]);
+    let when = |t: Option<chrono::DateTime<Utc>>| t.map_or("-".to_string(), |t| fmt::relative_time(t, now));
+    let mut t =
+        table(&["RELEASE", "EVENTS", "ISSUES", "NEW ISSUES", "FIRST SEEN", "LAST SEEN", "RELEASED", "LAST DEPLOY"]);
     for r in &list.releases {
         t.add_row(vec![
             Cell::new(&r.version).add_attribute(Attribute::Bold),
             right(fmt::compact(r.events)),
             right(fmt::compact(r.issues)),
             right(fmt::compact(r.new_issues)),
-            Cell::new(fmt::relative_time(r.first_seen, now)),
-            Cell::new(fmt::relative_time(r.last_seen, now)),
+            Cell::new(when(r.first_seen)),
+            Cell::new(when(r.last_seen)),
+            Cell::new(when(r.date_released)),
+            Cell::new(r.deploys.first().map_or("-".to_string(), |d| {
+                format!("{} {}", d.environment, fmt::relative_time(d.date_finished, now))
+            })),
         ]);
     }
     out!(o, "{t}");

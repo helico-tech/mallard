@@ -103,8 +103,8 @@ mallard issues list --new --since 30m                 # first seen in the window
 mallard issues list --first-release web@1.4.0 --status all
 mallard releases list --since 7d                      # per release: events, issues, new_issues
 ```
-Releases come from the `release` of error events; `sentry-cli releases new`
-answers but stores nothing.
+Releases come from the `release` of error events and from `sentry-cli releases new`, `finalize` and
+`deploys new`. A release with no events in the window has `first_seen` and `last_seen` null.
 
 **Errors of one user, URL or tenant** (tags; repeat `--tag`, all must match):
 ```sh

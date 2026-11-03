@@ -193,7 +193,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Releases named by the project's events in the window (default 14d), newest last event first. Derived from events: releases created with sentry-cli are not stored. */
+        /** @description Releases of the project in the window (default 14d), newest first: those named by its events, and those made with `sentry-cli releases new` that were created, finalized or deployed in it. `first_seen` and `last_seen` are null with no events in the window. */
         get: operations["list_releases"];
         put?: never;
         post?: never;
@@ -462,15 +462,27 @@ export interface components {
         /** @description A release, derived from the events that name it. */
         Release: {
             /**
+             * Format: date-time
+             * @description When `sentry-cli releases new` made it; null if only events name it.
+             */
+            date_created?: string | null;
+            /**
+             * Format: date-time
+             * @description The last `sentry-cli releases finalize`; null if not finalized.
+             */
+            date_released?: string | null;
+            /** @description The last deploy per environment, newest first. */
+            deploys: components["schemas"]["ReleaseDeploy"][];
+            /**
              * Format: int64
              * @description Events in the window.
              */
             events: number;
             /**
              * Format: date-time
-             * @description First event of the release in the window.
+             * @description First event of the release in the window; null with no events in it.
              */
-            first_seen: string;
+            first_seen?: string | null;
             /**
              * Format: int64
              * @description Distinct issues with events in the window.
@@ -478,9 +490,9 @@ export interface components {
             issues: number;
             /**
              * Format: date-time
-             * @description Last event of the release in the window.
+             * @description Last event of the release in the window; null with no events in it.
              */
-            last_seen: string;
+            last_seen?: string | null;
             /**
              * Format: int64
              * @description Issues first seen in this release (`first_release`), at any time.
@@ -488,8 +500,14 @@ export interface components {
             new_issues: number;
             version: string;
         };
+        ReleaseDeploy: {
+            /** Format: date-time */
+            date_finished: string;
+            environment: string;
+            name?: string | null;
+        };
         ReleaseList: {
-            /** @description Newest `last_seen` first. */
+            /** @description Newest first, by the latest of its event, creation, finalize and deploy in the window. */
             releases: components["schemas"]["Release"][];
             /** Format: date-time */
             window_end: string;

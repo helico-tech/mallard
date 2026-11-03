@@ -51,7 +51,7 @@ mallard events show <event_id> [--issue id]    exception chain, frames (newest f
                                            in-app highlighted with source context),
                                            breadcrumbs, tags, user, request
 mallard stats [-s 24h] [--interval 1h]         totals and events per bucket
-mallard releases list [-s 14d] [-n limit]      releases seen in events (derived; not sentry-cli's)
+mallard releases list [-s 14d] [-n limit]      releases from events and from sentry-cli
 mallard sql --errors "<select>" [-n limit]     read-only SQL over events, issues, issue_activity
                                            (server: sentry.query.enable_sql; exit 7 when off)
 mallard sourcemaps list                        uploaded artifact bundles
