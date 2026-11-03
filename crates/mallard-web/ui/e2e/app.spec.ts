@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { OTLP, TOKEN } from "./setup";
+import { OTLP, SERVER, TOKEN } from "./setup";
 
 /** A page that fails the test on any console error or CSP violation. */
 function watch(page: Page): string[] {
@@ -874,5 +874,46 @@ test.describe("first screen", () => {
     await page.keyboard.press("r");
     await page.waitForTimeout(800);
     await expect(page.locator(`[data-row-id="${id}"]`)).toHaveAttribute("aria-selected", "true");
+  });
+});
+
+test.describe("deploy markers", () => {
+  test.use({ viewport: { width: 1600, height: 900 } });
+
+  test("a deploy shows on the charts that can show it", async ({ page, request }) => {
+    const problems = watch(page);
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const made = await request.post(`${SERVER}/api/0/organizations/o/releases/`, { headers, data: { version: "web@marker", projects: ["web"] } });
+    expect(made.status()).toBe(201);
+    // Well inside the window, so it falls on a bar.
+    const at = new Date(Date.now() - 10 * 60_000).toISOString();
+    const deployed = await request.post(`${SERVER}/api/0/organizations/o/releases/web@marker/deploys/`, {
+      headers,
+      data: { environment: "production", name: "e2e", dateFinished: at },
+    });
+    expect(deployed.status()).toBe(201);
+    const shot = process.env.DEPLOY_SHOT_DIR;
+
+    await page.goto("/errors/web");
+    await expect(page.locator("[data-deploy-mark]").first()).toBeVisible();
+    if (shot) await page.screenshot({ path: `${shot}/errors.png` });
+
+    await page.goto("/telemetry/logs");
+    await expect(page.locator("[data-deploy-mark]").first()).toBeVisible();
+    if (shot) await page.screenshot({ path: `${shot}/logs.png` });
+
+    await page.goto("/errors/web");
+    await page.locator("table tbody tr a").first().click();
+    await expect(page.locator("svg [data-deploy-mark]").first()).toBeAttached();
+    if (shot) await page.screenshot({ path: `${shot}/issue.png` });
+
+    // The line charts draw on a canvas: that they asked is what a test can see here.
+    const asked = page.waitForResponse((r) => r.url().includes("/sentry/v1/deploys") && r.ok());
+    await page.goto("/telemetry");
+    await asked;
+    await expect(page.getByText("Throughput")).toBeVisible();
+    await page.waitForTimeout(800);
+    if (shot) await page.screenshot({ path: `${shot}/overview.png` });
+    expect(problems).toEqual([]);
   });
 });

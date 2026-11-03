@@ -438,6 +438,37 @@ pub struct ReleaseQuery {
     pub limit: Option<u32>,
 }
 
+/// A deploy from `sentry-cli deploys new`, for a marker on a chart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct Deploy {
+    pub version: String,
+    pub environment: String,
+    pub name: Option<String>,
+    pub date_finished: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct DeployList {
+    /// Newest first.
+    pub deploys: Vec<Deploy>,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams))]
+pub struct DeployQuery {
+    /// Only deploys of this project's releases: those made for it, or named by its events in
+    /// the window. Without it, every deploy.
+    pub project: Option<String>,
+    /// Window, e.g. `24h`, `30d` (default `14d`).
+    pub since: Option<String>,
+    /// Max deploys (default 200, max 500).
+    pub limit: Option<u32>,
+}
+
 /// `GET /v1/schema`: the tables `POST /v1/sql` can query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]

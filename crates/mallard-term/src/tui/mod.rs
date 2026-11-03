@@ -34,6 +34,44 @@ pub enum Outcome {
     SetWindow(&'static str),
 }
 
+/// The columns of `width` where marks fall in a span, one per column.
+pub fn mark_columns(marks: &[f64], start: f64, end: f64, width: u16) -> Vec<u16> {
+    if width == 0 || end <= start {
+        return Vec::new();
+    }
+    let scale = f64::from(width) / (end - start);
+    let mut cols: Vec<u16> = marks
+        .iter()
+        .filter(|m| (start..=end).contains(*m))
+        .map(|m| (((m - start) * scale) as u16).min(width - 1))
+        .collect();
+    cols.sort_unstable();
+    cols.dedup();
+    cols
+}
+
+/// Draw deploys over bars: a line through the empty cells, and always at the top, so a full
+/// column still shows it.
+pub fn draw_marks(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    cols: &[u16],
+    style: ratatui::style::Style,
+) {
+    for c in cols {
+        let x = area.x + c;
+        if x >= area.right() {
+            continue;
+        }
+        for y in area.top()..area.bottom() {
+            let cell = &mut buf[(x, y)];
+            if y == area.top() || cell.symbol() == " " {
+                cell.set_char('┊').set_style(style);
+            }
+        }
+    }
+}
+
 /// What the host's app picker has chosen; each tab scopes itself to its side of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Scope {
@@ -174,5 +212,32 @@ mod tests {
         let a = Rect::new(10, 5, 20, 10);
         assert_eq!(centered(a, 10, 4), Rect::new(15, 8, 10, 4));
         assert_eq!(centered(a, 50, 50), a);
+    }
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::*;
+
+    #[test]
+    fn marks_fall_in_their_column() {
+        assert_eq!(mark_columns(&[100.0, 150.0, 200.0], 100.0, 200.0, 10), [0, 5, 9]);
+        assert_eq!(mark_columns(&[99.0, 201.0], 100.0, 200.0, 10), [] as [u16; 0], "outside the span");
+        assert_eq!(mark_columns(&[150.0, 150.5], 100.0, 200.0, 10), [5], "one per column");
+        assert_eq!(mark_columns(&[150.0], 200.0, 100.0, 10), [] as [u16; 0]);
+        assert_eq!(mark_columns(&[150.0], 100.0, 200.0, 0), [] as [u16; 0]);
+    }
+
+    #[test]
+    fn marks_show_through_empty_cells_and_on_top() {
+        let area = ratatui::layout::Rect::new(0, 0, 3, 3);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        buf[(1u16, 2u16)].set_char('█');
+        buf[(1u16, 0u16)].set_char('█');
+        draw_marks(&mut buf, area, &[1], ratatui::style::Style::new());
+        assert_eq!(buf[(1u16, 0u16)].symbol(), "┊", "on top, always");
+        assert_eq!(buf[(1u16, 1u16)].symbol(), "┊");
+        assert_eq!(buf[(1u16, 2u16)].symbol(), "█", "a bar stays");
+        assert_eq!(buf[(0u16, 1u16)].symbol(), " ");
     }
 }

@@ -115,6 +115,11 @@ pub struct Embedded {
     errors_enabled: bool,
     /// The host's error tracker: marks traces and spans with error events.
     errors: Option<Arc<dyn crate::ErrorLookup>>,
+    /// When deploys finished, for markers on the charts (issue 0195).
+    pub(crate) deploys: Vec<f64>,
+    deploys_at: Option<Instant>,
+    /// What the markers were last read for: a change reads them again at once.
+    deploys_for: Option<(Option<String>, String)>,
     /// Kinds whose last load failed: only the first failure flashes.
     failing: HashSet<Kind>,
     /// The host's app; everything but a trace opened by id is limited to its services.
@@ -188,6 +193,9 @@ impl Embedded {
             spin: 0,
             errors_enabled: false,
             errors: None,
+            deploys: Vec::new(),
+            deploys_at: None,
+            deploys_for: None,
             failing: HashSet::new(),
             scope: Scope::All,
             trace_suggest: Suggest::new(suggestions::TRACE_KEYS),
@@ -261,6 +269,31 @@ impl Embedded {
     /// error tracker is connected). Off by default.
     pub fn set_errors_enabled(&mut self, enabled: bool) {
         self.errors_enabled = enabled;
+    }
+
+    /// Read the deploys for the chosen app and window, now if either changed, else now and then.
+    /// All apps: every deploy. An app with no project: none, a deploy goes by project.
+    fn poll_deploys(&mut self) {
+        let Some(l) = self.errors.clone() else { return };
+        let project = match &self.scope {
+            Scope::All => None,
+            Scope::App { project: Some(p), .. } => Some(p.clone()),
+            Scope::App { project: None, .. } => {
+                self.deploys.clear();
+                self.deploys_for = None;
+                return;
+            }
+        };
+        let wanted = (project.clone(), self.since().to_string());
+        if self.deploys_for.as_ref() == Some(&wanted) && !due(self.deploys_at, Duration::from_secs(30)) {
+            return;
+        }
+        let since = wanted.1.clone();
+        let fut = async move { Ok(l.deploys(project, since).await.map_err(|e| e.to_string())) };
+        if self.loader.spawn(Kind::Deploys, fut, Data::Deploys) {
+            self.deploys_at = Some(Instant::now());
+            self.deploys_for = Some(wanted);
+        }
     }
 
     /// Mark traces and spans that have error events in the host's error
@@ -372,6 +405,7 @@ impl Embedded {
             }
         }
         self.poll_suggest();
+        self.poll_deploys();
         if self.no_telemetry().is_none() {
             match self.view {
                 View::Overview => self.refresh_overview(false),
@@ -391,6 +425,12 @@ impl Embedded {
             // Flash when the lookup starts failing; keep the last markers.
             if self.failing.insert(kind) {
                 self.flash_error(format!("sentry errors: {e}"));
+            }
+            return;
+        }
+        if let Data::Deploys(Err(e)) = &data {
+            if self.failing.insert(kind) {
+                self.flash_error(format!("deploys: {e}"));
             }
             return;
         }
@@ -428,6 +468,7 @@ impl Embedded {
                 self.load_span_errors();
             }
             Data::Errors(r) => self.traces.set_errors(kind, r.unwrap_or_default()),
+            Data::Deploys(r) => self.deploys = r.unwrap_or_default(),
             Data::Logs(v) => self.traces.set_trace_logs(v),
             Data::LogPage { records, tail } => self.logs_loaded(records, *tail),
             Data::Tail { records, truncated } => self.logs_tail_loaded(records, truncated),
@@ -466,7 +507,7 @@ impl Embedded {
             }
             Kind::MetricList => self.metrics.error = Some(e),
             // These report their failures as data.
-            Kind::TraceErrors | Kind::SpanErrors | Kind::Suggest => {}
+            Kind::TraceErrors | Kind::SpanErrors | Kind::Suggest | Kind::Deploys => {}
             Kind::MetricQuery => {
                 if let Some(c) = &mut self.metrics.chart {
                     c.error = Some(e);

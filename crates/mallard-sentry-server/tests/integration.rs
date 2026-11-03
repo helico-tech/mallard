@@ -436,6 +436,34 @@ async fn releases_and_deploys_are_stored() {
     let (s, d) = t.api(Method::GET, early, None).await;
     assert_eq!((s, d.as_array().unwrap().len()), (200, 1), "{d}");
 
+    // For markers on charts: by window and by project.
+    let now = chrono::Utc::now().to_rfc3339();
+    let body = json!({"environment": "production", "name": "now", "dateFinished": now});
+    let (s, v) = t.api(Method::POST, &deploys, Some(body)).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = t
+        .api(
+            Method::POST,
+            "/api/0/organizations/o/releases/seen@1/deploys/",
+            Some(json!({"environment": "production", "name": "ev"})),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let names = |v: &Value| {
+        let mut n: Vec<String> =
+            v["deploys"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap_or("-").to_string()).collect();
+        n.sort();
+        n
+    };
+    let all = t.get("/v1/deploys?since=1h").await;
+    assert_eq!(names(&all), ["-", "ev", "now"], "every deploy, old ones not: {all}");
+    let w = t.get("/v1/deploys?since=1h&project=web").await;
+    assert_eq!(names(&w), ["ev", "now"], "made for it, or named by its events: {w}");
+    let a = t.get("/v1/deploys?since=1h&project=api").await;
+    assert_eq!(names(&a), ["now"], "made for it: {a}");
+    let (s, v) = t.api(Method::GET, "/v1/deploys?project=nope", None).await;
+    assert_eq!(s, 404, "{v}");
+
     // The token is needed.
     let r = t.http.get(format!("{}/api/0/organizations/o/releases/", t.base)).send().await.unwrap();
     assert_eq!(r.status(), 401);

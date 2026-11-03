@@ -1144,6 +1144,38 @@ pub fn get_release(conn: &Connection, ns: &Ns, version: &str, w: &Window) -> Res
     Ok(query_releases(conn, ns, ReleaseScope::Version(version), w, 1)?.into_iter().next())
 }
 
+/// Deploys finished in the window, newest first, for markers on charts.
+pub fn deploys_in_window(
+    conn: &Connection,
+    ns: &Ns,
+    project: Option<u32>,
+    w: &Window,
+    limit: u32,
+) -> Result<DeployList> {
+    let (from, to) = (start_us(w), end_us(w));
+    let only = match project {
+        Some(p) => format!(
+            "AND version IN (
+                SELECT version FROM $S.releases WHERE project_id = {p}
+                UNION
+                SELECT release FROM $S.events WHERE project_id = {p} AND release IS NOT NULL
+                  AND timestamp >= make_timestamp({from}) AND timestamp < make_timestamp({to})
+             )",
+            p = p as i32,
+        ),
+        None => String::new(),
+    };
+    let mut stmt = conn.prepare(&ns.sql(&format!(
+        "SELECT version, environment, name, epoch_us(date_finished) FROM $S.deploys
+         WHERE date_finished >= make_timestamp(?) AND date_finished < make_timestamp(?) {only}
+         ORDER BY date_finished DESC, created_at DESC LIMIT ?"
+    )))?;
+    let rows = stmt.query_map(params![from, to, limit.clamp(1, 500) as i64], |r| {
+        Ok(Deploy { version: r.get(0)?, environment: r.get(1)?, name: r.get(2)?, date_finished: us_to_dt(r.get(3)?) })
+    })?;
+    Ok(DeployList { deploys: rows.collect::<Result<_, _>>()?, window_start: w.from, window_end: w.to })
+}
+
 /// The deploys of a version, newest first. At most 500, as the release lists.
 pub fn list_deploys(conn: &Connection, ns: &Ns, version: &str) -> Result<Vec<DeployRow>> {
     let mut stmt = conn.prepare(&ns.sql(

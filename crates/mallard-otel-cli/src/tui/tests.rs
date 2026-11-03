@@ -1256,3 +1256,19 @@ fn an_error_from_the_server_is_cleaned() {
     assert!(!s.contains('\u{202e}') && !s.contains('\x1b'), "{s}");
     assert!(s.contains("bo\\u{202e}om"), "{s}");
 }
+
+/// Issue 0195: a deploy is a line on the charts, and the legend says what it is.
+#[test]
+fn deploys_show_on_the_charts() {
+    let mut e = fixture();
+    let plain = render(&mut e, 160, 40);
+    assert!(!plain.contains("deploy"), "{plain}");
+    e.deploys = vec![chrono::Utc::now().timestamp() as f64 - 60.0];
+    let s = render(&mut e, 160, 40);
+    assert!(s.contains("┊ deploy"), "{s}");
+    assert_ne!(plain, s);
+    // Outside the window it draws nothing, and still has data to draw.
+    e.deploys = vec![0.0];
+    let far = render(&mut e, 160, 40);
+    assert!(far.contains("┊ deploy"), "{far}");
+}

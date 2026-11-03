@@ -343,6 +343,7 @@ mod tests {
             project: "web".into(),
             window: app.window,
             result: Err(FetchError::offline("cannot reach server")),
+            deploys: Ok(vec![]),
         });
         let s = draw(&mut app, 120, 30);
         assert!(s.contains("● offline") && s.contains("cannot reach server"), "{s}");
@@ -464,6 +465,25 @@ mod tests {
                 && s.contains("web"),
             "{s}"
         );
+    }
+
+    /// Issue 0195: a deploy is a line on the events chart; failing to read them is said, not hidden.
+    #[test]
+    fn deploys_show_on_the_events_chart() {
+        let mut app = loaded_app();
+        let plain = draw(&mut app, 120, 30);
+        assert!(!plain.contains('┊'), "{plain}");
+        let s = app.stats.as_ref().unwrap();
+        let start = s.buckets.first().unwrap().start.timestamp() as f64;
+        let end = s.buckets.last().unwrap().start.timestamp() as f64;
+        app.deploys = vec![(start + end) / 2.0];
+        let shown = draw(&mut app, 120, 30);
+        assert!(shown.contains("┊ deploy"), "{shown}");
+        assert!(shown.matches('┊').count() > 1, "a line, and the legend: {shown}");
+        app.deploys = vec![];
+        app.deploys_error = Some("no deploys".into());
+        let failed = draw(&mut app, 120, 30);
+        assert!(failed.contains("deploys: no deploys"), "{failed}");
     }
 
     #[test]

@@ -7,9 +7,122 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "paths": {
+    "/v1/deploys": {
+      "get": {
+        "description": "Deploys finished in the window (default 14d), newest first, for markers on charts. A deploy goes by version: with `project`, those of the versions made for that project or named by its events in the window.",
+        "operationId": "list_deploys",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Only deploys of this project's releases: those made for it, or named by its events in\nthe window. Without it, every deploy.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "path",
+            "description": "Window, e.g. `24h`, `30d` (default `14d`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "Max deploys (default 200, max 500).",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Start of the window (inclusive, RFC 3339).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "description": "End of the window (exclusive, RFC 3339). Defaults to now.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "step",
+            "in": "path",
+            "description": "Bucket size for time series, e.g. `1h` (same as `interval`).",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/events": {
       "get": {
         "description": "Events of one trace across all projects (for linking errors to traces).",
@@ -1581,6 +1694,58 @@
               "null"
             ],
             "description": "URL-safe identifier. Derived from `name` when omitted. A project that has the same\nslug under the slug rule (`my_app` next to `my-app`) is a 409, also for a slug that was\nasked for, because a second project would take its services."
+          }
+        }
+      },
+      "Deploy": {
+        "type": "object",
+        "description": "A deploy from `sentry-cli deploys new`, for a marker on a chart.",
+        "required": [
+          "version",
+          "environment",
+          "date_finished"
+        ],
+        "properties": {
+          "date_finished": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "DeployList": {
+        "type": "object",
+        "required": [
+          "deploys",
+          "window_start",
+          "window_end"
+        ],
+        "properties": {
+          "deploys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Deploy"
+            },
+            "description": "Newest first."
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

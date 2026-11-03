@@ -402,6 +402,9 @@ impl Embedded {
             bars,
         );
         let (a, b) = (pts.first().unwrap().time, pts.last().unwrap().time);
+        let cols =
+            mallard_term::tui::mark_columns(&self.deploys, a.timestamp() as f64, b.timestamp() as f64, bars.width);
+        mallard_term::tui::draw_marks(f.buffer_mut(), bars, &cols, theme::dim());
         let labels = widgets::time_labels(a.timestamp() as f64, b.timestamp() as f64);
         let w = axis.width as usize;
         let mid = &labels[1];

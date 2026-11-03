@@ -1,6 +1,6 @@
 import { get, getPage, send } from "./client";
 import type {
-  EventDetail, EventList, EventsByTrace, IssueDetail, IssueList, IssueStatus, Project, ProjectStats, ServerInfo, TagStats,
+  DeployList, EventDetail, EventList, EventsByTrace, IssueDetail, IssueList, IssueStatus, Project, ProjectStats, ServerInfo, TagStats,
 } from "./types";
 
 const p = (project: string) => `/sentry/v1/projects/${encodeURIComponent(project)}`;
@@ -16,6 +16,8 @@ export const sentry = {
   ) => get<IssueList>(`${p(project)}/issues`, { limit: 200, ...q }, signal),
   tags: (project: string, q: { since: string; key?: string; prefix?: string; limit?: number }, signal?: Sig) =>
     get<TagStats>(`${p(project)}/tags`, q, signal),
+  deploys: (project: string | null | undefined, since: string, signal?: Sig) =>
+    get<DeployList>("/sentry/v1/deploys", project ? { project, since } : { since }, signal),
   stats: (project: string, since: string, interval: string, signal?: Sig) =>
     get<ProjectStats>(`${p(project)}/stats`, { since, interval }, signal),
   issue: (project: string, id: string, since: string, signal?: Sig) =>

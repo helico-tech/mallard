@@ -114,6 +114,15 @@ pub fn time_labels(x0: f64, x1: f64) -> Vec<String> {
 }
 
 /// Colored legend for a panel title: `━ name  ━ name`.
+/// The legend of a chart with deploys on it.
+pub fn legend_with_deploys(series: &[Series], marks: &[f64]) -> Line<'static> {
+    let mut l = legend(series);
+    if !marks.is_empty() {
+        l.spans.push(Span::styled("┊ deploy ", theme::dim()));
+    }
+    l
+}
+
 pub fn legend(series: &[Series]) -> Line<'static> {
     let mut spans = vec![];
     for s in series {
@@ -133,6 +142,7 @@ pub fn time_chart(
     series: &[Series],
     x_bounds: Option<[f64; 2]>,
     fmt_y: &dyn Fn(f64) -> String,
+    marks: &[f64],
 ) {
     let all = series.iter().flat_map(|s| s.points.iter());
     let (mut x0, mut x1, mut y1) = (f64::MAX, f64::MIN, 0.0f64);
@@ -158,16 +168,23 @@ pub fn time_chart(
     }
     let y0 = if y0 >= 0.0 { 0.0 } else { y0 * 1.1 };
     let y1 = if y1 <= y0 { y0 + 1.0 } else { y1 * 1.1 };
-    let datasets: Vec<Dataset> = series
+    // Deploys: a vertical line each, drawn first so the data stays on top.
+    let lines: Vec<[(f64, f64); 2]> =
+        marks.iter().filter(|m| (x0..=x1).contains(*m)).map(|m| [(*m, y0), (*m, y1)]).collect();
+    let lines_style = Style::new().fg(theme::DIM);
+    let datasets: Vec<Dataset> = lines
         .iter()
-        .map(|s| {
+        .map(|l| {
+            Dataset::default().marker(symbols::Marker::Braille).graph_type(GraphType::Line).style(lines_style).data(l)
+        })
+        .chain(series.iter().map(|s| {
             Dataset::default()
                 .name(s.name.clone())
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::new().fg(s.color))
                 .data(s.points)
-        })
+        }))
         .collect();
     let xl = time_labels(x0, x1);
     let chart = Chart::new(datasets)

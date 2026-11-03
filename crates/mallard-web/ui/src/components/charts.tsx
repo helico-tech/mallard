@@ -1,12 +1,13 @@
 // Marks drawn as SVG or divs (sparklines, stacked bars); line charts come from
 // Kumo's TimeseriesChart in charts-kumo.tsx. Thin marks, one axis, hover values.
 import { useId, useMemo, useState } from "react";
+import { markFraction, type DeployMark } from "@/lib/deploys";
 import { compact } from "@/lib/format";
 import { resample } from "@/lib/domain";
 import { cn } from "@/lib/utils";
 
 /** Trend in a row: no axes, the exact value sits beside it. */
-export function Sparkline({ values, width = 96, height = 22, label, className, fluid }: { values: number[]; width?: number; height?: number; label: string; className?: string; fluid?: boolean }) {
+export function Sparkline({ values, width = 96, height = 22, label, className, fluid, marks = [] }: { marks?: { at: number; title: string }[];  values: number[]; width?: number; height?: number; label: string; className?: string; fluid?: boolean }) {
   const bars = useMemo(() => resample(values, 24), [values]);
   const max = Math.max(...bars, 0);
   const step = width / Math.max(bars.length, 1);
@@ -29,6 +30,11 @@ export function Sparkline({ values, width = 96, height = 22, label, className, f
           />
         );
       })}
+      {marks.map((m, i) => (
+        <line key={i} data-deploy-mark x1={m.at * width} x2={m.at * width} y1={0} y2={height} stroke="currentColor" strokeWidth={1} strokeDasharray="2 2" opacity={0.6}>
+          <title>{m.title}</title>
+        </line>
+      ))}
     </svg>
   );
 }
@@ -46,7 +52,9 @@ export interface StackBucket {
 }
 
 /** Stacked bars over time with a per-bucket tooltip. */
-export function StackedBars({ buckets, series, height = 72, format = compact, axis, ariaLabel, stepLabel }: {
+export function StackedBars({ buckets, series, height = 72, format = compact, axis, ariaLabel, stepLabel, marks = [] }: {
+  /** Deploys, drawn over the bars and named in the tooltip of their bucket. */
+  marks?: DeployMark[];
   buckets: StackBucket[];
   series: StackSeries[];
   height?: number;
@@ -60,10 +68,18 @@ export function StackedBars({ buckets, series, height = 72, format = compact, ax
   const totals = buckets.map((b) => series.reduce((a, s) => a + (b.values[s.key] ?? 0), 0));
   const max = Math.max(...totals, 0);
   const hovered = hover === null ? null : buckets[hover.index];
+  const step = buckets.length > 1 ? buckets[1]!.time - buckets[0]!.time : 0;
+  const placed = marks.flatMap((m) => {
+    const at = buckets.length ? markFraction(m.time, buckets[0]!.time, step * buckets.length) : null;
+    return at === null ? [] : [{ ...m, at, index: Math.min(Math.floor(at * buckets.length), buckets.length - 1) }];
+  });
   return (
     <figure className="relative m-0" aria-labelledby={titleId}>
       <figcaption id={titleId} className="sr-only">{ariaLabel}</figcaption>
-      <div className="flex items-end gap-px" style={{ height }} role="img" aria-label={ariaLabel} onMouseLeave={() => setHover(null)}>
+      <div className="relative flex items-end gap-px" style={{ height }} role="img" aria-label={ariaLabel} onMouseLeave={() => setHover(null)}>
+        {placed.map((m, i) => (
+          <div key={i} data-deploy-mark aria-hidden className="pointer-events-none absolute inset-y-0 z-10 border-l border-dashed border-current text-kumo-subtle" style={{ left: `${m.at * 100}%` }} />
+        ))}
         {buckets.map((b, i) => (
           <div key={b.time} className="relative flex h-full min-w-0 flex-1 flex-col justify-end" onMouseEnter={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
@@ -101,6 +117,9 @@ export function StackedBars({ buckets, series, height = 72, format = compact, ax
               <span className="flex items-center gap-1.5"><span aria-hidden className="size-2 rounded-[2px]" style={{ background: s.color }} />{s.label}</span>
               <span>{format(hovered.values[s.key] ?? 0)}</span>
             </div>
+          ))}
+          {placed.filter((m) => m.index === hover!.index).map((m, i) => (
+            <div key={i} className="mt-1 text-kumo-subtle">Deploy {m.label}, {m.detail}</div>
           ))}
         </div>
       )}

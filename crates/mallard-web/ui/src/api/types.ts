@@ -26,6 +26,8 @@ export type EventsByTrace = SS["EventsByTrace"];
 export type TraceEvent = SS["TraceEvent"];
 export type Project = SS["Project"];
 export type ProjectStats = SS["ProjectStats"];
+export type Deploy = SS["Deploy"];
+export type DeployList = SS["DeployList"];
 export type ServerInfo = SS["ServerInfo"];
 export type TagStats = SS["TagStats"];
 

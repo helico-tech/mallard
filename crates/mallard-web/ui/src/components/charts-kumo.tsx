@@ -4,7 +4,9 @@ import { BarChart, LineChart } from "echarts/charts";
 import { AriaComponent, AxisPointerComponent, BrushComponent, GridComponent, LegendComponent, MarkLineComponent, ToolboxComponent, TooltipComponent } from "echarts/components";
 import * as echarts from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
+import { DeployNote, useDeployMarks } from "@/app/deploys";
 import { useSettings } from "@/app/settings";
+import { useWindow } from "@/app/window";
 import { Legend } from "@/components/charts";
 import { axisTime, timestamp } from "@/lib/format";
 
@@ -38,7 +40,10 @@ export function TimeChart({ lines, height = 220, format, spanMs, type = "line", 
   minInterval?: number;
 }) {
   const { isDark } = useSettings();
+  const { w } = useWindow();
+  const { marks, error } = useDeployMarks(w);
   return (
+    <>
     <TimeseriesChart
       echarts={echarts}
       isDarkMode={isDark}
@@ -50,6 +55,9 @@ export function TimeChart({ lines, height = 220, format, spanMs, type = "line", 
       tooltipValueFormat={format}
       tooltipTimestampFormat={(t) => `${timestamp(new Date(t))} UTC`}
       yAxisMinInterval={minInterval}
+      markers={marks.map((m) => ({ timestamp: m.time, label: m.label, description: m.detail }))}
     />
+    <DeployNote error={error} />
+    </>
   );
 }

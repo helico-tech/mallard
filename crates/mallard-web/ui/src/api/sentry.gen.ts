@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/v1/deploys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Deploys finished in the window (default 14d), newest first, for markers on charts. A deploy goes by version: with `project`, those of the versions made for that project or named by its events in the window. */
+        get: operations["list_deploys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/events": {
         parameters: {
             query?: never;
@@ -319,6 +336,22 @@ export interface components {
              *     asked for, because a second project would take its services.
              */
             slug?: string | null;
+        };
+        /** @description A deploy from `sentry-cli deploys new`, for a marker on a chart. */
+        Deploy: {
+            /** Format: date-time */
+            date_finished: string;
+            environment: string;
+            name?: string | null;
+            version: string;
+        };
+        DeployList: {
+            /** @description Newest first. */
+            deploys: components["schemas"]["Deploy"][];
+            /** Format: date-time */
+            window_end: string;
+            /** Format: date-time */
+            window_start: string;
         };
         EventDetail: components["schemas"]["EventSummary"] & {
             culprit?: string | null;
@@ -681,6 +714,57 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_deploys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description Only deploys of this project's releases: those made for it, or named by its events in
+                 *     the window. Without it, every deploy.
+                 */
+                project: string | null;
+                /** @description Window, e.g. `24h`, `30d` (default `14d`). */
+                since: string | null;
+                /** @description Max deploys (default 200, max 500). */
+                limit: number | null;
+                /** @description Start of the window (inclusive, RFC 3339). */
+                from: string | null;
+                /** @description End of the window (exclusive, RFC 3339). Defaults to now. */
+                to: string | null;
+                /** @description Bucket size for time series, e.g. `1h` (same as `interval`). */
+                step: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeployList"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     events_by_trace: {
         parameters: {
             query?: never;

@@ -270,11 +270,21 @@ fn a_stale_response_does_not_end_a_newer_load() {
     let Req::Issues(old) = &first[1] else { panic!("{first:?}") };
     let list = IssueList { issues: issues(), window_start: now(), window_end: now(), next_cursor: None };
     app.on_response(Resp::Issues(old.clone(), Ok(list.clone())));
-    app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
+    app.on_response(Resp::Stats {
+        project: "web".into(),
+        window: app.window,
+        result: Ok(stats()),
+        deploys: Ok(vec![]),
+    });
     assert!(app.in_flight(Kind::Issues) && app.in_flight(Kind::Stats), "the newer loads are still running");
     assert!(app.loading());
     app.on_response(Resp::Issues(app.issues_key().unwrap(), Ok(list)));
-    app.on_response(Resp::Stats { project: "web".into(), window: app.window, result: Ok(stats()) });
+    app.on_response(Resp::Stats {
+        project: "web".into(),
+        window: app.window,
+        result: Ok(stats()),
+        deploys: Ok(vec![]),
+    });
     assert!(!app.loading());
 }
 
@@ -660,4 +670,21 @@ fn an_issue_opens_by_id_in_its_project() {
     assert!(r.iter().any(|q| matches!(q, Req::Event { event_id, .. } if event_id == "e1")), "{r:?}");
     press(&mut app, KeyEvent::from(KeyCode::Esc));
     assert_eq!(app.view(), View::Issues);
+}
+
+/// Issue 0195: the chart keeps its bars when the deploys cannot be read, and says so.
+#[test]
+fn deploys_come_with_the_stats_and_may_fail_alone() {
+    let mut app = loaded_app();
+    let w = app.window;
+    app.on_response(Resp::Stats { project: "web".into(), window: w, result: Ok(stats()), deploys: Ok(vec![5.0]) });
+    assert_eq!(app.deploys, [5.0]);
+    assert!(app.stats.is_some() && app.deploys_error.is_none());
+    let failed = Err(FetchError::offline("no deploys"));
+    app.on_response(Resp::Stats { project: "web".into(), window: w, result: Ok(stats()), deploys: failed });
+    assert_eq!(app.deploys, [5.0], "the last ones stay");
+    assert!(app.stats.is_some() && app.stats_error.is_none());
+    assert_eq!(app.deploys_error.as_deref(), Some("no deploys"));
+    app.on_response(Resp::Stats { project: "other".into(), window: w, result: Ok(stats()), deploys: Ok(vec![]) });
+    assert_eq!(app.deploys, [5.0], "of another project");
 }

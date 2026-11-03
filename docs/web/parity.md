@@ -220,6 +220,7 @@ changed in the browser, because the seeded data has no such case.
 | `b` group by, kept across `a` | Yes | Yes | ok |
 | Esc Bksp ← h q | Yes | Yes | ok |
 | Chart cadence | 10 s | 10 s | ok |
+| Deploy markers | Events chart, Overview charts, metric chart, log volume | The same, and the issue's trend | intended: the TUI's issue page has no trend chart |
 | Value formats by unit | `1`, `s`, `ms`, `By` | Same rules; percent check uses signed max (code) | intended: differs only with large negative values |
 | Reload or direct link of a chart | n/a | Works: a path outside `/assets/` is a screen of the app | ok |
 
