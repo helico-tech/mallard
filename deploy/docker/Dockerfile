@@ -67,9 +67,13 @@ RUN mallard install-extensions --dir /opt/duckdb/extensions \
 # MALLOC_ARENA_MAX: glibc otherwise keeps one heap per busy thread, and DuckDB's
 # freed memory stays in them; two heaps measured about 0.5 GiB less
 # (docs/otel/capacity.md, both sides).
+# DUCKDB_JE_MALLOC_CONF: the DuckLake extension has its own jemalloc, which keeps
+# about 300 MiB of freed pages outside duckdb.memory_limit. Returning them at once
+# lowered peak memory by 0.15-0.25 GiB at 2 GiB (same page).
 WORKDIR /data
 ENV MALLARD_DUCKDB__EXTENSION_DIRECTORY=/opt/duckdb/extensions \
     MALLOC_ARENA_MAX=2 \
+    DUCKDB_JE_MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 \
     MALLARD_DUCKDB__AUTOINSTALL_EXTENSIONS=false \
     MALLARD_DUCKDB__TEMP_DIRECTORY=/data/.tmp \
     HOME=/data
